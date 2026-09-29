@@ -13,8 +13,8 @@ import {
 
 type Message = {
   id: string;
-  role: 'yunxiu' | 'user';
-  text: string;
+  role: 'user' | 'assistant';
+  content: string;
 };
 
 export default function App() {
@@ -22,41 +22,74 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '1',
-      role: 'yunxiu',
-      text: '陛下，臣在。',
+      role: 'assistant',
+      content: '我在。',
     },
     {
       id: '2',
-      role: 'yunxiu',
-      text: '这里是属于云岫的地方。您想说什么，便说吧。',
+      role: 'assistant',
+      content: '这里是属于云岫的地方。想说什么就说吧。',
     },
   ]);
 
-  const sendMessage = () => {
+  const sendMessage = async () => {
     const text = input.trim();
+
     if (!text) return;
 
-    setMessages(prev => [
-      ...prev,
-      {
-        id: Date.now().toString(),
-        role: 'user',
-        text,
-      },
-    ]);
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      role: 'user',
+      content: text,
+    };
 
+    setMessages(prev => [...prev, userMessage]);
     setInput('');
 
-    setTimeout(() => {
+    try {
+      const response = await fetch(
+        `${process.env.EXPO_PUBLIC_API_URL}/chat`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            message: text,
+            history: messages.slice(-20).map(item => ({
+              role: item.role,
+              content: item.content,
+            })),
+          }),
+        }
+      );
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || '请求失败');
+      }
+
       setMessages(prev => [
         ...prev,
         {
-          id: (Date.now() + 1).toString(),
-          role: 'yunxiu',
-          text: '臣听着。只是现在的我还没有接入真正的 AI 模型，等我们把记忆与模型接上，这里才会真正成为云岫。',
+          id: `${Date.now()}-ai`,
+          role: 'assistant',
+          content: data.reply,
         },
       ]);
-    }, 500);
+    } catch (error) {
+      console.error(error);
+
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `${Date.now()}-error`,
+          role: 'assistant',
+          content: '连接云岫失败了，再试一次。',
+        },
+      ]);
+    }
   };
 
   return (
@@ -84,7 +117,7 @@ export default function App() {
                 item.role === 'user' && styles.userRow,
               ]}
             >
-              {item.role === 'yunxiu' && (
+              {item.role === 'assistant' && (
                 <View style={styles.avatar}>
                   <Text style={styles.avatarText}>岫</Text>
                 </View>
@@ -98,7 +131,7 @@ export default function App() {
                     : styles.yunxiuBubble,
                 ]}
               >
-                <Text style={styles.messageText}>{item.text}</Text>
+                <Text style={styles.messageText}>{item.content}</Text>
               </View>
             </View>
           )}
