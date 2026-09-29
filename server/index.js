@@ -4,6 +4,11 @@ const express = require('express');
 const cors = require('cors');
 const OpenAI = require('openai');
 
+const {
+  buildMemoryContext,
+  processMemory,
+} = require('./memory');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -82,6 +87,12 @@ app.post('/chat', async (req, res) => {
           .slice(-20)
       : [];
 
+    const memoryContext = buildMemoryContext(message);
+
+    const systemPrompt = memoryContext
+      ? `${YUNXIU_SYSTEM_PROMPT}\n\n${memoryContext}`
+      : YUNXIU_SYSTEM_PROMPT;
+
     const completion = await client.chat.completions.create({
       model: 'deepseek-chat',
       temperature: 0.8,
@@ -89,7 +100,7 @@ app.post('/chat', async (req, res) => {
       messages: [
         {
           role: 'system',
-          content: YUNXIU_SYSTEM_PROMPT,
+          content: systemPrompt,
         },
         ...safeHistory,
         {
@@ -108,6 +119,16 @@ app.post('/chat', async (req, res) => {
     res.json({
       reply,
       model: completion.model,
+    });
+
+    setImmediate(() => {
+      processMemory(client, message.trim())
+        .catch(error => {
+          console.error(
+            'Memory processing error:',
+            error.message
+          );
+        });
     });
   } catch (error) {
     console.error('AI API Error:', error);
