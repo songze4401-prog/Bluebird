@@ -9,6 +9,7 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
+  Alert,
 } from 'react-native';
 
 type Message = {
@@ -21,6 +22,7 @@ export default function App() {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -87,6 +89,76 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  const clearMemory = async () => {
+    Alert.alert(
+      '清理长期记忆',
+      '确定要清空 Bluebird 对你的长期记忆吗？',
+      [
+        { text: '取消', style: 'cancel' },
+        {
+          text: '清理',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const response = await fetch(
+                `${process.env.EXPO_PUBLIC_API_URL}/memory/clear`,
+                { method: 'POST' }
+              );
+
+              const data = await response.json();
+
+              if (!response.ok) {
+                throw new Error(data.error || '清理失败');
+              }
+
+              setMenuOpen(false);
+              Alert.alert('完成', 'Bluebird 的长期记忆已经清空。');
+            } catch (error) {
+              console.error('Clear memory error:', error);
+              Alert.alert('失败', '清理长期记忆失败，请稍后再试。');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const clearChatHistory = async () => {
+    Alert.alert(
+      '清理聊天记录',
+      '确定要删除当前保存的全部聊天记录吗？',
+      [
+        { text: '取消', style: 'cancel' },
+        {
+          text: '清理',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const response = await fetch(
+                `${process.env.EXPO_PUBLIC_API_URL}/history/clear`,
+                { method: 'POST' }
+              );
+
+              const data = await response.json();
+
+              if (!response.ok) {
+                throw new Error(data.error || '清理失败');
+              }
+
+              setMessages([]);
+              setMenuOpen(false);
+
+              Alert.alert('完成', '聊天记录已经清空。');
+            } catch (error) {
+              console.error('Clear history error:', error);
+              Alert.alert('失败', '清理聊天记录失败，请稍后再试。');
+            }
+          },
+        },
+      ]
+    );
+  };
 
   const sendMessage = async () => {
     const text = input.trim();
@@ -159,8 +231,36 @@ export default function App() {
             <Text style={styles.title}>Bluebird</Text>
             <Text style={styles.status}>● 在线</Text>
           </View>
-          <Text style={styles.version}>V0.1</Text>
+
+          <View style={styles.headerRight}>
+            <Text style={styles.version}>V0.1</Text>
+
+            <TouchableOpacity
+              style={styles.menuButton}
+              onPress={() => setMenuOpen(prev => !prev)}
+            >
+              <Text style={styles.menuIcon}>☰</Text>
+            </TouchableOpacity>
+          </View>
         </View>
+
+        {menuOpen && (
+          <View style={styles.menu}>
+            <TouchableOpacity
+              style={styles.menuItem}
+              onPress={clearMemory}
+            >
+              <Text style={styles.menuItemText}>清理长期记忆</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.menuItem}
+              onPress={clearChatHistory}
+            >
+              <Text style={styles.menuItemText}>清理聊天记录</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         <FlatList
           data={messages}
@@ -175,7 +275,7 @@ export default function App() {
             >
               {item.role === 'assistant' && (
                 <View style={styles.avatar}>
-                  <Text style={styles.avatarText}>岫</Text>
+                  <Text style={styles.avatarText}>B</Text>
                 </View>
               )}
 
@@ -239,6 +339,43 @@ const styles = StyleSheet.create({
   version: {
     color: '#777',
     fontSize: 12,
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+
+  menuButton: {
+    marginLeft: 14,
+    padding: 6,
+  },
+
+  menuIcon: {
+    color: '#ffffff',
+    fontSize: 22,
+  },
+
+  menu: {
+    position: 'absolute',
+    top: 62,
+    right: 16,
+    zIndex: 100,
+    width: 160,
+    backgroundColor: '#181c25',
+    borderRadius: 12,
+    paddingVertical: 6,
+    borderWidth: 1,
+    borderColor: '#303642',
+  },
+
+  menuItem: {
+    paddingHorizontal: 16,
+    paddingVertical: 13,
+  },
+
+  menuItemText: {
+    color: '#ffffff',
+    fontSize: 15,
   },
   messages: {
     padding: 16,

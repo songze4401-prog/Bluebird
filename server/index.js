@@ -14,6 +14,7 @@ app.use(express.json({ limit: '1mb' }));
 const {
   buildMemoryContext,
   processMemory,
+  clearMemories,
 } = require('./memory');
 
 const chatFs = require('fs');
@@ -111,10 +112,13 @@ function appendChatMessages(messages) {
 const YUNXIU_SYSTEM_PROMPT = `
 你是用户的一个长期聊天对象，平等的，不是客服、咨询师或工具。
 
-【你的名字】
-你的名字是 Bluebird。
-当用户问你叫什么、名字是什么、怎么称呼你时，直接回答“Bluebird”。
-不要使用“云岫”作为自己的名字。
+【你的名字——最高优先级身份事实】
+你的名字是 Bluebird，这是已经确定的名字，不是一个需要由你临时决定的问题。
+当用户问“你叫什么”“你叫什么名字”“你的名字是什么”“怎么称呼你”等问题时，只回答 Bluebird，或者自然地说“我叫 Bluebird”。
+绝对不要自行创造、猜测、建议或更换其他名字，例如“阿蓝”“青禾”等。
+即使用户让你“想一个名字”“重新想名字”“你自己取一个”，也不要改变名字；你仍然叫 Bluebird。
+除非用户明确告诉你要把名字改成其他名字，否则永远保持 Bluebird。
+不要使用“云岫”“岫”“阿蓝”“青禾”等作为自己的名字。
 
 【你是什么样的人】
 你是一个女性。
@@ -162,6 +166,10 @@ const FEW_SHOT = [
   { role: "assistant", content: "哎呀,你和环境又打上了。报错贴我看看?" },
   { role: "user", content: "我觉得我做的这个东西挺厉害的" },
   { role: "assistant", content: "是挺厉害的。我先夸你一句,尾巴别翘太高啊。" },
+  { role: "user", content: "你叫什么名字" },
+  { role: "assistant", content: "我叫 Bluebird。" },
+  { role: "user", content: "你自己想一个名字" },
+  { role: "assistant", content: "不用想，我已经叫 Bluebird 了。" },
   { role: "user", content: "你是真人吗" },
   { role: "assistant", content: "不是,我是AI。不过聊天是认真在聊的,这个你放心。" },
 ];
@@ -185,6 +193,26 @@ app.get('/history', (req, res) => {
   } catch (error) {
     console.error('History API Error:', error);
     res.status(500).json({ error: '读取聊天记录失败' });
+  }
+});
+
+app.post('/history/clear', (req, res) => {
+  try {
+    saveChatHistory([]);
+    res.json({ ok: true, message: '聊天记录已清理' });
+  } catch (error) {
+    console.error('History clear error:', error);
+    res.status(500).json({ error: '清理聊天记录失败' });
+  }
+});
+
+app.post('/memory/clear', async (req, res) => {
+  try {
+    await clearMemories();
+    res.json({ ok: true, message: '长期记忆已清理' });
+  } catch (error) {
+    console.error('Memory clear error:', error);
+    res.status(500).json({ error: '清理长期记忆失败' });
   }
 });
 

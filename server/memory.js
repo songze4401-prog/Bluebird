@@ -454,9 +454,18 @@ ${lines.join('\n')}
 
 loadMemories();
 
+async function clearMemories() {
+  await enqueueWrite(async () => {
+    memories = [];
+    await saveMemories([]);
+    console.log("Memory cleared");
+  });
+}
+
 module.exports = {
   MEMORY_ENABLED,
   loadMemories,
   buildMemoryContext,
   processMemory,
+  clearMemories,
 };
