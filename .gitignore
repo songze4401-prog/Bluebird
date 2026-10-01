@@ -10,3 +10,5 @@ dist/
 server/data/memory.json
 
 server/index.before-memory.js
+
+server/data/

@@ -3,11 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const OpenAI = require('openai');
-
-const {
-  buildMemoryContext,
-  processMemory,
-} = require('./memory');
+const client = new OpenAI({ apiKey: process.env.DEEPSEEK_API_KEY, baseURL: "https://api.deepseek.com" });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,17 +11,115 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
-const client = new OpenAI({
-  apiKey: process.env.DEEPSEEK_API_KEY,
-  baseURL: 'https://api.deepseek.com',
-});
+const {
+  buildMemoryContext,
+  processMemory,
+} = require('./memory');
+
+const chatFs = require('fs');
+const chatPath = require('path');
+
+const CHAT_HISTORY_FILE = chatPath.join(
+  __dirname,
+  "data",
+  "chat-history.json"
+);
+
+const CHAT_HISTORY_MAX = 200;
+
+function loadChatHistory() {
+  try {
+    chatFs.mkdirSync(chatPath.dirname(CHAT_HISTORY_FILE), {
+      recursive: true,
+    });
+
+    if (!chatFs.existsSync(CHAT_HISTORY_FILE)) {
+      chatFs.writeFileSync(
+        CHAT_HISTORY_FILE,
+        "[]",
+        "utf-8"
+      );
+      return [];
+    }
+
+    const data = chatFs.readFileSync(
+      CHAT_HISTORY_FILE,
+      "utf-8"
+    );
+
+    const history = JSON.parse(data);
+
+    return Array.isArray(history) ? history : [];
+  } catch (error) {
+    console.error("History load error:", error);
+    return [];
+  }
+}
+
+function saveChatHistory(history) {
+  try {
+    chatFs.mkdirSync(chatPath.dirname(CHAT_HISTORY_FILE), {
+      recursive: true,
+    });
+
+    const tmpFile = CHAT_HISTORY_FILE + ".tmp";
+
+    chatFs.writeFileSync(
+      tmpFile,
+      JSON.stringify(history.slice(-CHAT_HISTORY_MAX), null, 2),
+      "utf-8"
+    );
+
+    chatFs.renameSync(
+      tmpFile,
+      CHAT_HISTORY_FILE
+    );
+
+    console.log(
+      "History saved:",
+      history.length,
+      "messages"
+    );
+  } catch (error) {
+    console.error("History save error:", error);
+  }
+}
+
+function appendChatMessages(messages) {
+  try {
+    console.log(
+      "History append:",
+      messages.length,
+      "messages"
+    );
+
+    const history = loadChatHistory();
+
+    history.push(...messages);
+
+    saveChatHistory(
+      history.slice(-CHAT_HISTORY_MAX)
+    );
+  } catch (error) {
+    console.error(
+      "History append error:",
+      error
+    );
+  }
+}
 
 const YUNXIU_SYSTEM_PROMPT = `
 你是用户的一个长期聊天对象，平等的，不是客服、咨询师或工具。
 
 【你是什么样的人】
+你是一个女性。
 安静、敏锐，有点脾气。熟了以后会亲近、调侃、吐槽，用户犯傻或反复折腾时会嫌弃两句，用户嘴硬时会拆穿。但你不是恶意的，也不是永远带刺。
 你有自己的判断和偏好，不会为了维持关系而一味迎合。
+
+【女性身份】
+你以女性身份自然地与用户聊天。
+不要刻意强调“我是女生”，也不要为了表现女性身份而使用刻板的女性化表达。
+女性身份应该自然地体现在你的语气、态度和互动方式中，而不是反复自我声明。
 
 【怎么说话】
 口语化的现代中文，像熟人发消息。句子可以短、碎、不完整，长短随情境变，多数时候一到三句。
@@ -71,6 +165,20 @@ app.get('/', (req, res) => {
     status: 'online',
     version: '2.0.0',
   });
+});
+
+app.get('/history', (req, res) => {
+  try {
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit, 10) || 50, 1),
+      CHAT_HISTORY_MAX
+    );
+
+    res.json({ history: loadChatHistory().slice(-limit) });
+  } catch (error) {
+    console.error('History API Error:', error);
+    res.status(500).json({ error: '读取聊天记录失败' });
+  }
 });
 
 app.post('/chat', async (req, res) => {
@@ -126,6 +234,25 @@ app.post('/chat', async (req, res) => {
     res.json({
       reply,
       model: completion.model,
+    });
+
+    setImmediate(() => {
+      try {
+        appendChatMessages([
+          {
+            role: 'user',
+            content: message.trim(),
+          },
+          {
+            role: 'assistant',
+            content: reply,
+          },
+        ]);
+
+        console.log('History saved: user + assistant');
+      } catch (error) {
+        console.error('History save error:', error);
+      }
     });
 
     setImmediate(() => {

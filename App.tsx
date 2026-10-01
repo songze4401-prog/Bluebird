@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   SafeAreaView,
   View,
@@ -19,18 +19,74 @@ type Message = {
 
 export default function App() {
   const [input, setInput] = useState('');
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: '1',
-      role: 'assistant',
-      content: '我在。',
-    },
-    {
-      id: '2',
-      role: 'assistant',
-      content: '这里是属于云岫的地方。想说什么就说吧。',
-    },
-  ]);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const welcome: Message[] = [
+      {
+        id: 'welcome-1',
+        role: 'assistant',
+        content: '我在。',
+      },
+      {
+        id: 'welcome-2',
+        role: 'assistant',
+        content: '这里是属于云岫的地方。想说什么就说吧。',
+      },
+    ];
+
+    const loadHistory = async () => {
+      try {
+        const response = await fetch(
+          `${process.env.EXPO_PUBLIC_API_URL}/history?limit=200`
+        );
+
+        const data = await response.json();
+
+        if (!response.ok || !Array.isArray(data.history)) {
+          throw new Error('读取历史记录失败');
+        }
+
+        if (cancelled) return;
+
+        if (data.history.length === 0) {
+          setMessages(welcome);
+          return;
+        }
+
+        setMessages(
+          data.history.map(
+            (
+              item: {
+                role: 'user' | 'assistant';
+                content: string;
+                createdAt?: string;
+              },
+              index: number
+            ) => ({
+              id: `${item.createdAt || 'history'}-${index}`,
+              role: item.role,
+              content: item.content,
+            })
+          )
+        );
+      } catch (error) {
+        console.error('History load error:', error);
+        if (!cancelled) setMessages(welcome);
+      } finally {
+        if (!cancelled) setLoadingHistory(false);
+      }
+    };
+
+    loadHistory();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const sendMessage = async () => {
     const text = input.trim();
