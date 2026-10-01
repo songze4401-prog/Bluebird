@@ -34,7 +34,7 @@ export default function App() {
       {
         id: 'welcome-2',
         role: 'assistant',
-        content: '这里是属于云岫的地方。想说什么就说吧。',
+        content: '这里是属于Bluebird的地方。想说什么就说吧。',
       },
     ];
 
@@ -142,7 +142,7 @@ export default function App() {
         {
           id: `${Date.now()}-error`,
           role: 'assistant',
-          content: '连接云岫失败了，再试一次。',
+          content: '连接Bluebird失败了，再试一次。',
         },
       ]);
     }
@@ -156,7 +156,7 @@ export default function App() {
       >
         <View style={styles.header}>
           <View>
-            <Text style={styles.title}>云岫</Text>
+            <Text style={styles.title}>Bluebird</Text>
             <Text style={styles.status}>● 在线</Text>
           </View>
           <Text style={styles.version}>V0.1</Text>
@@ -197,7 +197,7 @@ export default function App() {
           <TextInput
             value={input}
             onChangeText={setInput}
-            placeholder="与云岫说些什么……"
+            placeholder="与Bluebird说些什么……"
             placeholderTextColor="#777"
             style={styles.input}
             multiline
