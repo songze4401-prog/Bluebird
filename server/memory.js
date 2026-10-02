@@ -207,11 +207,14 @@ async function extractMemory(client, message) {
 {
   "content": "简短的长期记忆",
   "type": "identity|preference|fact|goal|relationship",
+  "keywords": ["关键词1", "关键词2", "关键词3"],
   "confidence": 0.0,
   "sourceQuote": "用户原话中的连续片段"
 }
 
 content 不要超过 100 个字符。
+keywords 提取 3-5 个与这条记忆直接相关的具体关键词或同义词。
+不要使用“什么”“应该”“这个”“那个”“以后”等低信息量词。
 sourceQuote 必须来自用户原话。
 `.trim(),
             },
