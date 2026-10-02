@@ -28,17 +28,42 @@ export default function App() {
   const flatListRef = React.useRef<FlatList<Message>>(null);
   const isAtBottomRef = React.useRef(true);
   const hasInitialScrolledRef = React.useRef(false);
+  const previousMessageCountRef = React.useRef(0);
 
   useEffect(() => {
-    if (messages.length > 0 && !loadingHistory && !hasInitialScrolledRef.current) {
+    if (messages.length === 0) {
+      previousMessageCountRef.current = 0;
+      hasInitialScrolledRef.current = false;
+      return;
+    }
+
+    if (!loadingHistory && !hasInitialScrolledRef.current) {
       hasInitialScrolledRef.current = true;
+      previousMessageCountRef.current = messages.length;
 
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           flatListRef.current?.scrollToEnd({ animated: false });
         });
       });
+
+      return;
     }
+
+    if (
+      messages.length > previousMessageCountRef.current &&
+      isAtBottomRef.current
+    ) {
+      previousMessageCountRef.current = messages.length;
+
+      requestAnimationFrame(() => {
+        flatListRef.current?.scrollToEnd({ animated: true });
+      });
+
+      return;
+    }
+
+    previousMessageCountRef.current = messages.length;
   }, [messages.length, loadingHistory]);
 
   useEffect(() => {
@@ -315,13 +340,6 @@ export default function App() {
             isAtBottomRef.current = distanceFromBottom < 80;
           }}
           scrollEventThrottle={100}
-          onContentSizeChange={() => {
-            if (isAtBottomRef.current) {
-              requestAnimationFrame(() => {
-                flatListRef.current?.scrollToEnd({ animated: false });
-              });
-            }
-          }}
           contentContainerStyle={styles.messages}
           renderItem={({ item }) => (
             <View
