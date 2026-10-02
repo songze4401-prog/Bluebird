@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import {
-  SafeAreaView,
   View,
   Text,
   TextInput,
@@ -23,6 +23,7 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
+  const flatListRef = React.useRef<FlatList<Message>>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -224,7 +225,7 @@ export default function App() {
     <SafeAreaView style={styles.container}>
       <KeyboardAvoidingView
         style={styles.container}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior="padding"
       >
         <View style={styles.header}>
           <View>
@@ -263,8 +264,16 @@ export default function App() {
         )}
 
         <FlatList
+          ref={flatListRef}
           data={messages}
           keyExtractor={item => item.id}
+          onContentSizeChange={() => {
+            if (messages.length > 0) {
+              setTimeout(() => {
+                flatListRef.current?.scrollToEnd({ animated: false });
+              }, 50);
+            }
+          }}
           contentContainerStyle={styles.messages}
           renderItem={({ item }) => (
             <View
@@ -440,6 +449,7 @@ const styles = StyleSheet.create({
     paddingVertical: 11,
     color: '#ffffff',
     fontSize: 16,
+    textAlignVertical: 'top',
   },
   sendButton: {
     height: 46,
