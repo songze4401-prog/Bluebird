@@ -29,24 +29,19 @@ export default function App() {
   const isAtBottomRef = React.useRef(true);
   const hasInitialScrolledRef = React.useRef(false);
   const previousMessageCountRef = React.useRef(0);
+  const pendingInitialScrollRef = React.useRef(false);
 
   useEffect(() => {
     if (messages.length === 0) {
       previousMessageCountRef.current = 0;
       hasInitialScrolledRef.current = false;
+      pendingInitialScrollRef.current = false;
       return;
     }
 
-    if (!loadingHistory && !hasInitialScrolledRef.current) {
-      hasInitialScrolledRef.current = true;
+    if (!hasInitialScrolledRef.current) {
+      pendingInitialScrollRef.current = true;
       previousMessageCountRef.current = messages.length;
-
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          flatListRef.current?.scrollToEnd({ animated: false });
-        });
-      });
-
       return;
     }
 
@@ -340,6 +335,16 @@ export default function App() {
             isAtBottomRef.current = distanceFromBottom < 80;
           }}
           scrollEventThrottle={100}
+          onContentSizeChange={() => {
+            if (pendingInitialScrollRef.current && messages.length > 0) {
+              pendingInitialScrollRef.current = false;
+              hasInitialScrolledRef.current = true;
+
+              requestAnimationFrame(() => {
+                flatListRef.current?.scrollToEnd({ animated: false });
+              });
+            }
+          }}
           contentContainerStyle={styles.messages}
           renderItem={({ item }) => (
             <View
