@@ -26,12 +26,18 @@ export default function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const flatListRef = React.useRef<FlatList<Message>>(null);
+  const isAtBottomRef = React.useRef(true);
+  const hasInitialScrolledRef = React.useRef(false);
 
   useEffect(() => {
-    if (messages.length > 0 && !loadingHistory) {
-      setTimeout(() => {
-        flatListRef.current?.scrollToEnd({ animated: false });
-      }, 50);
+    if (messages.length > 0 && !loadingHistory && !hasInitialScrolledRef.current) {
+      hasInitialScrolledRef.current = true;
+
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          flatListRef.current?.scrollToEnd({ animated: false });
+        });
+      });
     }
   }, [messages.length, loadingHistory]);
 
@@ -298,6 +304,24 @@ export default function App() {
           ref={flatListRef}
           data={messages}
           keyExtractor={item => item.id}
+          onScroll={event => {
+            const { contentOffset, contentSize, layoutMeasurement } =
+              event.nativeEvent;
+
+            const distanceFromBottom =
+              contentSize.height -
+              (contentOffset.y + layoutMeasurement.height);
+
+            isAtBottomRef.current = distanceFromBottom < 80;
+          }}
+          scrollEventThrottle={100}
+          onContentSizeChange={() => {
+            if (isAtBottomRef.current) {
+              requestAnimationFrame(() => {
+                flatListRef.current?.scrollToEnd({ animated: false });
+              });
+            }
+          }}
           contentContainerStyle={styles.messages}
           renderItem={({ item }) => (
             <View
