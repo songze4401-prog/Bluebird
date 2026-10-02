@@ -28,6 +28,14 @@ export default function App() {
   const flatListRef = React.useRef<FlatList<Message>>(null);
 
   useEffect(() => {
+    if (messages.length > 0 && !loadingHistory) {
+      setTimeout(() => {
+        flatListRef.current?.scrollToEnd({ animated: false });
+      }, 50);
+    }
+  }, [messages.length, loadingHistory]);
+
+  useEffect(() => {
     let cancelled = false;
 
     const welcome: Message[] = [
@@ -290,13 +298,6 @@ export default function App() {
           ref={flatListRef}
           data={messages}
           keyExtractor={item => item.id}
-          onContentSizeChange={() => {
-            if (messages.length > 0) {
-              setTimeout(() => {
-                flatListRef.current?.scrollToEnd({ animated: false });
-              }, 50);
-            }
-          }}
           contentContainerStyle={styles.messages}
           renderItem={({ item }) => (
             <View
