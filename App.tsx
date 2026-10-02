@@ -16,6 +16,7 @@ type Message = {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  retryText?: string;
 };
 
 export default function App() {
@@ -23,6 +24,7 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [sending, setSending] = useState(false);
   const flatListRef = React.useRef<FlatList<Message>>(null);
 
   useEffect(() => {
@@ -161,10 +163,10 @@ export default function App() {
     );
   };
 
-  const sendMessage = async () => {
-    const text = input.trim();
+  const sendMessage = async (retryText?: string) => {
+    const text = (retryText ?? input).trim();
 
-    if (!text) return;
+    if (!text || sending) return;
 
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -172,8 +174,22 @@ export default function App() {
       content: text,
     };
 
-    setMessages(prev => [...prev, userMessage]);
-    setInput('');
+    setSending(true);
+
+    const past = messages.filter(item => !item.retryText);
+    const history = (retryText ? past.slice(0, -1) : past)
+      .slice(-20)
+      .map(item => ({ role: item.role, content: item.content }));
+
+    if (retryText) {
+      setMessages(prev => prev.filter(m => m.retryText !== retryText));
+    } else {
+      setMessages(prev => [...prev, userMessage]);
+      setInput('');
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
 
     try {
       const response = await fetch(
@@ -183,12 +199,10 @@ export default function App() {
           headers: {
             'Content-Type': 'application/json',
           },
+          signal: controller.signal,
           body: JSON.stringify({
             message: text,
-            history: messages.slice(-20).map(item => ({
-              role: item.role,
-              content: item.content,
-            })),
+            history,
           }),
         }
       );
@@ -210,14 +224,23 @@ export default function App() {
     } catch (error) {
       console.error(error);
 
+      const errorMessage =
+        error instanceof Error && error.name === 'AbortError'
+          ? '连接Bluebird超时了，再试一次。'
+          : '连接Bluebird失败了，再试一次。';
+
       setMessages(prev => [
         ...prev,
         {
-          id: `${Date.now()}-error`,
+          id: `error-${Date.now()}`,
           role: 'assistant',
-          content: '连接Bluebird失败了，再试一次。',
+          content: errorMessage,
+          retryText: text,
         },
       ]);
+    } finally {
+      clearTimeout(timeout);
+      setSending(false);
     }
   };
 
@@ -234,7 +257,7 @@ export default function App() {
           </View>
 
           <View style={styles.headerRight}>
-            <Text style={styles.version}>V0.1</Text>
+            <Text style={styles.version}>V0.2</Text>
 
             <TouchableOpacity
               style={styles.menuButton}
@@ -297,9 +320,31 @@ export default function App() {
                 ]}
               >
                 <Text style={styles.messageText}>{item.content}</Text>
+
+                {item.role === 'assistant' && !!item.retryText && (
+                  <TouchableOpacity
+                    style={styles.retryButton}
+                    onPress={() => sendMessage(item.retryText)}
+                    disabled={sending}
+                  >
+                    <Text style={styles.retryText}>重新发送</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             </View>
           )}
+          ListFooterComponent={
+            sending ? (
+              <View style={styles.typingRow}>
+                <View style={styles.avatar}>
+                  <Text style={styles.avatarText}>B</Text>
+                </View>
+                <View style={styles.typingBubble}>
+                  <Text style={styles.typingText}>Bluebird 正在输入…</Text>
+                </View>
+              </View>
+            ) : null
+          }
         />
 
         <View style={styles.inputArea}>
@@ -312,8 +357,12 @@ export default function App() {
             multiline
           />
 
-          <TouchableOpacity style={styles.sendButton} onPress={sendMessage}>
-            <Text style={styles.sendText}>发送</Text>
+          <TouchableOpacity
+            style={[styles.sendButton, sending && styles.sendButtonDisabled]}
+            onPress={() => sendMessage()}
+            disabled={sending}
+          >
+            <Text style={styles.sendText}>{sending ? '发送中' : '发送'}</Text>
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
@@ -464,5 +513,36 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 15,
     fontWeight: '600',
+  },
+  sendButtonDisabled: {
+    opacity: 0.55,
+  },
+  typingRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    marginBottom: 16,
+  },
+  typingBubble: {
+    paddingHorizontal: 15,
+    paddingVertical: 11,
+    borderRadius: 16,
+    borderBottomLeftRadius: 4,
+    backgroundColor: '#171b24',
+  },
+  typingText: {
+    color: '#999999',
+    fontSize: 14,
+  },
+  retryButton: {
+    marginTop: 9,
+    alignSelf: 'flex-start',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 8,
+    backgroundColor: '#303846',
+  },
+  retryText: {
+    color: '#ffffff',
+    fontSize: 13,
   },
 });
