@@ -252,6 +252,13 @@ sourceQuote 必须来自用户原话。
 
     const type = candidate.type;
     const confidence = Number(candidate.confidence);
+    const keywords = Array.isArray(candidate.keywords)
+      ? candidate.keywords
+          .filter(item => typeof item === 'string')
+          .map(item => item.trim())
+          .filter(Boolean)
+          .slice(0, 5)
+      : [];
 
     if (!content || !sourceQuote) return null;
 
@@ -288,6 +295,7 @@ sourceQuote 必须来自用户原话。
     return {
       content,
       type,
+      keywords,
       confidence,
       sourceQuote,
       createdAt: new Date().toISOString(),
@@ -376,6 +384,7 @@ function buildMemoryContext(message) {
       return '';
     }
 
+    const currentNormalized = normalize(current);
     const currentBigrams = getBigrams(current);
 
     const scored = memories
@@ -386,8 +395,26 @@ function buildMemoryContext(message) {
           item.content.trim()
       )
       .map(item => {
-        const memoryBigrams =
-          getBigrams(item.content);
+        const keywords = Array.isArray(item.keywords)
+          ? item.keywords
+              .filter(item => typeof item === 'string')
+              .map(item => normalize(item))
+              .filter(Boolean)
+          : [];
+
+        let keywordHits = 0;
+
+        for (const keyword of keywords) {
+          if (currentNormalized.includes(keyword)) {
+            keywordHits++;
+          }
+        }
+
+        const keywordScore = keywords.length
+          ? keywordHits / keywords.length
+          : 0;
+
+        const memoryBigrams = getBigrams(item.content);
 
         let hits = 0;
 
@@ -397,24 +424,29 @@ function buildMemoryContext(message) {
           }
         }
 
-        const score =
+        const contentScore =
           memoryBigrams.size > 0
             ? hits / memoryBigrams.size
             : 0;
 
+        const score = keywords.length
+          ? keywordScore * 0.7 + contentScore * 0.3
+          : contentScore;
+
         return {
           item,
           score,
+          keywordHits,
         };
       })
-      .filter(({ item, score }) => {
-        if (item.type === 'identity') {
-          return score > 0;
+      .filter(({ score }) => score > 0)
+      .sort((a, b) => {
+        if (b.score !== a.score) {
+          return b.score - a.score;
         }
 
-        return score > 0;
-      })
-      .sort((a, b) => b.score - a.score);
+        return b.keywordHits - a.keywordHits;
+      });
 
     const identity = scored
       .filter(({ item }) => item.type === 'identity')
