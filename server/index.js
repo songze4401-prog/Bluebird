@@ -176,7 +176,7 @@ const FEW_SHOT = [
 
 app.get('/', (req, res) => {
   res.json({
-    name: '云岫 API',
+    name: 'Bluebird API',
     status: 'online',
     version: '2.0.0',
   });
@@ -313,5 +313,5 @@ app.post('/chat', async (req, res) => {
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`云岫 API running on port ${PORT}`);
+  console.log(`Bluebird API running on port ${PORT}`);
 });
