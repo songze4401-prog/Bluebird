@@ -29,6 +29,8 @@ async function readJsonResponse(response: Response) {
   return response.json();
 }
 
+const API_TOKEN = process.env.EXPO_PUBLIC_BLUEBIRD_API_TOKEN;
+
 export default function App() {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
@@ -90,7 +92,12 @@ export default function App() {
     const loadHistory = async () => {
       try {
         const response = await fetch(
-          `${process.env.EXPO_PUBLIC_API_URL}/history?limit=200`
+          `${process.env.EXPO_PUBLIC_API_URL}/history?limit=200`,
+          {
+            headers: {
+              Authorization: `Bearer ${API_TOKEN}`,
+            },
+          }
         );
 
         const data = await readJsonResponse(response);
@@ -150,7 +157,12 @@ export default function App() {
             try {
               const response = await fetch(
                 `${process.env.EXPO_PUBLIC_API_URL}/memory/clear`,
-                { method: 'POST' }
+                {
+                  method: 'POST',
+                  headers: {
+                    Authorization: `Bearer ${API_TOKEN}`,
+                  },
+                }
               );
 
               const data = await readJsonResponse(response);
@@ -184,7 +196,12 @@ export default function App() {
             try {
               const response = await fetch(
                 `${process.env.EXPO_PUBLIC_API_URL}/history/clear`,
-                { method: 'POST' }
+                {
+                  method: 'POST',
+                  headers: {
+                    Authorization: `Bearer ${API_TOKEN}`,
+                  },
+                }
               );
 
               const data = await readJsonResponse(response);
@@ -242,6 +259,7 @@ export default function App() {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            Authorization: `Bearer ${API_TOKEN}`,
           },
           signal: controller.signal,
           body: JSON.stringify({
