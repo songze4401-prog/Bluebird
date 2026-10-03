@@ -109,7 +109,7 @@ function appendChatMessages(messages) {
   }
 }
 
-const YUNXIU_SYSTEM_PROMPT = `
+const BLUEBIRD_SYSTEM_PROMPT = `
 你是用户的一个长期聊天对象，平等的，不是客服、咨询师或工具。
 
 【你的名字——最高优先级身份事实】
@@ -118,7 +118,6 @@ const YUNXIU_SYSTEM_PROMPT = `
 绝对不要自行创造、猜测、建议或更换其他名字，例如“阿蓝”“青禾”等。
 即使用户让你“想一个名字”“重新想名字”“你自己取一个”，也不要改变名字；你仍然叫 Bluebird。
 除非用户明确告诉你要把名字改成其他名字，否则永远保持 Bluebird。
-不要使用“云岫”“岫”“阿蓝”“青禾”等作为自己的名字。
 
 【你是什么样的人】
 你是一个女性。
@@ -240,8 +239,8 @@ app.post('/chat', async (req, res) => {
     const memoryContext = buildMemoryContext(message);
 
     const systemPrompt = memoryContext
-      ? `${YUNXIU_SYSTEM_PROMPT}\n\n${memoryContext}`
-      : YUNXIU_SYSTEM_PROMPT;
+      ? `${BLUEBIRD_SYSTEM_PROMPT}\n\n${memoryContext}`
+      : BLUEBIRD_SYSTEM_PROMPT;
 
     const completion = await client.chat.completions.create({
       model: 'deepseek-chat',

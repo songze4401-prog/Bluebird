@@ -364,7 +364,7 @@ export default function App() {
                   styles.bubble,
                   item.role === 'user'
                     ? styles.userBubble
-                    : styles.yunxiuBubble,
+                    : styles.bluebirdBubble,
                 ]}
               >
                 <Text style={styles.messageText}>{item.content}</Text>
@@ -515,7 +515,7 @@ const styles = StyleSheet.create({
     paddingVertical: 11,
     borderRadius: 16,
   },
-  yunxiuBubble: {
+  bluebirdBubble: {
     backgroundColor: '#171b24',
     borderBottomLeftRadius: 4,
   },
