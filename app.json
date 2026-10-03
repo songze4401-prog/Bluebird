@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "yunxiu-app",
-    "slug": "yunxiu-app",
+    "name": "Bluebird",
+    "slug": "bluebird",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
