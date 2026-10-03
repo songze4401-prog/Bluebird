@@ -19,6 +19,16 @@ type Message = {
   retryText?: string;
 };
 
+async function readJsonResponse(response: Response) {
+  const contentType = response.headers.get('content-type') || '';
+
+  if (!contentType.toLowerCase().includes('application/json')) {
+    throw new Error('服务器连接失败');
+  }
+
+  return response.json();
+}
+
 export default function App() {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
@@ -83,7 +93,7 @@ export default function App() {
           `${process.env.EXPO_PUBLIC_API_URL}/history?limit=200`
         );
 
-        const data = await response.json();
+        const data = await readJsonResponse(response);
 
         if (!response.ok || !Array.isArray(data.history)) {
           throw new Error('读取历史记录失败');
@@ -143,7 +153,7 @@ export default function App() {
                 { method: 'POST' }
               );
 
-              const data = await response.json();
+              const data = await readJsonResponse(response);
 
               if (!response.ok) {
                 throw new Error(data.error || '清理失败');
@@ -177,7 +187,7 @@ export default function App() {
                 { method: 'POST' }
               );
 
-              const data = await response.json();
+              const data = await readJsonResponse(response);
 
               if (!response.ok) {
                 throw new Error(data.error || '清理失败');
@@ -241,7 +251,7 @@ export default function App() {
         }
       );
 
-      const data = await response.json();
+      const data = await readJsonResponse(response);
 
       if (!response.ok) {
         throw new Error(data.error || '请求失败');
