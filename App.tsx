@@ -265,6 +265,7 @@ export default function App() {
           body: JSON.stringify({
             message: text,
             history,
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           }),
         }
       );
