@@ -276,6 +276,19 @@ export default function App() {
     );
   };
 
+  const recallMessage = (id: string) => {
+    Alert.alert('撤回消息', '撤回这条消息？', [
+      { text: '取消', style: 'cancel' },
+      {
+        text: '撤回',
+        style: 'destructive',
+        onPress: () => {
+          setMessages(prev => prev.filter(m => m.id !== id));
+        },
+      },
+    ]);
+  };
+
   const sendMessage = async (retryText?: string) => {
     const text = (retryText ?? input).trim();
 
@@ -440,26 +453,29 @@ export default function App() {
             >
               {item.role === 'assistant' && <BlueAvatar />}
 
-              <View
-                style={[
-                  styles.bubble,
-                  item.role === 'user'
-                    ? styles.userBubble
-                    : styles.bluebirdBubble,
-                ]}
-              >
-                <Text style={styles.messageText}>{item.content}</Text>
+              {item.role === 'user' ? (
+                <TouchableOpacity
+                  style={[styles.bubble, styles.userBubble]}
+                  activeOpacity={0.75}
+                  onLongPress={() => recallMessage(item.id)}
+                >
+                  <Text style={styles.messageText}>{item.content}</Text>
+                </TouchableOpacity>
+              ) : (
+                <View style={[styles.bubble, styles.bluebirdBubble]}>
+                  <Text style={styles.messageText}>{item.content}</Text>
 
-                {item.role === 'assistant' && !!item.retryText && (
-                  <TouchableOpacity
-                    style={styles.retryButton}
-                    onPress={() => sendMessage(item.retryText)}
-                    disabled={sending}
-                  >
-                    <Text style={styles.retryText}>重新发送</Text>
-                  </TouchableOpacity>
-                )}
-              </View>
+                  {!!item.retryText && (
+                    <TouchableOpacity
+                      style={styles.retryButton}
+                      onPress={() => sendMessage(item.retryText)}
+                      disabled={sending}
+                    >
+                      <Text style={styles.retryText}>重新发送</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              )}
             </View>
           )}
           ListFooterComponent={
