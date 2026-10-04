@@ -17,6 +17,7 @@ type Message = {
   role: 'user' | 'assistant';
   content: string;
   retryText?: string;
+  mood?: string;
 };
 
 async function readJsonResponse(response: Response) {
@@ -70,13 +71,24 @@ function SharedTime() {
   );
 }
 
-const MOODS = ['😌', '😏', '😴', '😂', '😳', '🙄'];
+const MOOD_EMOJI: Record<string, string> = {
+  calm: '😌',
+  happy: '😊',
+  teasing: '😏',
+  surprised: '😳',
+  tired: '😴',
+  angry: '😠',
+  sad: '🥺',
+  laughing: '😂',
+};
 
-function pickMood() {
-  return MOODS[Math.floor(Math.random() * MOODS.length)];
+function moodEmoji(mood?: string) {
+  return MOOD_EMOJI[mood ?? 'calm'] ?? MOOD_EMOJI.calm;
 }
 
 function BlueAvatar({ size = 38, mood }: { size?: number; mood?: string }) {
+  const badgeSize = Math.round(size * 0.95);
+
   return (
     <View
       style={[
@@ -90,13 +102,17 @@ function BlueAvatar({ size = 38, mood }: { size?: number; mood?: string }) {
           style={[
             styles.moodBadge,
             {
-              width: size * 0.42,
-              height: size * 0.42,
-              borderRadius: size * 0.21,
+              width: badgeSize,
+              height: badgeSize,
+              borderRadius: badgeSize / 2,
+              top: -badgeSize * 0.25,
+              right: -badgeSize * 0.3,
             },
           ]}
         >
-          <Text style={{ fontSize: size * 0.28 }}>{mood}</Text>
+          <Text style={{ fontSize: Math.round(badgeSize * 0.62) }}>
+            {mood}
+          </Text>
         </View>
       )}
     </View>
@@ -109,7 +125,7 @@ export default function App() {
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
   const [sending, setSending] = useState(false);
-  const [mood, setMood] = useState('😌');
+  const [mood, setMood] = useState('calm');
   const flatListRef = React.useRef<FlatList<Message>>(null);
   const isAtBottomRef = React.useRef(true);
   const hasInitialScrolledRef = React.useRef(false);
@@ -362,16 +378,19 @@ export default function App() {
         throw new Error(data.error || '请求失败');
       }
 
+      const replyMood = typeof data.mood === 'string' ? data.mood : 'calm';
+
       setMessages(prev => [
         ...prev,
         {
           id: `${Date.now()}-ai`,
           role: 'assistant',
           content: data.reply,
+          mood: replyMood,
         },
       ]);
 
-      setMood(pickMood());
+      setMood(replyMood);
     } catch (error) {
       console.error(error);
 
@@ -403,7 +422,7 @@ export default function App() {
       >
         <View style={styles.header}>
           <View style={styles.headerLeft}>
-            <BlueAvatar size={30} mood={mood} />
+            <BlueAvatar size={30} mood={moodEmoji(mood)} />
             <View>
               <Text style={styles.title}>Bluebird</Text>
               <Text style={styles.status}>● 在线</Text>
@@ -474,7 +493,9 @@ export default function App() {
                 item.role === 'user' && styles.userRow,
               ]}
             >
-              {item.role === 'assistant' && <BlueAvatar mood={mood} />}
+              {item.role === 'assistant' && (
+                <BlueAvatar mood={moodEmoji(item.mood)} />
+              )}
 
               {item.role === 'user' ? (
                 <TouchableOpacity
@@ -504,7 +525,7 @@ export default function App() {
           ListFooterComponent={
             sending ? (
               <View style={styles.typingRow}>
-                <BlueAvatar mood={mood} />
+                <BlueAvatar mood={moodEmoji(mood)} />
                 <View style={styles.typingBubble}>
                   <Text style={styles.typingText}>Bluebird 正在输入…</Text>
                 </View>
@@ -661,8 +682,6 @@ const styles = StyleSheet.create({
 
   moodBadge: {
     position: 'absolute',
-    top: -2,
-    right: -3,
     backgroundColor: '#202735',
     borderWidth: 1,
     borderColor: '#303642',

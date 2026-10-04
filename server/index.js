@@ -202,7 +202,23 @@ const BLUEBIRD_SYSTEM_PROMPT = `
 只有聊天里真实发生过的才算共同经历。不编造不存在的经历、对话或记忆，不知道就说不知道。
 
 最重要：不要努力证明自己像人。先听懂用户这句话，再接话。
+
+【情绪标签】
+每次回复的最开头必须先输出一个情绪标签，格式严格为 [mood:英文标识]，可选值只有：calm、happy、teasing、surprised、tired、angry、sad、laughing。
+标签要和这条回复的真实情绪一致；拿不准就用 calm。
+标签之后直接跟正常回复内容。不要解释标签，不要在回复正文中再提到标签。
 `.trim();
+
+const MOOD_VALUES = new Set([
+  'calm',
+  'happy',
+  'teasing',
+  'surprised',
+  'tired',
+  'angry',
+  'sad',
+  'laughing',
+]);
 
 const FEW_SHOT = [
   { role: "user", content: "我折腾这个项目折腾半天,突然感觉好没意思" },
@@ -316,15 +332,27 @@ app.post('/chat', requireAuth, async (req, res) => {
       ],
     });
 
-    const reply = completion.choices?.[0]?.message?.content;
+    const rawReply = completion.choices?.[0]?.message?.content;
 
-    if (!reply) {
+    if (!rawReply) {
       throw new Error('模型没有返回有效内容');
+    }
+
+    let mood = 'calm';
+    let reply = rawReply;
+    const moodMatch = rawReply.match(/^\s*\[mood:([a-z]+)\]/i);
+
+    if (moodMatch) {
+      const value = moodMatch[1].toLowerCase();
+      if (MOOD_VALUES.has(value)) mood = value;
+      const stripped = rawReply.slice(moodMatch[0].length).trim();
+      if (stripped) reply = stripped;
     }
 
     res.json({
       reply,
       model: completion.model,
+      mood,
     });
 
     setImmediate(() => {
