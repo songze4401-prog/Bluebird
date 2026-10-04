@@ -70,6 +70,19 @@ function SharedTime() {
   );
 }
 
+function BlueAvatar({ size = 38 }: { size?: number }) {
+  return (
+    <View
+      style={[
+        styles.avatar,
+        { width: size, height: size, borderRadius: size / 2 },
+      ]}
+    >
+      <Text style={[styles.avatarText, { fontSize: size * 0.45 }]}>B</Text>
+    </View>
+  );
+}
+
 export default function App() {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
@@ -353,9 +366,12 @@ export default function App() {
         behavior="padding"
       >
         <View style={styles.header}>
-          <View>
-            <Text style={styles.title}>Bluebird</Text>
-            <Text style={styles.status}>● 在线</Text>
+          <View style={styles.headerLeft}>
+            <BlueAvatar size={30} />
+            <View>
+              <Text style={styles.title}>Bluebird</Text>
+              <Text style={styles.status}>● 在线</Text>
+            </View>
           </View>
 
           <View style={styles.headerRight}>
@@ -422,11 +438,7 @@ export default function App() {
                 item.role === 'user' && styles.userRow,
               ]}
             >
-              {item.role === 'assistant' && (
-                <View style={styles.avatar}>
-                  <Text style={styles.avatarText}>B</Text>
-                </View>
-              )}
+              {item.role === 'assistant' && <BlueAvatar />}
 
               <View
                 style={[
@@ -453,9 +465,7 @@ export default function App() {
           ListFooterComponent={
             sending ? (
               <View style={styles.typingRow}>
-                <View style={styles.avatar}>
-                  <Text style={styles.avatarText}>B</Text>
-                </View>
+                <BlueAvatar />
                 <View style={styles.typingBubble}>
                   <Text style={styles.typingText}>Bluebird 正在输入…</Text>
                 </View>
@@ -592,18 +602,21 @@ const styles = StyleSheet.create({
   userRow: {
     justifyContent: 'flex-end',
   },
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+
   avatar: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
     backgroundColor: '#202735',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(217,199,161,0.45)',
   },
   avatarText: {
     color: '#d9c7a1',
-    fontSize: 17,
     fontWeight: '700',
   },
   bubble: {
