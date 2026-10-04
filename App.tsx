@@ -33,12 +33,25 @@ const API_TOKEN = process.env.EXPO_PUBLIC_BLUEBIRD_API_TOKEN;
 
 const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
 
-function HeaderClock() {
+function SharedTime() {
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
-    const timer = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(timer);
+    let interval: ReturnType<typeof setInterval> | undefined;
+
+    // 对齐到下一分钟边界，之后每分钟刷新
+    const timeout = setTimeout(
+      () => {
+        setNow(new Date());
+        interval = setInterval(() => setNow(new Date()), 60000);
+      },
+      (60 - new Date().getSeconds()) * 1000
+    );
+
+    return () => {
+      clearTimeout(timeout);
+      if (interval) clearInterval(interval);
+    };
   }, []);
 
   const timeText = `${String(now.getHours()).padStart(2, '0')}:${String(
@@ -49,9 +62,10 @@ function HeaderClock() {
   }`;
 
   return (
-    <View style={styles.clock}>
-      <Text style={styles.clockTime}>{timeText}</Text>
-      <Text style={styles.clockDate}>{dateText}</Text>
+    <View style={styles.sharedTime}>
+      <Text style={styles.sharedTimeClock}>{timeText}</Text>
+      <Text style={styles.sharedTimeDate}>{dateText}</Text>
+      <Text style={styles.sharedTimeCaption}>我们现在都在这里</Text>
     </View>
   );
 }
@@ -345,7 +359,7 @@ export default function App() {
           </View>
 
           <View style={styles.headerRight}>
-            <HeaderClock />
+            <SharedTime />
             <Text style={styles.version}>V0.2</Text>
 
             <TouchableOpacity
@@ -506,22 +520,32 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
 
-  clock: {
+  sharedTime: {
     alignItems: 'flex-end',
     marginRight: 12,
+    paddingLeft: 12,
+    borderLeftWidth: 1,
+    borderLeftColor: '#20242d',
   },
 
-  clockTime: {
-    color: '#eeeeee',
+  sharedTimeClock: {
+    color: '#d9c7a1',
     fontSize: 15,
     fontWeight: '600',
     fontVariant: ['tabular-nums'],
   },
 
-  clockDate: {
+  sharedTimeDate: {
     color: '#777',
     fontSize: 10,
     marginTop: 2,
+  },
+
+  sharedTimeCaption: {
+    color: '#777',
+    fontSize: 9,
+    marginTop: 2,
+    opacity: 0.75,
   },
 
   menuButton: {
