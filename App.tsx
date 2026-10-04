@@ -86,9 +86,7 @@ function moodEmoji(mood?: string) {
   return MOOD_EMOJI[mood ?? 'calm'] ?? MOOD_EMOJI.calm;
 }
 
-function BlueAvatar({ size = 38, mood }: { size?: number; mood?: string }) {
-  const badgeSize = Math.round(size * 0.95);
-
+function BlueAvatar({ size = 38 }: { size?: number }) {
   return (
     <View
       style={[
@@ -97,24 +95,6 @@ function BlueAvatar({ size = 38, mood }: { size?: number; mood?: string }) {
       ]}
     >
       <Text style={[styles.avatarText, { fontSize: size * 0.45 }]}>B</Text>
-      {!!mood && (
-        <View
-          style={[
-            styles.moodBadge,
-            {
-              width: badgeSize,
-              height: badgeSize,
-              borderRadius: badgeSize / 2,
-              top: -badgeSize * 0.25,
-              right: -badgeSize * 0.3,
-            },
-          ]}
-        >
-          <Text style={{ fontSize: Math.round(badgeSize * 0.62) }}>
-            {mood}
-          </Text>
-        </View>
-      )}
     </View>
   );
 }
@@ -422,7 +402,7 @@ export default function App() {
       >
         <View style={styles.header}>
           <View style={styles.headerLeft}>
-            <BlueAvatar size={30} mood={moodEmoji(mood)} />
+            <Text style={styles.headerMood}>{moodEmoji(mood)}</Text>
             <View>
               <Text style={styles.title}>Bluebird</Text>
               <Text style={styles.status}>● 在线</Text>
@@ -493,9 +473,7 @@ export default function App() {
                 item.role === 'user' && styles.userRow,
               ]}
             >
-              {item.role === 'assistant' && (
-                <BlueAvatar mood={moodEmoji(item.mood)} />
-              )}
+              {item.role === 'assistant' && <BlueAvatar />}
 
               {item.role === 'user' ? (
                 <TouchableOpacity
@@ -525,7 +503,7 @@ export default function App() {
           ListFooterComponent={
             sending ? (
               <View style={styles.typingRow}>
-                <BlueAvatar mood={moodEmoji(mood)} />
+                <BlueAvatar />
                 <View style={styles.typingBubble}>
                   <Text style={styles.typingText}>Bluebird 正在输入…</Text>
                 </View>
@@ -667,6 +645,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
 
+  headerMood: {
+    fontSize: 26,
+    marginRight: 10,
+  },
+
   avatar: {
     backgroundColor: '#202735',
     alignItems: 'center',
@@ -678,15 +661,6 @@ const styles = StyleSheet.create({
   avatarText: {
     color: '#d9c7a1',
     fontWeight: '700',
-  },
-
-  moodBadge: {
-    position: 'absolute',
-    backgroundColor: '#202735',
-    borderWidth: 1,
-    borderColor: '#303642',
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   bubble: {
     maxWidth: '78%',
