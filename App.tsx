@@ -70,7 +70,13 @@ function SharedTime() {
   );
 }
 
-function BlueAvatar({ size = 38 }: { size?: number }) {
+const MOODS = ['😌', '😏', '😴', '😂', '😳', '🙄'];
+
+function pickMood() {
+  return MOODS[Math.floor(Math.random() * MOODS.length)];
+}
+
+function BlueAvatar({ size = 38, mood }: { size?: number; mood?: string }) {
   return (
     <View
       style={[
@@ -79,6 +85,20 @@ function BlueAvatar({ size = 38 }: { size?: number }) {
       ]}
     >
       <Text style={[styles.avatarText, { fontSize: size * 0.45 }]}>B</Text>
+      {!!mood && (
+        <View
+          style={[
+            styles.moodBadge,
+            {
+              width: size * 0.42,
+              height: size * 0.42,
+              borderRadius: size * 0.21,
+            },
+          ]}
+        >
+          <Text style={{ fontSize: size * 0.28 }}>{mood}</Text>
+        </View>
+      )}
     </View>
   );
 }
@@ -89,6 +109,7 @@ export default function App() {
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
   const [sending, setSending] = useState(false);
+  const [mood, setMood] = useState('😌');
   const flatListRef = React.useRef<FlatList<Message>>(null);
   const isAtBottomRef = React.useRef(true);
   const hasInitialScrolledRef = React.useRef(false);
@@ -349,6 +370,8 @@ export default function App() {
           content: data.reply,
         },
       ]);
+
+      setMood(pickMood());
     } catch (error) {
       console.error(error);
 
@@ -380,7 +403,7 @@ export default function App() {
       >
         <View style={styles.header}>
           <View style={styles.headerLeft}>
-            <BlueAvatar size={30} />
+            <BlueAvatar size={30} mood={mood} />
             <View>
               <Text style={styles.title}>Bluebird</Text>
               <Text style={styles.status}>● 在线</Text>
@@ -451,7 +474,7 @@ export default function App() {
                 item.role === 'user' && styles.userRow,
               ]}
             >
-              {item.role === 'assistant' && <BlueAvatar />}
+              {item.role === 'assistant' && <BlueAvatar mood={mood} />}
 
               {item.role === 'user' ? (
                 <TouchableOpacity
@@ -481,7 +504,7 @@ export default function App() {
           ListFooterComponent={
             sending ? (
               <View style={styles.typingRow}>
-                <BlueAvatar />
+                <BlueAvatar mood={mood} />
                 <View style={styles.typingBubble}>
                   <Text style={styles.typingText}>Bluebird 正在输入…</Text>
                 </View>
@@ -634,6 +657,17 @@ const styles = StyleSheet.create({
   avatarText: {
     color: '#d9c7a1',
     fontWeight: '700',
+  },
+
+  moodBadge: {
+    position: 'absolute',
+    top: -2,
+    right: -3,
+    backgroundColor: '#202735',
+    borderWidth: 1,
+    borderColor: '#303642',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   bubble: {
     maxWidth: '78%',
