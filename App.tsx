@@ -31,6 +31,31 @@ async function readJsonResponse(response: Response) {
 
 const API_TOKEN = process.env.EXPO_PUBLIC_BLUEBIRD_API_TOKEN;
 
+const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
+
+function HeaderClock() {
+  const [now, setNow] = useState(() => new Date());
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const timeText = `${String(now.getHours()).padStart(2, '0')}:${String(
+    now.getMinutes()
+  ).padStart(2, '0')}`;
+  const dateText = `${now.getMonth() + 1}月${now.getDate()}日 周${
+    WEEKDAYS[now.getDay()]
+  }`;
+
+  return (
+    <View style={styles.clock}>
+      <Text style={styles.clockTime}>{timeText}</Text>
+      <Text style={styles.clockDate}>{dateText}</Text>
+    </View>
+  );
+}
+
 export default function App() {
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
@@ -320,6 +345,7 @@ export default function App() {
           </View>
 
           <View style={styles.headerRight}>
+            <HeaderClock />
             <Text style={styles.version}>V0.2</Text>
 
             <TouchableOpacity
@@ -478,6 +504,24 @@ const styles = StyleSheet.create({
   headerRight: {
     flexDirection: 'row',
     alignItems: 'center',
+  },
+
+  clock: {
+    alignItems: 'flex-end',
+    marginRight: 12,
+  },
+
+  clockTime: {
+    color: '#eeeeee',
+    fontSize: 15,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
+
+  clockDate: {
+    color: '#777',
+    fontSize: 10,
+    marginTop: 2,
   },
 
   menuButton: {
