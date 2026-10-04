@@ -587,7 +587,7 @@ const styles = StyleSheet.create({
   messageRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    marginBottom: 16,
+    marginBottom: 12,
   },
   userRow: {
     justifyContent: 'flex-end',
@@ -599,7 +599,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#202735',
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 9,
+    marginRight: 8,
   },
   avatarText: {
     color: '#d9c7a1',
@@ -608,22 +608,24 @@ const styles = StyleSheet.create({
   },
   bubble: {
     maxWidth: '78%',
-    paddingHorizontal: 15,
-    paddingVertical: 11,
-    borderRadius: 16,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 18,
   },
   bluebirdBubble: {
-    backgroundColor: '#171b24',
-    borderBottomLeftRadius: 4,
+    backgroundColor: '#161c28',
+    borderWidth: 1,
+    borderColor: '#232b3a',
+    borderBottomLeftRadius: 6,
   },
   userBubble: {
-    backgroundColor: '#303846',
-    borderBottomRightRadius: 4,
+    backgroundColor: '#2f3d55',
+    borderBottomRightRadius: 6,
   },
   messageText: {
     color: '#eeeeee',
     fontSize: 16,
-    lineHeight: 24,
+    lineHeight: 23,
   },
   inputArea: {
     flexDirection: 'row',
@@ -665,14 +667,16 @@ const styles = StyleSheet.create({
   typingRow: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    marginBottom: 16,
+    marginBottom: 12,
   },
   typingBubble: {
-    paddingHorizontal: 15,
-    paddingVertical: 11,
-    borderRadius: 16,
-    borderBottomLeftRadius: 4,
-    backgroundColor: '#171b24',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 18,
+    borderBottomLeftRadius: 6,
+    backgroundColor: '#161c28',
+    borderWidth: 1,
+    borderColor: '#232b3a',
   },
   typingText: {
     color: '#999999',
@@ -684,7 +688,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 8,
-    backgroundColor: '#303846',
+    backgroundColor: '#2f3d55',
   },
   retryText: {
     color: '#ffffff',
