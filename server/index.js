@@ -11,6 +11,43 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 
+// 简单内存限流：客户端 bundle 里必然带 EXPO_PUBLIC_ token（纯前端无法隐藏），
+// 这是缓解 token 泄露后被暴力/盗刷的基本防线。按 IP+token 每分钟限频。
+const RATE_LIMIT_WINDOW = 60 * 1000;
+const rateBuckets = new Map();
+
+function rateLimit({ maxPerWindow = 60 } = {}) {
+  return (req, res, next) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const token = String(req.headers.authorization || '').slice(7) || 'anon';
+    const key = `${ip}:${token}`;
+    const now = Date.now();
+    const bucket = rateBuckets.get(key);
+
+    if (!bucket || now - bucket.start > RATE_LIMIT_WINDOW) {
+      rateBuckets.set(key, { start: now, count: 1 });
+      return next();
+    }
+
+    if (bucket.count >= maxPerWindow) {
+      return res.status(429).json({ error: '请求过于频繁，请稍后再试' });
+    }
+
+    bucket.count++;
+    next();
+  };
+}
+
+app.use(rateLimit());
+
+// 定期清理过期限流桶，防止内存无限增长
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, bucket] of rateBuckets) {
+    if (now - bucket.start > RATE_LIMIT_WINDOW) rateBuckets.delete(key);
+  }
+}, RATE_LIMIT_WINDOW).unref();
+
 function getTimeContext(timeZone) {
   const tz = typeof timeZone === 'string' && timeZone.trim()
     ? timeZone
@@ -372,6 +409,12 @@ app.post('/memory/clear', requireAuth, async (req, res) => {
 });
 
 app.post('/chat', requireAuth, async (req, res) => {
+  // 客户端提前断开时标记，避免回复落盘成"幽灵消息"（用户没收到却已入库）
+  let clientGone = false;
+  res.on('close', () => {
+    if (!res.writableEnded) clientGone = true;
+  });
+
   try {
     const { message, history = [] } = req.body;
 
@@ -405,22 +448,25 @@ app.post('/chat', requireAuth, async (req, res) => {
 \
 ');
 
-    const completion = await client.chat.completions.create({
-      model: 'deepseek-chat',
-      temperature: 0.8,
-      max_tokens: 1200,
-      messages: [
-        {
-          role: 'system',
-          content: systemPrompt,
-        },
-        ...safeHistory,
-        {
-          role: 'user',
-          content: message.trim(),
-        },
-      ],
-    });
+    const completion = await client.chat.completions.create(
+      {
+        model: 'deepseek-chat',
+        temperature: 0.8,
+        max_tokens: 1200,
+        messages: [
+          {
+            role: 'system',
+            content: systemPrompt,
+          },
+          ...safeHistory,
+          {
+            role: 'user',
+            content: message.trim(),
+          },
+        ],
+      },
+      { timeout: 90000 }
+    );
 
     const rawReply = completion.choices?.[0]?.message?.content;
 
@@ -436,6 +482,11 @@ app.post('/chat', requireAuth, async (req, res) => {
       const value = moodMatch[1].toLowerCase();
       if (MOOD_VALUES.has(value)) mood = value;
       const stripped = rawReply.slice(moodMatch[0].length).trim();
+      if (stripped) reply = stripped;
+    } else {
+      // 兜底：模型没按要求在开头输出标签时，剥离正文里任何位置的 [mood:...]，
+      // 避免把标签原文展示给用户。
+      const stripped = reply.replace(/\[mood:[a-z]+\]/gi, '').trim();
       if (stripped) reply = stripped;
     }
 
@@ -466,6 +517,7 @@ app.post('/chat', requireAuth, async (req, res) => {
     });
 
     setImmediate(() => {
+      if (clientGone) return; // 客户端已断开，不落盘，避免幽灵消息
       try {
         appendChatMessages(stamped);
       } catch (error) {
