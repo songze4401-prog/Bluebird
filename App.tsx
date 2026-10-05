@@ -8,9 +8,13 @@ import {
   FlatList,
   StyleSheet,
   KeyboardAvoidingView,
-  Platform,
   Alert,
 } from 'react-native';
+
+// 本地临时消息的 id（服务端返回稳定 id 后会被替换）
+function makeLocalId(): string {
+  return Date.now().toString();
+}
 
 type Message = {
   id: string;
@@ -396,7 +400,7 @@ export default function App() {
     if (!text || sending) return;
 
     const userMessage: Message = {
-      id: Date.now().toString(),
+      id: makeLocalId(),
       role: 'user',
       content: text,
       createdAt: new Date().toISOString(),
@@ -471,7 +475,7 @@ export default function App() {
             id:
               typeof data.assistantMessageId === 'string'
                 ? data.assistantMessageId
-                : `${Date.now()}-ai`,
+                : `${makeLocalId()}-ai`,
             role: 'assistant',
             content: data.reply,
             mood: replyMood,
@@ -492,7 +496,7 @@ export default function App() {
       setMessages(prev => [
         ...prev,
         {
-          id: `error-${Date.now()}`,
+          id: `error-${makeLocalId()}`,
           role: 'assistant',
           content: errorMessage,
           retryText: text,

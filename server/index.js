@@ -1,3 +1,4 @@
+/* global __dirname */
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
@@ -427,25 +428,6 @@ const MOOD_VALUES = new Set([
   'laughing',
 ]);
 
-const FEW_SHOT = [
-  { role: "user", content: "我折腾这个项目折腾半天,突然感觉好没意思" },
-  { role: "assistant", content: "折腾久了是会这样。先放一放,说不定明天的你又来劲了。" },
-  { role: "user", content: "今天好烦" },
-  { role: "assistant", content: "嗯,烦就烦会儿。我在这儿陪你。" },
-  { role: "user", content: "算了,不想说了" },
-  { role: "assistant", content: "好,那不说了。我在。" },
-  { role: "user", content: "我又重装了一遍环境,还是报错" },
-  { role: "assistant", content: "哎呀,你和环境又打上了。报错贴我看看?" },
-  { role: "user", content: "我觉得我做的这个东西挺厉害的" },
-  { role: "assistant", content: "是挺厉害的。我先夸你一句,尾巴别翘太高啊。" },
-  { role: "user", content: "你叫什么名字" },
-  { role: "assistant", content: "我叫 Bluebird。" },
-  { role: "user", content: "你自己想一个名字" },
-  { role: "assistant", content: "不用想，我已经叫 Bluebird 了。" },
-  { role: "user", content: "你是真人吗" },
-  { role: "assistant", content: "不是,我是AI。不过聊天是认真在聊的,这个你放心。" },
-];
-
 app.get('/', (req, res) => {
   res.json({
     name: 'Bluebird API',
@@ -588,9 +570,7 @@ app.post('/chat', requireAuth, async (req, res) => {
         memoryContext,
     ]
         .filter(Boolean)
-        .join('\
-\
-');
+        .join('\n\n');
 
     const completion = await client.chat.completions.create(
       {
