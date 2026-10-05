@@ -16,6 +16,7 @@ type Message = {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  createdAt?: string; // ISO 时间，后端返回；前端发送时自己打
   retryText?: string;
   mood?: string;
 };
@@ -84,6 +85,57 @@ const MOOD_EMOJI: Record<string, string> = {
 
 function moodEmoji(mood?: string) {
   return MOOD_EMOJI[mood ?? 'calm'] ?? MOOD_EMOJI.calm;
+}
+
+// 微信式时间显示：间隔超过 5 分钟或跨天才显示一次时间标签
+const MESSAGE_TIME_GAP_MS = 5 * 60 * 1000;
+
+function formatMessageTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+
+  const now = new Date();
+  const hm = `${String(date.getHours()).padStart(2, '0')}:${String(
+    date.getMinutes()
+  ).padStart(2, '0')}`;
+
+  const startOfDay = (d: Date) =>
+    new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const dayDiff = Math.round(
+    (startOfDay(now) - startOfDay(date)) / 86400000
+  );
+
+  if (dayDiff <= 0) return hm; // 今天：只显示时间
+  if (dayDiff === 1) return `昨天 ${hm}`;
+  if (dayDiff < 7) return `周${WEEKDAYS[date.getDay()]} ${hm}`;
+  if (date.getFullYear() === now.getFullYear()) {
+    return `${date.getMonth() + 1}月${date.getDate()}日 ${hm}`;
+  }
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${hm}`;
+}
+
+function shouldShowMessageTime(
+  current: Message,
+  previous?: Message
+): boolean {
+  if (!current.createdAt) return false;
+  if (!previous) return true;
+  if (!previous.createdAt) return true;
+
+  const curr = new Date(current.createdAt).getTime();
+  const prev = new Date(previous.createdAt).getTime();
+  if (Number.isNaN(curr) || Number.isNaN(prev)) return false;
+
+  if (curr - prev >= MESSAGE_TIME_GAP_MS) return true;
+
+  // 间隔短但跨天：新的一天第一条仍显示
+  const a = new Date(curr);
+  const b = new Date(prev);
+  return (
+    a.getFullYear() !== b.getFullYear() ||
+    a.getMonth() !== b.getMonth() ||
+    a.getDate() !== b.getDate()
+  );
 }
 
 function BlueAvatar({ size = 38 }: { size?: number }) {
@@ -196,6 +248,7 @@ export default function App() {
               id: item.id ?? `history-${index}`,
               role: item.role,
               content: item.content,
+              createdAt: item.createdAt,
             })
           )
         );
@@ -346,6 +399,7 @@ export default function App() {
       id: Date.now().toString(),
       role: 'user',
       content: text,
+      createdAt: new Date().toISOString(),
     };
 
     setSending(true);
@@ -421,6 +475,7 @@ export default function App() {
             role: 'assistant',
             content: data.reply,
             mood: replyMood,
+            createdAt: new Date().toISOString(),
           },
         ];
       });
@@ -521,40 +576,53 @@ export default function App() {
             }
           }}
           contentContainerStyle={styles.messages}
-          renderItem={({ item }) => (
-            <View
-              style={[
-                styles.messageRow,
-                item.role === 'user' && styles.userRow,
-              ]}
-            >
-              {item.role === 'assistant' && <BlueAvatar />}
+          renderItem={({ item, index }) => {
+            const previous = messages[index - 1];
+            const showTime = shouldShowMessageTime(item, previous);
 
-              {item.role === 'user' ? (
-                <TouchableOpacity
-                  style={[styles.bubble, styles.userBubble]}
-                  activeOpacity={0.75}
-                  onLongPress={() => recallMessage(item)}
+            return (
+              <View>
+                {showTime && item.createdAt && (
+                  <Text style={styles.messageTime}>
+                    {formatMessageTime(item.createdAt)}
+                  </Text>
+                )}
+
+                <View
+                  style={[
+                    styles.messageRow,
+                    item.role === 'user' && styles.userRow,
+                  ]}
                 >
-                  <Text style={styles.messageText}>{item.content}</Text>
-                </TouchableOpacity>
-              ) : (
-                <View style={[styles.bubble, styles.bluebirdBubble]}>
-                  <Text style={styles.messageText}>{item.content}</Text>
+                  {item.role === 'assistant' && <BlueAvatar />}
 
-                  {!!item.retryText && (
+                  {item.role === 'user' ? (
                     <TouchableOpacity
-                      style={styles.retryButton}
-                      onPress={() => sendMessage(item.retryText)}
-                      disabled={sending}
+                      style={[styles.bubble, styles.userBubble]}
+                      activeOpacity={0.75}
+                      onLongPress={() => recallMessage(item)}
                     >
-                      <Text style={styles.retryText}>重新发送</Text>
+                      <Text style={styles.messageText}>{item.content}</Text>
                     </TouchableOpacity>
+                  ) : (
+                    <View style={[styles.bubble, styles.bluebirdBubble]}>
+                      <Text style={styles.messageText}>{item.content}</Text>
+
+                      {!!item.retryText && (
+                        <TouchableOpacity
+                          style={styles.retryButton}
+                          onPress={() => sendMessage(item.retryText)}
+                          disabled={sending}
+                        >
+                          <Text style={styles.retryText}>重新发送</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
                   )}
                 </View>
-              )}
-            </View>
-          )}
+              </View>
+            );
+          }}
           ListFooterComponent={
             sending ? (
               <View style={styles.typingRow}>
@@ -686,6 +754,14 @@ const styles = StyleSheet.create({
   messages: {
     padding: 16,
     paddingBottom: 24,
+  },
+  messageTime: {
+    alignSelf: 'center',
+    color: '#777',
+    fontSize: 12,
+    marginBottom: 12,
+    marginTop: 4,
+    fontVariant: ['tabular-nums'],
   },
   messageRow: {
     flexDirection: 'row',

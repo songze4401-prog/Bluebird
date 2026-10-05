@@ -242,6 +242,117 @@ function appendChatMessages(messages) {
   }
 }
 
+// 把任意时刻格式化为用户时区的可读时间（与 getTimeContext 同一套方式）
+function formatTimeInZone(dateInput, timeZone) {
+  const tz =
+    typeof timeZone === 'string' && timeZone.trim() ? timeZone : 'UTC';
+
+  try {
+    const parts = new Intl.DateTimeFormat('zh-CN', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      weekday: 'short',
+      hour12: false,
+    }).formatToParts(dateInput);
+
+    const v = Object.fromEntries(
+      parts.filter(x => x.type !== 'literal').map(x => [x.type, x.value])
+    );
+
+    return `${v.year}年${v.month}月${v.day}日 ${v.weekday} ${v.hour}:${v.minute}`;
+  } catch {
+    return new Date(dateInput).toISOString();
+  }
+}
+
+// 时间间隔的语义标签：模型不需要自己算时间差
+function gapSemanticLabel(gapMinutes, gapHours, gapDays) {
+  if (gapMinutes < 1) return '刚刚';
+  if (gapMinutes < 10) return '几分钟前';
+  if (gapMinutes < 60) return `约${gapMinutes}分钟前`;
+  if (gapHours < 6) return `约${gapHours}小时前`;
+  if (gapHours < 24) return '已经有一段时间没聊天了';
+  if (gapDays < 2) return '距离上次聊天已经一天左右';
+  return '已经有几天没聊天了';
+}
+
+// 结构化时间上下文：告诉 Blue 距上一条有效用户消息过去了多久。
+// 历史文件中被撤回的消息已物理删除，天然不参与计算。
+function buildTimeGapContext(timeZone) {
+  const history = loadChatHistory();
+  const now = new Date();
+
+  let prevUser = null;
+
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i];
+    if (m && m.role === 'user' && m.createdAt) {
+      prevUser = m;
+      break;
+    }
+  }
+
+  const currentTime = formatTimeInZone(now, timeZone);
+
+  if (!prevUser) {
+    return {
+      currentTime,
+      previousUserMessageTime: null,
+      gapSeconds: null,
+      gapMinutes: null,
+      gapHours: null,
+      gapDays: null,
+      timeContext: '第一次聊天',
+      promptText:
+        '【对话间隔】\n这是有记录以来的第一条用户消息，没有历史间隔。',
+    };
+  }
+
+  const prevTime = new Date(prevUser.createdAt).getTime();
+  const gapSeconds = Math.max(0, Math.floor((now.getTime() - prevTime) / 1000));
+  const gapMinutes = Math.floor(gapSeconds / 60);
+  const gapHours = Math.floor(gapMinutes / 60);
+  const gapDays = Math.floor(gapHours / 24);
+  const timeContext = gapSemanticLabel(gapMinutes, gapHours, gapDays);
+
+  const previousUserMessageTime = formatTimeInZone(
+    prevUser.createdAt,
+    timeZone
+  );
+
+  // 人类可读的间隔：10小时40分钟 / 20分钟 / 1天3小时 / 不到1分钟
+  const gapHuman =
+    gapMinutes < 1
+      ? '不到1分钟'
+      : [
+          gapDays > 0 ? `${gapDays}天` : '',
+          gapHours % 24 > 0 ? `${gapHours % 24}小时` : '',
+          gapMinutes % 60 > 0 ? `${gapMinutes % 60}分钟` : '',
+        ]
+          .filter(Boolean)
+          .join('') || '不到1分钟';
+
+  return {
+    currentTime,
+    previousUserMessageTime,
+    gapSeconds,
+    gapMinutes,
+    gapHours,
+    gapDays,
+    timeContext,
+    promptText: [
+      '【对话间隔】',
+      `用户上一条消息时间：${previousUserMessageTime}`,
+      `距离上一条用户消息：${gapHuman}（${timeContext}）`,
+      '时间间隔用于把握对话节奏：隔得久可以自然地接住对方，间隔很短就当作连续对话。除非时间间隔对当前对话有意义，否则不要刻意提及，不要每条回复都报告时间。',
+    ].join('\n'),
+  };
+}
+
 const BLUEBIRD_SYSTEM_PROMPT = `
 你是用户的一个长期聊天对象，平等的，不是客服、咨询师或工具。
 
@@ -388,8 +499,8 @@ app.post('/history/recall', requireAuth, (req, res) => {
 
     // 异步撤回由这条用户消息产生的长期记忆（sourceQuote 匹配）
     recallMemoryBySourceQuote(
-      recalled.content,
-      recalled.createdAt
+      removed[0].content,
+      removed[0].createdAt
     ).catch(error => {
       console.error('Memory recall error:', error.message);
     });
@@ -450,10 +561,17 @@ app.post('/chat', requireAuth, async (req, res) => {
 
     const memoryContext = buildMemoryContext(message);
     const timeContext = getTimeContext(req.body.timeZone || 'Asia/Shanghai');
+    const gapContext = buildTimeGapContext(req.body.timeZone || 'Asia/Shanghai');
+
+    console.log(
+      `Time gap: ${gapContext.timeContext}` +
+        (gapContext.gapSeconds != null ? ` (${gapContext.gapSeconds}s)` : '')
+    );
 
     const systemPrompt = [
         BLUEBIRD_SYSTEM_PROMPT,
         timeContext,
+        gapContext.promptText,
         memoryContext,
     ]
         .filter(Boolean)
