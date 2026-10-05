@@ -534,7 +534,7 @@ async function recallMemoryBySourceQuote(sourceText, sourceCreatedAt) {
             sourceTime === null ||
             memoryTime === null ||
             (memoryTime >= sourceTime - 5000 &&
-              memoryTime <= sourceTime + 5 * 60 * 1000);
+              memoryTime <= sourceTime + 2 * 60 * 60 * 1000);
         }
       }
 

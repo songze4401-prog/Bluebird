@@ -176,10 +176,10 @@ function appendChatMessages(messages) {
     const createdAt = new Date().toISOString();
 
     const stamped = messages.map(item => ({
-      id: crypto.randomUUID(),
+      id: item.id || crypto.randomUUID(),
       role: item.role,
       content: String(item.content),
-      createdAt,
+      createdAt: item.createdAt || createdAt,
     }));
 
     history.push(...stamped);
@@ -329,13 +329,14 @@ app.post('/history/recall', requireAuth, (req, res) => {
       });
     }
 
-    const recalled = history[index];
-    const removed = [recalled];
-    const next = history[index + 1];
+    const removed = [history[index]];
 
-    // 配对删除：仅当下一条是 assistant 回复时一并撤回
-    if (next && next.role === 'assistant') {
-      removed.push(next);
+    // 配对删除：撤回该用户消息之后、下一条用户消息之前的所有 assistant 回复，
+    // 避免留下"用户消息删了、AI 回复还在"的孤儿回复。
+    for (let i = index + 1; i < history.length; i++) {
+      const m = history[i];
+      if (!m || m.role !== 'assistant') break;
+      removed.push(m);
     }
 
     const removedIds = new Set(removed.map(m => m.id));
@@ -438,26 +439,39 @@ app.post('/chat', requireAuth, async (req, res) => {
       if (stripped) reply = stripped;
     }
 
-    const stamped = appendChatMessages([
+    // 同步生成稳定 id 并立即返回给前端（撤回需要），历史落盘放异步，
+    // 避免磁盘 IO 卡住回复关键路径；appendChatMessages 会沿用已有 id。
+    const now = new Date().toISOString();
+    const stamped = [
       {
+        id: crypto.randomUUID(),
         role: 'user',
         content: message.trim(),
+        createdAt: now,
       },
       {
+        id: crypto.randomUUID(),
         role: 'assistant',
         content: reply,
+        createdAt: now,
       },
-    ]);
+    ];
 
     res.json({
       reply,
       model: completion.model,
       mood,
-      userMessageId: stamped?.[0]?.id ?? null,
-      assistantMessageId: stamped?.[1]?.id ?? null,
+      userMessageId: stamped[0].id,
+      assistantMessageId: stamped[1].id,
     });
 
-    console.log('History saved: user + assistant');
+    setImmediate(() => {
+      try {
+        appendChatMessages(stamped);
+      } catch (error) {
+        console.error('History save error:', error);
+      }
+    });
 
     setImmediate(() => {
       processMemory(client, message.trim())
