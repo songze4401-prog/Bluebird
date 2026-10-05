@@ -2,7 +2,10 @@
 # Bluebird 一键启动：后端 API (3000) + Expo Metro (8081)
 # 幂等：已在运行的服务不会重复启动
 
-cd /workspaces/yunxiu-app || { echo "✗ 项目目录不存在: /workspaces/yunxiu-app"; exit 1; }
+# 从脚本自身位置推导仓库根目录，不依赖固定的工作区名
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT" || { echo "✗ 无法进入项目目录: $REPO_ROOT"; exit 1; }
 
 echo "Bluebird starting..."
 
