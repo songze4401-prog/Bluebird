@@ -125,7 +125,14 @@ const CHAT_HISTORY_FILE = chatPath.join(
 
 const CHAT_HISTORY_MAX = 200;
 
+// 聊天历史内存缓存：避免每次 /chat（buildTimeGapContext、appendChatMessages）
+// 都重新读磁盘。所有写操作（追加/撤回/清空）都经 saveChatHistory 更新缓存，
+// 保证缓存与文件一致。
+let chatHistoryCache = null;
+
 function loadChatHistory() {
+  if (chatHistoryCache) return chatHistoryCache;
+
   try {
     chatFs.mkdirSync(chatPath.dirname(CHAT_HISTORY_FILE), {
       recursive: true,
@@ -137,7 +144,8 @@ function loadChatHistory() {
         "[]",
         "utf-8"
       );
-      return [];
+      chatHistoryCache = [];
+      return chatHistoryCache;
     }
 
     const data = chatFs.readFileSync(
@@ -168,11 +176,13 @@ function loadChatHistory() {
           : item
       );
 
+      chatHistoryCache = migrated.slice(-CHAT_HISTORY_MAX);
       saveChatHistory(migrated);
-      return migrated;
+      return chatHistoryCache;
     }
 
-    return list;
+    chatHistoryCache = list;
+    return chatHistoryCache;
   } catch (error) {
     console.error("History load error:", error);
     return [];
@@ -185,11 +195,12 @@ function saveChatHistory(history) {
       recursive: true,
     });
 
+    const trimmed = history.slice(-CHAT_HISTORY_MAX);
     const tmpFile = CHAT_HISTORY_FILE + ".tmp";
 
     chatFs.writeFileSync(
       tmpFile,
-      JSON.stringify(history.slice(-CHAT_HISTORY_MAX), null, 2),
+      JSON.stringify(trimmed, null, 2),
       "utf-8"
     );
 
@@ -197,6 +208,8 @@ function saveChatHistory(history) {
       tmpFile,
       CHAT_HISTORY_FILE
     );
+
+    chatHistoryCache = trimmed;
 
     console.log(
       "History saved:",
@@ -645,6 +658,8 @@ app.post('/chat', requireAuth, async (req, res) => {
       mood,
       userMessageId: stamped[0].id,
       assistantMessageId: stamped[1].id,
+      // 服务端统一时间，供前端展示，避免客户端时钟偏差
+      createdAt: now,
     });
 
     setImmediate(() => {

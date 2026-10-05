@@ -475,7 +475,7 @@ export default function App() {
             role: 'assistant',
             content: data.reply,
             mood: replyMood,
-            createdAt: new Date().toISOString(),
+            createdAt: data.createdAt ?? new Date().toISOString(),
           },
         ];
       });
