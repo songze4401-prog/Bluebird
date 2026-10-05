@@ -65,7 +65,10 @@ const {
   buildMemoryContext,
   processMemory,
   clearMemories,
+  recallMemoryBySourceQuote,
 } = require('./memory');
+
+const crypto = require('crypto');
 
 const chatFs = require('fs');
 const chatPath = require('path');
@@ -99,8 +102,33 @@ function loadChatHistory() {
     );
 
     const history = JSON.parse(data);
+    const list = Array.isArray(history) ? history : [];
 
-    return Array.isArray(history) ? history : [];
+    // 兼容旧数据：缺少 id / createdAt 的条目迁移补齐一次并落盘，保证 id 稳定
+    if (list.some(item => item && (!item.id || !item.createdAt))) {
+      let legacyCreatedAt = new Date().toISOString();
+
+      try {
+        legacyCreatedAt = chatFs
+          .statSync(CHAT_HISTORY_FILE)
+          .mtime.toISOString();
+      } catch {}
+
+      const migrated = list.map(item =>
+        item && typeof item === 'object'
+          ? {
+              ...item,
+              id: item.id || crypto.randomUUID(),
+              createdAt: item.createdAt || legacyCreatedAt,
+            }
+          : item
+      );
+
+      saveChatHistory(migrated);
+      return migrated;
+    }
+
+    return list;
   } catch (error) {
     console.error("History load error:", error);
     return [];
@@ -145,17 +173,28 @@ function appendChatMessages(messages) {
     );
 
     const history = loadChatHistory();
+    const createdAt = new Date().toISOString();
 
-    history.push(...messages);
+    const stamped = messages.map(item => ({
+      id: crypto.randomUUID(),
+      role: item.role,
+      content: String(item.content),
+      createdAt,
+    }));
+
+    history.push(...stamped);
 
     saveChatHistory(
       history.slice(-CHAT_HISTORY_MAX)
     );
+
+    return stamped;
   } catch (error) {
     console.error(
       "History append error:",
       error
     );
+    return null;
   }
 }
 
@@ -271,6 +310,56 @@ app.post('/history/clear', requireAuth, (req, res) => {
   }
 });
 
+app.post('/history/recall', requireAuth, (req, res) => {
+  try {
+    const { messageId } = req.body;
+
+    if (!messageId || typeof messageId !== 'string') {
+      return res.status(400).json({ error: '缺少 messageId' });
+    }
+
+    const history = loadChatHistory();
+    const index = history.findIndex(
+      item => item && item.id === messageId && item.role === 'user'
+    );
+
+    if (index < 0) {
+      return res.status(404).json({
+        error: '消息不存在或不可撤回',
+      });
+    }
+
+    const recalled = history[index];
+    const removed = [recalled];
+    const next = history[index + 1];
+
+    // 配对删除：仅当下一条是 assistant 回复时一并撤回
+    if (next && next.role === 'assistant') {
+      removed.push(next);
+    }
+
+    const removedIds = new Set(removed.map(m => m.id));
+    saveChatHistory(history.filter(m => m && !removedIds.has(m.id)));
+
+    // 异步撤回由这条用户消息产生的长期记忆（sourceQuote 匹配）
+    recallMemoryBySourceQuote(
+      recalled.content,
+      recalled.createdAt
+    ).catch(error => {
+      console.error('Memory recall error:', error.message);
+    });
+
+    res.json({
+      ok: true,
+      removedCount: removed.length,
+      removedIds: removed.map(m => m.id),
+    });
+  } catch (error) {
+    console.error('History recall error:', error);
+    res.status(500).json({ error: '撤回失败' });
+  }
+});
+
 app.post('/memory/clear', requireAuth, async (req, res) => {
   try {
     await clearMemories();
@@ -349,30 +438,26 @@ app.post('/chat', requireAuth, async (req, res) => {
       if (stripped) reply = stripped;
     }
 
+    const stamped = appendChatMessages([
+      {
+        role: 'user',
+        content: message.trim(),
+      },
+      {
+        role: 'assistant',
+        content: reply,
+      },
+    ]);
+
     res.json({
       reply,
       model: completion.model,
       mood,
+      userMessageId: stamped?.[0]?.id ?? null,
+      assistantMessageId: stamped?.[1]?.id ?? null,
     });
 
-    setImmediate(() => {
-      try {
-        appendChatMessages([
-          {
-            role: 'user',
-            content: message.trim(),
-          },
-          {
-            role: 'assistant',
-            content: reply,
-          },
-        ]);
-
-        console.log('History saved: user + assistant');
-      } catch (error) {
-        console.error('History save error:', error);
-      }
-    });
+    console.log('History saved: user + assistant');
 
     setImmediate(() => {
       processMemory(client, message.trim())

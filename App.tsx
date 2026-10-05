@@ -186,13 +186,14 @@ export default function App() {
           data.history.map(
             (
               item: {
+                id?: string;
                 role: 'user' | 'assistant';
                 content: string;
                 createdAt?: string;
               },
               index: number
             ) => ({
-              id: `${item.createdAt || 'history'}-${index}`,
+              id: item.id ?? `history-${index}`,
               role: item.role,
               content: item.content,
             })
@@ -293,14 +294,44 @@ export default function App() {
     );
   };
 
-  const recallMessage = (id: string) => {
-    Alert.alert('撤回消息', '撤回这条消息？', [
+  const recallMessage = (message: Message) => {
+    Alert.alert('撤回这条消息？', message.content, [
       { text: '取消', style: 'cancel' },
       {
         text: '撤回',
         style: 'destructive',
-        onPress: () => {
-          setMessages(prev => prev.filter(m => m.id !== id));
+        onPress: async () => {
+          try {
+            const response = await fetch(
+              `${process.env.EXPO_PUBLIC_API_URL}/history/recall`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${API_TOKEN}`,
+                },
+                body: JSON.stringify({ messageId: message.id }),
+              }
+            );
+
+            const data = await readJsonResponse(response);
+
+            if (!response.ok) {
+              throw new Error(data.error || '撤回失败');
+            }
+
+            // 服务端返回真实删除的 id 列表（含配对的 AI 回复），按它移除
+            const removedIds: string[] = Array.isArray(data.removedIds)
+              ? data.removedIds
+              : [message.id];
+
+            setMessages(prev =>
+              prev.filter(m => !removedIds.includes(m.id))
+            );
+          } catch (error) {
+            console.error('Recall error:', error);
+            Alert.alert('撤回失败', '请稍后再试。');
+          }
         },
       },
     ]);
@@ -360,15 +391,39 @@ export default function App() {
 
       const replyMood = typeof data.mood === 'string' ? data.mood : 'calm';
 
-      setMessages(prev => [
-        ...prev,
-        {
-          id: `${Date.now()}-ai`,
-          role: 'assistant',
-          content: data.reply,
-          mood: replyMood,
-        },
-      ]);
+      setMessages(prev => {
+        // 撤回需要服务端稳定 id：用服务端返回的 id 替换本地临时 id
+        const serverUserId =
+          typeof data.userMessageId === 'string'
+            ? data.userMessageId
+            : null;
+
+        let patched = prev;
+
+        if (serverUserId) {
+          // 正常发送更新刚发出的气泡；重试时更新最后一条用户消息
+          const targetId = retryText
+            ? [...prev].reverse().find(m => m.role === 'user')?.id
+            : userMessage.id;
+
+          patched = prev.map(m =>
+            m.id === targetId ? { ...m, id: serverUserId } : m
+          );
+        }
+
+        return [
+          ...patched,
+          {
+            id:
+              typeof data.assistantMessageId === 'string'
+                ? data.assistantMessageId
+                : `${Date.now()}-ai`,
+            role: 'assistant',
+            content: data.reply,
+            mood: replyMood,
+          },
+        ];
+      });
 
       setMood(replyMood);
     } catch (error) {
@@ -479,7 +534,7 @@ export default function App() {
                 <TouchableOpacity
                   style={[styles.bubble, styles.userBubble]}
                   activeOpacity={0.75}
-                  onLongPress={() => recallMessage(item.id)}
+                  onLongPress={() => recallMessage(item)}
                 >
                   <Text style={styles.messageText}>{item.content}</Text>
                 </TouchableOpacity>

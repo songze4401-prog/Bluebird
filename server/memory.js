@@ -497,10 +497,69 @@ async function clearMemories() {
   });
 }
 
+// 撤回用户消息时，同步撤回由该消息产生的长期记忆。
+// 通过 sourceQuote 与原文的包含/相似度匹配，并用时间窗防止误删无关记忆。
+async function recallMemoryBySourceQuote(sourceText, sourceCreatedAt) {
+  if (!MEMORY_ENABLED) return 0;
+
+  const source = normalize(sourceText);
+  if (!source) return 0;
+
+  const sourceTime = sourceCreatedAt
+    ? new Date(sourceCreatedAt).getTime()
+    : null;
+
+  return enqueueWrite(async () => {
+    const current = Array.isArray(memories) ? memories : [];
+    const remaining = [];
+    let removed = 0;
+
+    for (const item of current) {
+      const quote = normalize(item && item.sourceQuote);
+      let matched = false;
+
+      if (quote) {
+        const textMatch =
+          quote === source ||
+          (quote.length >= 4 && source.includes(quote)) ||
+          similarity(quote, source) >= 0.7;
+
+        if (textMatch) {
+          const memoryTime =
+            item && item.createdAt
+              ? new Date(item.createdAt).getTime()
+              : null;
+
+          matched =
+            sourceTime === null ||
+            memoryTime === null ||
+            (memoryTime >= sourceTime - 5000 &&
+              memoryTime <= sourceTime + 5 * 60 * 1000);
+        }
+      }
+
+      if (matched) {
+        removed++;
+      } else {
+        remaining.push(item);
+      }
+    }
+
+    if (removed > 0) {
+      memories = remaining;
+      await saveMemories(remaining);
+      console.log(`Memory recalled: ${removed}`);
+    }
+
+    return removed;
+  });
+}
+
 module.exports = {
   MEMORY_ENABLED,
   loadMemories,
   buildMemoryContext,
   processMemory,
   clearMemories,
+  recallMemoryBySourceQuote,
 };
