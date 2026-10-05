@@ -1,9 +1,16 @@
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const express = require('express');
 const cors = require('cors');
 const OpenAI = require('openai');
-const client = new OpenAI({ apiKey: process.env.DEEPSEEK_API_KEY, baseURL: "https://api.deepseek.com" });
+
+// 容错初始化：缺 DEEPSEEK_API_KEY 时服务仍能启动（管理接口可用），
+// /chat 再返回清晰提示，而不是模块加载即崩溃。
+const apiKey = process.env.DEEPSEEK_API_KEY;
+const client = apiKey
+  ? new OpenAI({ apiKey, baseURL: "https://api.deepseek.com" })
+  : null;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -424,6 +431,12 @@ app.post('/chat', requireAuth, async (req, res) => {
       });
     }
 
+    if (!client) {
+      return res.status(500).json({
+        error: '服务端未配置 DEEPSEEK_API_KEY，请在 server/.env 中填写后重启',
+      });
+    }
+
     const safeHistory = Array.isArray(history)
       ? history
           .filter(
@@ -526,6 +539,7 @@ app.post('/chat', requireAuth, async (req, res) => {
     });
 
     setImmediate(() => {
+      if (!client) return; // 未配置模型 key，跳过记忆提取
       processMemory(client, message.trim())
         .catch(error => {
           console.error(
