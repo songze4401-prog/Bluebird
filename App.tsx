@@ -525,7 +525,7 @@ export default function App() {
 
           <View style={styles.headerRight}>
             <SharedTime />
-            <Text style={styles.version}>V0.2</Text>
+            <Text style={styles.version}>V0.3</Text>
 
             <TouchableOpacity
               style={styles.menuButton}
