@@ -556,9 +556,59 @@ async function recallMemoryBySourceQuote(sourceText, sourceCreatedAt) {
   });
 }
 
+// 记忆库只读读取：返回浅拷贝，避免外部代码直接改到内部数组。
+// 刻意不调用 loadMemories()——它会重置内存数组，不适合作为读取入口。
+function getMemories() {
+  const current = Array.isArray(memories) ? memories : [];
+
+  return current.map(item => ({ ...item }));
+}
+
+// 记忆库单条删除：以 createdAt + content 作为定位键（现有数据格式没有 id）。
+// 必须走 enqueueWrite，与 processMemory 的自动写入串行化，
+// 否则会出现"用户刚删除 → 后台提取写入"把这次删除覆盖掉。
+async function deleteMemory({ createdAt, content }) {
+  const targetCreatedAt =
+    typeof createdAt === 'string' ? createdAt : '';
+  const targetContent =
+    typeof content === 'string' ? content : '';
+
+  if (!targetCreatedAt || !targetContent) {
+    return { removed: 0, reason: 'invalid' };
+  }
+
+  return enqueueWrite(async () => {
+    const current = Array.isArray(memories) ? memories : [];
+
+    const index = current.findIndex(
+      item =>
+        item &&
+        item.createdAt === targetCreatedAt &&
+        item.content === targetContent
+    );
+
+    if (index < 0) {
+      return { removed: 0, reason: 'not-found' };
+    }
+
+    const next = current.slice();
+    next.splice(index, 1);
+
+    await saveMemories(next);
+
+    memories = next;
+
+    console.log('Memory deleted');
+
+    return { removed: 1, reason: 'ok' };
+  });
+}
+
 module.exports = {
   MEMORY_ENABLED,
   loadMemories,
+  getMemories,
+  deleteMemory,
   buildMemoryContext,
   processMemory,
   clearMemories,

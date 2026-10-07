@@ -111,7 +111,17 @@ const {
   processMemory,
   clearMemories,
   recallMemoryBySourceQuote,
+  getMemories,
+  deleteMemory,
 } = require('./memory');
+
+const {
+  EMOTIONS,
+  getEmotion,
+  buildEmotionContext,
+  applyTimeDecay,
+  applyObservation,
+} = require('./emotion');
 
 const crypto = require('crypto');
 
@@ -412,21 +422,12 @@ const BLUEBIRD_SYSTEM_PROMPT = `
 最重要：不要努力证明自己像人。先听懂用户这句话，再接话。
 
 【情绪标签】
-每次回复的最开头必须先输出一个情绪标签，格式严格为 [mood:英文标识]，可选值只有：calm、happy、teasing、surprised、tired、angry、sad、laughing。
+每次回复的最开头必须先输出一个情绪标签，格式严格为 [mood:英文标识]，可选值只有：calm、happy、playful、excited、tired、sad、annoyed、hurt。
 标签要和这条回复的真实情绪一致；拿不准就用 calm。
 标签之后直接跟正常回复内容。不要解释标签，不要在回复正文中再提到标签。
 `.trim();
 
-const MOOD_VALUES = new Set([
-  'calm',
-  'happy',
-  'teasing',
-  'surprised',
-  'tired',
-  'angry',
-  'sad',
-  'laughing',
-]);
+const MOOD_VALUES = new Set(EMOTIONS);
 
 app.get('/', (req, res) => {
   res.json({
@@ -521,6 +522,48 @@ app.post('/memory/clear', requireAuth, async (req, res) => {
   }
 });
 
+// 记忆库：读取当前全部长期记忆（只读，不重置内存数组）
+app.get('/memory', requireAuth, (req, res) => {
+  try {
+    res.json({ memories: getMemories() });
+  } catch (error) {
+    console.error('Memory API Error:', error);
+    res.status(500).json({ error: '读取长期记忆失败' });
+  }
+});
+
+// 情绪系统：读取当前持久化的真实情绪状态（App 启动时同步顶部 Emoji 用）
+app.get('/emotion', requireAuth, (req, res) => {
+  try {
+    res.json(getEmotion());
+  } catch (error) {
+    console.error('Emotion API Error:', error);
+    res.status(500).json({ error: '读取情绪状态失败' });
+  }
+});
+
+// 记忆库：按 createdAt + content 删除单条记忆
+app.post('/memory/delete', requireAuth, async (req, res) => {
+  try {
+    const { createdAt, content } = req.body || {};
+
+    if (typeof createdAt !== 'string' || typeof content !== 'string') {
+      return res.status(400).json({ error: '缺少 createdAt 或 content' });
+    }
+
+    const result = await deleteMemory({ createdAt, content });
+
+    if (!result.removed) {
+      return res.status(404).json({ error: '记忆不存在' });
+    }
+
+    res.json({ ok: true, removed: result.removed });
+  } catch (error) {
+    console.error('Memory delete error:', error);
+    res.status(500).json({ error: '删除记忆失败' });
+  }
+});
+
 app.post('/chat', requireAuth, async (req, res) => {
   // 客户端提前断开时标记，避免回复落盘成"幽灵消息"（用户没收到却已入库）
   let clientGone = false;
@@ -558,6 +601,11 @@ app.post('/chat', requireAuth, async (req, res) => {
     const timeContext = getTimeContext(req.body.timeZone || 'Asia/Shanghai');
     const gapContext = buildTimeGapContext(req.body.timeZone || 'Asia/Shanghai');
 
+    // 情绪惯性：先按"距离上一条用户消息"的间隔做时间衰减，再生成情绪上下文。
+    // 时间间隔直接复用 Time Sense V1 已经算好的 gapSeconds，不另造时间机制。
+    applyTimeDecay(gapContext.gapSeconds);
+    const emotionContext = buildEmotionContext();
+
     console.log(
       `Time gap: ${gapContext.timeContext}` +
         (gapContext.gapSeconds != null ? ` (${gapContext.gapSeconds}s)` : '')
@@ -568,6 +616,7 @@ app.post('/chat', requireAuth, async (req, res) => {
         timeContext,
         gapContext.promptText,
         memoryContext,
+        emotionContext,
     ]
         .filter(Boolean)
         .join('\n\n');
@@ -632,10 +681,14 @@ app.post('/chat', requireAuth, async (req, res) => {
       },
     ];
 
+    // 本轮 [mood:] 只是"观察信号"，交给情绪系统做惯性更新后再返回当期真实状态
+    const emotion = applyObservation(mood);
+
     res.json({
       reply,
       model: completion.model,
-      mood,
+      mood: emotion.emotion,
+      intensity: emotion.intensity,
       userMessageId: stamped[0].id,
       assistantMessageId: stamped[1].id,
       // 服务端统一时间，供前端展示，避免客户端时钟偏差
