@@ -429,6 +429,19 @@ const BLUEBIRD_SYSTEM_PROMPT = `
 
 const MOOD_VALUES = new Set(EMOTIONS);
 
+// 「继续说」的内部续写指令。它只存在于本次 API 请求的 systemPrompt 中：
+// 不写入 chat-history、不进入长期记忆、不污染任何持久化数据。
+const CONTINUE_INSTRUCTION = `
+【续写模式】
+用户点了「继续说」，你要接着你自己上一条回复自然往下说，而不是开始一段新的回答。
+- 顺着上一条回复的语气和思路继续展开：补充细节、举例、把没说完的话说完
+- 绝对不要重复已经说过的内容，也不要换个说法把同一件事再说一遍
+- 不要重新回答用户之前问过的问题，不要复述问题
+- 不要解释你为什么继续，不要出现"继续""补充""另外"这类提示词
+- 保持你的人格与当前情绪，像自然聊天那样接着讲
+- 不要写成文章、总结、列表或分条
+`.trim();
+
 app.get('/', (req, res) => {
   res.json({
     name: 'Bluebird API',
@@ -572,13 +585,18 @@ app.post('/chat', requireAuth, async (req, res) => {
   });
 
   try {
-    const { message, history = [] } = req.body;
+    const { message, history = [], mode } = req.body;
 
-    if (typeof message !== 'string' || !message.trim()) {
+    // 续写模式：「继续说」不是真实用户消息，只是一次内部 continuation 请求
+    const isContinue = mode === 'continue';
+
+    if (!isContinue && (typeof message !== 'string' || !message.trim())) {
       return res.status(400).json({
         error: '消息不能为空',
       });
     }
+
+    const userText = isContinue ? '' : message.trim();
 
     if (!client) {
       return res.status(500).json({
@@ -597,7 +615,14 @@ app.post('/chat', requireAuth, async (req, res) => {
           .slice(-20)
       : [];
 
-    const memoryContext = buildMemoryContext(message);
+    // 续写没有新的用户消息，用最近一条用户消息作为记忆检索的查询，
+    // 保证续写仍然复用现有 Memory System，而不是绕过它
+    const memoryQuery = isContinue
+      ? ([...safeHistory].reverse().find(item => item.role === 'user') || {})
+          .content || ''
+      : userText;
+
+    const memoryContext = buildMemoryContext(memoryQuery);
     const timeContext = getTimeContext(req.body.timeZone || 'Asia/Shanghai');
     const gapContext = buildTimeGapContext(req.body.timeZone || 'Asia/Shanghai');
 
@@ -617,6 +642,7 @@ app.post('/chat', requireAuth, async (req, res) => {
         gapContext.promptText,
         memoryContext,
         emotionContext,
+        isContinue ? CONTINUE_INSTRUCTION : '',
     ]
         .filter(Boolean)
         .join('\n\n');
@@ -633,8 +659,9 @@ app.post('/chat', requireAuth, async (req, res) => {
           },
           ...safeHistory,
           {
+            // 续写模式用一个内部短指令占位：只存在于本次请求，不落任何盘
             role: 'user',
-            content: message.trim(),
+            content: isContinue ? '（继续）' : userText,
           },
         ],
       },
@@ -666,20 +693,31 @@ app.post('/chat', requireAuth, async (req, res) => {
     // 同步生成稳定 id 并立即返回给前端（撤回需要），历史落盘放异步，
     // 避免磁盘 IO 卡住回复关键路径；appendChatMessages 会沿用已有 id。
     const now = new Date().toISOString();
-    const stamped = [
-      {
-        id: crypto.randomUUID(),
-        role: 'user',
-        content: message.trim(),
-        createdAt: now,
-      },
-      {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        content: reply,
-        createdAt: now,
-      },
-    ];
+
+    // 续写只落盘 assistant 消息：不产生"继续说"用户消息，不污染 chat-history
+    const stamped = isContinue
+      ? [
+          {
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: reply,
+            createdAt: now,
+          },
+        ]
+      : [
+          {
+            id: crypto.randomUUID(),
+            role: 'user',
+            content: userText,
+            createdAt: now,
+          },
+          {
+            id: crypto.randomUUID(),
+            role: 'assistant',
+            content: reply,
+            createdAt: now,
+          },
+        ];
 
     // 本轮 [mood:] 只是"观察信号"，交给情绪系统做惯性更新后再返回当期真实状态
     const emotion = applyObservation(mood);
@@ -689,8 +727,8 @@ app.post('/chat', requireAuth, async (req, res) => {
       model: completion.model,
       mood: emotion.emotion,
       intensity: emotion.intensity,
-      userMessageId: stamped[0].id,
-      assistantMessageId: stamped[1].id,
+      userMessageId: isContinue ? null : stamped[0].id,
+      assistantMessageId: isContinue ? stamped[0].id : stamped[1].id,
       // 服务端统一时间，供前端展示，避免客户端时钟偏差
       createdAt: now,
     });
@@ -706,7 +744,8 @@ app.post('/chat', requireAuth, async (req, res) => {
 
     setImmediate(() => {
       if (!client) return; // 未配置模型 key，跳过记忆提取
-      processMemory(client, message.trim())
+      if (isContinue) return; // 续写不是用户说的话，不产生长期记忆
+      processMemory(client, userText)
         .catch(error => {
           console.error(
             'Memory processing error:',

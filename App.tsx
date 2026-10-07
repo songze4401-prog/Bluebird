@@ -235,6 +235,7 @@ export default function App() {
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
   const [sending, setSending] = useState(false);
+  const [continuing, setContinuing] = useState(false);
   const [mood, setMood] = useState('calm');
 
   // 主题色：纯前端本地偏好，不经过服务器、不写入 Memory
@@ -749,6 +750,77 @@ export default function App() {
     }
   };
 
+  // 「继续说」：让 Bluebird 接着自己上一条回复往下说。
+  // 走同一个 /chat，用 mode:'continue' 标记为内部续写请求；
+  // 后端不会保存任何"继续说"用户消息，只追加 assistant 消息。
+  const sendContinuation = async () => {
+    if (continuing || sending) return;
+
+    const last = messages[messages.length - 1];
+
+    if (!last || last.role !== 'assistant' || last.retryText) return;
+
+    const history = messages
+      .filter(item => !item.retryText)
+      .slice(-20)
+      .map(item => ({ role: item.role, content: item.content }));
+
+    setContinuing(true);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60000);
+
+    try {
+      const response = await fetch(
+        `${process.env.EXPO_PUBLIC_API_URL}/chat`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${API_TOKEN}`,
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            mode: 'continue',
+            history,
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          }),
+        }
+      );
+
+      const data = await readJsonResponse(response);
+
+      if (!response.ok) {
+        throw new Error(data.error || '请求失败');
+      }
+
+      const replyMood = typeof data.mood === 'string' ? data.mood : 'calm';
+
+      setMessages(prev => [
+        ...prev,
+        {
+          id:
+            typeof data.assistantMessageId === 'string'
+              ? data.assistantMessageId
+              : `${makeLocalId()}-ai`,
+          role: 'assistant',
+          content: data.reply,
+          mood: replyMood,
+          createdAt: data.createdAt ?? new Date().toISOString(),
+        },
+      ]);
+
+      setMood(replyMood);
+    } catch (error) {
+      console.error('Continue error:', error);
+
+      Alert.alert('失败', '继续说失败了，请稍后再试。');
+    } finally {
+      clearTimeout(timeout);
+      setContinuing(false);
+    }
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <KeyboardAvoidingView
@@ -832,6 +904,13 @@ export default function App() {
             const previous = messages[index - 1];
             const showTime = shouldShowMessageTime(item, previous);
 
+            // 只有"最新一条且是 Bluebird 正常回复"时才显示续写按钮
+            const showContinue =
+              index === messages.length - 1 &&
+              item.role === 'assistant' &&
+              !item.retryText &&
+              !sending;
+
             return (
               <View>
                 {showTime && item.createdAt && (
@@ -879,6 +958,33 @@ export default function App() {
                     </View>
                   )}
                 </View>
+
+                {showContinue && (
+                  <View style={styles.continueRow}>
+                    <TouchableOpacity
+                      style={[
+                        styles.continueButton,
+                        { borderColor: theme.accentBorder },
+                      ]}
+                      onPress={sendContinuation}
+                      disabled={continuing}
+                      activeOpacity={0.6}
+                    >
+                      <Text
+                        style={[
+                          styles.continueText,
+                          {
+                            color: continuing
+                              ? theme.accentBorder
+                              : theme.accent,
+                          },
+                        ]}
+                      >
+                        {continuing ? '···' : '>>>'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
               </View>
             );
           }}
@@ -895,6 +1001,15 @@ export default function App() {
         />
 
         <View style={styles.inputArea}>
+          <TouchableOpacity
+            style={[styles.plusButton, { borderColor: theme.accentBorder }]}
+            onPress={() => Alert.alert('＋', '这里之后会放更多功能。')}
+            activeOpacity={0.6}
+            accessibilityLabel="更多功能"
+          >
+            <Text style={[styles.plusText, { color: theme.accent }]}>+</Text>
+          </TouchableOpacity>
+
           <TextInput
             value={input}
             onChangeText={setInput}
@@ -1380,6 +1495,26 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '700',
   },
+
+  // ---- 「继续说」按钮 ----
+  continueRow: {
+    flexDirection: 'row',
+    // 与 Bluebird 气泡左边缘对齐（头像 38 + 右边距 8）
+    marginLeft: 46,
+    marginTop: -2,
+    marginBottom: 10,
+  },
+  continueButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    borderRadius: 9,
+    borderWidth: 1,
+  },
+  continueText: {
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 1,
+  },
   messages: {
     padding: 16,
     paddingBottom: 24,
@@ -1442,6 +1577,23 @@ const styles = StyleSheet.create({
     color: '#eeeeee',
     fontSize: 16,
     lineHeight: 23,
+  },
+  // ---- 输入框左侧「＋」按钮（仅 UI，暂未接任何菜单） ----
+  plusButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+    // 输入框最小高度 46，这里做垂直居中
+    marginBottom: 3,
+  },
+  plusText: {
+    fontSize: 22,
+    lineHeight: 26,
+    fontWeight: '600',
   },
   inputArea: {
     flexDirection: 'row',
