@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   View,
@@ -16,12 +16,18 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import {
   THEMES,
+  MODE_OPTIONS,
   getTheme,
+  getAccentSet,
   isThemeId,
+  isThemeMode,
   DEFAULT_THEME_ID,
+  DEFAULT_THEME_MODE,
   THEME_STORAGE_KEY,
+  THEME_MODE_STORAGE_KEY,
   type Theme,
   type ThemeId,
+  type ThemeMode,
 } from './theme';
 
 // 本地临时消息的 id（服务端返回稳定 id 后会被替换）
@@ -92,7 +98,38 @@ const MEMORY_TYPE_LABELS: Record<string, string> = {
   relationship: '关系',
 };
 
-function SharedTime({ theme }: { theme: Theme }) {
+// 记忆摘要：只做展示，由已有记忆就地归并生成（不调接口、不改写任何记忆数据）。
+// 优先展示"核心"类别，最多取前几条，避免摘要变成第二个完整列表。
+const SUMMARY_TYPE_ORDER = ['identity', 'relationship', 'goal', 'preference', 'fact'];
+const MEMORY_SUMMARY_MAX = 6;
+
+function buildMemorySummary(items: MemoryItem[]): string {
+  if (!items.length) return '';
+
+  const rank = (type?: string) => {
+    const index = SUMMARY_TYPE_ORDER.indexOf(type || '');
+    return index < 0 ? SUMMARY_TYPE_ORDER.length : index;
+  };
+
+  // 注意：先 slice() 拷贝再排序，绝不改动传入的 memories 原始顺序
+  const merged = items
+    .slice()
+    .sort((a, b) => rank(a.type) - rank(b.type))
+    .slice(0, MEMORY_SUMMARY_MAX)
+    .map(item => item.content.trim().replace(/[。，,.\s]+$/, ''))
+    .filter(Boolean)
+    .join('，');
+
+  return merged ? `${merged}。` : '';
+}
+
+function SharedTime({
+  theme,
+  styles,
+}: {
+  theme: Theme;
+  styles: ReturnType<typeof createStyles>;
+}) {
   const [now, setNow] = useState(() => new Date());
 
   useEffect(() => {
@@ -150,6 +187,10 @@ function moodEmoji(mood?: string) {
 // 微信式时间显示：间隔超过 5 分钟或跨天才显示一次时间标签
 const MESSAGE_TIME_GAP_MS = 5 * 60 * 1000;
 
+// 距底部小于该距离视为"已在底部"：
+// 决定「新消息是否自动跟随」以及「返回底部按钮是否显示」，两者互补不留死区
+const AT_BOTTOM_DISTANCE = 80;
+
 function formatMessageTime(iso: string): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return '';
@@ -201,9 +242,11 @@ function shouldShowMessageTime(
 function BlueAvatar({
   size = 38,
   theme,
+  styles,
 }: {
   size?: number;
   theme: Theme;
+  styles: ReturnType<typeof createStyles>;
 }) {
   return (
     <View
@@ -238,10 +281,19 @@ export default function App() {
   const [continuing, setContinuing] = useState(false);
   const [mood, setMood] = useState('calm');
 
-  // 主题色：纯前端本地偏好，不经过服务器、不写入 Memory
+  // 主题：模式（浅色/深色）+ 强调色，均为纯前端本地偏好，不经过服务器
+  const [themeMode, setThemeMode] = useState<ThemeMode>(DEFAULT_THEME_MODE);
   const [themeId, setThemeId] = useState<ThemeId>(DEFAULT_THEME_ID);
   const [themePickerOpen, setThemePickerOpen] = useState(false);
-  const theme = getTheme(themeId);
+
+  // 由「模式 + 强调色」合成全局主题
+  const theme = useMemo(
+    () => getTheme(themeMode, themeId),
+    [themeMode, themeId]
+  );
+
+  // 样式由主题派生，组件内不再硬编码任何浅色/深色色值
+  const styles = useMemo(() => createStyles(theme), [theme]);
 
   // 记忆库
   const [memoryOpen, setMemoryOpen] = useState(false);
@@ -256,6 +308,9 @@ export default function App() {
   const hasInitialScrolledRef = React.useRef(false);
   const previousMessageCountRef = React.useRef(0);
   const pendingInitialScrollRef = React.useRef(false);
+
+  // 「返回底部」悬浮按钮：仅在用户向上翻看历史时出现
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 
   useEffect(() => {
     if (messages.length === 0) {
@@ -392,17 +447,21 @@ export default function App() {
     };
   }, []);
 
-  // 启动时读取本地保存的主题色；读不到就用默认（黑色）
+  // 启动时读取本地保存的主题（模式 + 强调色）；读不到就用默认（浅色 + 黑色强调）
   useEffect(() => {
     let cancelled = false;
 
     const loadTheme = async () => {
       try {
-        const saved = await AsyncStorage.getItem(THEME_STORAGE_KEY);
+        const [savedMode, savedAccent] = await Promise.all([
+          AsyncStorage.getItem(THEME_MODE_STORAGE_KEY),
+          AsyncStorage.getItem(THEME_STORAGE_KEY),
+        ]);
 
-        if (cancelled || !isThemeId(saved)) return;
+        if (cancelled) return;
 
-        setThemeId(saved);
+        if (isThemeMode(savedMode)) setThemeMode(savedMode);
+        if (isThemeId(savedAccent)) setThemeId(savedAccent);
       } catch (error) {
         console.error('Load theme error:', error);
       }
@@ -415,12 +474,21 @@ export default function App() {
     };
   }, []);
 
-  // 切换主题：先立即生效（UI 不等 IO），再异步落盘
+  // 切换强调色：先立即生效（UI 不等 IO），再异步落盘
   const selectTheme = (next: ThemeId) => {
     setThemeId(next);
 
     AsyncStorage.setItem(THEME_STORAGE_KEY, next).catch(error => {
       console.error('Save theme error:', error);
+    });
+  };
+
+  // 切换浅色 / 深色模式：同样先立即生效再落盘
+  const selectMode = (next: ThemeMode) => {
+    setThemeMode(next);
+
+    AsyncStorage.setItem(THEME_MODE_STORAGE_KEY, next).catch(error => {
+      console.error('Save theme mode error:', error);
     });
   };
 
@@ -821,6 +889,14 @@ export default function App() {
     }
   };
 
+  // 「返回底部」：平滑滚到底部，并立即隐藏按钮（后续 onScroll 会复核）
+  const scrollToBottom = () => {
+    isAtBottomRef.current = true;
+    setShowScrollToBottom(false);
+
+    flatListRef.current?.scrollToEnd({ animated: true });
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <KeyboardAvoidingView
@@ -837,7 +913,7 @@ export default function App() {
           </View>
 
           <View style={styles.headerRight}>
-            <SharedTime theme={theme} />
+            <SharedTime theme={theme} styles={styles} />
             <Text style={styles.version}>V0.3</Text>
 
             <TouchableOpacity
@@ -857,6 +933,28 @@ export default function App() {
             >
               <Text style={styles.menuItemText}>🧠 记忆库</Text>
             </TouchableOpacity>
+
+            {MODE_OPTIONS.map(option => {
+              const active = theme.mode === option.id;
+
+              return (
+                <TouchableOpacity
+                  key={option.id}
+                  style={styles.menuItem}
+                  onPress={() => selectMode(option.id)}
+                >
+                  <Text
+                    style={[
+                      styles.menuItemText,
+                      active && { color: theme.accent },
+                    ]}
+                  >
+                    {option.emoji} {option.label}
+                    {active ? '  ✓' : ''}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
 
             <TouchableOpacity
               style={styles.menuItem}
@@ -886,7 +984,17 @@ export default function App() {
               contentSize.height -
               (contentOffset.y + layoutMeasurement.height);
 
-            isAtBottomRef.current = distanceFromBottom < 80;
+            const atBottom = distanceFromBottom < AT_BOTTOM_DISTANCE;
+
+            // 自动跟随的判断依据（ref，不触发渲染）
+            isAtBottomRef.current = atBottom;
+
+            // 按钮显隐与自动跟随互补：离开底部才显示。
+            // 仅状态真正变化时才 setState，避免滚动过程中频繁渲染。
+            const shouldShow = !atBottom;
+            setShowScrollToBottom(prev =>
+              prev === shouldShow ? prev : shouldShow
+            );
           }}
           scrollEventThrottle={100}
           onContentSizeChange={() => {
@@ -925,7 +1033,9 @@ export default function App() {
                     item.role === 'user' && styles.userRow,
                   ]}
                 >
-                  {item.role === 'assistant' && <BlueAvatar theme={theme} />}
+                  {item.role === 'assistant' && (
+                    <BlueAvatar theme={theme} styles={styles} />
+                  )}
 
                   {item.role === 'user' ? (
                     <TouchableOpacity
@@ -937,7 +1047,9 @@ export default function App() {
                       activeOpacity={0.75}
                       onLongPress={() => recallMessage(item)}
                     >
-                      <Text style={styles.messageText}>{item.content}</Text>
+                      <Text style={[styles.messageText, styles.userMessageText]}>
+                        {item.content}
+                      </Text>
                     </TouchableOpacity>
                   ) : (
                     <View style={[styles.bubble, styles.bluebirdBubble]}>
@@ -991,7 +1103,7 @@ export default function App() {
           ListFooterComponent={
             sending ? (
               <View style={styles.typingRow}>
-                <BlueAvatar theme={theme} />
+                <BlueAvatar theme={theme} styles={styles} />
                 <View style={styles.typingBubble}>
                   <Text style={styles.typingText}>Bluebird 正在输入…</Text>
                 </View>
@@ -999,6 +1111,25 @@ export default function App() {
             ) : null
           }
         />
+
+        {showScrollToBottom && (
+          <TouchableOpacity
+            style={[
+              styles.scrollToBottom,
+              {
+                backgroundColor: theme.surface,
+                borderColor: theme.borderStrong,
+              },
+            ]}
+            onPress={scrollToBottom}
+            activeOpacity={0.75}
+            accessibilityLabel="返回底部"
+          >
+            <Text style={[styles.scrollToBottomIcon, { color: theme.accent }]}>
+              ↓
+            </Text>
+          </TouchableOpacity>
+        )}
 
         <View style={styles.inputArea}>
           <TouchableOpacity
@@ -1014,7 +1145,7 @@ export default function App() {
             value={input}
             onChangeText={setInput}
             placeholder="与Bluebird说些什么……"
-            placeholderTextColor="#777"
+            placeholderTextColor={theme.textMuted}
             style={styles.input}
             multiline
           />
@@ -1051,12 +1182,38 @@ export default function App() {
 
             <Text style={styles.memoryTitle}>记忆库</Text>
 
-            <View style={styles.memoryHeaderSpacer} />
+            <TouchableOpacity
+              style={styles.memoryRefresh}
+              onPress={fetchMemories}
+              disabled={loadingMemories}
+              activeOpacity={0.6}
+              accessibilityLabel="刷新记忆库"
+            >
+              <Text
+                style={[styles.memoryRefreshText, { color: theme.accent }]}
+              >
+                {loadingMemories ? '···' : '↻'}
+              </Text>
+            </TouchableOpacity>
           </View>
 
           <Text style={styles.memoryCaption}>
             共 {memories.length} 条 · 这里是 Bluebird 长期保存的信息，与聊天记录相互独立
           </Text>
+
+          {!loadingMemories && !memoryError && memories.length > 0 && (
+            <View style={styles.summaryCard}>
+              <Text style={styles.summaryTitle}>记忆摘要</Text>
+
+              <Text style={styles.summaryText}>
+                {buildMemorySummary(memories)}
+              </Text>
+
+              <Text style={styles.summaryNote}>
+                由已有 {memories.length} 条记忆归并生成，仅作概览，原始记忆见下方
+              </Text>
+            </View>
+          )}
 
           {loadingMemories ? (
             <View style={styles.memoryCenter}>
@@ -1188,7 +1345,7 @@ export default function App() {
             keyExtractor={item => item.id}
             contentContainerStyle={styles.memoryList}
             renderItem={({ item }) => {
-              const selected = item.id === theme.id;
+              const selected = item.id === theme.accentId;
 
               return (
                 <TouchableOpacity
@@ -1202,7 +1359,7 @@ export default function App() {
                     <View
                       style={[
                         styles.themeSwatch,
-                        { backgroundColor: item.sendButton },
+                        { backgroundColor: getAccentSet(item.id, theme.mode).sendButton },
                       ]}
                     />
 
@@ -1228,10 +1385,11 @@ export default function App() {
   );
 }
 
-const styles = StyleSheet.create({
+// 样式由主题派生：所有颜色都来自 theme，组件内不再硬编码浅色/深色色值
+const createStyles = (theme: Theme) => StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0b0d12',
+    backgroundColor: theme.background,
   },
   header: {
     height: 72,
@@ -1240,20 +1398,20 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     borderBottomWidth: 1,
-    borderBottomColor: '#20242d',
+    borderBottomColor: theme.border,
   },
   title: {
-    color: '#f0f0f0',
+    color: theme.textPrimary,
     fontSize: 24,
     fontWeight: '700',
   },
   status: {
-    color: '#7fd18b',
+    color: theme.online,
     fontSize: 12,
     marginTop: 3,
   },
   version: {
-    color: '#777',
+    color: theme.textMuted,
     fontSize: 12,
   },
   headerRight: {
@@ -1266,24 +1424,24 @@ const styles = StyleSheet.create({
     marginRight: 12,
     paddingLeft: 12,
     borderLeftWidth: 1,
-    borderLeftColor: '#20242d',
+    borderLeftColor: theme.border,
   },
 
   sharedTimeClock: {
-    color: '#d9c7a1',
+    color: theme.accent,
     fontSize: 15,
     fontWeight: '600',
     fontVariant: ['tabular-nums'],
   },
 
   sharedTimeDate: {
-    color: '#777',
+    color: theme.textMuted,
     fontSize: 10,
     marginTop: 2,
   },
 
   sharedTimeCaption: {
-    color: '#777',
+    color: theme.textMuted,
     fontSize: 9,
     marginTop: 2,
     opacity: 0.75,
@@ -1295,7 +1453,7 @@ const styles = StyleSheet.create({
   },
 
   menuIcon: {
-    color: '#ffffff',
+    color: theme.textPrimary,
     fontSize: 22,
   },
 
@@ -1305,11 +1463,11 @@ const styles = StyleSheet.create({
     right: 16,
     zIndex: 100,
     width: 160,
-    backgroundColor: '#181c25',
+    backgroundColor: theme.surface,
     borderRadius: 12,
     paddingVertical: 6,
     borderWidth: 1,
-    borderColor: '#303642',
+    borderColor: theme.borderStrong,
   },
 
   menuItem: {
@@ -1318,14 +1476,14 @@ const styles = StyleSheet.create({
   },
 
   menuItemText: {
-    color: '#ffffff',
+    color: theme.textPrimary,
     fontSize: 15,
   },
 
   // ---- 记忆库 ----
   memoryContainer: {
     flex: 1,
-    backgroundColor: '#0b0d12',
+    backgroundColor: theme.background,
   },
   memoryHeader: {
     height: 72,
@@ -1334,31 +1492,69 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     borderBottomWidth: 1,
-    borderBottomColor: '#20242d',
+    borderBottomColor: theme.border,
   },
   memoryBack: {
     minWidth: 64,
     paddingVertical: 6,
   },
   memoryBackText: {
-    color: '#d9c7a1',
+    color: theme.accent,
     fontSize: 16,
   },
   memoryTitle: {
-    color: '#f0f0f0',
+    color: theme.textPrimary,
     fontSize: 20,
     fontWeight: '700',
   },
   memoryHeaderSpacer: {
     minWidth: 64,
   },
+  // 记忆库右上角刷新按钮：复用同一套强调色，适配浅色/深色
+  memoryRefresh: {
+    minWidth: 64,
+    paddingVertical: 6,
+    alignItems: 'flex-end',
+  },
+  memoryRefreshText: {
+    fontSize: 19,
+    lineHeight: 23,
+    fontWeight: '700',
+  },
   memoryCaption: {
-    color: '#8b93a3',
+    color: theme.textSecondary,
     fontSize: 13,
     lineHeight: 19,
     paddingHorizontal: 20,
     paddingTop: 14,
     paddingBottom: 6,
+  },
+  // ---- 记忆摘要（仅展示，不替代原始记忆；随 memories 更新自动刷新） ----
+  summaryCard: {
+    marginHorizontal: 16,
+    marginTop: 10,
+    padding: 14,
+    borderRadius: 12,
+    borderWidth: 1,
+    backgroundColor: theme.surface,
+    borderColor: theme.borderStrong,
+  },
+  summaryTitle: {
+    color: theme.accent,
+    fontSize: 13,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  summaryText: {
+    color: theme.textBody,
+    fontSize: 15,
+    lineHeight: 22,
+  },
+  summaryNote: {
+    color: theme.textMuted,
+    fontSize: 11,
+    lineHeight: 16,
+    marginTop: 9,
   },
   memoryCenter: {
     flex: 1,
@@ -1367,20 +1563,20 @@ const styles = StyleSheet.create({
     paddingHorizontal: 32,
   },
   memoryEmptyTitle: {
-    color: '#f0f0f0',
+    color: theme.textPrimary,
     fontSize: 17,
     fontWeight: '600',
     marginBottom: 8,
   },
   memoryHint: {
-    color: '#8b93a3',
+    color: theme.textSecondary,
     fontSize: 14,
     lineHeight: 21,
     textAlign: 'center',
     marginTop: 8,
   },
   memoryErrorText: {
-    color: '#e08a8a',
+    color: theme.danger,
     fontSize: 14,
     lineHeight: 21,
     textAlign: 'center',
@@ -1388,13 +1584,13 @@ const styles = StyleSheet.create({
   },
   memoryRetry: {
     borderWidth: 1,
-    borderColor: '#303642',
+    borderColor: theme.borderStrong,
     borderRadius: 10,
     paddingHorizontal: 18,
     paddingVertical: 9,
   },
   memoryRetryText: {
-    color: '#d9c7a1',
+    color: theme.accent,
     fontSize: 14,
   },
   memoryList: {
@@ -1403,9 +1599,9 @@ const styles = StyleSheet.create({
     paddingBottom: 24,
   },
   memoryCard: {
-    backgroundColor: '#181c25',
+    backgroundColor: theme.surface,
     borderWidth: 1,
-    borderColor: '#303642',
+    borderColor: theme.borderStrong,
     borderRadius: 12,
     padding: 14,
     marginBottom: 10,
@@ -1417,25 +1613,25 @@ const styles = StyleSheet.create({
   },
   memoryContent: {
     flex: 1,
-    color: '#eeeeee',
+    color: theme.textBody,
     fontSize: 16,
     lineHeight: 23,
     marginRight: 10,
   },
   memoryBadge: {
-    backgroundColor: '#202735',
+    backgroundColor: theme.avatarBg,
     borderWidth: 1,
-    borderColor: 'rgba(217,199,161,0.45)',
+    borderColor: theme.accentBorder,
     borderRadius: 8,
     paddingHorizontal: 8,
     paddingVertical: 3,
   },
   memoryBadgeText: {
-    color: '#d9c7a1',
+    color: theme.accent,
     fontSize: 12,
   },
   memorySource: {
-    color: '#8b93a3',
+    color: theme.textSecondary,
     fontSize: 13,
     lineHeight: 19,
     marginTop: 8,
@@ -1447,7 +1643,7 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   memoryTime: {
-    color: '#777',
+    color: theme.textMuted,
     fontSize: 12,
     fontVariant: ['tabular-nums'],
   },
@@ -1456,7 +1652,7 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   memoryDeleteText: {
-    color: '#e08a8a',
+    color: theme.danger,
     fontSize: 14,
   },
   memoryClearAll: {
@@ -1465,11 +1661,11 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     borderRadius: 12,
     borderWidth: 1,
-    borderColor: 'rgba(224,138,138,0.5)',
+    borderColor: theme.dangerBorder,
     alignItems: 'center',
   },
   memoryClearAllText: {
-    color: '#e08a8a',
+    color: theme.danger,
     fontSize: 15,
   },
 
@@ -1484,11 +1680,11 @@ const styles = StyleSheet.create({
     borderRadius: 11,
     marginRight: 12,
     borderWidth: 1,
-    borderColor: '#303642',
+    borderColor: theme.borderStrong,
   },
   themeLabel: {
     flex: 1,
-    color: '#eeeeee',
+    color: theme.textBody,
     fontSize: 16,
   },
   themeCheck: {
@@ -1521,7 +1717,7 @@ const styles = StyleSheet.create({
   },
   messageTime: {
     alignSelf: 'center',
-    color: '#777',
+    color: theme.textMuted,
     fontSize: 12,
     marginBottom: 12,
     marginTop: 4,
@@ -1546,15 +1742,15 @@ const styles = StyleSheet.create({
   },
 
   avatar: {
-    backgroundColor: '#202735',
+    backgroundColor: theme.avatarBg,
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 8,
     borderWidth: 1,
-    borderColor: 'rgba(217,199,161,0.45)',
+    borderColor: theme.accentBorder,
   },
   avatarText: {
-    color: '#d9c7a1',
+    color: theme.accent,
     fontWeight: '700',
   },
   bubble: {
@@ -1564,19 +1760,23 @@ const styles = StyleSheet.create({
     borderRadius: 18,
   },
   bluebirdBubble: {
-    backgroundColor: '#161c28',
+    backgroundColor: theme.bubbleIncoming,
     borderWidth: 1,
-    borderColor: '#232b3a',
+    borderColor: theme.bubbleIncomingBorder,
     borderBottomLeftRadius: 6,
   },
   userBubble: {
-    backgroundColor: '#2f3d55',
+    backgroundColor: theme.bubble,
     borderBottomRightRadius: 6,
   },
   messageText: {
-    color: '#eeeeee',
+    color: theme.textBody,
     fontSize: 16,
     lineHeight: 23,
+  },
+  // 用户气泡是饱和底色，需要铺在其上的浅色文字
+  userMessageText: {
+    color: theme.textOnAccent,
   },
   // ---- 输入框左侧「＋」按钮（仅 UI，暂未接任何菜单） ----
   plusButton: {
@@ -1595,23 +1795,43 @@ const styles = StyleSheet.create({
     lineHeight: 26,
     fontWeight: '600',
   },
+  // ---- 「返回底部」悬浮按钮 ----
+  scrollToBottom: {
+    position: 'absolute',
+    right: 16,
+    // 输入区高度约 71，这里让按钮浮在它正上方，不遮挡输入框
+    bottom: 84,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    elevation: 3,
+    zIndex: 50,
+  },
+  scrollToBottomIcon: {
+    fontSize: 20,
+    lineHeight: 24,
+    fontWeight: '700',
+  },
   inputArea: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     padding: 12,
     borderTopWidth: 1,
-    borderTopColor: '#20242d',
-    backgroundColor: '#0e1016',
+    borderTopColor: theme.border,
+    backgroundColor: theme.surfaceAlt,
   },
   input: {
     flex: 1,
     maxHeight: 110,
     minHeight: 46,
-    backgroundColor: '#181c25',
+    backgroundColor: theme.surface,
     borderRadius: 14,
     paddingHorizontal: 14,
     paddingVertical: 11,
-    color: '#ffffff',
+    color: theme.textPrimary,
     fontSize: 16,
     textAlignVertical: 'top',
   },
@@ -1620,12 +1840,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     marginLeft: 8,
     borderRadius: 14,
-    backgroundColor: '#303846',
+    backgroundColor: theme.sendButton,
     alignItems: 'center',
     justifyContent: 'center',
   },
   sendText: {
-    color: '#ffffff',
+    color: theme.textOnAccent,
     fontSize: 15,
     fontWeight: '600',
   },
@@ -1642,12 +1862,12 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     borderRadius: 18,
     borderBottomLeftRadius: 6,
-    backgroundColor: '#161c28',
+    backgroundColor: theme.bubbleIncoming,
     borderWidth: 1,
-    borderColor: '#232b3a',
+    borderColor: theme.bubbleIncomingBorder,
   },
   typingText: {
-    color: '#999999',
+    color: theme.textMuted,
     fontSize: 14,
   },
   retryButton: {
@@ -1656,10 +1876,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 8,
-    backgroundColor: '#2f3d55',
+    backgroundColor: theme.bubble,
   },
   retryText: {
-    color: '#ffffff',
+    color: theme.textOnAccent,
     fontSize: 13,
   },
 });

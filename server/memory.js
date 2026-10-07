@@ -14,7 +14,11 @@ let memories = [];
 let writeQueue = Promise.resolve();
 
 const MEMORY_TRIGGER =
-  /(记住|记下|我叫|我的名字|我是|我喜欢|我不喜欢|我想要|我的目标|以后请|请不要|忘记|别记|不要记)/;
+  /(记住|记着|记下|保存|我叫|我的名字|我是|我喜欢|我不喜欢|我想要|我的目标|以后请|请不要|忘记|别记|不要记)/;
+
+// 跨消息的"待记忆"状态：用户先单独发一句「记住」，下一条才给出内容时，
+// 由它让下一条消息也走一次记忆提取。消费一次即清除，不会长期残留。
+let pendingMemoryIntent = false;
 
 const SENSITIVE_PATTERN =
   /(密码|口令|私钥|助记词|验证码|信用卡|银行卡|身份证|手机号|cvv|api[\s_-]?key|secret|bearer|sk-[a-zA-Z0-9_-]{8,}|(?:\d[\s-]?){11,})/i;
@@ -174,9 +178,10 @@ function parseModelJson(text) {
   }
 }
 
-async function extractMemory(client, message) {
+async function extractMemory(client, message, force = false) {
   try {
-    if (!shouldProcessMemory(message)) {
+    // force=true 表示上一条留下了待记忆意图，本条即使没有触发词也要尝试提取
+    if (!force && !shouldProcessMemory(message)) {
       return null;
     }
 
@@ -319,9 +324,25 @@ sourceQuote 必须来自用户原话。
 async function processMemory(client, message) {
   if (!MEMORY_ENABLED) return;
 
-  const candidate = await extractMemory(client, message);
+  const text = String(message || '').trim();
 
-  if (!candidate) return;
+  // 本条是否值得尝试提取：上一条留下的待记忆意图，或本条自带触发词。
+  // 先同步消费掉意图，避免并发消息重复使用同一次意图。
+  const shouldTryMemory = pendingMemoryIntent || shouldProcessMemory(text);
+  pendingMemoryIntent = false;
+
+  if (!shouldTryMemory) return;
+
+  const candidate = await extractMemory(client, text, true);
+
+  if (!candidate) {
+    // 本条看着像记忆指令（例如只发了「记住」）却没提取到内容 —— 把意图交给下一条
+    if (shouldProcessMemory(text)) {
+      pendingMemoryIntent = true;
+    }
+
+    return;
+  }
 
   await enqueueWrite(async () => {
     const current = Array.isArray(memories)
@@ -379,11 +400,45 @@ async function processMemory(client, message) {
   });
 }
 
+// 记忆摘要：与前端展示同一套归并规则（核心类别优先，最多 6 条）。
+// 纯字符串拼接，不调用任何模型 —— 只用于让模型也看到这份概览。
+const SUMMARY_TYPE_ORDER = [
+  'identity',
+  'relationship',
+  'goal',
+  'preference',
+  'fact',
+];
+const MEMORY_SUMMARY_MAX = 6;
+
+function buildMemorySummary(items) {
+  if (!Array.isArray(items) || !items.length) return '';
+
+  const rank = type => {
+    const index = SUMMARY_TYPE_ORDER.indexOf(type || '');
+    return index < 0 ? SUMMARY_TYPE_ORDER.length : index;
+  };
+
+  // 先 slice() 拷贝再排序，绝不影响调用方的数组顺序
+  return items
+    .slice()
+    .sort((a, b) => rank(a && a.type) - rank(b && b.type))
+    .slice(0, MEMORY_SUMMARY_MAX)
+    .map(item =>
+      String(item && item.content ? item.content : '')
+        .trim()
+        .replace(/[。，,.\s]+$/, '')
+    )
+    .filter(Boolean)
+    .join('，');
+}
+
 // 记忆上下文渲染：既告诉模型"这些是你已知的信息"，也约束它不要当成清单汇报。
 function renderMemoryContext(items) {
   if (!items.length) return '';
 
   const lines = items.map(item => `- ${item.content}`);
+  const summary = buildMemorySummary(items);
 
   return `
 【关于用户的长期记忆】
@@ -391,7 +446,7 @@ function renderMemoryContext(items) {
 当用户问到自己相关的事情（名字、身份、偏好、经历等）时，直接依据这些内容回答，不要说"你没告诉过我"。
 如果与用户当前明确表达冲突，以当前表达为准。
 不要主动说"根据我的记忆"，也不要把它当成需要汇报的清单。
-
+${summary ? `\n记忆摘要：${summary}。\n` : ''}
 ${lines.join('\n')}
 `.trim();
 }
