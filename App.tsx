@@ -906,15 +906,16 @@ export default function App() {
         <View style={styles.header}>
           <View style={styles.headerLeft}>
             <Text style={styles.headerMood}>{moodEmoji(mood)}</Text>
-            <View>
-              <Text style={styles.title}>Bluebird</Text>
+            <View style={styles.headerTitle}>
+              <Text style={styles.title} numberOfLines={1}>
+                Bluebird
+              </Text>
               <Text style={styles.status}>● 在线</Text>
             </View>
           </View>
 
           <View style={styles.headerRight}>
             <SharedTime theme={theme} styles={styles} />
-            <Text style={styles.version}>V0.3</Text>
 
             <TouchableOpacity
               style={styles.menuButton}
@@ -969,6 +970,10 @@ export default function App() {
             >
               <Text style={styles.menuItemText}>🗑️ 清理聊天记录</Text>
             </TouchableOpacity>
+
+            <View style={styles.menuVersion}>
+              <Text style={styles.version}>V0.3</Text>
+            </View>
           </View>
         )}
 
@@ -1033,10 +1038,6 @@ export default function App() {
                     item.role === 'user' && styles.userRow,
                   ]}
                 >
-                  {item.role === 'assistant' && (
-                    <BlueAvatar theme={theme} styles={styles} />
-                  )}
-
                   {item.role === 'user' ? (
                     <TouchableOpacity
                       style={[
@@ -1052,51 +1053,54 @@ export default function App() {
                       </Text>
                     </TouchableOpacity>
                   ) : (
-                    <View style={[styles.bubble, styles.bluebirdBubble]}>
-                      <Text style={styles.messageText}>{item.content}</Text>
+                    // 气泡与「继续说」包在同一列里：列宽 = 气泡宽，按钮靠右即贴住气泡右边缘
+                    <View style={styles.assistantColumn}>
+                      <View style={[styles.bubble, styles.bluebirdBubble]}>
+                        <Text style={styles.messageText}>{item.content}</Text>
 
-                      {!!item.retryText && (
-                        <TouchableOpacity
-                          style={[
-                            styles.retryButton,
-                            { backgroundColor: theme.bubble },
-                          ]}
-                          onPress={() => sendMessage(item.retryText)}
-                          disabled={sending}
-                        >
-                          <Text style={styles.retryText}>重新发送</Text>
-                        </TouchableOpacity>
+                        {!!item.retryText && (
+                          <TouchableOpacity
+                            style={[
+                              styles.retryButton,
+                              { backgroundColor: theme.bubble },
+                            ]}
+                            onPress={() => sendMessage(item.retryText)}
+                            disabled={sending}
+                          >
+                            <Text style={styles.retryText}>重新发送</Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+
+                      {showContinue && (
+                        <View style={styles.continueRow}>
+                          <TouchableOpacity
+                            style={[
+                              styles.continueButton,
+                              { borderColor: theme.accentBorder },
+                            ]}
+                            onPress={sendContinuation}
+                            disabled={continuing}
+                            activeOpacity={0.6}
+                          >
+                            <Text
+                              style={[
+                                styles.continueText,
+                                {
+                                  color: continuing
+                                    ? theme.accentBorder
+                                    : theme.accent,
+                                },
+                              ]}
+                            >
+                              {continuing ? '···' : '→'}
+                            </Text>
+                          </TouchableOpacity>
+                        </View>
                       )}
                     </View>
                   )}
                 </View>
-
-                {showContinue && (
-                  <View style={styles.continueRow}>
-                    <TouchableOpacity
-                      style={[
-                        styles.continueButton,
-                        { borderColor: theme.accentBorder },
-                      ]}
-                      onPress={sendContinuation}
-                      disabled={continuing}
-                      activeOpacity={0.6}
-                    >
-                      <Text
-                        style={[
-                          styles.continueText,
-                          {
-                            color: continuing
-                              ? theme.accentBorder
-                              : theme.accent,
-                          },
-                        ]}
-                      >
-                        {continuing ? '···' : '>>>'}
-                      </Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
               </View>
             );
           }}
@@ -1131,36 +1135,48 @@ export default function App() {
           </TouchableOpacity>
         )}
 
-        <View style={styles.inputArea}>
-          <TouchableOpacity
-            style={[styles.plusButton, { borderColor: theme.accentBorder }]}
-            onPress={() => Alert.alert('＋', '这里之后会放更多功能。')}
-            activeOpacity={0.6}
-            accessibilityLabel="更多功能"
-          >
-            <Text style={[styles.plusText, { color: theme.accent }]}>+</Text>
-          </TouchableOpacity>
+        {/* 悬浮输入栏 dock：留在正常流里，键盘弹起时仍会被 KeyboardAvoidingView 顶上去 */}
+        <View style={styles.inputDock}>
+          <View style={styles.inputArea}>
+            {/* 整条输入栏是一个大胶囊，左头像 / 中间输入 / 右按钮全包在里面 */}
+            <View style={styles.inputCapsule}>
+              {/* 左侧圆形头像：直接复用聊天界面里的 BlueAvatar（同一个 B 头像） */}
+              <BlueAvatar size={48} theme={theme} styles={styles} />
 
-          <TextInput
-            value={input}
-            onChangeText={setInput}
-            placeholder="与Bluebird说些什么……"
-            placeholderTextColor={theme.textMuted}
-            style={styles.input}
-            multiline
-          />
+              <TextInput
+                value={input}
+                onChangeText={setInput}
+                placeholder="发消息..."
+                placeholderTextColor={theme.textMuted}
+                cursorColor={theme.accent}
+                selectionColor={theme.accentBorder}
+                style={styles.input}
+                multiline
+              />
 
-          <TouchableOpacity
-            style={[
-              styles.sendButton,
-              sending && styles.sendButtonDisabled,
-              { backgroundColor: theme.sendButton },
-            ]}
-            onPress={() => sendMessage()}
-            disabled={sending}
-          >
-            <Text style={styles.sendText}>{sending ? '发送中' : '发送'}</Text>
-          </TouchableOpacity>
+              {input.trim().length > 0 ? (
+                // 有输入内容：右侧变为发送按钮（向上箭头，不显示文字）
+                <TouchableOpacity
+                  style={[
+                    styles.sendButton,
+                    sending && styles.sendButtonDisabled,
+                    { backgroundColor: theme.sendButton },
+                  ]}
+                  onPress={() => sendMessage()}
+                  disabled={sending}
+                  activeOpacity={0.75}
+                  accessibilityLabel="发送"
+                >
+                  <Text style={styles.sendText}>{sending ? '···' : '↑'}</Text>
+                </TouchableOpacity>
+              ) : (
+                // 无输入内容：右侧是白色描边「＋」
+                <View style={styles.plusButton}>
+                  <Text style={styles.plusIcon}>+</Text>
+                </View>
+              )}
+            </View>
+          </View>
         </View>
       </KeyboardAvoidingView>
 
@@ -1417,14 +1433,12 @@ const createStyles = (theme: Theme) => StyleSheet.create({
   headerRight: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexShrink: 0,
   },
 
   sharedTime: {
     alignItems: 'flex-end',
     marginRight: 12,
-    paddingLeft: 12,
-    borderLeftWidth: 1,
-    borderLeftColor: theme.border,
   },
 
   sharedTimeClock: {
@@ -1478,6 +1492,15 @@ const createStyles = (theme: Theme) => StyleSheet.create({
   menuItemText: {
     color: theme.textPrimary,
     fontSize: 15,
+  },
+
+  menuVersion: {
+    alignItems: 'center',
+    marginTop: 4,
+    paddingTop: 9,
+    paddingBottom: 5,
+    borderTopWidth: 1,
+    borderTopColor: theme.border,
   },
 
   // ---- 记忆库 ----
@@ -1695,9 +1718,11 @@ const createStyles = (theme: Theme) => StyleSheet.create({
   // ---- 「继续说」按钮 ----
   continueRow: {
     flexDirection: 'row',
-    // 与 Bluebird 气泡左边缘对齐（头像 38 + 右边距 8）
-    marginLeft: 46,
-    marginTop: -2,
+    // 撑满整列（列宽 = 气泡宽），内容靠右 → 按钮右边缘贴住气泡右边缘
+    alignSelf: 'stretch',
+    justifyContent: 'flex-end',
+    // 与气泡下方留出间距（进同一列后原来的 -2 会压住气泡）
+    marginTop: 6,
     marginBottom: 10,
   },
   continueButton: {
@@ -1713,7 +1738,8 @@ const createStyles = (theme: Theme) => StyleSheet.create({
   },
   messages: {
     padding: 16,
-    paddingBottom: 24,
+    // 让最后一条消息能滚出悬浮胶囊之外：胶囊高度 56 + 底部间距 8 + 余量 16
+    paddingBottom: 80,
   },
   messageTime: {
     alignSelf: 'center',
@@ -1734,6 +1760,11 @@ const createStyles = (theme: Theme) => StyleSheet.create({
   headerLeft: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexShrink: 1,
+  },
+
+  headerTitle: {
+    flexShrink: 1,
   },
 
   headerMood: {
@@ -1754,10 +1785,16 @@ const createStyles = (theme: Theme) => StyleSheet.create({
     fontWeight: '700',
   },
   bubble: {
-    maxWidth: '78%',
     paddingHorizontal: 14,
     paddingVertical: 10,
     borderRadius: 18,
+  },
+  // 对方消息：气泡与「继续说」同一列，列宽由气泡决定
+  assistantColumn: {
+    // 相对 messageRow（宽度确定），限制整列不超过 85%
+    maxWidth: '85%',
+    // 让气泡按内容收缩，而不是被拉伸到整列宽度
+    alignItems: 'flex-start',
   },
   bluebirdBubble: {
     backgroundColor: theme.bubbleIncoming,
@@ -1766,6 +1803,8 @@ const createStyles = (theme: Theme) => StyleSheet.create({
     borderBottomLeftRadius: 6,
   },
   userBubble: {
+    // 78% 从共享的 bubble 挪到这里：用户气泡父级是 messageRow（宽度确定），百分比有效
+    maxWidth: '78%',
     backgroundColor: theme.bubble,
     borderBottomRightRadius: 6,
   },
@@ -1778,22 +1817,47 @@ const createStyles = (theme: Theme) => StyleSheet.create({
   userMessageText: {
     color: theme.textOnAccent,
   },
-  // ---- 输入框左侧「＋」按钮（仅 UI，暂未接任何菜单） ----
+  // ---- 输入栏：整条大胶囊 + 左头像 + 右「＋」（参考图配色，写死色值） ----
+  inputDock: {
+    height: 80,
+    // 上移 80 叠在消息列表底部之上：列表照旧铺满，胶囊浮在消息上面
+    marginTop: -80,
+    backgroundColor: 'transparent',
+  },
+  inputCapsule: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    // 成套跟随模式：浅色模式白胶囊，深色模式深色胶囊（深色下 accent 是浅色系，需要深底）
+    backgroundColor:
+      theme.mode === 'dark' ? 'rgba(24,28,37,0.9)' : 'rgba(255,255,255,0.9)',
+    borderRadius: 999,
+    paddingHorizontal: 4,
+    minHeight: 56,
+    // 悬浮阴影
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 4 },
+    elevation: 8,
+  },
   plusButton: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    borderWidth: 1,
+    borderWidth: 2,
+    // 跟随强调色（与左侧 BlueAvatar 同一套：描边 accentBorder + 内容 accent）
+    borderColor: theme.accentBorder,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 8,
-    // 输入框最小高度 46，这里做垂直居中
-    marginBottom: 3,
+    marginRight: 4,
   },
-  plusText: {
-    fontSize: 22,
-    lineHeight: 26,
-    fontWeight: '600',
+  plusIcon: {
+    color: theme.accent,
+    fontSize: 26,
+    lineHeight: 30,
+    fontWeight: '300',
+    marginTop: -3,
   },
   // ---- 「返回底部」悬浮按钮 ----
   scrollToBottom: {
@@ -1816,38 +1880,42 @@ const createStyles = (theme: Theme) => StyleSheet.create({
     fontWeight: '700',
   },
   inputArea: {
+    // 贴底悬浮：相对 inputDock（底部已在安全区之上），所以 bottom 只要 8
+    position: 'absolute',
+    left: 12,
+    right: 12,
+    bottom: 8,
     flexDirection: 'row',
-    alignItems: 'flex-end',
-    padding: 12,
-    borderTopWidth: 1,
-    borderTopColor: theme.border,
-    backgroundColor: theme.surfaceAlt,
+    alignItems: 'center',
+    // 整条背景去掉，只留中间的胶囊
+    backgroundColor: 'transparent',
   },
   input: {
     flex: 1,
     maxHeight: 110,
-    minHeight: 46,
-    backgroundColor: theme.surface,
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 11,
-    color: theme.textPrimary,
-    fontSize: 16,
-    textAlignVertical: 'top',
+    minHeight: 40,
+    // 去掉独立背景与边框，直接融进胶囊
+    backgroundColor: 'transparent',
+    paddingHorizontal: 10,
+    paddingVertical: 12,
+    color: theme.textBody,
+    fontSize: 17,
+    textAlignVertical: 'center',
   },
   sendButton: {
-    height: 46,
-    paddingHorizontal: 16,
-    marginLeft: 8,
-    borderRadius: 14,
+    width: 40,
+    height: 40,
+    marginRight: 4,
+    borderRadius: 20,
     backgroundColor: theme.sendButton,
     alignItems: 'center',
     justifyContent: 'center',
   },
   sendText: {
     color: theme.textOnAccent,
-    fontSize: 15,
-    fontWeight: '600',
+    fontSize: 17,
+    lineHeight: 21,
+    fontWeight: '700',
   },
   sendButtonDisabled: {
     opacity: 0.55,
