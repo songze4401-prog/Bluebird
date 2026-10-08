@@ -184,6 +184,19 @@ function moodEmoji(mood?: string) {
   return MOOD_EMOJI[mood ?? 'calm'] ?? MOOD_EMOJI.calm;
 }
 
+// 把主题里的不透明 hex 转成带 alpha 的 rgba：气泡的"半透明材质"需要透明度，
+// 但 theme.ts 给出的是不透明色值。此处在本地转换，不引入依赖、不改 theme.ts。
+// 遇到非 6 位 hex（例如已是 rgba()）时原样返回，避免拼出非法色值。
+function withAlpha(color: string, alpha: number): string {
+  const hex6 = /^#?([0-9a-f]{6})$/i.exec(String(color).trim());
+
+  if (!hex6) return color;
+
+  const value = parseInt(hex6[1], 16);
+
+  return `rgba(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255}, ${alpha})`;
+}
+
 // 微信式时间显示：间隔超过 5 分钟或跨天才显示一次时间标签
 const MESSAGE_TIME_GAP_MS = 5 * 60 * 1000;
 
@@ -899,8 +912,20 @@ export default function App() {
 
   return (
     <SafeAreaView style={styles.container}>
+      {/* 基础聊天背景（仅深色模式）。
+          必须放在 KeyboardAvoidingView 之前、并让 KAV 不设背景，
+          否则 KAV 的不透明底会把光晕整层盖住。
+          各层 pointerEvents="none"，不拦截任何触摸。 */}
+      {theme.mode === 'dark' && (
+        <>
+          <View pointerEvents="none" style={styles.chatBase} />
+          <View pointerEvents="none" style={styles.chatGlowCool} />
+          <View pointerEvents="none" style={styles.chatGlowWarm} />
+        </>
+      )}
+
       <KeyboardAvoidingView
-        style={styles.container}
+        style={styles.keyboardArea}
         behavior="padding"
       >
         <View style={styles.header}>
@@ -1040,11 +1065,9 @@ export default function App() {
                 >
                   {item.role === 'user' ? (
                     <TouchableOpacity
-                      style={[
-                        styles.bubble,
-                        styles.userBubble,
-                        { backgroundColor: theme.bubble },
-                      ]}
+                      // 底色交给 styles.userBubble：半透明材质需要 alpha，
+                      // 内联的 theme.bubble 是不透明 hex，会覆盖掉它
+                      style={[styles.bubble, styles.userBubble]}
                       activeOpacity={0.75}
                       onLongPress={() => recallMessage(item)}
                     >
@@ -1401,11 +1424,47 @@ export default function App() {
   );
 }
 
+// 铺满父级的绝对定位层。
+// 不用 StyleSheet.absoluteFillObject：当前 RN 的 TS 类型里没有该属性。
+const FILL_ABSOLUTE = {
+  position: 'absolute',
+  top: 0,
+  left: 0,
+  right: 0,
+  bottom: 0,
+} as const;
+
 // 样式由主题派生：所有颜色都来自 theme，组件内不再硬编码浅色/深色色值
 const createStyles = (theme: Theme) => StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: theme.background,
+  },
+  // KeyboardAvoidingView 专用：刻意不设背景，
+  // 否则它会在背景光晕层之上再铺一层不透明底，把光晕全部盖掉。
+  keyboardArea: {
+    flex: 1,
+  },
+  // ---- 聊天背景（深色模式）：深黑蓝基底 + 柔和渐变 + 两处低亮度环境光晕 ----
+  // 静态层，无动画、无粒子。光晕用超大尺寸 + 多段透明度衰减的 radial-gradient 实现
+  // 自然模糊的过渡，刻意避免出现"明显的圆形光斑"。
+  chatBase: {
+    ...FILL_ABSOLUTE,
+    // 不用纯黑：保留深灰蓝，并让纵向明暗层次拉开一点
+    experimental_backgroundImage:
+      'linear-gradient(180deg, #0e1119 0%, #0a0c11 45%, #070810 100%)',
+  },
+  chatGlowCool: {
+    ...FILL_ABSOLUTE,
+    // 左上冷蓝环境光
+    experimental_backgroundImage:
+      'radial-gradient(ellipse 95% 60% at 18% 0%, rgba(62,94,156,0.30) 0%, rgba(62,94,156,0.12) 45%, rgba(62,94,156,0) 75%)',
+  },
+  chatGlowWarm: {
+    ...FILL_ABSOLUTE,
+    // 右下紫调余晖，比冷光更弱一些，避免抢主体
+    experimental_backgroundImage:
+      'radial-gradient(ellipse 85% 55% at 88% 100%, rgba(80,68,128,0.22) 0%, rgba(80,68,128,0.10) 48%, rgba(80,68,128,0) 78%)',
   },
   header: {
     height: 72,
@@ -1797,16 +1856,35 @@ const createStyles = (theme: Theme) => StyleSheet.create({
     alignItems: 'flex-start',
   },
   bluebirdBubble: {
-    backgroundColor: theme.bubbleIncoming,
+    // 通透材质：半透明底（深色模式更透、浅色模式略实，保证文字对比度）
+    backgroundColor: withAlpha(
+      theme.bubbleIncoming,
+      theme.mode === 'dark' ? 0.74 : 0.84
+    ),
     borderWidth: 1,
     borderColor: theme.bubbleIncomingBorder,
     borderBottomLeftRadius: 6,
+    // 光感：用强调色做柔和外发光，而不是黑色投影（避免"厚重阴影"）
+    shadowColor: theme.accent,
+    shadowOpacity: theme.mode === 'dark' ? 0.2 : 0.14,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
   },
   userBubble: {
     // 78% 从共享的 bubble 挪到这里：用户气泡父级是 messageRow（宽度确定），百分比有效
     maxWidth: '78%',
-    backgroundColor: theme.bubble,
+    // 用户气泡更实体、更稳定：不透明度高于 Bluebird 气泡
+    backgroundColor: withAlpha(theme.bubble, theme.mode === 'dark' ? 0.88 : 0.92),
+    borderWidth: 1,
+    // 细边缘高光：只用一条极淡的白边体现"材质边界"，不做强描边
+    borderColor: 'rgba(255,255,255,0.14)',
     borderBottomRightRadius: 6,
+    shadowColor: '#000',
+    shadowOpacity: 0.14,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 1,
   },
   messageText: {
     color: theme.textBody,
@@ -1930,9 +2008,18 @@ const createStyles = (theme: Theme) => StyleSheet.create({
     paddingVertical: 10,
     borderRadius: 18,
     borderBottomLeftRadius: 6,
-    backgroundColor: theme.bubbleIncoming,
+    // 与 Bluebird 气泡同一材质，避免"正在输入"时出现一块实底造成割裂
+    backgroundColor: withAlpha(
+      theme.bubbleIncoming,
+      theme.mode === 'dark' ? 0.74 : 0.84
+    ),
     borderWidth: 1,
     borderColor: theme.bubbleIncomingBorder,
+    shadowColor: theme.accent,
+    shadowOpacity: theme.mode === 'dark' ? 0.2 : 0.14,
+    shadowRadius: 10,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 2,
   },
   typingText: {
     color: theme.textMuted,
