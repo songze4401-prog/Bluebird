@@ -15,7 +15,7 @@ import {
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { Message } from './lib/types';
-import { API_TOKEN, WEEKDAYS, AT_BOTTOM_DISTANCE } from './lib/constants';
+import { API_TOKEN, AT_BOTTOM_DISTANCE } from './lib/constants';
 import {
   makeLocalId,
   readJsonResponse,
@@ -24,6 +24,9 @@ import {
   shouldShowMessageTime,
   moodEmoji,
 } from './lib/utils';
+
+import { SharedTime } from './components/SharedTime';
+import { BlueAvatar } from './components/BlueAvatar';
 
 import {
   THEMES,
@@ -104,84 +107,6 @@ function buildMemorySummary(items: MemoryItem[]): string {
     .join('，');
 
   return merged ? `${merged}。` : '';
-}
-
-function SharedTime({
-  theme,
-  styles,
-}: {
-  theme: Theme;
-  styles: ReturnType<typeof createStyles>;
-}) {
-  const [now, setNow] = useState(() => new Date());
-
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval> | undefined;
-
-    // 对齐到下一分钟边界，之后每分钟刷新
-    const timeout = setTimeout(
-      () => {
-        setNow(new Date());
-        interval = setInterval(() => setNow(new Date()), 60000);
-      },
-      (60 - new Date().getSeconds()) * 1000
-    );
-
-    return () => {
-      clearTimeout(timeout);
-      if (interval) clearInterval(interval);
-    };
-  }, []);
-
-  const timeText = `${String(now.getHours()).padStart(2, '0')}:${String(
-    now.getMinutes()
-  ).padStart(2, '0')}`;
-  const dateText = `${now.getMonth() + 1}月${now.getDate()}日 周${
-    WEEKDAYS[now.getDay()]
-  }`;
-
-  return (
-    <View style={styles.sharedTime}>
-      <Text style={[styles.sharedTimeClock, { color: theme.accent }]}>
-        {timeText}
-      </Text>
-      <Text style={styles.sharedTimeDate}>{dateText}</Text>
-      <Text style={styles.sharedTimeCaption}>我们现在都在这里</Text>
-    </View>
-  );
-}
-
-function BlueAvatar({
-  size = 38,
-  theme,
-  styles,
-}: {
-  size?: number;
-  theme: Theme;
-  styles: ReturnType<typeof createStyles>;
-}) {
-  return (
-    <View
-      style={[
-        styles.avatar,
-        {
-          width: size,
-          height: size,
-          borderRadius: size / 2,
-          borderColor: theme.accentBorder,
-        },
-      ]}
-    >
-      <Text
-        style={[
-          styles.avatarText,
-          { fontSize: size * 0.45, color: theme.accent },
-        ]}
-      >
-        B
-      </Text>
-    </View>
-  );
 }
 
 export default function App() {
@@ -839,7 +764,7 @@ export default function App() {
           </View>
 
           <View style={styles.headerRight}>
-            <SharedTime theme={theme} styles={styles} />
+            <SharedTime theme={theme} />
 
             <TouchableOpacity
               style={styles.menuButton}
@@ -1029,7 +954,7 @@ export default function App() {
           ListFooterComponent={
             sending ? (
               <View style={styles.typingRow}>
-                <BlueAvatar theme={theme} styles={styles} />
+                <BlueAvatar theme={theme} />
                 <View style={styles.typingBubble}>
                   <Text style={styles.typingText}>Bluebird 正在输入…</Text>
                 </View>
@@ -1063,7 +988,7 @@ export default function App() {
             {/* 整条输入栏是一个大胶囊，左头像 / 中间输入 / 右按钮全包在里面 */}
             <View style={styles.inputCapsule}>
               {/* 左侧圆形头像：直接复用聊天界面里的 BlueAvatar（同一个 B 头像） */}
-              <BlueAvatar size={48} theme={theme} styles={styles} />
+              <BlueAvatar size={48} theme={theme} />
 
               <TextInput
                 value={input}
@@ -1394,31 +1319,6 @@ const createStyles = (theme: Theme) => StyleSheet.create({
     flexShrink: 0,
   },
 
-  sharedTime: {
-    alignItems: 'flex-end',
-    marginRight: 12,
-  },
-
-  sharedTimeClock: {
-    color: theme.accent,
-    fontSize: 15,
-    fontWeight: '600',
-    fontVariant: ['tabular-nums'],
-  },
-
-  sharedTimeDate: {
-    color: theme.textMuted,
-    fontSize: 10,
-    marginTop: 2,
-  },
-
-  sharedTimeCaption: {
-    color: theme.textMuted,
-    fontSize: 9,
-    marginTop: 2,
-    opacity: 0.75,
-  },
-
   menuButton: {
     marginLeft: 14,
     padding: 6,
@@ -1730,18 +1630,6 @@ const createStyles = (theme: Theme) => StyleSheet.create({
     marginRight: 10,
   },
 
-  avatar: {
-    backgroundColor: theme.avatarBg,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 8,
-    borderWidth: 1,
-    borderColor: theme.accentBorder,
-  },
-  avatarText: {
-    color: theme.accent,
-    fontWeight: '700',
-  },
   bubble: {
     paddingHorizontal: 14,
     paddingVertical: 10,
