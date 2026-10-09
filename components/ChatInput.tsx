@@ -18,12 +18,14 @@ export function ChatInput({
   onChangeText,
   sending,
   onSend,
+  onReturnHome,
 }: {
   theme: Theme;
   value: string;
   onChangeText: (text: string) => void;
   sending: boolean;
   onSend: () => void;
+  onReturnHome: () => void;
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);
 
@@ -33,8 +35,14 @@ export function ChatInput({
       <View style={styles.inputArea}>
         {/* 整条输入栏是一个大胶囊，左头像 / 中间输入 / 右按钮全包在里面 */}
         <View style={styles.inputCapsule}>
-          {/* 左侧圆形头像：直接复用聊天界面里的 BlueAvatar（同一个 B 头像） */}
-          <BlueAvatar size={48} theme={theme} />
+          {/* 左侧圆形头像：复用 BlueAvatar，视觉不变，点击即返回欢迎主页 */}
+          <TouchableOpacity
+            onPress={onReturnHome}
+            activeOpacity={0.75}
+            accessibilityLabel="返回主页"
+          >
+            <BlueAvatar size={48} theme={theme} />
+          </TouchableOpacity>
 
           <TextInput
             value={value}

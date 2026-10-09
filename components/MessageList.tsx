@@ -40,47 +40,24 @@ export function MessageList({
   const styles = useMemo(() => createStyles(theme), [theme]);
 
   const flatListRef = useRef<FlatList<Message>>(null);
-  const isAtBottomRef = useRef(true);
-  const hasInitialScrolledRef = useRef(false);
-  const previousMessageCountRef = useRef(0);
-  const pendingInitialScrollRef = useRef(false);
+
+  // 是否贴底自动跟随：初始为 true（加载完成即定位最新消息），
+  // 仅当用户主动拖拽时才置 false，回到底部后由 onScroll 恢复。
+  const autoScrollRef = useRef(true);
 
   // 「返回底部」悬浮按钮：仅在用户向上翻看历史时出现
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 
+  // 历史被清空后重置跟随状态，让下一次加载重新贴底
   useEffect(() => {
     if (messages.length === 0) {
-      previousMessageCountRef.current = 0;
-      hasInitialScrolledRef.current = false;
-      pendingInitialScrollRef.current = false;
-      return;
+      autoScrollRef.current = true;
     }
+  }, [messages.length]);
 
-    if (!hasInitialScrolledRef.current) {
-      pendingInitialScrollRef.current = true;
-      previousMessageCountRef.current = messages.length;
-      return;
-    }
-
-    if (
-      messages.length > previousMessageCountRef.current &&
-      isAtBottomRef.current
-    ) {
-      previousMessageCountRef.current = messages.length;
-
-      requestAnimationFrame(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
-      });
-
-      return;
-    }
-
-    previousMessageCountRef.current = messages.length;
-  }, [messages.length, loadingHistory]);
-
-  // 「返回底部」：平滑滚到底部，并立即隐藏按钮（后续 onScroll 会复核）
+  // 「返回底部」：平滑滚到底部，并恢复自动跟随
   const scrollToBottom = () => {
-    isAtBottomRef.current = true;
+    autoScrollRef.current = true;
     setShowScrollToBottom(false);
 
     flatListRef.current?.scrollToEnd({ animated: true });
@@ -92,6 +69,10 @@ export function MessageList({
         ref={flatListRef}
         data={messages}
         keyExtractor={item => item.id}
+        // 只有用户主动拖拽才关闭自动跟随，避免把程序化滚动/首屏布局误判为「用户离开底部」
+        onScrollBeginDrag={() => {
+          autoScrollRef.current = false;
+        }}
         onScroll={event => {
           const { contentOffset, contentSize, layoutMeasurement } =
             event.nativeEvent;
@@ -101,8 +82,10 @@ export function MessageList({
 
           const atBottom = distanceFromBottom < AT_BOTTOM_DISTANCE;
 
-          // 自动跟随的判断依据（ref，不触发渲染）
-          isAtBottomRef.current = atBottom;
+          // 回到底部即恢复自动跟随
+          if (atBottom) {
+            autoScrollRef.current = true;
+          }
 
           // 按钮显隐与自动跟随互补：离开底部才显示。
           // 仅状态真正变化时才 setState，避免滚动过程中频繁渲染。
@@ -112,15 +95,15 @@ export function MessageList({
           );
         }}
         scrollEventThrottle={100}
+        // 唯一的滚动入口：内容尺寸变化时按需贴底，
+        // 同时覆盖首屏历史定位、发送新消息与流式增量三种场景。
+        // 一律不做动画：首屏布局会分多次收敛，动画滚动会表现为「持续向下滚」。
         onContentSizeChange={() => {
-          if (pendingInitialScrollRef.current && messages.length > 0) {
-            pendingInitialScrollRef.current = false;
-            hasInitialScrolledRef.current = true;
-
-            requestAnimationFrame(() => {
-              flatListRef.current?.scrollToEnd({ animated: false });
-            });
+          if (!autoScrollRef.current || messages.length === 0) {
+            return;
           }
+
+          flatListRef.current?.scrollToEnd({ animated: false });
         }}
         contentContainerStyle={styles.messages}
         renderItem={({ item, index }) => (
