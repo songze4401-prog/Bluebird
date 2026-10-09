@@ -40,10 +40,21 @@ function writeRaw(text) {
 /** 套件必须串行执行：共用同一份情绪状态文件 */
 const SERIAL = { concurrency: 1 };
 
-before(() => {
-  // 清空历史残留（含上一轮留下的 .corrupt 备份），保证每轮从干净状态开始
-  fs.rmSync(DATA_DIR, { recursive: true, force: true });
+/** 清空本套件自己的历史残留（含上一轮留下的 .corrupt 备份），保证每轮从干净状态开始。
+ *  只删 emotion-state.json 相关文件：data 目录是共享的，不能整目录清空，
+ *  否则会连带删掉 memory.json / chat-history.json，影响并行跑的其他测试文件。
+ */
+function cleanOwnArtifacts() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+  for (const name of fs.readdirSync(DATA_DIR)) {
+    if (name === 'emotion-state.json' || name.startsWith('emotion-state.json.corrupt-')) {
+      fs.rmSync(path.join(DATA_DIR, name), { force: true });
+    }
+  }
+}
+
+before(() => {
+  cleanOwnArtifacts();
 });
 
 after(() => {

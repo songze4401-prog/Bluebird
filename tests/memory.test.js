@@ -4,6 +4,11 @@
  * 只读外部验证：不改被测源码，仅通过公开 API + 真实数据文件驱动。
  * 用假 OpenAI client 拦截请求，从而观察「是否真的调用了模型」以及各条拒绝分支。
  * 运行：node --test --test-concurrency=1 <本文件>
+ *
+ * 串行说明：与 emotion.test.js 同理，本文件所有套件共用同一个 memory.json，
+ * 其中「损坏的记忆文件被备份」用例会把它 rename 成 .corrupt 备份。任何并行执行
+ * 都会让其他套件在读取时扑空，因此每个 describe 都显式声明 concurrency: 1，
+ * 并在 before 中清掉本套件的历史残留。
  */
 const { test, describe, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -64,8 +69,21 @@ async function quiesce() {
   await memory.processMemory(client, '今天天气不错');
 }
 
-before(() => {
+/** 套件必须串行执行：共用同一份记忆文件 */
+const SERIAL = { concurrency: 1 };
+
+/** 只清本套件自己的残留（含上一轮 .corrupt 备份），不动共享目录里的其他文件 */
+function cleanOwnArtifacts() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+  for (const name of fs.readdirSync(DATA_DIR)) {
+    if (name === 'memory.json' || name.startsWith('memory.json.corrupt-')) {
+      fs.rmSync(path.join(DATA_DIR, name), { force: true });
+    }
+  }
+}
+
+before(() => {
+  cleanOwnArtifacts();
 });
 
 after(() => {
@@ -73,7 +91,7 @@ after(() => {
   console.error = origErr;
 });
 
-describe('配置与基础读取', () => {
+describe('配置与基础读取', SERIAL, () => {
   test('MEMORY_ENABLED 默认开启', () => {
     assert.equal(memory.MEMORY_ENABLED, true);
   });
@@ -103,7 +121,7 @@ describe('配置与基础读取', () => {
   });
 });
 
-describe('buildMemoryContext 上下文注入', () => {
+describe('buildMemoryContext 上下文注入', SERIAL, () => {
   test('空记忆库返回空字符串', () => {
     seed([]);
     assert.equal(memory.buildMemoryContext('我叫什么'), '');
@@ -171,7 +189,7 @@ describe('buildMemoryContext 上下文注入', () => {
   });
 });
 
-describe('deleteMemory 单条删除', () => {
+describe('deleteMemory 单条删除', SERIAL, () => {
   test('缺少 createdAt 或 content 时判定为 invalid', async () => {
     seed([{ content: '用户叫宋泽', createdAt: '2026-01-01T00:00:00.000Z' }]);
     assert.deepEqual(await memory.deleteMemory({ content: '用户叫宋泽' }), { removed: 0, reason: 'invalid' });
@@ -209,7 +227,7 @@ describe('deleteMemory 单条删除', () => {
   });
 });
 
-describe('recallMemoryBySourceQuote 撤回联动', () => {
+describe('recallMemoryBySourceQuote 撤回联动', SERIAL, () => {
   const now = new Date('2026-06-01T12:00:00.000Z').toISOString();
 
   test('精确匹配 sourceQuote 时删除对应记忆', async () => {
@@ -261,7 +279,7 @@ describe('recallMemoryBySourceQuote 撤回联动', () => {
   });
 });
 
-describe('processMemory 提取流程（假 client 拦截）', () => {
+describe('processMemory 提取流程（假 client 拦截）', SERIAL, () => {
   test('无触发词的普通消息不调用模型', async () => {
     await quiesce();
     seed([]);
