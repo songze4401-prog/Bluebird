@@ -21,16 +21,14 @@ import {
   withAlpha,
   formatMessageTime,
   shouldShowMessageTime,
-  moodEmoji,
 } from './lib/utils';
 
-import { SharedTime } from './components/SharedTime';
 import { BlueAvatar } from './components/BlueAvatar';
 import { ChatInput } from './components/ChatInput';
+import { ChatHeader } from './components/ChatHeader';
 
 import {
   THEMES,
-  MODE_OPTIONS,
   getTheme,
   getAccentSet,
   isThemeId,
@@ -752,79 +750,16 @@ export default function App() {
         style={styles.keyboardArea}
         behavior="padding"
       >
-        <View style={styles.header}>
-          <View style={styles.headerLeft}>
-            <Text style={styles.headerMood}>{moodEmoji(mood)}</Text>
-            <View style={styles.headerTitle}>
-              <Text style={styles.title} numberOfLines={1}>
-                Bluebird
-              </Text>
-              <Text style={styles.status}>● 在线</Text>
-            </View>
-          </View>
-
-          <View style={styles.headerRight}>
-            <SharedTime theme={theme} />
-
-            <TouchableOpacity
-              style={styles.menuButton}
-              onPress={() => setMenuOpen(prev => !prev)}
-            >
-              <Text style={styles.menuIcon}>☰</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        {menuOpen && (
-          <View style={styles.menu}>
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={openMemoryLibrary}
-            >
-              <Text style={styles.menuItemText}>🧠 记忆库</Text>
-            </TouchableOpacity>
-
-            {MODE_OPTIONS.map(option => {
-              const active = theme.mode === option.id;
-
-              return (
-                <TouchableOpacity
-                  key={option.id}
-                  style={styles.menuItem}
-                  onPress={() => selectMode(option.id)}
-                >
-                  <Text
-                    style={[
-                      styles.menuItemText,
-                      active && { color: theme.accent },
-                    ]}
-                  >
-                    {option.emoji} {option.label}
-                    {active ? '  ✓' : ''}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={openThemePicker}
-            >
-              <Text style={styles.menuItemText}>🎨 主题色</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={clearChatHistory}
-            >
-              <Text style={styles.menuItemText}>🗑️ 清理聊天记录</Text>
-            </TouchableOpacity>
-
-            <View style={styles.menuVersion}>
-              <Text style={styles.version}>V0.3</Text>
-            </View>
-          </View>
-        )}
+        <ChatHeader
+          theme={theme}
+          mood={mood}
+          menuOpen={menuOpen}
+          onToggleMenu={() => setMenuOpen(prev => !prev)}
+          onOpenMemory={openMemoryLibrary}
+          onSelectMode={selectMode}
+          onOpenThemePicker={openThemePicker}
+          onClearHistory={clearChatHistory}
+        />
 
         <FlatList
           ref={flatListRef}
@@ -1255,77 +1190,6 @@ const createStyles = (theme: Theme) => StyleSheet.create({
     experimental_backgroundImage:
       'radial-gradient(ellipse 85% 55% at 88% 100%, rgba(80,68,128,0.22) 0%, rgba(80,68,128,0.10) 48%, rgba(80,68,128,0) 78%)',
   },
-  header: {
-    height: 72,
-    paddingHorizontal: 20,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    borderBottomWidth: 1,
-    borderBottomColor: theme.border,
-  },
-  title: {
-    color: theme.textPrimary,
-    fontSize: 24,
-    fontWeight: '700',
-  },
-  status: {
-    color: theme.online,
-    fontSize: 12,
-    marginTop: 3,
-  },
-  version: {
-    color: theme.textMuted,
-    fontSize: 12,
-  },
-  headerRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexShrink: 0,
-  },
-
-  menuButton: {
-    marginLeft: 14,
-    padding: 6,
-  },
-
-  menuIcon: {
-    color: theme.textPrimary,
-    fontSize: 22,
-  },
-
-  menu: {
-    position: 'absolute',
-    top: 62,
-    right: 16,
-    zIndex: 100,
-    width: 160,
-    backgroundColor: theme.surface,
-    borderRadius: 12,
-    paddingVertical: 6,
-    borderWidth: 1,
-    borderColor: theme.borderStrong,
-  },
-
-  menuItem: {
-    paddingHorizontal: 16,
-    paddingVertical: 13,
-  },
-
-  menuItemText: {
-    color: theme.textPrimary,
-    fontSize: 15,
-  },
-
-  menuVersion: {
-    alignItems: 'center',
-    marginTop: 4,
-    paddingTop: 9,
-    paddingBottom: 5,
-    borderTopWidth: 1,
-    borderTopColor: theme.border,
-  },
-
   // ---- 记忆库 ----
   memoryContainer: {
     flex: 1,
@@ -1580,21 +1444,6 @@ const createStyles = (theme: Theme) => StyleSheet.create({
   userRow: {
     justifyContent: 'flex-end',
   },
-  headerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexShrink: 1,
-  },
-
-  headerTitle: {
-    flexShrink: 1,
-  },
-
-  headerMood: {
-    fontSize: 26,
-    marginRight: 10,
-  },
-
   bubble: {
     paddingHorizontal: 14,
     paddingVertical: 10,
