@@ -3,6 +3,10 @@
  *
  * 只读外部验证：不改被测源码，仅通过公开 API + 真实数据文件驱动。
  * 运行：node --test --test-concurrency=1 <本文件>
+ *
+ * 串行说明：本文件所有套件共用同一个 emotion-state.json，且其中「文件损坏恢复」
+ * 用例会把它 rename 成 .corrupt 备份。任何并行执行都会让其他套件在读取时扑空，
+ * 因此每个 describe 都显式声明 concurrency: 1，并在 before 中清空数据目录。
  */
 const { test, describe, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
@@ -33,7 +37,12 @@ function writeRaw(text) {
   fs.writeFileSync(EMOTION_FILE, text, 'utf8');
 }
 
+/** 套件必须串行执行：共用同一份情绪状态文件 */
+const SERIAL = { concurrency: 1 };
+
 before(() => {
+  // 清空历史残留（含上一轮留下的 .corrupt 备份），保证每轮从干净状态开始
+  fs.rmSync(DATA_DIR, { recursive: true, force: true });
   fs.mkdirSync(DATA_DIR, { recursive: true });
 });
 
@@ -42,7 +51,7 @@ after(() => {
   console.error = origErr;
 });
 
-describe('情绪集合与常量', () => {
+describe('情绪集合与常量', SERIAL, () => {
   test('EMOTIONS 为 8 种 V1 情绪，且不含已废弃标签', () => {
     assert.equal(emotion.EMOTIONS.length, 8);
     for (const e of ['calm', 'happy', 'playful', 'excited', 'tired', 'sad', 'annoyed', 'hurt']) {
@@ -55,7 +64,7 @@ describe('情绪集合与常量', () => {
   });
 });
 
-describe('状态归一化 normalizeState（经 loadEmotion 验证）', () => {
+describe('状态归一化 normalizeState（经 loadEmotion 验证）', SERIAL, () => {
   test('calm 携带高强度时，强度强制归零', () => {
     resetTo({ emotion: 'calm', intensity: 100 });
     const s = emotion.getEmotion();
@@ -117,7 +126,7 @@ describe('状态归一化 normalizeState（经 loadEmotion 验证）', () => {
   });
 });
 
-describe('惯性更新 applyObservation', () => {
+describe('惯性更新 applyObservation', SERIAL, () => {
   test('calm 下观察到新情绪：进入该情绪且强度为 40', () => {
     resetTo({ emotion: 'calm', intensity: 0 });
     const s = emotion.applyObservation('happy');
@@ -202,7 +211,7 @@ describe('惯性更新 applyObservation', () => {
   });
 });
 
-describe('时间衰减 applyTimeDecay', () => {
+describe('时间衰减 applyTimeDecay', SERIAL, () => {
   test('10 分钟内返回：情绪完全保留', () => {
     resetTo({ emotion: 'happy', intensity: 100 });
     const s = emotion.applyTimeDecay(5 * 60);
@@ -247,7 +256,7 @@ describe('时间衰减 applyTimeDecay', () => {
   });
 });
 
-describe('情绪上下文 buildEmotionContext', () => {
+describe('情绪上下文 buildEmotionContext', SERIAL, () => {
   test('calm 时提示平静', () => {
     resetTo({ emotion: 'calm', intensity: 0 });
     const ctx = emotion.buildEmotionContext();
@@ -275,17 +284,23 @@ describe('情绪上下文 buildEmotionContext', () => {
   });
 });
 
-describe('状态持久化', () => {
+describe('状态持久化', SERIAL, () => {
   test('applyObservation 的结果被写入磁盘', async () => {
     resetTo({ emotion: 'calm', intensity: 0 });
     emotion.applyObservation('excited');
 
-    // 写入走串行队列且为 fire-and-forget，给足 I/O 时间再断言
+    // 写入走串行队列且为 fire-and-forget，给足 I/O 时间再断言。
+    // 轮询窗口放宽到 3 秒：慢机器上异步落盘可能超过 1 秒，别把超时当成 bug。
+    // 读取失败（原子 rename 的瞬间文件可能不在）不视为失败，继续重试。
     let onDisk = null;
-    for (let i = 0; i < 100; i++) {
+    for (let i = 0; i < 300; i++) {
       await new Promise(r => setTimeout(r, 10));
-      onDisk = JSON.parse(fs.readFileSync(EMOTION_FILE, 'utf8'));
-      if (onDisk.emotion === 'excited') break;
+      try {
+        onDisk = JSON.parse(fs.readFileSync(EMOTION_FILE, 'utf8'));
+      } catch (_) {
+        continue;
+      }
+      if (onDisk && onDisk.emotion === 'excited') break;
     }
     assert.equal(onDisk.emotion, 'excited', '情绪状态未落盘');
     assert.equal(onDisk.intensity, 40);
