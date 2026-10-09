@@ -2,13 +2,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   View,
-  Text,
-  TouchableOpacity,
-  FlatList,
   StyleSheet,
   KeyboardAvoidingView,
   Alert,
-  Modal,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -21,11 +17,10 @@ import { ChatHeader } from './components/ChatHeader';
 import { ChatBubble } from './components/ChatBubble';
 import { MessageList } from './components/MessageList';
 import { MemoryScreen } from './components/MemoryScreen';
+import { ThemeScreen } from './components/ThemeScreen';
 
 import {
-  THEMES,
   getTheme,
-  getAccentSet,
   isThemeId,
   isThemeMode,
   DEFAULT_THEME_ID,
@@ -549,72 +544,12 @@ export default function App() {
         theme={theme}
       />
 
-      <Modal
+      <ThemeScreen
         visible={themePickerOpen}
-        animationType="slide"
-        onRequestClose={() => setThemePickerOpen(false)}
-      >
-        <SafeAreaView style={styles.memoryContainer}>
-          <View style={styles.memoryHeader}>
-            <TouchableOpacity
-              style={styles.memoryBack}
-              onPress={() => setThemePickerOpen(false)}
-            >
-              <Text style={[styles.memoryBackText, { color: theme.accent }]}>
-                ‹ 返回
-              </Text>
-            </TouchableOpacity>
-
-            <Text style={styles.memoryTitle}>主题色</Text>
-
-            <View style={styles.memoryHeaderSpacer} />
-          </View>
-
-          <Text style={styles.memoryCaption}>
-            只切换强调色，黑色背景与文字层级保持不变
-          </Text>
-
-          <FlatList
-            data={THEMES}
-            keyExtractor={item => item.id}
-            contentContainerStyle={styles.memoryList}
-            renderItem={({ item }) => {
-              const selected = item.id === theme.accentId;
-
-              return (
-                <TouchableOpacity
-                  style={[
-                    styles.memoryCard,
-                    selected && { borderColor: theme.accentBorder },
-                  ]}
-                  onPress={() => selectTheme(item.id)}
-                >
-                  <View style={styles.themeRow}>
-                    <View
-                      style={[
-                        styles.themeSwatch,
-                        { backgroundColor: getAccentSet(item.id, theme.mode).sendButton },
-                      ]}
-                    />
-
-                    <Text style={styles.themeLabel}>
-                      {item.emoji} {item.label}
-                    </Text>
-
-                    {selected && (
-                      <Text
-                        style={[styles.themeCheck, { color: theme.accent }]}
-                      >
-                        ✓
-                      </Text>
-                    )}
-                  </View>
-                </TouchableOpacity>
-              );
-            }}
-          />
-        </SafeAreaView>
-      </Modal>
+        onClose={() => setThemePickerOpen(false)}
+        theme={theme}
+        onSelect={selectTheme}
+      />
     </SafeAreaView>
   );
 }
@@ -660,78 +595,5 @@ const createStyles = (theme: Theme) => StyleSheet.create({
     // 右下紫调余晖，比冷光更弱一些，避免抢主体
     experimental_backgroundImage:
       'radial-gradient(ellipse 85% 55% at 88% 100%, rgba(80,68,128,0.22) 0%, rgba(80,68,128,0.10) 48%, rgba(80,68,128,0) 78%)',
-  },
-  // ---- 记忆库 ----
-  memoryContainer: {
-    flex: 1,
-    backgroundColor: theme.background,
-  },
-  memoryHeader: {
-    height: 72,
-    paddingHorizontal: 20,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    borderBottomWidth: 1,
-    borderBottomColor: theme.border,
-  },
-  memoryBack: {
-    minWidth: 64,
-    paddingVertical: 6,
-  },
-  memoryBackText: {
-    color: theme.accent,
-    fontSize: 16,
-  },
-  memoryTitle: {
-    color: theme.textPrimary,
-    fontSize: 20,
-    fontWeight: '700',
-  },
-  memoryHeaderSpacer: {
-    minWidth: 64,
-  },
-  memoryCaption: {
-    color: theme.textSecondary,
-    fontSize: 13,
-    lineHeight: 19,
-    paddingHorizontal: 20,
-    paddingTop: 14,
-    paddingBottom: 6,
-  },
-  memoryList: {
-    paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: 24,
-  },
-  memoryCard: {
-    backgroundColor: theme.surface,
-    borderWidth: 1,
-    borderColor: theme.borderStrong,
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 10,
-  },
-  // ---- 主题色选择（复用记忆库的容器/卡片样式） ----
-  themeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  themeSwatch: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    marginRight: 12,
-    borderWidth: 1,
-    borderColor: theme.borderStrong,
-  },
-  themeLabel: {
-    flex: 1,
-    color: theme.textBody,
-    fontSize: 16,
-  },
-  themeCheck: {
-    fontSize: 18,
-    fontWeight: '700',
   },
 });
