@@ -14,6 +14,17 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+import { Message } from './lib/types';
+import { API_TOKEN, WEEKDAYS, AT_BOTTOM_DISTANCE } from './lib/constants';
+import {
+  makeLocalId,
+  readJsonResponse,
+  withAlpha,
+  formatMessageTime,
+  shouldShowMessageTime,
+  moodEmoji,
+} from './lib/utils';
+
 import {
   THEMES,
   MODE_OPTIONS,
@@ -29,20 +40,6 @@ import {
   type ThemeId,
   type ThemeMode,
 } from './theme';
-
-// 本地临时消息的 id（服务端返回稳定 id 后会被替换）
-function makeLocalId(): string {
-  return Date.now().toString();
-}
-
-type Message = {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  createdAt?: string; // ISO 时间，后端返回；前端发送时自己打
-  retryText?: string;
-  mood?: string;
-};
 
 // 长期记忆条目（与服务端 memory.json 的结构一致，无 id 字段）
 type MemoryItem = {
@@ -74,20 +71,6 @@ function formatMemoryTime(iso?: string): string {
     ` ${pad(date.getHours())}:${pad(date.getMinutes())}`
   );
 }
-
-async function readJsonResponse(response: Response) {
-  const contentType = response.headers.get('content-type') || '';
-
-  if (!contentType.toLowerCase().includes('application/json')) {
-    throw new Error('服务器连接失败');
-  }
-
-  return response.json();
-}
-
-const API_TOKEN = process.env.EXPO_PUBLIC_BLUEBIRD_API_TOKEN;
-
-const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
 
 // 记忆类型 -> 中文徽章（仅展示，不参与任何逻辑）
 const MEMORY_TYPE_LABELS: Record<string, string> = {
@@ -165,90 +148,6 @@ function SharedTime({
       <Text style={styles.sharedTimeDate}>{dateText}</Text>
       <Text style={styles.sharedTimeCaption}>我们现在都在这里</Text>
     </View>
-  );
-}
-
-// 与 Emotion System V1 的 8 种情绪一一对应（全项目只有这一套情绪值域）
-const MOOD_EMOJI: Record<string, string> = {
-  calm: '😌',
-  happy: '😊',
-  playful: '😏',
-  excited: '🤩',
-  tired: '😴',
-  sad: '😔',
-  annoyed: '😒',
-  hurt: '🥺',
-};
-
-function moodEmoji(mood?: string) {
-  return MOOD_EMOJI[mood ?? 'calm'] ?? MOOD_EMOJI.calm;
-}
-
-// 把主题里的不透明 hex 转成带 alpha 的 rgba：气泡的"半透明材质"需要透明度，
-// 但 theme.ts 给出的是不透明色值。此处在本地转换，不引入依赖、不改 theme.ts。
-// 遇到非 6 位 hex（例如已是 rgba()）时原样返回，避免拼出非法色值。
-function withAlpha(color: string, alpha: number): string {
-  const hex6 = /^#?([0-9a-f]{6})$/i.exec(String(color).trim());
-
-  if (!hex6) return color;
-
-  const value = parseInt(hex6[1], 16);
-
-  return `rgba(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255}, ${alpha})`;
-}
-
-// 微信式时间显示：间隔超过 5 分钟或跨天才显示一次时间标签
-const MESSAGE_TIME_GAP_MS = 5 * 60 * 1000;
-
-// 距底部小于该距离视为"已在底部"：
-// 决定「新消息是否自动跟随」以及「返回底部按钮是否显示」，两者互补不留死区
-const AT_BOTTOM_DISTANCE = 80;
-
-function formatMessageTime(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '';
-
-  const now = new Date();
-  const hm = `${String(date.getHours()).padStart(2, '0')}:${String(
-    date.getMinutes()
-  ).padStart(2, '0')}`;
-
-  const startOfDay = (d: Date) =>
-    new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  const dayDiff = Math.round(
-    (startOfDay(now) - startOfDay(date)) / 86400000
-  );
-
-  if (dayDiff <= 0) return hm; // 今天：只显示时间
-  if (dayDiff === 1) return `昨天 ${hm}`;
-  if (dayDiff < 7) return `周${WEEKDAYS[date.getDay()]} ${hm}`;
-  if (date.getFullYear() === now.getFullYear()) {
-    return `${date.getMonth() + 1}月${date.getDate()}日 ${hm}`;
-  }
-  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${hm}`;
-}
-
-function shouldShowMessageTime(
-  current: Message,
-  previous?: Message
-): boolean {
-  if (!current.createdAt) return false;
-  if (!previous) return true;
-  if (!previous.createdAt) return true;
-
-  const curr = new Date(current.createdAt).getTime();
-  const prev = new Date(previous.createdAt).getTime();
-  if (Number.isNaN(curr) || Number.isNaN(prev)) return false;
-
-  if (curr - prev >= MESSAGE_TIME_GAP_MS) return true;
-
-  // 间隔短但跨天：新的一天第一条仍显示
-  const a = new Date(curr);
-  const b = new Date(prev);
-  return (
-    a.getFullYear() !== b.getFullYear() ||
-    a.getMonth() !== b.getMonth() ||
-    a.getDate() !== b.getDate()
   );
 }
 
