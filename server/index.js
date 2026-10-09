@@ -674,21 +674,47 @@ app.post('/chat', requireAuth, async (req, res) => {
       throw new Error('模型没有返回有效内容');
     }
 
-    let mood = 'calm';
-    let reply = rawReply;
-    const moodMatch = rawReply.match(/^\s*\[mood:([a-z]+)\]/i);
+    // 情绪标签兼容实际出现的三种形式：
+    // 1) 规范格式 [mood:calm]（认领情绪观察信号）；
+    // 2) 模型偶发的裸格式 [calm]（词项严格限定在 8 个已知情绪值内才剥离，
+    //    避免误删正文里的普通方括号内容）；
+    // 3) 其他前缀写法 [mood:任意词]（只剥离不认领，保持旧版剥离范围不缩水）。
+    const moodTagSource = `(?:［|\\[)\\s*(?:mood\\s*[:：]\\s*)?(${EMOTIONS.join('|')})\\s*(?:］|\\])`;
+    const prefixedTagSource = `(?:［|\\[)\\s*mood\\s*[:：]\\s*[a-z]+\\s*(?:］|\\])`;
+    const leadingTagRe = new RegExp(
+      `^\\s*(?:${moodTagSource}|${prefixedTagSource})`,
+      'i'
+    );
+    const anyTagRe = new RegExp(
+      `${prefixedTagSource}|${moodTagSource}`,
+      'gi'
+    );
 
-    if (moodMatch) {
-      const value = moodMatch[1].toLowerCase();
-      if (MOOD_VALUES.has(value)) mood = value;
-      const stripped = rawReply.slice(moodMatch[0].length).trim();
-      if (stripped) reply = stripped;
-    } else {
-      // 兜底：模型没按要求在开头输出标签时，剥离正文里任何位置的 [mood:...]，
-      // 避免把标签原文展示给用户。
-      const stripped = reply.replace(/\[mood:[a-z]+\]/gi, '').trim();
-      if (stripped) reply = stripped;
+    let mood = 'calm';
+    let moodSignalSet = false;
+    let body = rawReply;
+
+    // 1) 循环清掉开头的标签（模型偶尔会连发多个），第一个合法值作为本轮观察信号
+    let leading = body.match(leadingTagRe);
+
+    while (leading) {
+      const value =
+        typeof leading[1] === 'string' ? leading[1].toLowerCase() : '';
+
+      if (!moodSignalSet && MOOD_VALUES.has(value)) {
+        mood = value;
+        moodSignalSet = true;
+      }
+
+      body = body.slice(leading[0].length);
+      leading = body.match(leadingTagRe);
     }
+
+    // 2) 兜底清掉正文中任何位置残留的标签，避免标签原文展示给用户或落库
+    const cleaned = body.replace(anyTagRe, '').trim();
+
+    // 极端情况：整条回复只有标签，清洗后为空则保留原文，避免发出空消息
+    const reply = cleaned || rawReply;
 
     // 同步生成稳定 id 并立即返回给前端（撤回需要），历史落盘放异步，
     // 避免磁盘 IO 卡住回复关键路径；appendChatMessages 会沿用已有 id。
