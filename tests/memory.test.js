@@ -1,11 +1,12 @@
 /**
  * 云岫 Bluebird — 记忆系统 (server/memory.js) 行为测试
  *
- * 只读外部验证：不改被测源码，仅通过公开 API + 真实数据文件驱动。
+ * 只读外部验证：不改被测源码，仅通过公开 API + 数据文件驱动。
+ * 隔离说明：全程使用临时数据目录（BLUEBIRD_DATA_DIR），不读写 server/data 下的真实数据。
  * 用假 OpenAI client 拦截请求，从而观察「是否真的调用了模型」以及各条拒绝分支。
  * 运行：node --test --test-concurrency=1 <本文件>
  *
- * 串行说明：与 emotion.test.js 同理，本文件所有套件共用同一个 memory.json，
+ * 串行说明：与 emotion.test.js 同理，本文件所有套件共用同一个 memory.json（临时目录内），
  * 其中「损坏的记忆文件被备份」用例会把它 rename 成 .corrupt 备份。任何并行执行
  * 都会让其他套件在读取时扑空，因此每个 describe 都显式声明 concurrency: 1，
  * 并在 before 中清掉本套件的历史残留。
@@ -13,15 +14,22 @@
 const { test, describe, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
+// 静音被测模块的日志，保持测试输出可读
 const origLog = console.log;
 const origErr = console.error;
 console.log = () => {};
 console.error = () => {};
 
 const SERVER_DIR = path.join(__dirname, '..', 'server');
-const DATA_DIR = path.join(SERVER_DIR, 'data');
+
+// 隔离：全部数据落在系统临时目录，绝不触碰 server/data 下的真实记忆文件
+const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-memory-'));
+process.env.BLUEBIRD_DATA_DIR = TMP_DIR;
+
+const DATA_DIR = TMP_DIR;
 const MEMORY_FILE = path.join(DATA_DIR, 'memory.json');
 
 const memory = require(path.join(SERVER_DIR, 'memory.js'));

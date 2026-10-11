@@ -476,10 +476,11 @@ app.post('/history/recall', requireAuth, (req, res) => {
       });
     }
 
-    // 异步撤回由这条用户消息产生的长期记忆（sourceQuote 匹配）
+    // 异步撤回由这条用户消息产生的长期记忆（sourceQuote 匹配，优先同会话）
     recallMemoryBySourceQuote(
       removed[0].content,
-      removed[0].createdAt
+      removed[0].createdAt,
+      sessionId
     ).catch(error => {
       console.error('Memory recall error:', error.message);
     });
@@ -630,9 +631,10 @@ app.post('/chat', requireAuth, async (req, res) => {
       sessionId
     );
 
-    // 情绪惯性：先按"距离上一条用户消息"的间隔做时间衰减，再生成情绪上下文。
-    // 时间间隔直接复用 Time Sense V1 已经算好的 gapSeconds，不另造时间机制。
-    applyTimeDecay(gapContext.gapSeconds);
+    // 情绪惯性：先做时间衰减，再生成情绪上下文。
+    // E3：衰减基于"全局上次衰减检查时间"（emotion 模块内部维护），
+    // 不再使用当前会话的 gapSeconds —— 切换旧会话不会额外衰减全局情绪。
+    applyTimeDecay();
     const emotionContext = buildEmotionContext();
 
     console.log(
@@ -790,7 +792,7 @@ app.post('/chat', requireAuth, async (req, res) => {
     setImmediate(() => {
       if (!client) return; // 未配置模型 key，跳过记忆提取
       if (isContinue) return; // 续写不是用户说的话，不产生长期记忆
-      processMemory(client, userText)
+      processMemory(client, userText, sessionId)
         .catch(error => {
           console.error(
             'Memory processing error:',
