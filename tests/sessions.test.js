@@ -13,6 +13,35 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const http = require('http');
+
+// 测试在进程内 require server/index.js，会真的起一个 HTTP 服务。
+// 退出前必须关掉它（含 keep-alive 连接），否则 Windows 上 process.exit
+// 会撞上 libuv 的 UV_HANDLE_CLOSING 断言，导致非零退出码。
+const originalListen = http.Server.prototype.listen;
+let httpServer = null;
+
+http.Server.prototype.listen = function (...args) {
+  httpServer = this;
+  return originalListen.apply(this, args);
+};
+
+async function closeHttpServer() {
+  if (!httpServer) return;
+
+  const server = httpServer;
+  httpServer = null;
+
+  try {
+    if (typeof server.closeAllConnections === 'function') {
+      server.closeAllConnections();
+    }
+  } catch (_) {
+    /* ignore */
+  }
+
+  await new Promise(resolve => server.close(() => resolve()));
+}
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-sessions-'));
 
@@ -255,6 +284,8 @@ async function waitReady() {
   console.log = origLog;
   console.error = origErr;
 
+  await closeHttpServer();
+
   try {
     fs.rmSync(TMP, { recursive: true, force: true });
   } catch (_) {
@@ -266,6 +297,17 @@ async function waitReady() {
   console.log = origLog;
   console.error = origErr;
   origLog('测试执行异常：' + error.message);
+
+  try {
+    if (httpServer) {
+      if (typeof httpServer.closeAllConnections === 'function') {
+        httpServer.closeAllConnections();
+      }
+      httpServer.close();
+    }
+  } catch (_) {
+    /* ignore */
+  }
 
   try {
     fs.rmSync(TMP, { recursive: true, force: true });

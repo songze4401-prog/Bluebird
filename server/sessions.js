@@ -23,6 +23,11 @@ const STORE_VERSION = 1;
 // 所有写操作都经 saveStore 落盘，保证缓存与文件一致。
 let store = null;
 
+// 只读保护：数据文件存在但读不出来（损坏/结构不对）时置位。
+// 期间拒绝一切写入、且不做任何自动落盘，避免用重建出的空库覆盖掉
+// 待人工恢复的原始文件；内存里仅保留按旧历史拼出的只读回退视图。
+let storeReadOnly = false;
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -102,6 +107,24 @@ function sanitizeStore(parsed) {
       ? parsed.messages
       : {};
 
+  const knownIds = new Set(next.sessions.map(meta => meta.id));
+
+  // C5：messages 里存在但 sessions 里没有对应会话的 key（孤儿数据）。
+  // 以 sessions 为权威：孤儿消息不并入任何会话，但必须显式告警，
+  // 因为下一次 saveStore 会把它永久清掉，静默丢弃等于无声丢数据。
+  const orphanIds = Object.keys(source).filter(id => !knownIds.has(id));
+
+  if (orphanIds.length) {
+    console.error(
+      `Session store orphan messages detected: ${orphanIds.length} key(s) ` +
+        `without a matching session -> ${orphanIds.join(', ')}`
+    );
+    console.error(
+      '  这些消息不会并入任何会话，并将在下次写入时从文件中移除。' +
+        '如需保留，请先手动备份 sessions.json。'
+    );
+  }
+
   for (const meta of next.sessions) {
     const list = Array.isArray(source[meta.id]) ? source[meta.id] : [];
     next.messages[meta.id] = list.slice(-SESSION_MESSAGE_MAX);
@@ -110,23 +133,59 @@ function sanitizeStore(parsed) {
   return next;
 }
 
+// 结构校验：文件必须是我们存下来的「会话库」形状。
+// 合法 JSON 但不是该形状（例如被误写成数组或别的对象）同样按损坏处理，
+// 否则会被当成空库静默覆盖，等于把用户数据丢掉。
+function isStoreShape(value) {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Array.isArray(value.sessions)
+  );
+}
+
+// 进入只读保护：原始文件保持原样不动，靠重命名/移走备份的动作一概不做，
+// 因为文件留在原路径才最容易被人工发现与恢复；写入由 saveStore 统一拒绝。
+function enterReadOnly(reason) {
+  storeReadOnly = true;
+
+  console.error('==================================================');
+  console.error('会话数据文件不可用，已进入只读保护模式（写入全部被拒绝）');
+  console.error(`  文件：${STORE_FILE}（保持原样，未被修改或删除）`);
+  console.error(`  原因：${reason}`);
+  console.error(
+    '  影响：/chat 的回复不会落盘；新建会话、清空、撤回都会返回失败。'
+  );
+  console.error('  处理：先手动备份该文件，再修复或移走它，然后重启服务。');
+  console.error('==================================================');
+}
+
 function tryReadStore() {
+  let raw;
+
   try {
-    const parsed = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'));
-    return sanitizeStore(parsed);
+    raw = fs.readFileSync(STORE_FILE, 'utf8');
   } catch (error) {
-    console.error('Session store load error:', error.message);
-
-    try {
-      const corruptPath = `${STORE_FILE}.corrupt-${Date.now()}`;
-      fs.renameSync(STORE_FILE, corruptPath);
-      console.error(`Corrupt session store backed up: ${corruptPath}`);
-    } catch (backupError) {
-      console.error('Session store backup error:', backupError.message);
-    }
-
+    enterReadOnly(`文件读取失败：${error.message}`);
     return null;
   }
+
+  let parsed;
+
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    enterReadOnly(`JSON 解析失败：${error.message}`);
+    return null;
+  }
+
+  if (!isStoreShape(parsed)) {
+    enterReadOnly('内容不是会话库结构（缺少 sessions 数组）');
+    return null;
+  }
+
+  return sanitizeStore(parsed);
 }
 
 // 首次启动（无 sessions.json）：把旧的单份 chat-history.json 迁进「默认会话」。
@@ -144,13 +203,28 @@ function importLegacyHistory() {
     return false;
   }
 
-  const backupPath = uniquePath(`${LEGACY_HISTORY_FILE}.pre-multisession.bak`);
+  // 旧历史备份只留一份：迁移是在只读文件上做的，重复备份只会堆文件。
+  // （只读保护模式下每次启动都会走一次迁移，故需要这个去重。）
+  const backupPrefix = `${path.basename(LEGACY_HISTORY_FILE)}.pre-multisession.bak`;
+  let hasBackup = false;
 
   try {
-    fs.copyFileSync(LEGACY_HISTORY_FILE, backupPath);
-    console.log(`Legacy history backed up: ${backupPath}`);
+    hasBackup = fs
+      .readdirSync(DATA_DIR)
+      .some(name => name.startsWith(backupPrefix));
   } catch (error) {
-    console.error('Legacy history backup error:', error.message);
+    console.error('Legacy backup scan error:', error.message);
+  }
+
+  if (!hasBackup) {
+    const backupPath = uniquePath(`${LEGACY_HISTORY_FILE}.pre-multisession.bak`);
+
+    try {
+      fs.copyFileSync(LEGACY_HISTORY_FILE, backupPath);
+      console.log(`Legacy history backed up: ${backupPath}`);
+    } catch (error) {
+      console.error('Legacy history backup error:', error.message);
+    }
   }
 
   const fallbackCreatedAt = statMtime(LEGACY_HISTORY_FILE);
@@ -217,6 +291,10 @@ function loadStore() {
   // 保证「默认会话」始终存在：无 sessionId 的旧客户端请求全部落到它上面
   const addedDefault = ensureDefaultSession();
 
+  // 只读保护下不做任何自动落盘：磁盘上的原始文件必须原封不动，
+  // 内存里这份只是给 /sessions、/history 读的回退视图。
+  if (storeReadOnly) return store;
+
   if (!loadedFromDisk || addedDefault) {
     saveStore();
   }
@@ -224,18 +302,50 @@ function loadStore() {
   return store;
 }
 
+// 落盘。返回是否成功——调用方据此回滚内存并向上报错，
+// 绝不允许"写失败了还当成功"这种静默丢数据的行为。
 function saveStore() {
+  if (storeReadOnly) {
+    console.error(
+      'Session store write refused: read-only protection is active ->',
+      STORE_FILE
+    );
+    return false;
+  }
+
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
 
     const tmpFile = `${STORE_FILE}.tmp`;
+    const payload = JSON.stringify(store, null, 2);
 
-    fs.writeFileSync(tmpFile, JSON.stringify(store, null, 2), 'utf8');
+    // C2：先写临时文件并 fsync 落盘，再原子 rename 覆盖目标。
+    // 只 writeFile + rename 的话，rename 可能先于数据落盘被提交，
+    // 断电后目标文件可能变成空文件或旧内容；fsync 把"数据已写稳"钉在
+    // rename 之前，把这个窗口关掉。
+    // 注：memory.js / emotion.js 仍是旧的 writeFile + rename 写法，
+    // 该差异已在 AGENTS.md 记录为已知限制（本阶段不动这两个模块）。
+    const fd = fs.openSync(tmpFile, 'w');
+
+    try {
+      fs.writeFileSync(fd, payload, 'utf8');
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+
     fs.renameSync(tmpFile, STORE_FILE);
 
     console.log('Session store saved:', store.sessions.length, 'sessions');
+    return true;
   } catch (error) {
-    console.error('Session store save error:', error.message);
+    console.error(
+      'Session store save FAILED:',
+      error.message,
+      '->',
+      STORE_FILE
+    );
+    return false;
   }
 }
 
@@ -290,7 +400,13 @@ function createSession({ title } = {}) {
 
   current.sessions.push(meta);
   current.messages[meta.id] = [];
-  saveStore();
+
+  if (!saveStore()) {
+    // 落盘失败：回滚内存，保证内存视图与磁盘事实一致
+    current.sessions.pop();
+    delete current.messages[meta.id];
+    return null;
+  }
 
   return { ...meta, messageCount: 0 };
 }
@@ -328,13 +444,19 @@ function appendMessages(sessionId, messages) {
   }));
 
   const existing = current.messages[sessionId] || [];
+  const prevUpdatedAt = meta.updatedAt;
 
   current.messages[sessionId] = [...existing, ...stamped].slice(
     -SESSION_MESSAGE_MAX
   );
   meta.updatedAt = createdAt;
 
-  saveStore();
+  if (!saveStore()) {
+    // 落盘失败：回滚内存，避免内存里多出磁盘上不存在的消息
+    current.messages[sessionId] = existing;
+    meta.updatedAt = prevUpdatedAt;
+    return null;
+  }
 
   return stamped;
 }
@@ -346,8 +468,15 @@ function replaceMessages(sessionId, messages) {
 
   if (!findMeta(sessionId)) return false;
 
+  const prev = current.messages[sessionId] || [];
+
   current.messages[sessionId] = messages.slice(-SESSION_MESSAGE_MAX);
-  saveStore();
+
+  if (!saveStore()) {
+    // 落盘失败：回滚内存，避免撤回/清空只在内存里生效
+    current.messages[sessionId] = prev;
+    return false;
+  }
 
   return true;
 }

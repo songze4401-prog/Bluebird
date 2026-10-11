@@ -353,6 +353,12 @@ app.post('/sessions', requireAuth, (req, res) => {
     const { title } = req.body || {};
     const session = createSession({ title });
 
+    if (!session) {
+      return res.status(500).json({
+        error: '新建会话失败：聊天存储当前不可写',
+      });
+    }
+
     res.status(201).json({ session });
   } catch (error) {
     console.error('Session create error:', error);
@@ -409,7 +415,12 @@ app.post('/history/clear', requireAuth, (req, res) => {
       return res.status(404).json({ error: '会话不存在' });
     }
 
-    replaceMessages(sessionId, []);
+    if (!replaceMessages(sessionId, [])) {
+      return res.status(500).json({
+        error: '清理失败：聊天存储当前不可写',
+      });
+    }
+
     res.json({ ok: true, sessionId, message: '聊天记录已清理' });
   } catch (error) {
     console.error('History clear error:', error);
@@ -453,10 +464,17 @@ app.post('/history/recall', requireAuth, (req, res) => {
     }
 
     const removedIds = new Set(removed.map(m => m.id));
-    replaceMessages(
+    const saved = replaceMessages(
       sessionId,
       history.filter(m => m && !removedIds.has(m.id))
     );
+
+    // 落盘失败就不动记忆：消息没删成，记忆也不该删
+    if (!saved) {
+      return res.status(500).json({
+        error: '撤回失败：聊天存储当前不可写',
+      });
+    }
 
     // 异步撤回由这条用户消息产生的长期记忆（sourceQuote 匹配）
     recallMemoryBySourceQuote(
@@ -695,8 +713,7 @@ app.post('/chat', requireAuth, async (req, res) => {
     // 极端情况：整条回复只有标签，清洗后为空则保留原文，避免发出空消息
     const reply = cleaned || rawReply;
 
-    // 同步生成稳定 id 并立即返回给前端（撤回需要），历史落盘放异步，
-    // 避免磁盘 IO 卡住回复关键路径；appendMessages 会沿用已有 id。
+    // 同步生成稳定 id 并立即返回给前端（撤回需要）；appendMessages 会沿用已有 id。
     const now = new Date().toISOString();
 
     // 续写只落盘 assistant 消息：不产生"继续说"用户消息，不污染 chat-history
@@ -727,25 +744,40 @@ app.post('/chat', requireAuth, async (req, res) => {
     // 本轮 [mood:] 只是"观察信号"，交给情绪系统做惯性更新后再返回当期真实状态
     const emotion = applyObservation(mood);
 
+    // A1：落盘改到返回之前同步完成。此前是 setImmediate 异步写盘，客户端先拿到
+    // 200、写失败却完全看不到；同步写还顺带消掉了同一会话并发读-改-写的毫秒级
+    // 竞争（Node 单线程下这段同步代码不可被打断）。
+    // 客户端已断开时不落盘，避免回复成为"幽灵消息"（用户没收到却已入库）。
+    let persisted = false;
+
+    if (!clientGone) {
+      try {
+        persisted = !!appendMessages(sessionId, stamped);
+
+        if (!persisted) {
+          console.error(
+            'History persist FAILED:',
+            sessionId,
+            stamped.length,
+            'messages were NOT saved'
+          );
+        }
+      } catch (error) {
+        console.error('History save error:', error);
+      }
+    }
+
     res.json({
       reply,
       model: completion.model,
       sessionId,
+      persisted,
       mood: emotion.emotion,
       intensity: emotion.intensity,
       userMessageId: isContinue ? null : stamped[0].id,
       assistantMessageId: isContinue ? stamped[0].id : stamped[1].id,
       // 服务端统一时间，供前端展示，避免客户端时钟偏差
       createdAt: now,
-    });
-
-    setImmediate(() => {
-      if (clientGone) return; // 客户端已断开，不落盘，避免幽灵消息
-      try {
-        appendMessages(sessionId, stamped);
-      } catch (error) {
-        console.error('History save error:', error);
-      }
     });
 
     setImmediate(() => {
