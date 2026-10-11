@@ -595,8 +595,7 @@ app.post('/chat', requireAuth, async (req, res) => {
       : [];
 
     // 上下文历史以服务端存储为准：不同会话严格隔离，客户端就算传来别的
-    // 会话的历史也不会串进来。会话还没有任何消息时回退到客户端传入的历史，
-    // 兼容旧客户端（不带 sessionId）与「欢迎语不在存储里」的新会话开场。
+    // 会话的历史也不会串进来。
     const storedHistory = (getMessages(sessionId) || [])
       .filter(
         item =>
@@ -607,7 +606,15 @@ app.post('/chat', requireAuth, async (req, res) => {
       .map(item => ({ role: item.role, content: item.content }))
       .slice(-20);
 
-    const promptHistory = storedHistory.length ? storedHistory : clientHistory;
+    // B1：客户端历史回退只对「默认会话」开放。
+    // 默认会话是旧客户端（不带 sessionId）的唯一落点，保留回退以兼容
+    // 「存储为空但客户端握着历史」的旧行为；而新建的独立会话一旦为空，
+    // 其上下文就该是空的——否则前端只要误传上一段会话的历史，就会把
+    // 别的会话的内容注入进来，破坏严格隔离。
+    const promptHistory =
+      storedHistory.length || sessionId !== DEFAULT_SESSION_ID
+        ? storedHistory
+        : clientHistory;
 
     // 续写没有新的用户消息，用最近一条用户消息作为记忆检索的查询，
     // 保证续写仍然复用现有 Memory System，而不是绕过它

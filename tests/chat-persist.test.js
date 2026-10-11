@@ -103,6 +103,9 @@ async function main() {
   // ---- 桩模块：模型 / 记忆 / 情绪 ----
   const openaiTarget = require.resolve('openai', { paths: [SERVER] });
 
+  // 记录每次模型调用的入参，用于断言"哪些历史真正进了上下文"（B1）
+  const modelCalls = [];
+
   require.cache[openaiTarget] = {
     id: openaiTarget,
     filename: openaiTarget,
@@ -111,11 +114,15 @@ async function main() {
       constructor() {
         this.chat = {
           completions: {
-            create: async () => ({
-              model: 'stub-model',
-              // 故意带上情绪标签，验证 A1 落盘用的是清洗后的正文
-              choices: [{ message: { content: '[calm] 这是回复正文。' } }],
-            }),
+            create: async args => {
+              modelCalls.push(args);
+
+              return {
+                model: 'stub-model',
+                // 故意带上情绪标签，验证 A1 落盘用的是清洗后的正文
+                choices: [{ message: { content: '[calm] 这是回复正文。' } }],
+              };
+            },
           },
         };
       }
@@ -307,6 +314,74 @@ async function main() {
     check(
       'fsync 落盘路径可用（临时文件已清理）',
       !fs.existsSync(TMP_FILE)
+    );
+
+    ORIG_LOG('\nB1. 客户端历史回退只对默认会话开放');
+    const createdB1 = await req('/sessions', {
+      method: 'POST',
+      body: { title: 'B1' },
+    });
+    const sessionB1 = createdB1.json.session.id;
+
+    modelCalls.length = 0;
+
+    const b1Chat = await req('/chat', {
+      method: 'POST',
+      body: {
+        message: 'B1 首问',
+        sessionId: sessionB1,
+        history: [
+          { role: 'user', content: '别的会话的秘密问题' },
+          { role: 'assistant', content: '别的会话的秘密回答' },
+        ],
+      },
+    });
+
+    check(
+      'B1 非默认空会话请求成功',
+      b1Chat.status === 200 && b1Chat.json.persisted === true,
+      JSON.stringify(b1Chat.json)
+    );
+
+    const b1Messages = (modelCalls[0] && modelCalls[0].messages) || [];
+
+    check(
+      'B1 客户端历史未被注入模型上下文',
+      !b1Messages.some(item =>
+        String(item.content).includes('别的会话的秘密')
+      ),
+      JSON.stringify(b1Messages)
+    );
+    check(
+      'B1 模型上下文含本次用户消息',
+      b1Messages.some(
+        item => item.role === 'user' && item.content === 'B1 首问'
+      ),
+      JSON.stringify(b1Messages)
+    );
+    check(
+      'B1 新会话只落自己的消息（2 条）',
+      readStore().messages[sessionB1].length === 2,
+      String(readStore().messages[sessionB1].length)
+    );
+
+    // 反向确认：默认会话有存储时同样以存储为准，客户端历史不能覆盖它
+    modelCalls.length = 0;
+
+    await req('/chat', {
+      method: 'POST',
+      body: {
+        message: '默认会话续聊',
+        history: [{ role: 'user', content: '注入标记X' }],
+      },
+    });
+
+    const defMessages = (modelCalls[0] && modelCalls[0].messages) || [];
+
+    check(
+      'B1 默认会话有存储时仍以存储为准（忽略客户端历史）',
+      !defMessages.some(item => String(item.content).includes('注入标记X')),
+      JSON.stringify(defMessages)
     );
   }
 
