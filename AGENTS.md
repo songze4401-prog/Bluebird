@@ -20,6 +20,8 @@ Expo ships breaking changes every SDK release. APIs you remember are likely rena
   - Multi-session: `/chat`, `/history`, `/history/clear`, `/history/recall` all accept an optional `sessionId` (body for POST, query for GET). When omitted they fall back to the built-in `default` session, so clients that send no `sessionId` keep the legacy single-history behaviour. Unknown session ids are rejected with 404. `/chat` builds the model context from the session's stored messages; the client-supplied `history` is used as a fallback only for the `default` session (legacy clients) and only when that session is empty — a freshly created session never borrows another conversation's history. On first boot the legacy `server/data/chat-history.json` is imported into the `default` session, backed up in place, and never modified or deleted.
   - `/chat` persists before responding and returns `persisted` (`true`/`false`); a broken store therefore surfaces as `persisted: false` instead of a silent success. Persistence is synchronous, which also makes the same-session read-modify-write atomic (no `await` inside). Clients that disconnect before the reply is ready are not persisted, to avoid ghost messages.
   - Storage safety: `server/data/sessions.json` is the authoritative store. If it exists but cannot be read/parsed, or parses to an unexpected shape, the server enters read-only protection — it refuses all writes, leaves the file untouched at its original path (no rename, no delete), and serves a read-only fallback view built from the legacy history. Repairs must be done by hand on that file. This supersedes the older "rename to `.corrupt-<ts>`" behaviour, so `.corrupt-*` files and duplicate `.pre-multisession.bak-*` backups are no longer produced. `sessions.json` writes are `fsync`-ed before the atomic rename (see C2 note below); orphan `messages` keys with no matching session are reported on load rather than dropped silently.
+  - Memory attribution (E2): every newly extracted entry in `server/memory.js` is stamped with the originating `sessionId` (legacy entries carry none). `/history/recall` deletes entries that match the recalled message's text (equality, containment, or ≥0.7 similarity) within a `[messageTime − 5s, +2h]` window, preferring same-session matches; it falls back to un-attributed legacy entries only when the current session has no match. Entries attributed to another session are never deleted — this closes the old hole where recalling in session A wiped session B's identical memory. Dedupe/merge and `buildMemoryContext` retrieval stay global (single-persona product).
+  - Emotion decay (E3): `applyTimeDecay()` takes no arguments and is driven by a global `lastDecayAt` baseline (legacy state falls back to `updatedAt`), not by the current session's `gapSeconds`. The baseline advances on every check (in memory only; it rides along with the next state commit), so a single interval decays at most once, and switching into a long-idle session never re-applies that session's gap to the global emotion.
 - Deployment constraint (A3): the JSON state under `server/data/` is loaded once into a per-process in-memory cache and rewritten in full, so **the API must run as a single process**. Do not run multiple instances against the same data directory (or behind a load balancer without sticky routing) — concurrent instances would overwrite each other's state. Known limitation, not enforced in code.
 - Known limitation (C2): `server/memory.js` and `server/emotion.js` still persist with plain `writeFile` + `rename` (no `fsync`), unlike `server/sessions.js`. Only a power loss between rename and flush could expose this; these two modules are intentionally left untouched in this phase.
 - Config: the frontend reads `EXPO_PUBLIC_API_URL` and `EXPO_PUBLIC_BLUEBIRD_API_TOKEN` from the root `.env` (Expo only exposes `EXPO_PUBLIC_*` variables); the backend reads `server/.env` (`DEEPSEEK_API_KEY`, `BLUEBIRD_API_TOKEN`, `PORT`, `MEMORY_ENABLED`). See both `.env.example` templates; the client and server tokens must match.
@@ -41,6 +43,17 @@ npx expo-doctor              # diagnose dependency and config issues
 In the Codespaces devcontainer, `bash scripts/blue-start.sh` (alias `blue`) idempotently starts both the API (:3000) and Metro (:8081).
 
 Run lint and typecheck before declaring any task done.
+
+### Tests
+
+Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, and `emotion.js`), so tests never read or write the real `server/data`. Run each file separately:
+
+```bash
+node --test --test-concurrency=1 tests/memory.test.js   # node:test suites (memory, emotion)
+node tests/sessions.test.js                             # minimal custom-runner scripts
+```
+
+`tests/api.test.js` is the one exception — a legacy script that loads the real `server/data` and calls destructive endpoints (`/memory/clear`, `/history/clear`). Do not run it; kept for reference only.
 
 ## Rules
 
