@@ -16,7 +16,11 @@ const TMP_DATA_DIR = fs.mkdtempSync(
 );
 process.env.BLUEBIRD_DATA_DIR = TMP_DATA_DIR;
 
-process.env.PORT = '3999';
+// 端口交给操作系统分配（PORT=0），测前从 server 实例读取真实端口。
+// 固定端口若被别的进程占用，本测试的 listen 会失败，而 waitReady 仍会
+// 连上占用者的服务并全部"通过"——等于把断言跑在别人的实例上，
+// 并读写对方 server/data/ 下的真实记忆与聊天记录。
+process.env.PORT = '0';
 process.env.BLUEBIRD_API_TOKEN = 'test-token-bluebird';
 // 这里必须是赋空串，不能 delete。
 // dotenv 只填补「不存在」的变量：一旦 delete，DEEPSEEK_API_KEY 变成不存在，
@@ -25,15 +29,13 @@ process.env.BLUEBIRD_API_TOKEN = 'test-token-bluebird';
 // 并把测试造的假对话写进真实聊天记录与长期记忆。
 process.env.DEEPSEEK_API_KEY = ''; // 故意不配 API Key，验证降级路径
 
-const BASE = 'http://127.0.0.1:3999';
+let BASE = '';
 const TOKEN = 'test-token-bluebird';
 
 const origLog = console.log;
 const origErr = console.error;
 console.log = () => {};
 console.error = () => {};
-
-require(path.join(__dirname, '..', 'server', 'index.js'));
 
 let passed = 0;
 let failed = 0;
@@ -91,6 +93,13 @@ async function waitReady() {
 }
 
 (async () => {
+  // 先确定端口再加载入口：index.js 在 require 时即 listen。
+  const { server } = require(path.join(__dirname, '..', 'server', 'index.js'));
+  if (!server.listening) {
+    await new Promise(resolve => server.once('listening', resolve));
+  }
+  BASE = `http://127.0.0.1:${server.address().port}`;
+
   const ready = await waitReady();
   if (!ready) {
     origLog('服务未能在 5 秒内启动');
