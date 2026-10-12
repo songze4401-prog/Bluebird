@@ -37,6 +37,23 @@ In the Codespaces devcontainer, `bash scripts/blue-start.sh` (alias `blue`) idem
 
 Run lint and typecheck before declaring any task done.
 
+## Testing
+
+Three suites: `tests/emotion.test.js` (31), `tests/memory.test.js` (37), `tests/api.test.js` (22) — 90 checks total.
+
+```bash
+npm install --no-save express cors dotenv openai   # api.test.js only
+node --test tests/emotion.test.js tests/memory.test.js
+node tests/api.test.js
+```
+
+- **Every suite must isolate its data directory.** Point `process.env.BLUEBIRD_DATA_DIR` at an `fs.mkdtempSync()` temp dir and remove it in a top-level `after()` hook.
+- **Set that env var before `require`-ing any server module.** `server/{memory,emotion,index}.js` resolve their data path once at module load, so setting it afterwards silently does nothing and the test falls back to the real directory.
+- **Never read or write `server/data/` from a test.** It holds the real memory, chat history, and emotion state; `.gitignore` excludes it, so anything a test wipes there cannot be recovered.
+- The two `node:test` suites declare `{ concurrency: 1 }` on every `describe`: suites within a file share one data file, and the corruption-recovery case renames it to `.corrupt`.
+- To disable the LLM in a test, assign `process.env.DEEPSEEK_API_KEY = ''` — do **not** `delete` it. `dotenv` only fills keys that are absent, so a deleted key is re-injected from `server/.env` when `server/index.js` loads, which sends real requests and incurs real cost.
+- Verify isolation by seeding `server/data/` with sentinel content, running the full suite, and checking the files are byte-identical afterwards.
+
 ## Rules
 
 - If `ios/` and `android/` directories do not exist, they are generated (Continuous Native Generation). Never create or edit them by hand — configure native behavior in `app.json` and config plugins.
