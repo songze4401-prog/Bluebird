@@ -13,7 +13,14 @@
 const { test, describe, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+
+// 数据目录隔离：必须在 require 任何服务端数据模块之前设置。
+// memory.js 在模块加载时就把落盘目标固定下来，晚了设置就仍然指向
+// server/data/，测试会直接读写真实记忆与聊天记录。
+const TEST_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-memory-test-'));
+process.env.BLUEBIRD_DATA_DIR = TEST_DATA_DIR;
 
 const origLog = console.log;
 const origErr = console.error;
@@ -21,10 +28,19 @@ console.log = () => {};
 console.error = () => {};
 
 const SERVER_DIR = path.join(__dirname, '..', 'server');
-const DATA_DIR = path.join(SERVER_DIR, 'data');
+const { DATA_DIR } = require(path.join(SERVER_DIR, 'data-dir.js'));
 const MEMORY_FILE = path.join(DATA_DIR, 'memory.json');
 
 const memory = require(path.join(SERVER_DIR, 'memory.js'));
+
+/** 全部用例结束后清理临时数据目录；清理失败不影响测试结果。 */
+after(() => {
+  try {
+    fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+  } catch (_) {
+    /* 忽略清理失败 */
+  }
+});
 
 function seed(items) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
