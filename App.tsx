@@ -18,6 +18,7 @@ import { ChatBubble } from './components/ChatBubble';
 import { MessageList } from './components/MessageList';
 import { MemoryScreen } from './components/MemoryScreen';
 import { ThemeScreen } from './components/ThemeScreen';
+import { HomeScreen } from './components/HomeScreen';
 
 import {
   getTheme,
@@ -40,6 +41,9 @@ export default function App() {
   const [sending, setSending] = useState(false);
   const [continuing, setContinuing] = useState(false);
   const [mood, setMood] = useState('calm');
+
+  // 启动落在固定欢迎主页，选择入口后才进入聊天页
+  const [screen, setScreen] = useState<'home' | 'chat'>('home');
 
   // 主题：模式（浅色/深色）+ 强调色，均为纯前端本地偏好，不经过服务器
   const [themeMode, setThemeMode] = useState<ThemeMode>(DEFAULT_THEME_MODE);
@@ -488,6 +492,39 @@ export default function App() {
     }
   };
 
+  // ---- 欢迎主页的三个入口 ----
+  // 继续聊天：复用既有的历史加载结果进入聊天页。
+  // 服务端只有一份全局聊天历史，它就是「最近一次会话」，无需额外请求。
+  const enterChatFromHome = () => setScreen('chat');
+
+  // 新建聊天 / 历史聊天：当前后端不支持，如实告知，不用前端假效果代替。
+  // 依据：server/data/chat-history.json 是唯一的一份消息数组（上限 200），
+  // /history、/history/clear、/history/recall、/chat 均无会话 id 参数，
+  // 全仓库不存在 sessionId / conversationId 等会话概念。
+  const explainUnsupported = (title: string, detail: string) => {
+    Alert.alert(title, detail, [{ text: '知道了' }]);
+  };
+
+  if (screen === 'home') {
+    return (
+      <HomeScreen
+        onContinue={enterChatFromHome}
+        onNewChat={() =>
+          explainUnsupported(
+            '暂不支持新建聊天',
+            '后端目前只有一份全局聊天记录，没有独立会话存储。若现在「新建」，新消息仍会写进同一份历史，等于覆盖/串进旧聊天，因此不做假的新建效果。需要后端先支持多会话（会话 id、会话列表与独立消息）后才能提供。'
+          )
+        }
+        onHistory={() =>
+          explainUnsupported(
+            '暂不支持历史聊天',
+            '后端目前没有会话列表与会话元数据（标题、时间、会话 id），无法列出可恢复的历史会话。需要后端先支持多会话存储后才能提供。'
+          )
+        }
+      />
+    );
+  }
+
   return (
     <SafeAreaView style={styles.container}>
       {/* 基础聊天背景（仅深色模式）。
@@ -535,6 +572,7 @@ export default function App() {
           onChangeText={setInput}
           sending={sending}
           onSend={() => sendMessage()}
+          onReturnHome={() => setScreen('home')}
         />
       </KeyboardAvoidingView>
 
