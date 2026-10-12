@@ -12,7 +12,8 @@ Expo ships breaking changes every SDK release. APIs you remember are likely rena
 
 - Single-screen app built from root `App.tsx`. **There is no Expo Router and no `src/app/` directory — do not add routes, route files, or navigation libraries.**
 - Entry chain: `index.ts` (`registerRootComponent` + `SafeAreaProvider`) → root `App.tsx`, which renders the entire chat UI.
-- Screen-like views are React Native `Modal` overlays opened from `App.tsx`: `components/MemoryScreen.tsx` (memory library) and `components/ThemeScreen.tsx` (accent-color picker).
+- Screen-like views are React Native `Modal` overlays opened from `App.tsx`: `components/MemoryScreen.tsx` (memory library), `components/ThemeScreen.tsx` (accent-color picker), and `components/HistoryScreen.tsx` (session list). Each is self-contained: it fetches its own data when `visible` flips to `true` and exposes only `visible` / `onClose` / `theme` (plus callbacks) to the parent.
+- Multi-session wiring (frontend): `App.tsx` holds `currentSessionId` and sends it with every chat request (`/chat`, `/history`, `/history/clear`, `/history/recall`). On boot it reads `GET /sessions` (server returns `updatedAt`-desc order) and resumes the most recently updated session, falling back to `default` if the list is unavailable. The home screen's "new chat" creates a session eagerly via `POST /sessions`; "history" opens `HistoryScreen`. Session ids are not persisted on the client — the server list is authoritative.
 - `components/` — UI components; each keeps its styles at the bottom of the file as `const createStyles = (theme: Theme) => StyleSheet.create({ ... })`.
 - `theme.ts` — the theme system: mode (light/dark) × accent color. All light/dark color values are derived from the theme; components never hard-code them.
 - `lib/` — shared non-UI code: `types.ts` (`Message`), `constants.ts` (API token, mood emoji, timing constants), `utils.ts` (helpers).
