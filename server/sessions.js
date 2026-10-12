@@ -316,7 +316,8 @@ function saveStore() {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
 
-    const tmpFile = `${STORE_FILE}.tmp`;
+    // 与 memory.js 同款：临时文件名带 pid，避免多实例抢同一路径触发 EPERM
+    const tmpFile = `${STORE_FILE}.tmp.${process.pid}`;
     const payload = JSON.stringify(store, null, 2);
 
     // C2：先写临时文件并 fsync 落盘，再原子 rename 覆盖目标。

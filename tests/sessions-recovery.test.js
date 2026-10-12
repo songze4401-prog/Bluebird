@@ -193,8 +193,10 @@ async function main() {
   const created = d.createSession({ title: '可写' });
   check('D 正常状态下可新建会话', !!created && !!created.id);
 
-  // 注入失败：把临时文件路径占成目录，writeFileSync 必然失败
-  fs.mkdirSync(path.join(dirD, 'sessions.json.tmp'));
+  // 注入失败：把临时文件路径占成目录，openSync('w') 必然失败。
+  // 临时文件名带 pid（与 sessions.js 一致），占位路径必须同步带上。
+  const TMP_OCCUPIER = path.join(dirD, `sessions.json.tmp.${process.pid}`);
+  fs.mkdirSync(TMP_OCCUPIER);
 
   const before = d.listSessions().length;
   check('D 落盘失败时新建会话返回失败', d.createSession({ title: '失败' }) === null);
@@ -223,7 +225,7 @@ async function main() {
     errorLines.some(line => line.includes('save FAILED'))
   );
 
-  fs.rmdirSync(path.join(dirD, 'sessions.json.tmp'));
+  fs.rmdirSync(TMP_OCCUPIER);
 
   const recovered = d.createSession({ title: '恢复' });
   check(

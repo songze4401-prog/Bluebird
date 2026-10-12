@@ -136,7 +136,9 @@ function loadMemories() {
 
 async function saveMemories(nextMemories) {
   const dir = path.dirname(MEMORY_FILE);
-  const tmpFile = `${MEMORY_FILE}.tmp`;
+  // 临时文件名带 pid：多进程/多实例不再抢同一个固定名，避免 Windows 上
+  // 后打开的一方撞 EPERM 直接崩溃（此前正是这类崩溃让写入整份丢失）。
+  const tmpFile = `${MEMORY_FILE}.tmp.${process.pid}`;
 
   fs.mkdirSync(dir, { recursive: true });
 

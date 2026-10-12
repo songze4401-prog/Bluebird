@@ -156,7 +156,8 @@ function loadEmotion() {
 
 async function saveEmotion(nextState) {
   const dir = path.dirname(EMOTION_FILE);
-  const tmpFile = `${EMOTION_FILE}.tmp`;
+  // 与 memory.js / sessions.js 同款：临时文件名带 pid，避免多实例抢同一路径
+  const tmpFile = `${EMOTION_FILE}.tmp.${process.pid}`;
 
   fs.mkdirSync(dir, { recursive: true });
 

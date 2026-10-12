@@ -52,7 +52,8 @@ const DATA_DIR = path.join(TMP_ROOT, 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const STORE_FILE = path.join(DATA_DIR, 'sessions.json');
-const TMP_FILE = `${STORE_FILE}.tmp`;
+// 落盘用的临时文件名带 pid（多实例不再抢同一路径），这里必须同步带上
+const TMP_FILE = `${STORE_FILE}.tmp.${process.pid}`;
 
 const ORIG_LOG = console.log;
 const ORIG_ERR = console.error;

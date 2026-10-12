@@ -138,6 +138,13 @@ const {
   replaceMessages,
 } = require('./sessions');
 
+// 单实例守卫：必须在 listen 之前、且必须在路由注册之后调用，
+// 这样被测试 require 时不会先抢锁再崩，而是走到 listen 拦截那里正常起来。
+const {
+  acquireSingleInstance,
+  installShutdownHooks,
+} = require('./single-instance');
+
 // 解析请求里的会话 id：显式传入则用显式值，未传则落到「默认会话」。
 // 这样旧客户端（不带 sessionId）的 /chat、/history 行为与改造前完全一致。
 function resolveSessionId(req, source) {
@@ -819,6 +826,11 @@ app.post('/chat', requireAuth, async (req, res) => {
   }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+// 先抢占数据目录锁：已有实例在跑就直接退出，绝不带病启动造成静默覆盖
+acquireSingleInstance({ port: PORT });
+
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`Bluebird API running on port ${PORT}`);
 });
+
+installShutdownHooks(server);
