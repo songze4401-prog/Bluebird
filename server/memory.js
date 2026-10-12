@@ -196,6 +196,11 @@ async function extractMemory(client, message, force = false, sessionId = null) {
       return null;
     }
 
+    // 真实 API 调用流水：与 index.js 主回复同一格式，便于统一 grep / 对账。
+    console.log(
+      `[AI call] memory-extraction session=${sessionId || 'default'} at=${new Date().toISOString()}`
+    );
+
     const completion =
       await client.chat.completions.create(
         {

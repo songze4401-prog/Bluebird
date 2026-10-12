@@ -653,6 +653,12 @@ app.post('/chat', requireAuth, async (req, res) => {
         .filter(Boolean)
         .join('\n\n');
 
+    // 真实 API 调用流水：每次消耗 DEEPSEEK_API_KEY 都在日志留痕，
+    // 便于与 DeepSeek 控制台用量对账、排查意外调用来源。纯日志，不影响逻辑。
+    console.log(
+      `[AI call] main-reply session=${sessionId} at=${new Date().toISOString()}`
+    );
+
     const completion = await client.chat.completions.create(
       {
         model: 'deepseek-chat',
