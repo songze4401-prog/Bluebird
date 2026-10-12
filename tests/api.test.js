@@ -8,6 +8,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 
 // 数据目录隔离：所有落盘都指向临时目录，绝不触碰真实的 server/data/。
 // 必须放在 require 任何服务端模块之前——数据路径在模块首次加载时即求值。
@@ -79,6 +80,71 @@ function cleanup() {
   }
 }
 
+/* ---------------- 纵深防御 ----------------
+ * 数据目录隔离（BLUEBIRD_DATA_DIR）已能挡住绝大多数情况，但它依赖测试头部
+ * 那一行环境变量：一旦有人调整 require 顺序或误删该行，隔离会静默失效，
+ * 而 /memory/clear、/history/clear 这类破坏性断言就会打到真实数据上。
+ * 下面两层用于在这种情况下立刻失败并报警，而不是绿灯放过。
+ */
+const REAL_DATA_DIR = path.join(__dirname, '..', 'server', 'data');
+
+function realpathSafe(p) {
+  try {
+    return fs.realpathSync(p);
+  } catch (_) {
+    return null;
+  }
+}
+
+/** 前置守卫：生效的数据目录必须已重定向到临时目录，且不在真实目录内。
+ *  校验对象是 process.env 的实际值（而非 TMP_DATA_DIR 常量），
+ *  否则隔离被改坏时守卫反而永远通过。
+ */
+function isolationError() {
+  const envDir = process.env.BLUEBIRD_DATA_DIR;
+  if (!envDir) {
+    return 'BLUEBIRD_DATA_DIR 未设置，落盘将指向真实的 server/data/';
+  }
+  const active = realpathSafe(envDir);
+  if (!active) {
+    return `生效的数据目录不存在：${envDir}`;
+  }
+  const real = realpathSafe(REAL_DATA_DIR);
+  if (!real) {
+    return null; // 真实目录不存在，无从污染
+  }
+  if (active === real || active.startsWith(real + path.sep)) {
+    return `生效数据目录 ${active} 落在真实数据目录 ${real} 内`;
+  }
+  return null;
+}
+
+/** 跑测试前给真实数据目录拍快照，跑完比对，兜住任何意外的写入。 */
+function snapshotRealData() {
+  const snap = {};
+  try {
+    for (const name of fs.readdirSync(REAL_DATA_DIR)) {
+      const p = path.join(REAL_DATA_DIR, name);
+      if (!fs.statSync(p).isFile()) continue;
+      snap[name] = crypto.createHash('md5').update(fs.readFileSync(p)).digest('hex');
+    }
+  } catch (_) {
+    /* 目录不存在 */
+  }
+  return snap;
+}
+
+function diffSnapshot(before, after) {
+  const changed = [];
+  const names = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const name of names) {
+    if (before[name] !== after[name]) {
+      changed.push(before[name] ? `${name}(内容变化)` : `${name}(新增)`);
+    }
+  }
+  return changed;
+}
+
 async function waitReady() {
   for (let i = 0; i < 100; i++) {
     try {
@@ -93,6 +159,21 @@ async function waitReady() {
 }
 
 (async () => {
+  // 守卫 1（前置）：确认隔离生效，否则拒绝执行破坏性断言。
+  // 必须在 require 入口之前检查——入口一加载就会读写数据目录。
+  const isoErr = isolationError();
+  if (isoErr) {
+    origLog(`✖ 数据隔离守卫失败：${isoErr}`);
+    origLog('  已中止，未执行 /memory/clear、/history/clear 等破坏性断言。');
+    cleanup(); // 临时目录此时还是空的，直接回收，不留垃圾
+    console.log = origLog;
+    console.error = origErr;
+    process.exit(1);
+  }
+
+  // 守卫 2（后置基准）：跑之前给真实数据目录拍快照，跑完比对。
+  const snapshotBefore = snapshotRealData();
+
   // 先确定端口再加载入口：index.js 在 require 时即 listen。
   const { server } = require(path.join(__dirname, '..', 'server', 'index.js'));
   if (!server.listening) {
@@ -215,6 +296,17 @@ async function waitReady() {
 
     const wrongToken = await req('/emotion', { token: 'another-token' });
     check('错误 token 在限流期间仍走鉴权返回 401', wrongToken.status === 401, `实际 ${wrongToken.status}`);
+  }
+
+  // 守卫 2（后置）：确认整轮跑下来真实数据目录一个字节都没变。
+  const changed = diffSnapshot(snapshotBefore, snapshotRealData());
+  check(
+    '跑完后真实 server/data/ 未被改动',
+    changed.length === 0,
+    changed.length ? `变动：${changed.join('、')}` : ''
+  );
+  if (changed.length) {
+    origLog('  ⚠ 数据隔离可能已失效，请检查 BLUEBIRD_DATA_DIR 是否生效。');
   }
 
   origLog(`\n通过 ${passed} 项，失败 ${failed} 项`);
