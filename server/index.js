@@ -128,9 +128,10 @@ const crypto = require('crypto');
 const chatFs = require('fs');
 const chatPath = require('path');
 
+// 数据目录改为统一入口：支持 BLUEBIRD_DATA_DIR 覆盖，便于测试隔离。
+const { DATA_DIR } = require('./data-dir');
 const CHAT_HISTORY_FILE = chatPath.join(
-  __dirname,
-  "data",
+  DATA_DIR,
   "chat-history.json"
 );
 

@@ -2,7 +2,9 @@
 const fs = require('fs');
 const path = require('path');
 
-const MEMORY_FILE = path.join(__dirname, 'data', 'memory.json');
+// 数据目录改为统一入口：支持 BLUEBIRD_DATA_DIR 覆盖，便于测试隔离。
+const { DATA_DIR } = require('./data-dir');
+const MEMORY_FILE = path.join(DATA_DIR, 'memory.json');
 const MEMORY_LIMIT = 100;
 // 记忆总量不超过该值时，上下文直接全量注入、跳过相关性过滤。
 // 小记忆集下"相关性过滤"弊大于利：陈述式记忆（「用户叫宋泽」）与提问式查询

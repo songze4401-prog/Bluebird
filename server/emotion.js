@@ -2,7 +2,9 @@
 const fs = require('fs');
 const path = require('path');
 
-const EMOTION_FILE = path.join(__dirname, 'data', 'emotion-state.json');
+// 数据目录改为统一入口：支持 BLUEBIRD_DATA_DIR 覆盖，便于测试隔离。
+const { DATA_DIR } = require('./data-dir');
+const EMOTION_FILE = path.join(DATA_DIR, 'emotion-state.json');
 
 // V1 情绪值域：与人格 Prompt 的 [mood:xxx] 候选值严格一一对应。
 // 这里只有一套情绪概念，不再保留旧的 teasing / surprised / laughing / angry。

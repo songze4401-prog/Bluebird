@@ -5,11 +5,25 @@
  * 因此这里自建极简 runner，测完显式退出，确保进程能结束。
  * 运行：node <本文件>
  */
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
+
+// 数据目录隔离：所有落盘都指向临时目录，绝不触碰真实的 server/data/。
+// 必须放在 require 任何服务端模块之前——数据路径在模块首次加载时即求值。
+const TMP_DATA_DIR = fs.mkdtempSync(
+  path.join(os.tmpdir(), 'bluebird-api-test-')
+);
+process.env.BLUEBIRD_DATA_DIR = TMP_DATA_DIR;
 
 process.env.PORT = '3999';
 process.env.BLUEBIRD_API_TOKEN = 'test-token-bluebird';
-delete process.env.DEEPSEEK_API_KEY; // 故意不配 API Key，验证降级路径
+// 这里必须是赋空串，不能 delete。
+// dotenv 只填补「不存在」的变量：一旦 delete，DEEPSEEK_API_KEY 变成不存在，
+// 随后 server/index.js 里的 dotenv.config() 会把它从 server/.env 重新注入，
+// 结果是测试真的去调 DeepSeek（产生真实费用），
+// 并把测试造的假对话写进真实聊天记录与长期记忆。
+process.env.DEEPSEEK_API_KEY = ''; // 故意不配 API Key，验证降级路径
 
 const BASE = 'http://127.0.0.1:3999';
 const TOKEN = 'test-token-bluebird';
@@ -52,6 +66,15 @@ async function req(path, { method = 'GET', token = TOKEN, body } = {}) {
     /* 非 JSON 响应 */
   }
   return { status: res.status, json };
+}
+
+// 清理测试产生的临时数据目录（失败时保留，便于排查）
+function cleanup() {
+  try {
+    fs.rmSync(TMP_DATA_DIR, { recursive: true, force: true });
+  } catch (_) {
+    /* 清理失败不影响测试结果 */
+  }
 }
 
 async function waitReady() {
@@ -191,6 +214,10 @@ async function waitReady() {
     failures.forEach(f => origLog('  - ' + f));
   }
 
+  origLog(`\n临时数据目录：${TMP_DATA_DIR}`);
+  cleanup();
+  origLog('临时数据目录已清理');
+
   console.log = origLog;
   console.error = origErr;
   process.exit(failed === 0 ? 0 : 1);
@@ -198,5 +225,6 @@ async function waitReady() {
   console.log = origLog;
   console.error = origErr;
   origLog('测试执行异常：' + error.message);
+  origLog(`临时数据目录保留待查：${TMP_DATA_DIR}`);
   process.exit(1);
 });
