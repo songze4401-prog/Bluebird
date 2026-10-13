@@ -3,13 +3,35 @@
  *
  * 独立脚本（非 node:test）：服务入口 require 时即 app.listen 且未导出实例，
  * 因此这里自建极简 runner，测完显式退出，确保进程能结束。
+ * 隔离说明：全程使用临时数据目录（BLUEBIRD_DATA_DIR），不读写 server/data 下的真实数据。
  * 运行：node <本文件>
  */
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
+
+// 数据目录隔离：所有落盘都指向临时目录，绝不触碰真实的 server/data/。
+// 必须放在 require 任何服务端模块之前——数据路径在模块首次加载时即求值，
+// 晚了设置就仍然指向 server/data/，本文件里的 /memory/clear、/history/clear
+// 会直接清空真实记忆与聊天记录。
+const TMP_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-api-test-'));
+process.env.BLUEBIRD_DATA_DIR = TMP_DATA_DIR;
 
 process.env.PORT = '3999';
 process.env.BLUEBIRD_API_TOKEN = 'test-token-bluebird';
-delete process.env.DEEPSEEK_API_KEY; // 故意不配 API Key，验证降级路径
+// 这里必须是赋空串，不能 delete：dotenv 只填补「不存在」的变量，一旦 delete，
+// 随后 server/index.js 的 dotenv.config() 会从 server/.env 把 DEEPSEEK_API_KEY
+// 重新注入，测试就会真的去调 DeepSeek（产生真实费用）。
+process.env.DEEPSEEK_API_KEY = ''; // 故意不配 API Key，验证降级路径
+
+// 进程退出（含断言失败、异常）时回收临时数据目录
+process.on('exit', () => {
+  try {
+    fs.rmSync(TMP_DATA_DIR, { recursive: true, force: true });
+  } catch (_) {
+    /* 清理失败不影响测试结果 */
+  }
+});
 
 const BASE = 'http://127.0.0.1:3999';
 const TOKEN = 'test-token-bluebird';

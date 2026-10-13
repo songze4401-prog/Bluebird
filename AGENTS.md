@@ -51,14 +51,24 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, and `emotion.js`), so tests never read or write the real `server/data`. Because `server/index.js` now acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module. Run each file separately:
+Nine files, 220 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, and `emotion.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
-node --test --test-concurrency=1 tests/memory.test.js   # node:test suites (memory, emotion)
-node tests/sessions.test.js                             # minimal custom-runner scripts
+node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js   # node:test suites (70)
+node tests/api.test.js                    # 22 — HTTP/auth/rate-limit, custom runner
+node tests/chat-persist.test.js           # 23
+node tests/emotion-decay-global.test.js   # 8
+node tests/memory-session-scope.test.js   # 13
+node tests/session-scope-e2e.test.js      # 18
+node tests/sessions-recovery.test.js      # 36
+node tests/sessions.test.js               # 30
 ```
 
-`tests/api.test.js` is the one exception — a legacy script that loads the real `server/data` and calls destructive endpoints (`/memory/clear`, `/history/clear`). Do not run it; kept for reference only.
+- The two `node:test` suites declare `{ concurrency: 1 }` on every `describe`: suites within a file share one data file, and the corruption-recovery case renames it to `.corrupt`. The other seven are minimal custom-runner scripts (not `node:test`) that exit explicitly.
+- `tests/api.test.js` is a legacy reference script rather than a `node:test` suite: it drives the live HTTP endpoint on a fixed port (`3999`) and keep the `PORT`/`BLUEBIRD_API_TOKEN` env setup at the top.
+- To disable the LLM in a test, assign `process.env.DEEPSEEK_API_KEY = ''` — do **not** `delete` it. `dotenv` only fills keys that are absent, so a deleted key is re-injected from `server/.env` when `server/index.js` loads, which sends real requests and incurs real cost.
+- Never read or write `server/data/` from a test. It holds the real memory, chat history, and emotion state; `.gitignore` excludes it, so anything a test wipes there cannot be recovered.
+- Verify isolation by seeding `server/data/` with sentinel content, running the full suite, and checking the files are byte-identical afterwards.
 
 ## Rules
 
