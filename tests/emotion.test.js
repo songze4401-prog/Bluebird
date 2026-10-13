@@ -1,16 +1,18 @@
 /**
  * 云岫 Bluebird — 情绪系统 (server/emotion.js) 行为测试
  *
- * 只读外部验证：不改被测源码，仅通过公开 API + 真实数据文件驱动。
+ * 只读外部验证：不改被测源码，仅通过公开 API + 数据文件驱动。
+ * 隔离说明：全程使用临时数据目录（BLUEBIRD_DATA_DIR），不读写 server/data 下的真实数据。
  * 运行：node --test --test-concurrency=1 <本文件>
  *
- * 串行说明：本文件所有套件共用同一个 emotion-state.json，且其中「文件损坏恢复」
- * 用例会把它 rename 成 .corrupt 备份。任何并行执行都会让其他套件在读取时扑空，
- * 因此每个 describe 都显式声明 concurrency: 1，并在 before 中清空数据目录。
+ * 串行说明：本文件所有套件共用同一个 emotion-state.json（临时目录内），且其中
+ * 「文件损坏恢复」用例会把它 rename 成 .corrupt 备份。任何并行执行都会让其他套件
+ * 在读取时扑空，因此每个 describe 都显式声明 concurrency: 1，并在 before 中清空残留。
  */
 const { test, describe, before, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 // 静音被测模块的日志，保持测试输出可读
@@ -20,7 +22,12 @@ console.log = () => {};
 console.error = () => {};
 
 const SERVER_DIR = path.join(__dirname, '..', 'server');
-const DATA_DIR = path.join(SERVER_DIR, 'data');
+
+// 隔离：全部数据落在系统临时目录，绝不触碰 server/data 下的真实情绪文件
+const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-emotion-'));
+process.env.BLUEBIRD_DATA_DIR = TMP_DIR;
+
+const DATA_DIR = TMP_DIR;
 const EMOTION_FILE = path.join(DATA_DIR, 'emotion-state.json');
 
 const emotion = require(path.join(SERVER_DIR, 'emotion.js'));
@@ -222,48 +229,71 @@ describe('惯性更新 applyObservation', SERIAL, () => {
   });
 });
 
-describe('时间衰减 applyTimeDecay', SERIAL, () => {
+describe('时间衰减 applyTimeDecay（全局检查基线，E3）', SERIAL, () => {
+  /** 以"N 分钟前的 lastDecayAt"为基线重置状态（衰减不再接收 gap 参数） */
+  function resetWithBaseline(rawEmotion, intensity, minutes) {
+    const baseline = new Date(Date.now() - minutes * 60 * 1000).toISOString();
+    resetTo({
+      emotion: rawEmotion,
+      intensity,
+      updatedAt: baseline,
+      lastObservedAt: baseline,
+      lastDecayAt: baseline,
+    });
+  }
+
   test('10 分钟内返回：情绪完全保留', () => {
-    resetTo({ emotion: 'happy', intensity: 100 });
-    const s = emotion.applyTimeDecay(5 * 60);
+    resetWithBaseline('happy', 100, 5);
+    const s = emotion.applyTimeDecay();
     assert.equal(s.emotion, 'happy');
     assert.equal(s.intensity, 100);
   });
 
   test('1 小时：按档位 0.2 且强度加成后衰减', () => {
-    resetTo({ emotion: 'happy', intensity: 100 });
-    const s = emotion.applyTimeDecay(60 * 60);
+    resetWithBaseline('happy', 100, 60);
+    const s = emotion.applyTimeDecay();
     // ratio 0.2 * (0.5 + 1) = 0.3 → 100 * 0.7 = 70
     assert.equal(s.intensity, 70);
     assert.equal(s.emotion, 'happy');
   });
 
   test('2 天：衰减至阈值以下，回归 calm', () => {
-    resetTo({ emotion: 'happy', intensity: 100 });
-    const s = emotion.applyTimeDecay(2 * 24 * 60 * 60);
+    resetWithBaseline('happy', 100, 2 * 24 * 60);
+    const s = emotion.applyTimeDecay();
     assert.equal(s.emotion, 'calm');
     assert.equal(s.intensity, 0);
   });
 
   test('3 天以上：直接回归 calm', () => {
-    resetTo({ emotion: 'excited', intensity: 90 });
-    const s = emotion.applyTimeDecay(10 * 24 * 60 * 60);
+    resetWithBaseline('excited', 90, 10 * 24 * 60);
+    const s = emotion.applyTimeDecay();
     assert.equal(s.emotion, 'calm');
     assert.equal(s.intensity, 0);
   });
 
   test('本就是 calm 时不做处理', () => {
-    resetTo({ emotion: 'calm', intensity: 0 });
-    const s = emotion.applyTimeDecay(999999);
+    resetWithBaseline('calm', 0, 10 * 24 * 60);
+    const s = emotion.applyTimeDecay();
     assert.equal(s.emotion, 'calm');
     assert.equal(s.intensity, 0);
   });
 
-  test('非法 gap(NaN/0/负数)不改变状态', () => {
-    resetTo({ emotion: 'happy', intensity: 60 });
-    assert.equal(emotion.applyTimeDecay(NaN).intensity, 60);
-    assert.equal(emotion.applyTimeDecay(0).intensity, 60);
-    assert.equal(emotion.applyTimeDecay(-100).intensity, 60);
+  test('同一段间隔只衰减一次：检查基线随每次调用推进', () => {
+    resetWithBaseline('happy', 100, 60);
+    assert.equal(emotion.applyTimeDecay().intensity, 70);
+    // 紧接着再检查一次（等效于切到旧会话后立刻又发一条）：gap≈0，不再衰减
+    assert.equal(emotion.applyTimeDecay().intensity, 70);
+  });
+
+  test('旧状态文件没有 lastDecayAt 时，回退用 updatedAt 作基线', () => {
+    const baseline = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    resetTo({ emotion: 'happy', intensity: 100, updatedAt: baseline });
+    assert.equal(emotion.applyTimeDecay().intensity, 70);
+  });
+
+  test('基线时间无法解析时不衰减', () => {
+    resetTo({ emotion: 'happy', intensity: 60, updatedAt: '不是时间' });
+    assert.equal(emotion.applyTimeDecay().intensity, 60);
   });
 });
 

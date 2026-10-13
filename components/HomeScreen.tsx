@@ -15,10 +15,13 @@ export function HomeScreen({
   onContinue,
   onNewChat,
   onHistory,
+  creatingChat,
 }: {
   onContinue: () => void;
   onNewChat: () => void;
   onHistory: () => void;
+  // 新建会话请求进行中：禁用按钮防连点，避免创建出多余的空会话
+  creatingChat?: boolean;
 }) {
   const styles = useMemo(() => createStyles(), []);
   const insets = useSafeAreaInsets();
@@ -72,9 +75,12 @@ export function HomeScreen({
           <TouchableOpacity
             style={styles.outlineButton}
             onPress={onNewChat}
+            disabled={creatingChat}
             activeOpacity={0.82}
           >
-            <Text style={styles.outlineLabel}>新建聊天</Text>
+            <Text style={styles.outlineLabel}>
+              {creatingChat ? '正在新建…' : '新建聊天'}
+            </Text>
           </TouchableOpacity>
 
           <TouchableOpacity

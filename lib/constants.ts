@@ -2,6 +2,10 @@
 
 export const API_TOKEN = process.env.EXPO_PUBLIC_BLUEBIRD_API_TOKEN;
 
+// 默认会话 id：与后端 sessions.js 的 DEFAULT_SESSION_ID 对齐。
+// 全前端只在此处写死；未传 sessionId 时后端也会落到该会话（旧客户端兼容）。
+export const DEFAULT_SESSION_ID = 'default';
+
 export const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
 
 // 与 Emotion System V1 的 8 种情绪一一对应（全项目只有这一套情绪值域）

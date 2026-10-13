@@ -19,6 +19,7 @@ export function ChatInput({
   sending,
   onSend,
   onReturnHome,
+  loadingHistory,
 }: {
   theme: Theme;
   value: string;
@@ -26,6 +27,8 @@ export function ChatInput({
   sending: boolean;
   onSend: () => void;
   onReturnHome: () => void;
+  // 会话历史加载中：发送会带错上下文，先禁用
+  loadingHistory?: boolean;
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);
 
@@ -60,11 +63,11 @@ export function ChatInput({
             <TouchableOpacity
               style={[
                 styles.sendButton,
-                sending && styles.sendButtonDisabled,
+                (sending || loadingHistory) && styles.sendButtonDisabled,
                 { backgroundColor: theme.sendButton },
               ]}
               onPress={onSend}
-              disabled={sending}
+              disabled={sending || loadingHistory}
               activeOpacity={0.75}
               accessibilityLabel="发送"
             >

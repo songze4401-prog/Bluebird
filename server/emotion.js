@@ -2,7 +2,13 @@
 const fs = require('fs');
 const path = require('path');
 
-const EMOTION_FILE = path.join(__dirname, 'data', 'emotion-state.json');
+// 数据目录可通过 BLUEBIRD_DATA_DIR 覆盖：测试用临时目录，避免碰到真实数据。
+// 未设置时与 sessions.js / memory.js 保持一致，落在 server/data/。
+const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
+  ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
+  : path.join(__dirname, 'data');
+
+const EMOTION_FILE = path.join(DATA_DIR, 'emotion-state.json');
 
 // V1 情绪值域：与人格 Prompt 的 [mood:xxx] 候选值严格一一对应。
 // 这里只有一套情绪概念，不再保留旧的 teasing / surprised / laughing / angry。
@@ -71,6 +77,9 @@ function createDefaultState() {
     intensity: 0,
     updatedAt: now,
     lastObservedAt: null,
+    // 上一次时间衰减检查的时刻（全局，与会话无关）。null 表示还没检查过，
+    // 此时回退用 updatedAt 作为基线。
+    lastDecayAt: null,
   };
 }
 
@@ -96,6 +105,8 @@ function normalizeState(raw) {
         typeof raw.updatedAt === 'string' ? raw.updatedAt : new Date().toISOString(),
       lastObservedAt:
         typeof raw.lastObservedAt === 'string' ? raw.lastObservedAt : null,
+      lastDecayAt:
+        typeof raw.lastDecayAt === 'string' ? raw.lastDecayAt : null,
     };
   }
 
@@ -106,6 +117,8 @@ function normalizeState(raw) {
       typeof raw.updatedAt === 'string' ? raw.updatedAt : new Date().toISOString(),
     lastObservedAt:
       typeof raw.lastObservedAt === 'string' ? raw.lastObservedAt : null,
+    lastDecayAt:
+      typeof raw.lastDecayAt === 'string' ? raw.lastDecayAt : null,
   };
 }
 
@@ -143,7 +156,8 @@ function loadEmotion() {
 
 async function saveEmotion(nextState) {
   const dir = path.dirname(EMOTION_FILE);
-  const tmpFile = `${EMOTION_FILE}.tmp`;
+  // 与 memory.js / sessions.js 同款：临时文件名带 pid，避免多实例抢同一路径
+  const tmpFile = `${EMOTION_FILE}.tmp.${process.pid}`;
 
   fs.mkdirSync(dir, { recursive: true });
 
@@ -175,15 +189,30 @@ function commit(nextState) {
   });
 }
 
-// ---- 时间衰减：结合 Time Sense V1 的 gapSeconds ----
+// ---- 时间衰减：基于全局"上次衰减检查时刻"，与会话无关 ----
+// E3：不再使用当前会话的 gapSeconds（切到很久没聊的旧会话时，会把那个
+// 会话的历史间隔错误地施加在全局情绪上，同一段间隔还可能被算两次）。
+// 基线固定为 state.lastDecayAt（旧数据回退到 updatedAt），并且每次检查后
+// 就把基线推进到当前 —— 同一段时间间隔只会衰减一次。
 // 强烈情绪衰减更快：在分档比例之上再按强度放大。
-function applyTimeDecay(gapSeconds) {
+function applyTimeDecay() {
+  const nowIso = new Date().toISOString();
+
+  const baselineRaw = state.lastDecayAt || state.updatedAt;
+  const baseline = baselineRaw ? new Date(baselineRaw).getTime() : NaN;
+
+  const gapSeconds = Number.isFinite(baseline)
+    ? Math.max(0, Math.floor((Date.now() - baseline) / 1000))
+    : 0;
+
+  // 无论是否真的发生衰减，都推进检查基线（仅内存推进，随下一次状态提交
+  // 一并持久化；没有衰减就等于没有状态变化，不影响重启后的计算）。
+  state = normalizeState({ ...state, lastDecayAt: nowIso });
+
   if (state.emotion === 'calm') return state;
+  if (gapSeconds <= 0) return state;
 
-  const gap = Number(gapSeconds);
-  if (!Number.isFinite(gap) || gap <= 0) return state;
-
-  const gapMinutes = gap / 60;
+  const gapMinutes = gapSeconds / 60;
   const tier = DECAY_TIERS.find(item => gapMinutes < item.maxMinutes);
   const ratio = tier ? tier.ratio : 1;
 
@@ -196,7 +225,7 @@ function applyTimeDecay(gapSeconds) {
   const next = normalizeState({
     ...state,
     intensity: nextIntensity,
-    updatedAt: new Date().toISOString(),
+    updatedAt: nowIso,
   });
 
   if (

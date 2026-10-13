@@ -8,3 +8,12 @@ export type Message = {
   retryText?: string;
   mood?: string;
 };
+
+// 会话元数据（与 GET /sessions 返回结构一致）
+export type SessionMeta = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+};
