@@ -117,7 +117,17 @@ async function waitMemories(predicate, timeout = 3000) {
   return null;
 }
 
+// 记忆按"贡献列表"落盘，但 /memory 展示的 sourceQuote 取最早一条贡献的原话，
+// 所以这条展示断言在合并后依然成立。
 const isSameQuote = m => m && m.sourceQuote === '我叫宋泽';
+
+/** 条目的贡献列表（一条记忆可能被多个会话各自说过） */
+const contributionsOf = m =>
+  m && Array.isArray(m.contributions) ? m.contributions : [];
+
+/** 条目里是否有某个会话留下的贡献 */
+const hasScope = (m, sessionId) =>
+  contributionsOf(m).some(c => c.sessionId === sessionId);
 
 async function main() {
   const quotes = {
@@ -276,7 +286,7 @@ async function main() {
   check('A 会话聊天成功且已落盘', chatA1.json?.persisted === true);
 
   let memories = await waitMemories(list =>
-    list.some(m => m.sessionId === sessionA && isSameQuote(m))
+    list.some(m => hasScope(m, sessionA) && isSameQuote(m))
   );
   check(
     'E2-1 提取的记忆带 A 会话归属',
@@ -285,7 +295,12 @@ async function main() {
   );
   check(
     'E2-1 无归属旧记忆（吃辣）不受影响',
-    !!memories && memories.some(m => m.sourceQuote === quotes.food && !m.sessionId)
+    !!memories &&
+      memories.some(
+        m =>
+          m.sourceQuote === quotes.food &&
+          contributionsOf(m).every(c => c.sessionId === null)
+      )
   );
 
   // ---- E2-2：本会话撤回删除本会话的记忆 ----
@@ -300,7 +315,7 @@ async function main() {
   );
 
   memories = await waitMemories(
-    list => !list.some(m => m.sessionId === sessionA)
+    list => !list.some(m => hasScope(m, sessionA))
   );
   check(
     'E2-2 本会话记忆被同步撤回',
@@ -314,7 +329,7 @@ async function main() {
     body: { sessionId: sessionA, message: quotes.name },
   });
   memories = await waitMemories(list =>
-    list.some(m => m.sessionId === sessionA && isSameQuote(m))
+    list.some(m => hasScope(m, sessionA) && isSameQuote(m))
   );
   check('E2-3 前置：A 会话重新产生记忆', !!memories);
 
@@ -324,12 +339,16 @@ async function main() {
   });
   check('B 会话聊天成功', chatB1.json?.persisted === true);
 
+  // 贡献列表模型：B 重述合并不是把归属改判给 B，而是追加一条 B 的贡献，
+  // A 的归属与原话锚点都还在 —— 归属不再漂移。
   memories = await waitMemories(list =>
-    list.some(m => m.sessionId === sessionB && isSameQuote(m)) &&
-    !list.some(m => m.sessionId === sessionA)
+    list.some(
+      m =>
+        hasScope(m, sessionA) && hasScope(m, sessionB) && isSameQuote(m)
+    )
   );
   check(
-    'E2-3 前置：同内容记忆被去重合并到 B 会话归属',
+    'E2-3 前置：合并后两个会话的归属都保留（不再漂移）',
     !!memories,
     JSON.stringify(memories)
   );
@@ -348,23 +367,39 @@ async function main() {
   const afterRecallA2 = await req('/memory');
   check(
     'E2-3 A 撤回未误删 B 会话的同内容记忆',
-    !!afterRecallA2.json?.memories?.some(m => m.sessionId === sessionB && isSameQuote(m)),
+    !!afterRecallA2.json?.memories?.some(m => hasScope(m, sessionB) && isSameQuote(m)),
+    JSON.stringify(afterRecallA2.json?.memories)
+  );
+  check(
+    'E2-3 A 撤回只摘掉 A 的贡献，记忆仍留给 B',
+    !afterRecallA2.json?.memories?.some(m => hasScope(m, sessionA)),
     JSON.stringify(afterRecallA2.json?.memories)
   );
 
   // ---- E2-4：无归属旧记忆：本会话无匹配时回退撤回 ----
-  // 把旧条目 createdAt 刷成当前，保证落在撤回的 5 秒 ~ 2 小时时间窗内
+  // 把无归属旧贡献的时间刷成当前，保证落在撤回的 5 秒 ~ 2 小时时间窗内
+  // （时间窗按贡献自身的 createdAt 判定）
   const memoryFile = path.join(DATA_DIR, 'memory.json');
   const current = JSON.parse(fs.readFileSync(memoryFile, 'utf8'));
   const refreshed = new Date().toISOString();
+  const isLegacyFood = c =>
+    c.sessionId === null && c.sourceQuote === quotes.food;
+
   fs.writeFileSync(
     memoryFile,
     JSON.stringify(
-      current.map(m =>
-        !m.sessionId && m.sourceQuote === quotes.food
-          ? { ...m, createdAt: refreshed, updatedAt: refreshed }
-          : m
-      ),
+      current.map(m => {
+        if (!contributionsOf(m).some(isLegacyFood)) return m;
+
+        return {
+          ...m,
+          createdAt: refreshed,
+          updatedAt: refreshed,
+          contributions: contributionsOf(m).map(c =>
+            isLegacyFood(c) ? { ...c, createdAt: refreshed } : c
+          ),
+        };
+      }),
       null,
       2
     ),
@@ -398,7 +433,7 @@ async function main() {
   );
   check(
     'E2-4 其他会话的记忆仍然保留',
-    !!memories && memories.some(m => m.sessionId === sessionB && isSameQuote(m))
+    !!memories && memories.some(m => hasScope(m, sessionB) && isSameQuote(m))
   );
 
   // ---- E3：切到五天没聊的旧会话，不额外衰减全局情绪 ----

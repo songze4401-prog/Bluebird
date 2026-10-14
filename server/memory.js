@@ -88,6 +88,71 @@ function shouldProcessMemory(message) {
   return MEMORY_TRIGGER.test(text);
 }
 
+// 记忆条目的"贡献列表"：同一条事实可能被多个会话各自说过，每说一次就留下
+// 一条 { sessionId, sourceQuote, createdAt } 贡献。
+// 撤回某条消息只摘掉它对应的那条贡献，贡献被摘空才删整条记忆 —— 这样
+// 「A 撤回自己说的话」和「B 也说过、事实仍成立」可以同时成立。
+function normalizeContribution(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const sourceQuote =
+    typeof raw.sourceQuote === 'string' ? raw.sourceQuote.trim() : '';
+
+  if (!sourceQuote) return null;
+
+  return {
+    sessionId:
+      typeof raw.sessionId === 'string' && raw.sessionId.trim()
+        ? raw.sessionId.trim()
+        : null,
+    sourceQuote,
+    createdAt:
+      typeof raw.createdAt === 'string' && raw.createdAt
+        ? raw.createdAt
+        : null,
+  };
+}
+
+// 旧数据（引入贡献列表之前）把归属与撤回锚点平铺成 sourceQuote + 可选 sessionId；
+// 读盘时统一升级成一条贡献，其余字段原样保留。
+function normalizeEntry(item) {
+  const { sourceQuote, sessionId, ...rest } = item;
+
+  const contributions = Array.isArray(rest.contributions)
+    ? rest.contributions.map(normalizeContribution).filter(Boolean)
+    : [];
+
+  if (!contributions.length && typeof sourceQuote === 'string') {
+    const legacy = normalizeContribution({
+      sessionId,
+      sourceQuote,
+      createdAt: item.createdAt,
+    });
+
+    if (legacy) contributions.push(legacy);
+  }
+
+  return { ...rest, contributions };
+}
+
+// 同会话 + 同原话的重复贡献只保留最早一条：同一句话在同一会话里重复出现时，
+// 撤回其中任意一条都应连带撤掉这条贡献，不重复计数。
+function mergeContributions(existing, incoming) {
+  const merged = Array.isArray(existing) ? existing.slice() : [];
+
+  for (const contribution of Array.isArray(incoming) ? incoming : []) {
+    const duplicated = merged.some(
+      item =>
+        item.sessionId === contribution.sessionId &&
+        item.sourceQuote === contribution.sourceQuote
+    );
+
+    if (!duplicated) merged.push(contribution);
+  }
+
+  return merged;
+}
+
 function loadMemories() {
   try {
     if (!fs.existsSync(MEMORY_FILE)) {
@@ -104,13 +169,15 @@ function loadMemories() {
       throw new Error('memory.json 不是数组');
     }
 
-    memories = parsed.filter(
-      item =>
-        item &&
-        typeof item === 'object' &&
-        typeof item.content === 'string' &&
-        item.content.trim()
-    );
+    memories = parsed
+      .filter(
+        item =>
+          item &&
+          typeof item === 'object' &&
+          typeof item.content === 'string' &&
+          item.content.trim()
+      )
+      .map(normalizeEntry);
 
     console.log(`Memory loaded: ${memories.length}`);
   } catch (error) {
@@ -315,20 +382,27 @@ sourceQuote 必须来自用户原话。
       return null;
     }
 
+    const now = new Date().toISOString();
+
     return {
       content,
       type,
       keywords,
       confidence,
-      sourceQuote,
-      // 会话归属：撤回时优先只删"本会话产生的记忆"，避免跨会话误删。
-      // 旧条目没有该字段，撤回逻辑会把它们当作无归属历史数据处理。
-      sessionId:
-        typeof sessionId === 'string' && sessionId.trim()
-          ? sessionId.trim()
-          : null,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      // 归属 + 撤回锚点合成一条贡献。不再平铺 sourceQuote/sessionId，
+      // 合并时才能只追加贡献、不覆盖原会话的归属与原话锚点。
+      contributions: [
+        {
+          sessionId:
+            typeof sessionId === 'string' && sessionId.trim()
+              ? sessionId.trim()
+              : null,
+          sourceQuote,
+          createdAt: now,
+        },
+      ],
+      createdAt: now,
+      updatedAt: now,
     };
   } catch (error) {
     console.error(
@@ -379,11 +453,19 @@ async function processMemory(client, message, sessionId = null) {
     );
 
     if (duplicateIndex >= 0) {
+      const existing = next[duplicateIndex];
+
       next[duplicateIndex] = {
-        ...next[duplicateIndex],
+        ...existing,
         ...candidate,
+        // 归属与原话锚点不在覆盖范围内：本次提取只追加成一条贡献，
+        // 原会话的贡献（含它的 sourceQuote）原样保留。
+        contributions: mergeContributions(
+          existing.contributions,
+          candidate.contributions
+        ),
         createdAt:
-          next[duplicateIndex].createdAt ||
+          existing.createdAt ||
           candidate.createdAt,
         updatedAt: new Date().toISOString(),
       };
@@ -588,13 +670,14 @@ async function clearMemories() {
 }
 
 // 撤回用户消息时，同步撤回由该消息产生的长期记忆。
-// 通过 sourceQuote 与原文的包含/相似度匹配，并用时间窗防止误删无关记忆。
-// 会话归属规则（E2）：
-//   1) 优先只撤回 sourceQuote 匹配且同为"本会话"产生的记忆；
-//   2) 本会话无匹配时，回退匹配"无归属"的旧条目（引入 sessionId 之前写入的
-//      记忆，没有会话信息，按旧行为处理）；
-//   3) 带有其他会话标记的条目一律不动 —— 这正是旧实现里"A 会话撤回误删
-//      B 会话同内容记忆"的漏洞。
+// 通过贡献自身的 sourceQuote 与原文做包含/相似度匹配，并用时间窗防止误删无关记忆。
+// 归属规则（E2 + 贡献列表）：
+//   1) 优先只摘掉 sourceQuote 匹配且同为"本会话"的那条贡献；
+//   2) 本会话没有任何匹配时，回退摘掉"无归属"的旧贡献（引入 sessionId 之前
+//      写入的记忆，没有会话信息，按旧行为处理）；
+//   3) 其他会话的贡献一律不动 —— 这正是旧实现里"A 会话撤回误删 B 会话
+//      同内容记忆"的漏洞；
+//   4) 贡献被摘空的记忆整条删除；还有别的会话贡献撑着时，记忆保留。
 async function recallMemoryBySourceQuote(sourceText, sourceCreatedAt, sessionId = null) {
   if (!MEMORY_ENABLED) return 0;
 
@@ -610,9 +693,11 @@ async function recallMemoryBySourceQuote(sourceText, sourceCreatedAt, sessionId 
       ? sessionId.trim()
       : null;
 
-  // 单条记忆是否与本条被撤回消息匹配（文本 + 时间窗）
-  const isMatch = item => {
-    const quote = normalize(item && item.sourceQuote);
+  // 单条贡献是否与本条被撤回消息匹配（文本 + 时间窗）。
+  // 时间窗用贡献自身的时间，而不是整条记忆的 createdAt —— 合并后的记忆里
+  // 每个会话的贡献各有各的产生时间。
+  const isMatch = contribution => {
+    const quote = normalize(contribution && contribution.sourceQuote);
 
     if (!quote) return false;
 
@@ -623,40 +708,67 @@ async function recallMemoryBySourceQuote(sourceText, sourceCreatedAt, sessionId 
 
     if (!textMatch) return false;
 
-    const memoryTime =
-      item && item.createdAt
-        ? new Date(item.createdAt).getTime()
+    const contributionTime =
+      contribution && contribution.createdAt
+        ? new Date(contribution.createdAt).getTime()
         : null;
 
     return (
       sourceTime === null ||
-      memoryTime === null ||
-      (memoryTime >= sourceTime - 5000 &&
-        memoryTime <= sourceTime + 2 * 60 * 60 * 1000)
+      contributionTime === null ||
+      (contributionTime >= sourceTime - 5000 &&
+        contributionTime <= sourceTime + 2 * 60 * 60 * 1000)
     );
   };
 
   return enqueueWrite(async () => {
     const current = Array.isArray(memories) ? memories : [];
 
-    const candidates = current.filter(
-      item => item && item.sessionId === targetSessionId && isMatch(item)
+    // 本会话名下是否存在任何匹配贡献
+    const hasPrimaryMatch = current.some(
+      item =>
+        Array.isArray(item.contributions) &&
+        item.contributions.some(
+          contribution =>
+            contribution.sessionId === targetSessionId &&
+            isMatch(contribution)
+        )
     );
 
-    // 本会话没有任何匹配时，才回退到无归属旧条目；有会话标记的其他会话条目
-    // 永不删除，保证跨会话撤回不会互相影响。
-    if (!candidates.length) {
-      for (const item of current) {
-        if (item && !item.sessionId && isMatch(item)) {
-          candidates.push(item);
-        }
+    // 本会话没有任何匹配时，才回退到无归属旧贡献；其他会话的贡献永不动。
+    const useFallback = !hasPrimaryMatch;
+
+    const isTargeted = contribution =>
+      useFallback
+        ? contribution.sessionId === null
+        : contribution.sessionId === targetSessionId;
+
+    const remaining = [];
+    let dropped = 0;
+
+    for (const item of current) {
+      const contributions = Array.isArray(item.contributions)
+        ? item.contributions
+        : [];
+
+      const kept = contributions.filter(
+        contribution => !(isTargeted(contribution) && isMatch(contribution))
+      );
+
+      dropped += contributions.length - kept.length;
+
+      if (!contributions.length || kept.length) {
+        remaining.push(
+          kept.length === contributions.length
+            ? item
+            : { ...item, contributions: kept }
+        );
       }
+      // 贡献被摘空的记忆整条删除
     }
 
-    if (!candidates.length) return 0;
+    if (!dropped) return 0;
 
-    const removeSet = new Set(candidates);
-    const remaining = current.filter(item => !removeSet.has(item));
     const removed = current.length - remaining.length;
 
     memories = remaining;
@@ -669,10 +781,21 @@ async function recallMemoryBySourceQuote(sourceText, sourceCreatedAt, sessionId 
 
 // 记忆库只读读取：返回浅拷贝，避免外部代码直接改到内部数组。
 // 刻意不调用 loadMemories()——它会重置内存数组，不适合作为读取入口。
+// 落盘格式里归属与锚点按"贡献"存；这里额外补一个展示用的 sourceQuote
+// （最早一条贡献的原话），前端记忆库仍按单条 sourceQuote 渲染。
 function getMemories() {
   const current = Array.isArray(memories) ? memories : [];
 
-  return current.map(item => ({ ...item }));
+  return current.map(item => {
+    const contributions = Array.isArray(item.contributions)
+      ? item.contributions
+      : [];
+
+    return {
+      ...item,
+      sourceQuote: contributions.length ? contributions[0].sourceQuote : '',
+    };
+  });
 }
 
 // 记忆库单条删除：以 createdAt + content 作为定位键（现有数据格式没有 id）。
