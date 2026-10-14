@@ -6,7 +6,8 @@
  *
  * 覆盖：以 lastDecayAt 为全局基线的分档衰减、同一间隔不重复衰减（等效于
  *       连续切换会话）、旧状态文件（无 lastDecayAt）回退 updatedAt、
- *       calm 不受影响、衰减结果含 lastDecayAt 一并落盘。
+ *       calm 不受影响、衰减结果含 lastDecayAt 一并落盘、未衰减时基线
+ *       同样落盘（否则无衰减间隙内重启会让同一间隔更早衰减）。
  *
  * 运行：node tests/emotion-decay-global.test.js
  */
@@ -153,6 +154,42 @@ async function main() {
     raw => raw.intensity === 47 && typeof raw.lastDecayAt === 'string'
   );
   check('衰减后的状态与 lastDecayAt 已落盘', !!persisted, JSON.stringify(persisted));
+
+  // 9) 未发生衰减时，基线推进同样必须落盘。
+  //    历史上 applyTimeDecay 只在真的衰减时才 commit，未衰减时 lastDecayAt
+  //    仅推进在内存里。后果：进程在"未衰减"的间隙重启后，磁盘基线仍是旧值，
+  //    重启后的 gap 从更早的时刻算起 —— 同一段间隔被更早判为可衰减。
+  //    实测（可控时钟）：T0→+3min 不衰减→+12min，不衰减路径 gap 只有 9 分钟
+  //    不衰减；中途重启则 gap 变成 12 分钟、sad 60 -> 47。
+  //    本用例锁定根因：不衰减时磁盘基线也要更新到当下。
+  seedState({
+    emotion: 'sad',
+    intensity: 60,
+    updatedAt: minutesAgo(5),
+    lastObservedAt: minutesAgo(5),
+    lastDecayAt: minutesAgo(5),
+  });
+  s = emotion.applyTimeDecay();
+  check(
+    '5 分钟（<10）不衰减（用例 9 前提：确认未走衰减分支）',
+    s.emotion === 'sad' && s.intensity === 60,
+    `${s.emotion} ${s.intensity}`
+  );
+  // 轮询直到磁盘出现"刚写下"的基线（age < 5s）。
+  // 修复前磁盘永远停留在 5 分钟前的种子值，这里会超时返回 null。
+  const baselinePersisted = await waitForFile(
+    raw =>
+      raw.intensity === 60 &&
+      typeof raw.lastDecayAt === 'string' &&
+      Date.now() - new Date(raw.lastDecayAt).getTime() < 5000
+  );
+  check(
+    '未衰减时新基线也已落盘（重启后不回退到旧值）',
+    !!baselinePersisted,
+    baselinePersisted
+      ? `lastDecayAt=${baselinePersisted.lastDecayAt}`
+      : '磁盘基线仍停留在 5 分钟前的种子值'
+  );
 }
 
 main()

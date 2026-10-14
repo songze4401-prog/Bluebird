@@ -205,18 +205,30 @@ function applyTimeDecay() {
     ? Math.max(0, Math.floor((Date.now() - baseline) / 1000))
     : 0;
 
-  // 无论是否真的发生衰减，都推进检查基线（仅内存推进，随下一次状态提交
-  // 一并持久化；没有衰减就等于没有状态变化，不影响重启后的计算）。
+  // 无论是否真的发生衰减，都推进检查基线。未发生衰减时也必须把新基线
+  // 落盘：只在内存推进的话，进程若在"未衰减"的间隙里重启，磁盘上的基线
+  // 仍是旧值，重启后的 gap 会从更早的时刻算起 —— 同一段间隔被更早地判为
+  // 可衰减。实测同一时钟序列 T0→+3min（不衰减）→+12min：不重启时 gap 从
+  // +3min 算只有 9 分钟、不衰减；中途重启则 gap 从 T0 算有 12 分钟、
+  // 衰减 sad 60 -> 47。回归防护见 tests/emotion-decay-global.test.js。
+  // 衰减路径的 commit(next) 已带上新基线，因此不在那里中间写一次旧值 ——
+  // 中间态会被并发的读者观察到（测试的"等到 excited 就停"轮询就撞到过）。
   state = normalizeState({ ...state, lastDecayAt: nowIso });
 
-  if (state.emotion === 'calm') return state;
-  if (gapSeconds <= 0) return state;
+  // 无衰减路径：把推进后的基线落盘后原样返回
+  const persistBaseline = () => {
+    commit(state);
+    return state;
+  };
+
+  if (state.emotion === 'calm') return persistBaseline();
+  if (gapSeconds <= 0) return persistBaseline();
 
   const gapMinutes = gapSeconds / 60;
   const tier = DECAY_TIERS.find(item => gapMinutes < item.maxMinutes);
   const ratio = tier ? tier.ratio : 1;
 
-  if (ratio <= 0) return state; // 刚离开又回来，保留
+  if (ratio <= 0) return persistBaseline(); // 刚离开又回来，保留
 
   const strengthBoost = 0.5 + state.intensity / MAX_INTENSITY;
   const effective = Math.min(1, ratio * strengthBoost);
@@ -232,7 +244,8 @@ function applyTimeDecay() {
     next.emotion === state.emotion &&
     next.intensity === state.intensity
   ) {
-    return state;
+    // 情绪没变，但基线推进了，同样要落盘
+    return persistBaseline();
   }
 
   console.log(`Emotion decay: ${state.emotion} ${state.intensity} -> ${next.emotion} ${next.intensity}`);
