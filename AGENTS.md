@@ -20,7 +20,7 @@ Expo ships breaking changes every SDK release. APIs you remember are likely rena
 - `server/` — Express API, entry `server/index.js`, listens on port 3000 (`PORT`). Routes: `/chat` (DeepSeek via the `openai` SDK), `/sessions` (list/create), `/sessions/:id`, `/history`, `/history/clear`, `/history/recall`, `/memory`, `/memory/clear`, `/memory/delete`, `/emotion`; all except `/` require `Authorization: Bearer <token>` and pass through a rate-limit middleware. `server/sessions.js` owns multi-session storage and legacy migration, `server/memory.js` and `server/emotion.js` hold the domain logic; JSON state lives in `server/data/`.
   - Multi-session: `/chat`, `/history`, `/history/clear`, `/history/recall` all accept an optional `sessionId` (body for POST, query for GET). When omitted they fall back to the built-in `default` session, so clients that send no `sessionId` keep the legacy single-history behaviour. Unknown session ids are rejected with 404. `/chat` builds the model context from the session's stored messages; the client-supplied `history` is used as a fallback only for the `default` session (legacy clients) and only when that session is empty — a freshly created session never borrows another conversation's history. On first boot the legacy `server/data/chat-history.json` is imported into the `default` session, backed up in place, and never modified or deleted.
   - `/chat` persists before responding and returns `persisted` (`true`/`false`); a broken store therefore surfaces as `persisted: false` instead of a silent success. Persistence is synchronous, which also makes the same-session read-modify-write atomic (no `await` inside). Clients that disconnect before the reply is ready are not persisted, to avoid ghost messages.
-  - Storage safety: `server/data/sessions.json` is the authoritative store. If it exists but cannot be read/parsed, or parses to an unexpected shape, the server enters read-only protection — it refuses all writes, leaves the file untouched at its original path (no rename, no delete), and serves a read-only fallback view built from the legacy history. Repairs must be done by hand on that file. This supersedes the older "rename to `.corrupt-<ts>`" behaviour, so `.corrupt-*` files and duplicate `.pre-multisession.bak-*` backups are no longer produced. `sessions.json` writes are `fsync`-ed before the atomic rename (see C2 note below); orphan `messages` keys with no matching session are reported on load rather than dropped silently.
+  - Storage safety: `server/data/sessions.json` is the authoritative store. If it exists but cannot be read/parsed, or parses to an unexpected shape, the server enters read-only protection — it refuses all writes, leaves the file untouched at its original path (no rename, no delete), and serves a read-only fallback view built from the legacy history. Repairs must be done by hand on that file. This supersedes the older "rename to `.corrupt-<ts>`" behaviour **for `sessions.json` only**: that file is never renamed, and the migration snapshot is never stacked into duplicates. This must not be read as "the other modules changed too" — `server/memory.js` and `server/emotion.js` still rename an unreadable file to `<file>.corrupt-<ts>` and continue with empty state, and one `chat-history.json.pre-multisession.bak` is still written by the legacy migration when no such file exists (see "Data safety & backup" below). `sessions.json` writes are `fsync`-ed before the atomic rename (see C2 note below); orphan `messages` keys with no matching session are reported on load rather than dropped silently.
   - Memory attribution (E2 + contribution list): an entry stores its provenance as a **contribution list** — `contributions: [{ sessionId, sourceQuote, createdAt }]` — instead of a flat `sourceQuote` + `sessionId`. Every session that states the fact appends its own contribution; entry `createdAt` stays the earliest one, so it remains the `/memory/delete` key. Legacy entries that carry a flat `sourceQuote` are upgraded to a single contribution on load (`normalizeEntry`), and the flat fields disappear from the file on the next write. `/history/recall` matches **contributions**, not whole entries: it drops the contributions matching the recalled message's text (equality, containment, or ≥0.7 similarity) inside a `[messageTime − 5s, +2h]` window measured against *that contribution's* `createdAt`, preferring the current session's contributions and falling back to un-attributed (`sessionId: null`) legacy ones only when the current session has no match. Contributions from other sessions are never dropped, and an entry is deleted only once its last contribution is gone — so restating a fact in another session no longer reassigns (drifts) its attribution or replaces the original `sourceQuote` anchor, and recalling in session A still works after B restated the same fact. `recallMemoryBySourceQuote` returns the number of **entries** removed (a partial drop returns 0). `/memory` still serves a display-only `sourceQuote` (the earliest contribution's quote, derived in `getMemories`) so `components/MemoryScreen.tsx` needs no change. Dedupe/merge and `buildMemoryContext` retrieval stay global, and same-session + same-quote contributions are deduped (single-persona product).
   - Emotion decay (E3): `applyTimeDecay()` takes no arguments and is driven by a global `lastDecayAt` baseline (legacy state falls back to `updatedAt`), not by the current session's `gapSeconds`. The baseline advances on every check (in memory only; it rides along with the next state commit), so a single interval decays at most once, and switching into a long-idle session never re-applies that session's gap to the global emotion.
 - Deployment constraint (A3): the JSON state under `server/data/` is loaded once into a per-process in-memory cache and rewritten in full, so **the API must run as a single process**. Do not run multiple instances against the same data directory (or behind a load balancer without sticky routing) — concurrent instances overwrite each other's state silently (measured: two instances writing 15 unique memories each kept 28/30 sequentially and 14/30 concurrently, with the loser crashing on `EPERM ... memory.json.tmp`).
@@ -30,6 +30,50 @@ Expo ships breaking changes every SDK release. APIs you remember are likely rena
   - Temporary write files carry the pid: `memory.json.tmp.<pid>`, `emotion-state.json.tmp.<pid>`, `sessions.json.tmp.<pid>`. Tests that occupy the tmp path to simulate write failures must include the pid as well.
 - Known limitation (C2): `server/memory.js` and `server/emotion.js` still persist with plain `writeFile` + `rename` (no `fsync`), unlike `server/sessions.js`. Only a power loss between rename and flush could expose this; these two modules are intentionally left untouched in this phase.
 - Config: the frontend reads `EXPO_PUBLIC_API_URL` and `EXPO_PUBLIC_BLUEBIRD_API_TOKEN` from the root `.env` (Expo only exposes `EXPO_PUBLIC_*` variables); the backend reads `server/.env` (`DEEPSEEK_API_KEY`, `BLUEBIRD_API_TOKEN`, `PORT`, `MEMORY_ENABLED`). See both `.env.example` templates; the client and server tokens must match.
+
+## Data safety & backup
+
+Everything the user owns lives in one directory: `server/data/`, or `BLUEBIRD_DATA_DIR` when set. `.gitignore` excludes it, so **user data is never in git** — a fresh clone starts with zero data, and nothing in the repo restores it. There is no automatic backup; `scripts/blue-backup.sh` / `scripts/blue-backup.ps1` are the tool for that.
+
+| File in the data directory | Role |
+| --- | --- |
+| `sessions.json` | **Authoritative store** — every session and message; subsumes the legacy history after migration. |
+| `memory.json` | Long-term memory entries (contribution list, E2). |
+| `emotion-state.json` | Emotion state incl. the global decay baseline (E3). |
+| `chat-history.json` | **Legacy, frozen** — read exactly once by the first-boot migration (`importLegacyHistory`); no code path writes it, so multi-session-era messages never land here. |
+| `chat-history.json.pre-multisession.bak` | The pre-migration copy of `chat-history.json`, written once when absent (see the storage-safety note above). It is the only snapshot taken *before* session rewriting started. |
+| `<file>.corrupt-<ts>` | A `memory.json` / `emotion-state.json` that could not be read was renamed aside and the service continued with empty state (`sessions.json` never does this — read-only protection instead). No code reads these files and nothing prunes them; the only signal is a server-log line, which a headless run hides. Inspect, then delete by hand. |
+| `<file>.bak-<ts>` | Output of the older rename-based mechanism; no longer produced, and no current code reads, updates, or cleans existing ones. |
+| `.bluebird.lock` | The single-instance lock (A3). Normal while a server runs; a stale one is handled under "Manual recovery" above. It is runtime state, not data — backups skip it. |
+
+### Backup
+
+```bash
+bash scripts/blue-backup.sh               # -> $HOME/bluebird-backups/data-<ts>/
+bash scripts/blue-backup.sh /mnt/usb      # explicit destination root
+```
+
+```powershell
+pwsh scripts/blue-backup.ps1
+pwsh scripts/blue-backup.ps1 -DataDir 'D:\...\Bluebird\server\data' -OutDir 'E:\backups'
+```
+
+Both scripts are the same tool. They enumerate every data file in the directory (dotfiles included), skip runtime artifacts (`.bluebird.lock`, `*.tmp.*` — restoring a lock would make the server refuse to start, believing another instance is alive), copy each file into a timestamped sub-directory with one retry, write a `MANIFEST.txt` recording size and SHA-256 per file plus the skipped names, re-hash every copy and fail loudly on any mismatch, never write to or delete from the source, and never overwrite an existing backup directory. The source defaults to `BLUEBIRD_DATA_DIR` (else `<repo>/server/data`) and the destination to `BLUEBIRD_BACKUP_DIR` (else `$HOME/bluebird-backups`), so they back up the directory the server actually uses. Backing up while the server runs is safe per file — every module persists by writing a temp file and renaming it into place (`sessions.json` also `fsync`s), so a reader always sees one complete previous version — but a cross-file consistent snapshot (memory / sessions / emotion at the same instant) needs the server stopped.
+
+`scripts/blue-backup.ps1` must keep its UTF-8 **BOM** (PowerShell 5 decodes a BOM-less file with the system ANSI codepage, which garbles the Chinese text and fails to parse); `scripts/blue-backup.sh` must not have one (a BOM breaks the shebang).
+
+### Restore
+
+1. Stop the server and confirm no instance holds `<DATA_DIR>/.bluebird.lock`.
+2. Replace the contents of `<DATA_DIR>` with the backup directory's contents — keep the old directory aside instead of deleting it.
+3. Start the server: the JSON is loaded as-is, and sessions, memories, and emotion come back exactly as they were at backup time.
+
+Reviving the **legacy** history out of `chat-history.json.pre-multisession.bak` is a separate manual path, because that file is a `chat-history.json` and not a `sessions.json`:
+
+1. Stop the server.
+2. Move `sessions.json` aside. The migration runs only when the store cannot be loaded at all (`importLegacyHistory` is called on `!loadedFromDisk`), so any readable `sessions.json` suppresses it.
+3. Put the `.bak` back in place as `chat-history.json`.
+4. Start the server: the migration re-creates the `default` session from that file and writes a fresh `sessions.json`. Sessions that lived in the moved-aside store are **not** merged back — recover them by hand if you need both.
 
 ## Commands
 
