@@ -1,6 +1,9 @@
 /* global __dirname */
 const fs = require('fs');
 const path = require('path');
+const { logDataEvent } = require('./data-events');
+const { writeFileAtomic, writeFileAtomicSync } = require('./atomic-write');
+const { registerCorruptionHandler, handleCorruption } = require('./corruption');
 
 // 数据目录可通过 BLUEBIRD_DATA_DIR 覆盖：测试用临时目录，避免碰到真实数据。
 // 未设置时与 sessions.js / emotion.js 保持一致，落在 server/data/。
@@ -153,76 +156,131 @@ function mergeContributions(existing, incoming) {
   return merged;
 }
 
-function loadMemories() {
-  try {
-    if (!fs.existsSync(MEMORY_FILE)) {
-      fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true });
-      fs.writeFileSync(MEMORY_FILE, '[]\n', 'utf8');
-      memories = [];
-      return;
+// 损坏处理契约：detect 负责判定（读取失败 / JSON 解析失败 / 不是数组），
+// recover 保持原有隔离策略（重命名为 <file>.corrupt-<ts>，失败则原地保留）。
+registerCorruptionHandler('memory', {
+  detect(data) {
+    if (data.error) {
+      return {
+        corrupt: true,
+        // 允许调用方为"非解析型异常"（如初始化写盘失败）显式指定原因短码。
+        reason: data.reason || 'read_error',
+        error: data.error,
+      };
     }
 
-    const raw = fs.readFileSync(MEMORY_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-
-    if (!Array.isArray(parsed)) {
-      throw new Error('memory.json 不是数组');
-    }
-
-    memories = parsed
-      .filter(
-        item =>
-          item &&
-          typeof item === 'object' &&
-          typeof item.content === 'string' &&
-          item.content.trim()
-      )
-      .map(normalizeEntry);
-
-    console.log(`Memory loaded: ${memories.length}`);
-  } catch (error) {
-    console.error('Memory load error:', error.message);
+    let parsed;
 
     try {
-      const corruptPath =
-        `${MEMORY_FILE}.corrupt-${Date.now()}`;
+      parsed = JSON.parse(data.text);
+    } catch (error) {
+      return { corrupt: true, reason: 'json_parse_error', error };
+    }
 
-      fs.renameSync(MEMORY_FILE, corruptPath);
+    if (!Array.isArray(parsed)) {
+      return { corrupt: true, reason: 'invalid_shape' };
+    }
 
-      console.error(`Corrupt memory backed up: ${corruptPath}`);
+    return { corrupt: false, parsed };
+  },
+
+  recover(context) {
+    // 处理策略不变（隔离重命名 + 回退空库）；结构化日志由 handleCorruption 统一记录，
+    // 刻意不再打印 error.message：JSON.parse 的报错可能夹带文件内容（记忆正文）。
+    let isolatedPath = null;
+
+    try {
+      const corruptPath = `${context.file}.corrupt-${Date.now()}`;
+
+      fs.renameSync(context.file, corruptPath);
+
+      isolatedPath = corruptPath;
+
+      console.error(`Corrupt memory backed up: ${isolatedPath}`);
     } catch (backupError) {
-      console.error(
-        'Memory backup error:',
-        backupError.message
+      console.error('Memory backup error:', backupError.message);
+    }
+
+    return {
+      action: isolatedPath ? 'isolated_file' : 'isolation_failed',
+      isolatedPath,
+    };
+  },
+});
+
+function loadMemories() {
+  if (!fs.existsSync(MEMORY_FILE)) {
+    try {
+      fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true });
+      writeFileAtomicSync(MEMORY_FILE, '[]\n');
+    } catch (error) {
+      // 初始化写盘失败：与旧实现一致地走损坏兜底（隔离 + 回退空库），不向上抛。
+      handleCorruption(
+        'memory',
+        { text: null, error, reason: 'io_error' },
+        { file: MEMORY_FILE }
       );
     }
 
     memories = [];
+    return;
   }
+
+  let text = null;
+  let error = null;
+
+  try {
+    text = fs.readFileSync(MEMORY_FILE, 'utf8');
+  } catch (readError) {
+    error = readError;
+  }
+
+  const outcome = handleCorruption(
+    'memory',
+    { text, error },
+    { file: MEMORY_FILE }
+  );
+
+  if (outcome.corrupt) {
+    memories = [];
+    return;
+  }
+
+  memories = outcome.parsed
+    .filter(
+      item =>
+        item &&
+        typeof item === 'object' &&
+        typeof item.content === 'string' &&
+        item.content.trim()
+    )
+    .map(normalizeEntry);
+
+  console.log(`Memory loaded: ${memories.length}`);
 }
 
 async function saveMemories(nextMemories) {
   const dir = path.dirname(MEMORY_FILE);
-  // 临时文件名带 pid：多进程/多实例不再抢同一个固定名，避免 Windows 上
-  // 后打开的一方撞 EPERM 直接崩溃（此前正是这类崩溃让写入整份丢失）。
-  const tmpFile = `${MEMORY_FILE}.tmp.${process.pid}`;
 
   fs.mkdirSync(dir, { recursive: true });
 
-  await fs.promises.writeFile(
-    tmpFile,
-    JSON.stringify(nextMemories, null, 2),
-    'utf8'
-  );
-
-  await fs.promises.rename(tmpFile, MEMORY_FILE);
+  // 原子写（临时文件 'wx' + fsync + rename + 尽力 fsync 父目录），
+  // 崩溃时不会出现空文件 / 截断文件。
+  await writeFileAtomic(MEMORY_FILE, JSON.stringify(nextMemories, null, 2));
 }
 
 function enqueueWrite(task) {
   const run = writeQueue.then(task, task);
 
   writeQueue = run.catch(error => {
-    console.error('Memory queue error:', error.message);
+    // 结构化记录写入队列里的落盘失败（原本只有一行裸 message，无模块/路径/时间戳）。
+    logDataEvent({
+      module: 'memory',
+      file: MEMORY_FILE,
+      event: 'write_queue_error',
+      error,
+      action: 'write_failed',
+    });
   });
 
   return run;
