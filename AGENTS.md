@@ -69,6 +69,7 @@ node tests/sessions.test.js               # 30
 - To disable the LLM in a test, assign `process.env.DEEPSEEK_API_KEY = ''` — do **not** `delete` it. `dotenv` only fills keys that are absent, so a deleted key is re-injected from `server/.env` when `server/index.js` loads, which sends real requests and incurs real cost.
 - Never read or write `server/data/` from a test. It holds the real memory, chat history, and emotion state; `.gitignore` excludes it, so anything a test wipes there cannot be recovered.
 - Verify isolation by seeding `server/data/` with sentinel content, running the full suite, and checking the files are byte-identical afterwards.
+- CI (`.github/workflows/ci.yml`) runs the commands above plus `npx tsc --noEmit` on every push to `main` / `workbuddy/**`, every PR targeting `main`, and on manual dispatch. When adding a test file, add it to the workflow's file list as well — an unlisted file is silently not run. The workflow also carries two isolation tripwires: a static grep that `api.test.js` sets `BLUEBIRD_DATA_DIR`, and a runtime check that no `server/data` appears in the repo after the suites finish.
 
 ## Rules
 

@@ -1,0 +1,72 @@
+name: CI
+
+# 回归兜底：后端 9 个测试文件（227 项）+ 前端 tsc --noEmit。
+# 触发范围：main 与 workbuddy/** 分支的 push、针对 main 的 PR、手动触发。
+# 测试命令与 AGENTS.md「Tests」小节保持一致——新增测试文件时同步更新本文件，
+# 否则新文件不会被运行（静默漏测）。
+on:
+  push:
+    branches: [main, 'workbuddy/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: 后端测试与类型检查
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      # 仓库跟踪了 package-lock.json（lockfileVersion 3），用 npm ci 保证依赖可复现；
+      # setup-node 的 npm 缓存也依赖该 lockfile 存在。改依赖后记得重新生成 lockfile。
+      - name: 安装依赖（npm ci）
+        run: npm ci
+
+      # 静态兜底：api.test.js 里有 /memory/clear、/history/clear，
+      # 一旦去掉数据目录隔离就会清空真实 server/data（历史事故，见 AGENTS.md）。
+      - name: 隔离守卫（静态）：api.test.js 必须设置 BLUEBIRD_DATA_DIR
+        run: |
+          if ! grep -q "BLUEBIRD_DATA_DIR" tests/api.test.js; then
+            echo "::error::tests/api.test.js 未设置 BLUEBIRD_DATA_DIR——它会清空真实 server/data。参见 AGENTS.md「Tests」小节"
+            exit 1
+          fi
+
+      - name: node:test 两套（memory + emotion，共 70 项）
+        run: node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js
+
+      # 逐文件单独跑（AGENTS.md 约定）。某个套件失败也跑完其余套件，
+      # 最后统一以非零退出码结束，方便一次看全失败面。
+      - name: 自定义 runner 七套（逐文件单独跑，共 157 项）
+        run: |
+          fail=0
+          for f in api chat-persist emotion-decay-global memory-session-scope session-scope-e2e sessions-recovery sessions; do
+            echo "::group::node tests/$f.test.js"
+            node "tests/$f.test.js" || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
+
+      # 运行时隔离守卫：全新 checkout 里不存在 server/data（被 .gitignore 排除），
+      # 全部测试都使用临时数据目录，跑完后它也不该出现。出现了即为隔离失效——
+      # 这比静态 grep 更强，校验的是实际行为而非代码长相。
+      - name: 隔离守卫（运行时）：测试不得在仓库内留下 server/data
+        run: |
+          if [ -e server/data ]; then
+            echo "::error::测试在仓库内创建了 server/data——数据隔离失效，参见 AGENTS.md「Tests」小节"
+            ls -la server/data
+            exit 1
+          fi
+
+      - name: TypeScript 类型检查（前端 strict）
+        run: npx tsc --noEmit
