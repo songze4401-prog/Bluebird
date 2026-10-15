@@ -10,6 +10,7 @@ const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   : path.join(__dirname, 'data');
 
 const STORE_FILE = path.join(DATA_DIR, 'sessions.json');
+const { writeFileDurable } = require('./atomic-write');
 // 多会话改造前的唯一历史文件：只读取与备份，永不删除或覆盖。
 const LEGACY_HISTORY_FILE = path.join(DATA_DIR, 'chat-history.json');
 
@@ -314,28 +315,11 @@ function saveStore() {
   }
 
   try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-
-    // 与 memory.js 同款：临时文件名带 pid，避免多实例抢同一路径触发 EPERM
-    const tmpFile = `${STORE_FILE}.tmp.${process.pid}`;
-    const payload = JSON.stringify(store, null, 2);
-
-    // C2：先写临时文件并 fsync 落盘，再原子 rename 覆盖目标。
-    // 只 writeFile + rename 的话，rename 可能先于数据落盘被提交，
-    // 断电后目标文件可能变成空文件或旧内容；fsync 把"数据已写稳"钉在
-    // rename 之前，把这个窗口关掉。
-    // 注：memory.js / emotion.js 仍是旧的 writeFile + rename 写法，
-    // 该差异已在 AGENTS.md 记录为已知限制（本阶段不动这两个模块）。
-    const fd = fs.openSync(tmpFile, 'w');
-
-    try {
-      fs.writeFileSync(fd, payload, 'utf8');
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-
-    fs.renameSync(tmpFile, STORE_FILE);
+    // 落盘走统一工具：临时文件名带 pid + fsync + 原子 rename + 目录项 fsync，
+    // 与 memory.js / emotion.js 同一套策略（AGENTS.md C2 已随 a5 修复移除）。
+    // 任一步失败都抛错，由下面的 catch 转成 false 让调用方回滚——
+    // 绝不允许"写失败了还当成功"这种静默丢数据的行为。
+    writeFileDurable(STORE_FILE, JSON.stringify(store, null, 2));
 
     console.log('Session store saved:', store.sessions.length, 'sessions');
     return true;

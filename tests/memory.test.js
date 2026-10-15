@@ -470,3 +470,79 @@ describe('processMemory 提取流程（假 client 拦截）', SERIAL, () => {
     assert.ok(list.some(m => m.content === '用户叫宋泽'), 'identity 记忆不应被裁剪');
   });
 });
+
+describe('落盘持久化（fsync，a5 回归防护）', SERIAL, () => {
+  test('tmp 文件先 fsync 再原子 rename（C2：无 fsync 的写路径会被抓住）', async () => {
+    seed([]);
+
+    // 记录 open/fsync/rename 的事件序列。C2 的要求是"临时文件的数据先 fsync
+    // 落盘，再 rename 覆盖目标"——只数 fsync 次数是不够的：atomic-write 里
+    //  rename 之后还有一次目录 fsync，同样调 fs.fsyncSync，"文件 fsync 被删掉"
+    // 的回归会被它喂饱而逃过检测（本次开发中实测过这个漏洞）。
+    const realOpen = fs.openSync;
+    const realClose = fs.closeSync;
+    const realFsync = fs.fsyncSync;
+    const realRename = fs.renameSync;
+    const fdPath = new Map();
+    const events = [];
+
+    fs.openSync = (p, ...rest) => {
+      const fd = realOpen.call(fs, p, ...rest);
+      fdPath.set(fd, p);
+      return fd;
+    };
+    fs.closeSync = fd => {
+      fdPath.delete(fd);
+      return realClose.call(fs, fd);
+    };
+    fs.fsyncSync = fd => {
+      events.push(['fsync', fdPath.get(fd)]);
+      return realFsync.call(fs, fd);
+    };
+    fs.renameSync = (from, to) => {
+      events.push(['rename', from, to]);
+      return realRename.call(fs, from, to);
+    };
+
+    let writeError = null;
+    try {
+      const { client } = fakeClient(
+        validReply({ content: '用户喜欢爬山', sourceQuote: '我喜欢爬山' })
+      );
+      await memory.processMemory(client, '记住，我喜欢爬山');
+    } catch (error) {
+      writeError = error;
+    } finally {
+      fs.openSync = realOpen;
+      fs.closeSync = realClose;
+      fs.fsyncSync = realFsync;
+      fs.renameSync = realRename;
+    }
+
+    assert.equal(writeError, null, '落盘改造不应让 processMemory 报错');
+
+    const renameIdx = events.findIndex(
+      e => e[0] === 'rename' && e[2] === MEMORY_FILE
+    );
+    assert.ok(renameIdx >= 0, '落盘未走原子 rename');
+    const tmpPath = events[renameIdx][1];
+    assert.equal(
+      tmpPath,
+      `${MEMORY_FILE}.tmp.${process.pid}`,
+      '临时文件名不符合「带 pid」约定'
+    );
+    const fsyncIdx = events.findIndex(
+      e => e[0] === 'fsync' && e[1] === tmpPath
+    );
+    assert.ok(
+      fsyncIdx >= 0 && fsyncIdx < renameIdx,
+      '临时文件未在 rename 之前 fsync——写路径退化为无 fsync 的 writeFile + rename（C2 回归）'
+    );
+
+    const list = JSON.parse(fs.readFileSync(MEMORY_FILE, 'utf8'));
+    assert.ok(
+      list.some(item => item.content === '用户喜欢爬山'),
+      '记忆内容未正确落盘'
+    );
+  });
+});

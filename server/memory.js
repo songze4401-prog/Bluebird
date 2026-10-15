@@ -9,6 +9,7 @@ const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   : path.join(__dirname, 'data');
 
 const MEMORY_FILE = path.join(DATA_DIR, 'memory.json');
+const { writeFileDurable } = require('./atomic-write');
 const MEMORY_LIMIT = 100;
 // 记忆总量不超过该值时，上下文直接全量注入、跳过相关性过滤。
 // 小记忆集下"相关性过滤"弊大于利：陈述式记忆（「用户叫宋泽」）与提问式查询
@@ -202,20 +203,9 @@ function loadMemories() {
 }
 
 async function saveMemories(nextMemories) {
-  const dir = path.dirname(MEMORY_FILE);
-  // 临时文件名带 pid：多进程/多实例不再抢同一个固定名，避免 Windows 上
-  // 后打开的一方撞 EPERM 直接崩溃（此前正是这类崩溃让写入整份丢失）。
-  const tmpFile = `${MEMORY_FILE}.tmp.${process.pid}`;
-
-  fs.mkdirSync(dir, { recursive: true });
-
-  await fs.promises.writeFile(
-    tmpFile,
-    JSON.stringify(nextMemories, null, 2),
-    'utf8'
-  );
-
-  await fs.promises.rename(tmpFile, MEMORY_FILE);
+  // 落盘走统一工具：临时文件名带 pid + fsync + 原子 rename（AGENTS.md C2）。
+  // 写失败会抛错，由 enqueueWrite 的记录逻辑兜底——不允许静默丢数据。
+  writeFileDurable(MEMORY_FILE, JSON.stringify(nextMemories, null, 2));
 }
 
 function enqueueWrite(task) {

@@ -9,6 +9,7 @@ const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   : path.join(__dirname, 'data');
 
 const EMOTION_FILE = path.join(DATA_DIR, 'emotion-state.json');
+const { writeFileDurable } = require('./atomic-write');
 
 // V1 情绪值域：与人格 Prompt 的 [mood:xxx] 候选值严格一一对应。
 // 这里只有一套情绪概念，不再保留旧的 teasing / surprised / laughing / angry。
@@ -155,19 +156,9 @@ function loadEmotion() {
 }
 
 async function saveEmotion(nextState) {
-  const dir = path.dirname(EMOTION_FILE);
-  // 与 memory.js / sessions.js 同款：临时文件名带 pid，避免多实例抢同一路径
-  const tmpFile = `${EMOTION_FILE}.tmp.${process.pid}`;
-
-  fs.mkdirSync(dir, { recursive: true });
-
-  await fs.promises.writeFile(
-    tmpFile,
-    JSON.stringify(nextState, null, 2),
-    'utf8'
-  );
-
-  await fs.promises.rename(tmpFile, EMOTION_FILE);
+  // 落盘走统一工具：临时文件名带 pid + fsync + 原子 rename（AGENTS.md C2）。
+  // 写失败会抛错，由 enqueueWrite 的记录逻辑兜底——不允许静默丢数据。
+  writeFileDurable(EMOTION_FILE, JSON.stringify(nextState, null, 2));
 }
 
 // 与 memory.js 同款串行写队列：情绪更新和落盘不会被并发请求交错
