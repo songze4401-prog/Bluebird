@@ -44,7 +44,7 @@ jobs:
             exit 1
           fi
 
-      - name: node:test 两套（memory + emotion，共 70 项）
+      - name: node:test 两套（memory + emotion，共 72 项）
         run: node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js
 
       # 逐文件单独跑（AGENTS.md 约定）。某个套件失败也跑完其余套件，
