@@ -125,146 +125,37 @@ const {
 
 const crypto = require('crypto');
 
-const chatFs = require('fs');
-const chatPath = require('path');
+// 多会话存储：会话列表 / 新建会话 / 按会话读写消息 / 旧数据迁移
+// 全部收在 sessions.js，index.js 只负责路由与请求编排。
+const {
+  DEFAULT_SESSION_ID,
+  SESSION_MESSAGE_MAX,
+  listSessions,
+  getSession,
+  createSession,
+  getMessages,
+  appendMessages,
+  replaceMessages,
+} = require('./sessions');
 
-// 数据目录改为统一入口：支持 BLUEBIRD_DATA_DIR 覆盖，便于测试隔离。
-const { DATA_DIR } = require('./data-dir');
-const CHAT_HISTORY_FILE = chatPath.join(
-  DATA_DIR,
-  "chat-history.json"
-);
+// 单实例守卫：必须在 listen 之前、且必须在路由注册之后调用，
+// 这样被测试 require 时不会先抢锁再崩，而是走到 listen 拦截那里正常起来。
+const {
+  acquireSingleInstance,
+  installShutdownHooks,
+} = require('./single-instance');
 
-const CHAT_HISTORY_MAX = 200;
+// 解析请求里的会话 id：显式传入则用显式值，未传则落到「默认会话」。
+// 这样旧客户端（不带 sessionId）的 /chat、/history 行为与改造前完全一致。
+function resolveSessionId(req, source) {
+  const raw =
+    source === 'query'
+      ? req.query && req.query.sessionId
+      : req.body && req.body.sessionId;
 
-// 聊天历史内存缓存：避免每次 /chat（buildTimeGapContext、appendChatMessages）
-// 都重新读磁盘。所有写操作（追加/撤回/清空）都经 saveChatHistory 更新缓存，
-// 保证缓存与文件一致。
-let chatHistoryCache = null;
+  const value = typeof raw === 'string' ? raw.trim() : '';
 
-function loadChatHistory() {
-  if (chatHistoryCache) return chatHistoryCache;
-
-  try {
-    chatFs.mkdirSync(chatPath.dirname(CHAT_HISTORY_FILE), {
-      recursive: true,
-    });
-
-    if (!chatFs.existsSync(CHAT_HISTORY_FILE)) {
-      chatFs.writeFileSync(
-        CHAT_HISTORY_FILE,
-        "[]",
-        "utf-8"
-      );
-      chatHistoryCache = [];
-      return chatHistoryCache;
-    }
-
-    const data = chatFs.readFileSync(
-      CHAT_HISTORY_FILE,
-      "utf-8"
-    );
-
-    const history = JSON.parse(data);
-    const list = Array.isArray(history) ? history : [];
-
-    // 兼容旧数据：缺少 id / createdAt 的条目迁移补齐一次并落盘，保证 id 稳定
-    if (list.some(item => item && (!item.id || !item.createdAt))) {
-      let legacyCreatedAt = new Date().toISOString();
-
-      try {
-        legacyCreatedAt = chatFs
-          .statSync(CHAT_HISTORY_FILE)
-          .mtime.toISOString();
-      } catch {}
-
-      const migrated = list.map(item =>
-        item && typeof item === 'object'
-          ? {
-              ...item,
-              id: item.id || crypto.randomUUID(),
-              createdAt: item.createdAt || legacyCreatedAt,
-            }
-          : item
-      );
-
-      chatHistoryCache = migrated.slice(-CHAT_HISTORY_MAX);
-      saveChatHistory(migrated);
-      return chatHistoryCache;
-    }
-
-    chatHistoryCache = list;
-    return chatHistoryCache;
-  } catch (error) {
-    console.error("History load error:", error);
-    return [];
-  }
-}
-
-function saveChatHistory(history) {
-  try {
-    chatFs.mkdirSync(chatPath.dirname(CHAT_HISTORY_FILE), {
-      recursive: true,
-    });
-
-    const trimmed = history.slice(-CHAT_HISTORY_MAX);
-    const tmpFile = CHAT_HISTORY_FILE + ".tmp";
-
-    chatFs.writeFileSync(
-      tmpFile,
-      JSON.stringify(trimmed, null, 2),
-      "utf-8"
-    );
-
-    chatFs.renameSync(
-      tmpFile,
-      CHAT_HISTORY_FILE
-    );
-
-    chatHistoryCache = trimmed;
-
-    console.log(
-      "History saved:",
-      history.length,
-      "messages"
-    );
-  } catch (error) {
-    console.error("History save error:", error);
-  }
-}
-
-function appendChatMessages(messages) {
-  try {
-    console.log(
-      "History append:",
-      messages.length,
-      "messages"
-    );
-
-    const history = loadChatHistory();
-    const createdAt = new Date().toISOString();
-
-    const stamped = messages.map(item => ({
-      id: item.id || crypto.randomUUID(),
-      role: item.role,
-      content: String(item.content),
-      createdAt: item.createdAt || createdAt,
-    }));
-
-    history.push(...stamped);
-
-    saveChatHistory(
-      history.slice(-CHAT_HISTORY_MAX)
-    );
-
-    return stamped;
-  } catch (error) {
-    console.error(
-      "History append error:",
-      error
-    );
-    return null;
-  }
+  return value || DEFAULT_SESSION_ID;
 }
 
 // 把任意时刻格式化为用户时区的可读时间（与 getTimeContext 同一套方式）
@@ -307,8 +198,8 @@ function gapSemanticLabel(gapMinutes, gapHours, gapDays) {
 
 // 结构化时间上下文：告诉 Blue 距上一条有效用户消息过去了多久。
 // 历史文件中被撤回的消息已物理删除，天然不参与计算。
-function buildTimeGapContext(timeZone) {
-  const history = loadChatHistory();
+function buildTimeGapContext(timeZone, sessionId) {
+  const history = getMessages(sessionId) || [];
   const now = new Date();
 
   let prevUser = null;
@@ -451,24 +342,93 @@ app.get('/', (req, res) => {
   });
 });
 
+// ---- 会话管理 ----
+
+// 会话列表：按最近活跃（updatedAt）倒序
+app.get('/sessions', requireAuth, (req, res) => {
+  try {
+    res.json({ sessions: listSessions() });
+  } catch (error) {
+    console.error('Sessions API Error:', error);
+    res.status(500).json({ error: '读取会话列表失败' });
+  }
+});
+
+// 新建会话：创建独立会话，不触碰任何已有会话与旧历史
+app.post('/sessions', requireAuth, (req, res) => {
+  try {
+    const { title } = req.body || {};
+    const session = createSession({ title });
+
+    if (!session) {
+      return res.status(500).json({
+        error: '新建会话失败：聊天存储当前不可写',
+      });
+    }
+
+    res.status(201).json({ session });
+  } catch (error) {
+    console.error('Session create error:', error);
+    res.status(500).json({ error: '新建会话失败' });
+  }
+});
+
+// 单个会话元数据
+app.get('/sessions/:id', requireAuth, (req, res) => {
+  try {
+    const session = getSession(req.params.id);
+
+    if (!session) {
+      return res.status(404).json({ error: '会话不存在' });
+    }
+
+    res.json({ session });
+  } catch (error) {
+    console.error('Session API Error:', error);
+    res.status(500).json({ error: '读取会话失败' });
+  }
+});
+
+// 按会话读取消息：未传 sessionId 时读「默认会话」（兼容旧客户端）
 app.get('/history', requireAuth, (req, res) => {
   try {
+    const sessionId = resolveSessionId(req, 'query');
+
+    if (!getSession(sessionId)) {
+      return res.status(404).json({ error: '会话不存在' });
+    }
+
     const limit = Math.min(
       Math.max(parseInt(req.query.limit, 10) || 50, 1),
-      CHAT_HISTORY_MAX
+      SESSION_MESSAGE_MAX
     );
 
-    res.json({ history: loadChatHistory().slice(-limit) });
+    res.json({
+      sessionId,
+      history: getMessages(sessionId, limit),
+    });
   } catch (error) {
     console.error('History API Error:', error);
     res.status(500).json({ error: '读取聊天记录失败' });
   }
 });
 
+// 清空指定会话的消息，互不影响其他会话
 app.post('/history/clear', requireAuth, (req, res) => {
   try {
-    saveChatHistory([]);
-    res.json({ ok: true, message: '聊天记录已清理' });
+    const sessionId = resolveSessionId(req, 'body');
+
+    if (!getSession(sessionId)) {
+      return res.status(404).json({ error: '会话不存在' });
+    }
+
+    if (!replaceMessages(sessionId, [])) {
+      return res.status(500).json({
+        error: '清理失败：聊天存储当前不可写',
+      });
+    }
+
+    res.json({ ok: true, sessionId, message: '聊天记录已清理' });
   } catch (error) {
     console.error('History clear error:', error);
     res.status(500).json({ error: '清理聊天记录失败' });
@@ -478,12 +438,18 @@ app.post('/history/clear', requireAuth, (req, res) => {
 app.post('/history/recall', requireAuth, (req, res) => {
   try {
     const { messageId } = req.body;
+    const sessionId = resolveSessionId(req, 'body');
 
     if (!messageId || typeof messageId !== 'string') {
       return res.status(400).json({ error: '缺少 messageId' });
     }
 
-    const history = loadChatHistory();
+    if (!getSession(sessionId)) {
+      return res.status(404).json({ error: '会话不存在' });
+    }
+
+    // 撤回严格限定在当前会话内，跨会话不可见、不可撤回
+    const history = getMessages(sessionId) || [];
     const index = history.findIndex(
       item => item && item.id === messageId && item.role === 'user'
     );
@@ -505,18 +471,30 @@ app.post('/history/recall', requireAuth, (req, res) => {
     }
 
     const removedIds = new Set(removed.map(m => m.id));
-    saveChatHistory(history.filter(m => m && !removedIds.has(m.id)));
+    const saved = replaceMessages(
+      sessionId,
+      history.filter(m => m && !removedIds.has(m.id))
+    );
 
-    // 异步撤回由这条用户消息产生的长期记忆（sourceQuote 匹配）
+    // 落盘失败就不动记忆：消息没删成，记忆也不该删
+    if (!saved) {
+      return res.status(500).json({
+        error: '撤回失败：聊天存储当前不可写',
+      });
+    }
+
+    // 异步撤回由这条用户消息产生的长期记忆（sourceQuote 匹配，优先同会话）
     recallMemoryBySourceQuote(
       removed[0].content,
-      removed[0].createdAt
+      removed[0].createdAt,
+      sessionId
     ).catch(error => {
       console.error('Memory recall error:', error.message);
     });
 
     res.json({
       ok: true,
+      sessionId,
       removedCount: removed.length,
       removedIds: removed.map(m => m.id),
     });
@@ -587,6 +565,7 @@ app.post('/chat', requireAuth, async (req, res) => {
 
   try {
     const { message, history = [], mode } = req.body;
+    const sessionId = resolveSessionId(req, 'body');
 
     // 续写模式：「继续说」不是真实用户消息，只是一次内部 continuation 请求
     const isContinue = mode === 'continue';
@@ -594,6 +573,13 @@ app.post('/chat', requireAuth, async (req, res) => {
     if (!isContinue && (typeof message !== 'string' || !message.trim())) {
       return res.status(400).json({
         error: '消息不能为空',
+      });
+    }
+
+    // 会话必须已存在：跨会话或未知会话一律拒绝，保证严格隔离
+    if (!getSession(sessionId)) {
+      return res.status(404).json({
+        error: '会话不存在',
       });
     }
 
@@ -605,7 +591,7 @@ app.post('/chat', requireAuth, async (req, res) => {
       });
     }
 
-    const safeHistory = Array.isArray(history)
+    const clientHistory = Array.isArray(history)
       ? history
           .filter(
             item =>
@@ -616,20 +602,46 @@ app.post('/chat', requireAuth, async (req, res) => {
           .slice(-20)
       : [];
 
+    // 上下文历史以服务端存储为准：不同会话严格隔离，客户端就算传来别的
+    // 会话的历史也不会串进来。
+    const storedHistory = (getMessages(sessionId) || [])
+      .filter(
+        item =>
+          item &&
+          (item.role === 'user' || item.role === 'assistant') &&
+          typeof item.content === 'string'
+      )
+      .map(item => ({ role: item.role, content: item.content }))
+      .slice(-20);
+
+    // B1：客户端历史回退只对「默认会话」开放。
+    // 默认会话是旧客户端（不带 sessionId）的唯一落点，保留回退以兼容
+    // 「存储为空但客户端握着历史」的旧行为；而新建的独立会话一旦为空，
+    // 其上下文就该是空的——否则前端只要误传上一段会话的历史，就会把
+    // 别的会话的内容注入进来，破坏严格隔离。
+    const promptHistory =
+      storedHistory.length || sessionId !== DEFAULT_SESSION_ID
+        ? storedHistory
+        : clientHistory;
+
     // 续写没有新的用户消息，用最近一条用户消息作为记忆检索的查询，
     // 保证续写仍然复用现有 Memory System，而不是绕过它
     const memoryQuery = isContinue
-      ? ([...safeHistory].reverse().find(item => item.role === 'user') || {})
+      ? ([...promptHistory].reverse().find(item => item.role === 'user') || {})
           .content || ''
       : userText;
 
     const memoryContext = buildMemoryContext(memoryQuery);
     const timeContext = getTimeContext(req.body.timeZone || 'Asia/Shanghai');
-    const gapContext = buildTimeGapContext(req.body.timeZone || 'Asia/Shanghai');
+    const gapContext = buildTimeGapContext(
+      req.body.timeZone || 'Asia/Shanghai',
+      sessionId
+    );
 
-    // 情绪惯性：先按"距离上一条用户消息"的间隔做时间衰减，再生成情绪上下文。
-    // 时间间隔直接复用 Time Sense V1 已经算好的 gapSeconds，不另造时间机制。
-    applyTimeDecay(gapContext.gapSeconds);
+    // 情绪惯性：先做时间衰减，再生成情绪上下文。
+    // E3：衰减基于"全局上次衰减检查时间"（emotion 模块内部维护），
+    // 不再使用当前会话的 gapSeconds —— 切换旧会话不会额外衰减全局情绪。
+    applyTimeDecay();
     const emotionContext = buildEmotionContext();
 
     console.log(
@@ -648,6 +660,12 @@ app.post('/chat', requireAuth, async (req, res) => {
         .filter(Boolean)
         .join('\n\n');
 
+    // 真实 API 调用流水：每次消耗 DEEPSEEK_API_KEY 都在日志留痕，
+    // 便于与 DeepSeek 控制台用量对账、排查意外调用来源。纯日志，不影响逻辑。
+    console.log(
+      `[AI call] main-reply session=${sessionId} at=${new Date().toISOString()}`
+    );
+
     const completion = await client.chat.completions.create(
       {
         model: 'deepseek-chat',
@@ -658,7 +676,7 @@ app.post('/chat', requireAuth, async (req, res) => {
             role: 'system',
             content: systemPrompt,
           },
-          ...safeHistory,
+          ...promptHistory,
           {
             // 续写模式用一个内部短指令占位：只存在于本次请求，不落任何盘
             role: 'user',
@@ -717,8 +735,7 @@ app.post('/chat', requireAuth, async (req, res) => {
     // 极端情况：整条回复只有标签，清洗后为空则保留原文，避免发出空消息
     const reply = cleaned || rawReply;
 
-    // 同步生成稳定 id 并立即返回给前端（撤回需要），历史落盘放异步，
-    // 避免磁盘 IO 卡住回复关键路径；appendChatMessages 会沿用已有 id。
+    // 同步生成稳定 id 并立即返回给前端（撤回需要）；appendMessages 会沿用已有 id。
     const now = new Date().toISOString();
 
     // 续写只落盘 assistant 消息：不产生"继续说"用户消息，不污染 chat-history
@@ -749,9 +766,34 @@ app.post('/chat', requireAuth, async (req, res) => {
     // 本轮 [mood:] 只是"观察信号"，交给情绪系统做惯性更新后再返回当期真实状态
     const emotion = applyObservation(mood);
 
+    // A1：落盘改到返回之前同步完成。此前是 setImmediate 异步写盘，客户端先拿到
+    // 200、写失败却完全看不到；同步写还顺带消掉了同一会话并发读-改-写的毫秒级
+    // 竞争（Node 单线程下这段同步代码不可被打断）。
+    // 客户端已断开时不落盘，避免回复成为"幽灵消息"（用户没收到却已入库）。
+    let persisted = false;
+
+    if (!clientGone) {
+      try {
+        persisted = !!appendMessages(sessionId, stamped);
+
+        if (!persisted) {
+          console.error(
+            'History persist FAILED:',
+            sessionId,
+            stamped.length,
+            'messages were NOT saved'
+          );
+        }
+      } catch (error) {
+        console.error('History save error:', error);
+      }
+    }
+
     res.json({
       reply,
       model: completion.model,
+      sessionId,
+      persisted,
       mood: emotion.emotion,
       intensity: emotion.intensity,
       userMessageId: isContinue ? null : stamped[0].id,
@@ -761,18 +803,9 @@ app.post('/chat', requireAuth, async (req, res) => {
     });
 
     setImmediate(() => {
-      if (clientGone) return; // 客户端已断开，不落盘，避免幽灵消息
-      try {
-        appendChatMessages(stamped);
-      } catch (error) {
-        console.error('History save error:', error);
-      }
-    });
-
-    setImmediate(() => {
       if (!client) return; // 未配置模型 key，跳过记忆提取
       if (isContinue) return; // 续写不是用户说的话，不产生长期记忆
-      processMemory(client, userText)
+      processMemory(client, userText, sessionId)
         .catch(error => {
           console.error(
             'Memory processing error:',
@@ -793,11 +826,11 @@ app.post('/chat', requireAuth, async (req, res) => {
   }
 });
 
+// 先抢占数据目录锁：已有实例在跑就直接退出，绝不带病启动造成静默覆盖
+acquireSingleInstance({ port: PORT });
+
 const server = app.listen(PORT, '0.0.0.0', () => {
-  // PORT 为 0 时由操作系统分配空闲端口，日志回显真实端口
-  console.log(`Bluebird API running on port ${server.address().port}`);
+  console.log(`Bluebird API running on port ${PORT}`);
 });
 
-// 导出 app 与 server 实例：测试可用 PORT=0 拿到系统分配的空闲端口，
-// 避免固定端口被占用时误连到别的服务（会读写对方的真实数据目录）。
-module.exports = { app, server };
+installShutdownHooks(server);

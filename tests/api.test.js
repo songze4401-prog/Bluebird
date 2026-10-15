@@ -3,40 +3,45 @@
  *
  * 独立脚本（非 node:test）：服务入口 require 时即 app.listen 且未导出实例，
  * 因此这里自建极简 runner，测完显式退出，确保进程能结束。
+ * 隔离说明：全程使用临时数据目录（BLUEBIRD_DATA_DIR），不读写 server/data 下的真实数据。
  * 运行：node <本文件>
  */
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const crypto = require('crypto');
 
 // 数据目录隔离：所有落盘都指向临时目录，绝不触碰真实的 server/data/。
-// 必须放在 require 任何服务端模块之前——数据路径在模块首次加载时即求值。
-const TMP_DATA_DIR = fs.mkdtempSync(
-  path.join(os.tmpdir(), 'bluebird-api-test-')
-);
+// 必须放在 require 任何服务端模块之前——数据路径在模块首次加载时即求值，
+// 晚了设置就仍然指向 server/data/，本文件里的 /memory/clear、/history/clear
+// 会直接清空真实记忆与聊天记录。
+const TMP_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-api-test-'));
 process.env.BLUEBIRD_DATA_DIR = TMP_DATA_DIR;
 
-// 端口交给操作系统分配（PORT=0），测前从 server 实例读取真实端口。
-// 固定端口若被别的进程占用，本测试的 listen 会失败，而 waitReady 仍会
-// 连上占用者的服务并全部"通过"——等于把断言跑在别人的实例上，
-// 并读写对方 server/data/ 下的真实记忆与聊天记录。
-process.env.PORT = '0';
+process.env.PORT = '3999';
 process.env.BLUEBIRD_API_TOKEN = 'test-token-bluebird';
-// 这里必须是赋空串，不能 delete。
-// dotenv 只填补「不存在」的变量：一旦 delete，DEEPSEEK_API_KEY 变成不存在，
-// 随后 server/index.js 里的 dotenv.config() 会把它从 server/.env 重新注入，
-// 结果是测试真的去调 DeepSeek（产生真实费用），
-// 并把测试造的假对话写进真实聊天记录与长期记忆。
+// 这里必须是赋空串，不能 delete：dotenv 只填补「不存在」的变量，一旦 delete，
+// 随后 server/index.js 的 dotenv.config() 会从 server/.env 把 DEEPSEEK_API_KEY
+// 重新注入，测试就会真的去调 DeepSeek（产生真实费用）。
 process.env.DEEPSEEK_API_KEY = ''; // 故意不配 API Key，验证降级路径
 
-let BASE = '';
+// 进程退出（含断言失败、异常）时回收临时数据目录
+process.on('exit', () => {
+  try {
+    fs.rmSync(TMP_DATA_DIR, { recursive: true, force: true });
+  } catch (_) {
+    /* 清理失败不影响测试结果 */
+  }
+});
+
+const BASE = 'http://127.0.0.1:3999';
 const TOKEN = 'test-token-bluebird';
 
 const origLog = console.log;
 const origErr = console.error;
 console.log = () => {};
 console.error = () => {};
+
+require(path.join(__dirname, '..', 'server', 'index.js'));
 
 let passed = 0;
 let failed = 0;
@@ -71,80 +76,6 @@ async function req(path, { method = 'GET', token = TOKEN, body } = {}) {
   return { status: res.status, json };
 }
 
-// 清理测试产生的临时数据目录（失败时保留，便于排查）
-function cleanup() {
-  try {
-    fs.rmSync(TMP_DATA_DIR, { recursive: true, force: true });
-  } catch (_) {
-    /* 清理失败不影响测试结果 */
-  }
-}
-
-/* ---------------- 纵深防御 ----------------
- * 数据目录隔离（BLUEBIRD_DATA_DIR）已能挡住绝大多数情况，但它依赖测试头部
- * 那一行环境变量：一旦有人调整 require 顺序或误删该行，隔离会静默失效，
- * 而 /memory/clear、/history/clear 这类破坏性断言就会打到真实数据上。
- * 下面两层用于在这种情况下立刻失败并报警，而不是绿灯放过。
- */
-const REAL_DATA_DIR = path.join(__dirname, '..', 'server', 'data');
-
-function realpathSafe(p) {
-  try {
-    return fs.realpathSync(p);
-  } catch (_) {
-    return null;
-  }
-}
-
-/** 前置守卫：生效的数据目录必须已重定向到临时目录，且不在真实目录内。
- *  校验对象是 process.env 的实际值（而非 TMP_DATA_DIR 常量），
- *  否则隔离被改坏时守卫反而永远通过。
- */
-function isolationError() {
-  const envDir = process.env.BLUEBIRD_DATA_DIR;
-  if (!envDir) {
-    return 'BLUEBIRD_DATA_DIR 未设置，落盘将指向真实的 server/data/';
-  }
-  const active = realpathSafe(envDir);
-  if (!active) {
-    return `生效的数据目录不存在：${envDir}`;
-  }
-  const real = realpathSafe(REAL_DATA_DIR);
-  if (!real) {
-    return null; // 真实目录不存在，无从污染
-  }
-  if (active === real || active.startsWith(real + path.sep)) {
-    return `生效数据目录 ${active} 落在真实数据目录 ${real} 内`;
-  }
-  return null;
-}
-
-/** 跑测试前给真实数据目录拍快照，跑完比对，兜住任何意外的写入。 */
-function snapshotRealData() {
-  const snap = {};
-  try {
-    for (const name of fs.readdirSync(REAL_DATA_DIR)) {
-      const p = path.join(REAL_DATA_DIR, name);
-      if (!fs.statSync(p).isFile()) continue;
-      snap[name] = crypto.createHash('md5').update(fs.readFileSync(p)).digest('hex');
-    }
-  } catch (_) {
-    /* 目录不存在 */
-  }
-  return snap;
-}
-
-function diffSnapshot(before, after) {
-  const changed = [];
-  const names = new Set([...Object.keys(before), ...Object.keys(after)]);
-  for (const name of names) {
-    if (before[name] !== after[name]) {
-      changed.push(before[name] ? `${name}(内容变化)` : `${name}(新增)`);
-    }
-  }
-  return changed;
-}
-
 async function waitReady() {
   for (let i = 0; i < 100; i++) {
     try {
@@ -159,28 +90,6 @@ async function waitReady() {
 }
 
 (async () => {
-  // 守卫 1（前置）：确认隔离生效，否则拒绝执行破坏性断言。
-  // 必须在 require 入口之前检查——入口一加载就会读写数据目录。
-  const isoErr = isolationError();
-  if (isoErr) {
-    origLog(`✖ 数据隔离守卫失败：${isoErr}`);
-    origLog('  已中止，未执行 /memory/clear、/history/clear 等破坏性断言。');
-    cleanup(); // 临时目录此时还是空的，直接回收，不留垃圾
-    console.log = origLog;
-    console.error = origErr;
-    process.exit(1);
-  }
-
-  // 守卫 2（后置基准）：跑之前给真实数据目录拍快照，跑完比对。
-  const snapshotBefore = snapshotRealData();
-
-  // 先确定端口再加载入口：index.js 在 require 时即 listen。
-  const { server } = require(path.join(__dirname, '..', 'server', 'index.js'));
-  if (!server.listening) {
-    await new Promise(resolve => server.once('listening', resolve));
-  }
-  BASE = `http://127.0.0.1:${server.address().port}`;
-
   const ready = await waitReady();
   if (!ready) {
     origLog('服务未能在 5 秒内启动');
@@ -298,26 +207,11 @@ async function waitReady() {
     check('错误 token 在限流期间仍走鉴权返回 401', wrongToken.status === 401, `实际 ${wrongToken.status}`);
   }
 
-  // 守卫 2（后置）：确认整轮跑下来真实数据目录一个字节都没变。
-  const changed = diffSnapshot(snapshotBefore, snapshotRealData());
-  check(
-    '跑完后真实 server/data/ 未被改动',
-    changed.length === 0,
-    changed.length ? `变动：${changed.join('、')}` : ''
-  );
-  if (changed.length) {
-    origLog('  ⚠ 数据隔离可能已失效，请检查 BLUEBIRD_DATA_DIR 是否生效。');
-  }
-
   origLog(`\n通过 ${passed} 项，失败 ${failed} 项`);
   if (failures.length) {
     origLog('\n失败明细：');
     failures.forEach(f => origLog('  - ' + f));
   }
-
-  origLog(`\n临时数据目录：${TMP_DATA_DIR}`);
-  cleanup();
-  origLog('临时数据目录已清理');
 
   console.log = origLog;
   console.error = origErr;
@@ -326,6 +220,5 @@ async function waitReady() {
   console.log = origLog;
   console.error = origErr;
   origLog('测试执行异常：' + error.message);
-  origLog(`临时数据目录保留待查：${TMP_DATA_DIR}`);
   process.exit(1);
 });

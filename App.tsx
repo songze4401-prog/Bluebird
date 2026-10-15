@@ -8,8 +8,8 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import { Message } from './lib/types';
-import { API_TOKEN } from './lib/constants';
+import { Message, SessionMeta } from './lib/types';
+import { API_TOKEN, DEFAULT_SESSION_ID } from './lib/constants';
 import { makeLocalId, readJsonResponse } from './lib/utils';
 
 import { ChatInput } from './components/ChatInput';
@@ -19,6 +19,7 @@ import { MessageList } from './components/MessageList';
 import { MemoryScreen } from './components/MemoryScreen';
 import { ThemeScreen } from './components/ThemeScreen';
 import { HomeScreen } from './components/HomeScreen';
+import { HistoryScreen } from './components/HistoryScreen';
 
 import {
   getTheme,
@@ -45,6 +46,15 @@ export default function App() {
   // 启动落在固定欢迎主页，选择入口后才进入聊天页
   const [screen, setScreen] = useState<'home' | 'chat'>('home');
 
+  // 当前所在会话：所有聊天类请求都带上它，保证会话隔离。
+  // 会话 id 不落本地存储，以服务端 /sessions 为权威。
+  const [currentSessionId, setCurrentSessionId] =
+    useState<string>(DEFAULT_SESSION_ID);
+
+  // 历史聊天弹层开关；新建会话请求进行中（防连点）
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [creatingSession, setCreatingSession] = useState(false);
+
   // 主题：模式（浅色/深色）+ 强调色，均为纯前端本地偏好，不经过服务器
   const [themeMode, setThemeMode] = useState<ThemeMode>(DEFAULT_THEME_MODE);
   const [themeId, setThemeId] = useState<ThemeId>(DEFAULT_THEME_ID);
@@ -62,26 +72,79 @@ export default function App() {
   // 记忆库
   const [memoryOpen, setMemoryOpen] = useState(false);
 
+  // 空会话欢迎语：纯本地展示，不落盘、不计入服务端 messageCount
+  const buildWelcomeMessages = (): Message[] => [
+    {
+      id: 'welcome-1',
+      role: 'assistant',
+      content: '我在。',
+    },
+    {
+      id: 'welcome-2',
+      role: 'assistant',
+      content: '这里是属于Bluebird的地方。想说什么就说吧。',
+    },
+  ];
+
+  // 读取指定会话的消息并渲染；返回是否成功（失败时由调用方决定文案）
+  const loadSessionHistory = async (
+    sessionId: string
+  ): Promise<{ ok: boolean; status: number }> => {
+    try {
+      const response = await fetch(
+        `${process.env.EXPO_PUBLIC_API_URL}/history?sessionId=${encodeURIComponent(
+          sessionId
+        )}&limit=200`,
+        {
+          headers: {
+            Authorization: `Bearer ${API_TOKEN}`,
+          },
+        }
+      );
+
+      const data = await readJsonResponse(response);
+
+      if (!response.ok || !Array.isArray(data.history)) {
+        return { ok: false, status: response.status };
+      }
+
+      setMessages(
+        data.history.length === 0
+          ? buildWelcomeMessages()
+          : data.history.map(
+              (
+                item: {
+                  id?: string;
+                  role: 'user' | 'assistant';
+                  content: string;
+                  createdAt?: string;
+                },
+                index: number
+              ) => ({
+                id: item.id ?? `history-${index}`,
+                role: item.role,
+                content: item.content,
+                createdAt: item.createdAt,
+              })
+            )
+      );
+
+      return { ok: true, status: response.status };
+    } catch (error) {
+      console.error('History load error:', error);
+      return { ok: false, status: 0 };
+    }
+  };
+
+  // 启动：先选「最近更新的会话」（/sessions 已按 updatedAt 倒序），
+  // 再读它的历史；/sessions 不可用时退回默认会话单历史模式（与旧行为等价）。
   useEffect(() => {
     let cancelled = false;
 
-    const welcome: Message[] = [
-      {
-        id: 'welcome-1',
-        role: 'assistant',
-        content: '我在。',
-      },
-      {
-        id: 'welcome-2',
-        role: 'assistant',
-        content: '这里是属于Bluebird的地方。想说什么就说吧。',
-      },
-    ];
-
-    const loadHistory = async () => {
+    const loadSessions = async (): Promise<SessionMeta[] | null> => {
       try {
         const response = await fetch(
-          `${process.env.EXPO_PUBLIC_API_URL}/history?limit=200`,
+          `${process.env.EXPO_PUBLIC_API_URL}/sessions`,
           {
             headers: {
               Authorization: `Bearer ${API_TOKEN}`,
@@ -91,44 +154,33 @@ export default function App() {
 
         const data = await readJsonResponse(response);
 
-        if (!response.ok || !Array.isArray(data.history)) {
-          throw new Error('读取历史记录失败');
+        if (!response.ok || !Array.isArray(data.sessions)) {
+          throw new Error('读取会话列表失败');
         }
 
-        if (cancelled) return;
-
-        if (data.history.length === 0) {
-          setMessages(welcome);
-          return;
-        }
-
-        setMessages(
-          data.history.map(
-            (
-              item: {
-                id?: string;
-                role: 'user' | 'assistant';
-                content: string;
-                createdAt?: string;
-              },
-              index: number
-            ) => ({
-              id: item.id ?? `history-${index}`,
-              role: item.role,
-              content: item.content,
-              createdAt: item.createdAt,
-            })
-          )
-        );
+        return data.sessions as SessionMeta[];
       } catch (error) {
-        console.error('History load error:', error);
-        if (!cancelled) setMessages(welcome);
-      } finally {
-        if (!cancelled) setLoadingHistory(false);
+        // 失败不抛出：退回默认会话，保证单历史模式仍完整可用
+        console.error('Sessions load error:', error);
+        return null;
       }
     };
 
-    loadHistory();
+    const bootstrap = async () => {
+      const sessions = await loadSessions();
+
+      // 明确传 sessionId：新后端命中该会话，旧后端忽略未知 query 参数
+      const resumeSessionId = sessions?.[0]?.id || DEFAULT_SESSION_ID;
+
+      await loadSessionHistory(resumeSessionId);
+
+      if (cancelled) return;
+
+      setCurrentSessionId(resumeSessionId);
+      setLoadingHistory(false);
+    };
+
+    bootstrap();
 
     return () => {
       cancelled = true;
@@ -219,8 +271,8 @@ export default function App() {
 
   const clearChatHistory = async () => {
     Alert.alert(
-      '清理聊天记录',
-      '确定要删除当前保存的全部聊天记录吗？',
+      '清理当前会话',
+      '确定要删除当前会话的全部聊天记录吗？其他会话不受影响。',
       [
         { text: '取消', style: 'cancel' },
         {
@@ -233,8 +285,10 @@ export default function App() {
                 {
                   method: 'POST',
                   headers: {
+                    'Content-Type': 'application/json',
                     Authorization: `Bearer ${API_TOKEN}`,
                   },
+                  body: JSON.stringify({ sessionId: currentSessionId }),
                 }
               );
 
@@ -280,7 +334,10 @@ export default function App() {
                   'Content-Type': 'application/json',
                   Authorization: `Bearer ${API_TOKEN}`,
                 },
-                body: JSON.stringify({ messageId: message.id }),
+                body: JSON.stringify({
+                  sessionId: currentSessionId,
+                  messageId: message.id,
+                }),
               }
             );
 
@@ -310,7 +367,10 @@ export default function App() {
   const sendMessage = async (retryText?: string) => {
     const text = (retryText ?? input).trim();
 
-    if (!text || sending) return;
+    if (!text || sending || loadingHistory) return;
+
+    // 请求入口快照：await 期间即使用户切换了会话，本次请求也保持在同一会话
+    const sessionId = currentSessionId;
 
     const userMessage: Message = {
       id: makeLocalId(),
@@ -321,7 +381,10 @@ export default function App() {
 
     setSending(true);
 
-    const past = messages.filter(item => !item.retryText);
+    // welcome 是纯本地展示消息，不进模型上下文
+    const past = messages.filter(
+      item => !item.retryText && !item.id.startsWith('welcome-')
+    );
     const history = (retryText ? past.slice(0, -1) : past)
       .slice(-20)
       .map(item => ({ role: item.role, content: item.content }));
@@ -350,6 +413,7 @@ export default function App() {
             message: text,
             history,
             timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            sessionId,
           }),
         }
       );
@@ -357,6 +421,11 @@ export default function App() {
       const data = await readJsonResponse(response);
 
       if (!response.ok) {
+        // 会话被清理/只读保护时给出明确的下一步指引
+        if (response.status === 404) {
+          Alert.alert('会话已失效', '返回主页后请重新选择会话。');
+        }
+
         throw new Error(data.error || '请求失败');
       }
 
@@ -425,14 +494,17 @@ export default function App() {
   // 走同一个 /chat，用 mode:'continue' 标记为内部续写请求；
   // 后端不会保存任何"继续说"用户消息，只追加 assistant 消息。
   const sendContinuation = async () => {
-    if (continuing || sending) return;
+    if (continuing || sending || loadingHistory) return;
 
     const last = messages[messages.length - 1];
 
     if (!last || last.role !== 'assistant' || last.retryText) return;
 
+    // 与 sendMessage 同样的入口快照：续写期间不因切换会话串上下文
+    const sessionId = currentSessionId;
+
     const history = messages
-      .filter(item => !item.retryText)
+      .filter(item => !item.retryText && !item.id.startsWith('welcome-'))
       .slice(-20)
       .map(item => ({ role: item.role, content: item.content }));
 
@@ -455,6 +527,7 @@ export default function App() {
             mode: 'continue',
             history,
             timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            sessionId,
           }),
         }
       );
@@ -493,35 +566,95 @@ export default function App() {
   };
 
   // ---- 欢迎主页的三个入口 ----
-  // 继续聊天：复用既有的历史加载结果进入聊天页。
-  // 服务端只有一份全局聊天历史，它就是「最近一次会话」，无需额外请求。
+  // 继续聊天：启动时已加载「最近更新的会话」，直接进聊天页即可
   const enterChatFromHome = () => setScreen('chat');
 
-  // 新建聊天 / 历史聊天：当前后端不支持，如实告知，不用前端假效果代替。
-  // 依据：server/data/chat-history.json 是唯一的一份消息数组（上限 200），
-  // /history、/history/clear、/history/recall、/chat 均无会话 id 参数，
-  // 全仓库不存在 sessionId / conversationId 等会话概念。
-  const explainUnsupported = (title: string, detail: string) => {
-    Alert.alert(title, detail, [{ text: '知道了' }]);
+  // 新建聊天：点击即创建独立会话（POST /sessions），进入空的聊天页
+  const createNewChat = async () => {
+    if (creatingSession || sending || continuing || loadingHistory) return;
+
+    setCreatingSession(true);
+
+    try {
+      const response = await fetch(
+        `${process.env.EXPO_PUBLIC_API_URL}/sessions`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${API_TOKEN}`,
+          },
+          body: JSON.stringify({}),
+        }
+      );
+
+      const data = await readJsonResponse(response);
+
+      if (!response.ok || !data.session?.id) {
+        throw new Error(data.error || '新建会话失败');
+      }
+
+      setCurrentSessionId(data.session.id);
+      setMessages([]);
+      setScreen('chat');
+    } catch (error) {
+      console.error('Create session error:', error);
+      Alert.alert(
+        '新建聊天失败',
+        error instanceof Error && error.message.includes('新建会话失败')
+          ? error.message
+          : '暂时无法连接会话服务，请稍后再试。'
+      );
+    } finally {
+      setCreatingSession(false);
+    }
+  };
+
+  // 历史聊天：打开会话列表弹层
+  const openChatHistory = () => {
+    if (creatingSession || sending || continuing || loadingHistory) return;
+    setHistoryOpen(true);
+  };
+
+  // 从历史列表选择一个会话：加载它的消息并进入聊天页
+  const selectSessionFromHistory = async (sessionId: string) => {
+    if (sending || continuing || loadingHistory) return;
+
+    const result = await loadSessionHistory(sessionId);
+
+    if (!result.ok) {
+      Alert.alert(
+        '打开会话失败',
+        result.status === 404
+          ? '会话不存在，可能已被清理。'
+          : '读取会话记录失败，请稍后再试。'
+      );
+      return;
+    }
+
+    setCurrentSessionId(sessionId);
+    setHistoryOpen(false);
+    setScreen('chat');
   };
 
   if (screen === 'home') {
     return (
-      <HomeScreen
-        onContinue={enterChatFromHome}
-        onNewChat={() =>
-          explainUnsupported(
-            '暂不支持新建聊天',
-            '后端目前只有一份全局聊天记录，没有独立会话存储。若现在「新建」，新消息仍会写进同一份历史，等于覆盖/串进旧聊天，因此不做假的新建效果。需要后端先支持多会话（会话 id、会话列表与独立消息）后才能提供。'
-          )
-        }
-        onHistory={() =>
-          explainUnsupported(
-            '暂不支持历史聊天',
-            '后端目前没有会话列表与会话元数据（标题、时间、会话 id），无法列出可恢复的历史会话。需要后端先支持多会话存储后才能提供。'
-          )
-        }
-      />
+      <>
+        <HomeScreen
+          onContinue={enterChatFromHome}
+          onNewChat={createNewChat}
+          onHistory={openChatHistory}
+          creatingChat={creatingSession}
+        />
+
+        <HistoryScreen
+          visible={historyOpen}
+          onClose={() => setHistoryOpen(false)}
+          theme={theme}
+          currentSessionId={currentSessionId}
+          onSelectSession={selectSessionFromHistory}
+        />
+      </>
     );
   }
 
@@ -571,6 +704,7 @@ export default function App() {
           value={input}
           onChangeText={setInput}
           sending={sending}
+          loadingHistory={loadingHistory}
           onSend={() => sendMessage()}
           onReturnHome={() => setScreen('home')}
         />
@@ -587,6 +721,14 @@ export default function App() {
         onClose={() => setThemePickerOpen(false)}
         theme={theme}
         onSelect={selectTheme}
+      />
+
+      <HistoryScreen
+        visible={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        theme={theme}
+        currentSessionId={currentSessionId}
+        onSelectSession={selectSessionFromHistory}
       />
     </SafeAreaView>
   );

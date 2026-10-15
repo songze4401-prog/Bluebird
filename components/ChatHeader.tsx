@@ -86,7 +86,7 @@ export function ChatHeader({
           </TouchableOpacity>
 
           <TouchableOpacity style={styles.menuItem} onPress={onClearHistory}>
-            <Text style={styles.menuItemText}>🗑️ 清理聊天记录</Text>
+            <Text style={styles.menuItemText}>🗑️ 清理当前会话</Text>
           </TouchableOpacity>
 
           <View style={styles.menuVersion}>
