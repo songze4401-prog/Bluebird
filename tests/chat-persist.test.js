@@ -149,7 +149,9 @@ async function main() {
 
   // index.js 用 client 的存在与否决定是否调用模型：必须在 require 之前置好 key
   process.env.BLUEBIRD_DATA_DIR = DATA_DIR;
-  process.env.PORT = '3995';
+  // 端口交给操作系统分配：固定端口被占用时，下面的轮询会连上占用者的服务，
+  // 把本套件的写入（建会话、/chat）打到别人实例上。
+  process.env.PORT = '0';
   process.env.BLUEBIRD_API_TOKEN = 'test-token-chat';
   process.env.DEEPSEEK_API_KEY = 'stub-key';
 
@@ -159,9 +161,13 @@ async function main() {
   delete require.cache[indexTarget];
 
   const sessions = require(sessionsTarget);
-  require(indexTarget);
+  const { server } = require(indexTarget);
 
-  const BASE = 'http://127.0.0.1:3995';
+  // 等 listening 后从实例读取真实端口，与端口占用者完全不相干
+  if (!server.listening) {
+    await new Promise(resolve => server.once('listening', resolve));
+  }
+  const BASE = `http://127.0.0.1:${server.address().port}`;
   const TOKEN = 'test-token-chat';
 
   let ready = false;

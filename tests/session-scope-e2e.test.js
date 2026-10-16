@@ -76,9 +76,11 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-const PORT = '3996';
 const TOKEN = 'test-token-scope';
-const BASE = `http://127.0.0.1:${PORT}`;
+// 端口由操作系统分配（main() 里 PORT=0），BASE 在服务 listening 后回填：
+// 固定端口被占用时，轮询会连上占用者的服务，把本套件的会话/聊天写入
+// 打到别人实例上。
+let BASE = '';
 
 async function req(p, { method = 'GET', body } = {}) {
   const res = await fetch(BASE + p, {
@@ -237,7 +239,7 @@ async function main() {
   };
 
   process.env.BLUEBIRD_DATA_DIR = DATA_DIR;
-  process.env.PORT = PORT;
+  process.env.PORT = '0';
   process.env.BLUEBIRD_API_TOKEN = TOKEN;
   process.env.DEEPSEEK_API_KEY = 'stub-key';
 
@@ -249,7 +251,13 @@ async function main() {
   const memoryModule = require(path.join(SERVER, 'memory.js'));
   const emotionModule = require(path.join(SERVER, 'emotion.js'));
 
-  require(indexTarget);
+  const { server } = require(indexTarget);
+
+  // 等 listening 后回填真实端口，与端口占用者完全不相干
+  if (!server.listening) {
+    await new Promise(resolve => server.once('listening', resolve));
+  }
+  BASE = `http://127.0.0.1:${server.address().port}`;
 
   // 等 HTTP 服务就绪
   let ready = false;

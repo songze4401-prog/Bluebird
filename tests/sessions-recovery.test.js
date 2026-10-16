@@ -273,12 +273,18 @@ async function main() {
   delete require.cache[indexTarget];
 
   process.env.BLUEBIRD_DATA_DIR = dirE;
-  process.env.PORT = '3996';
+  // 端口交给操作系统分配：固定端口被占用时轮询会连上占用者的服务，
+  // 把本套件的读写打到别人实例上。
+  process.env.PORT = '0';
   process.env.BLUEBIRD_API_TOKEN = 'test-token-recovery';
 
-  require(indexTarget);
+  const { server } = require(indexTarget);
 
-  const BASE = 'http://127.0.0.1:3996';
+  // 等 listening 后从实例读取真实端口，与端口占用者完全不相干
+  if (!server.listening) {
+    await new Promise(resolve => server.once('listening', resolve));
+  }
+  const BASE = `http://127.0.0.1:${server.address().port}`;
   const TOKEN = 'test-token-recovery';
 
   let ready = false;
