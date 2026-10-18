@@ -1,73 +1,110 @@
-'use strict';
-
-/**
- * 云岫 Bluebird — 持久化写入工具（原子 + fsync）
- *
- * 三个 JSON 状态模块（memory.js / emotion.js / sessions.js）共用本模块落盘，
- * 保证写入策略只有一套：先写带 pid 的临时文件，fsync 把数据钉死，再原子
- * rename 覆盖目标，最后尽力把 rename 的目录项也钉死。
- *
- * 为什么需要 fsync（AGENTS.md C2）：
- * 只 writeFile + rename 的话，rename 可能在页面缓存真正落盘之前就被提交，
- * 断电后目标文件可能是空文件或旧内容。fsync 把"数据已写稳"排在 rename 之前，
- * 关掉这个窗口。
- *
- * Windows 注意事项（实测）：
- * - 临时文件必须以 'w' 打开再 fsync；对只读 fd 调 fsync 会抛 EPERM。
- * - 目录 fsync 在 Windows 上要用 'r+' 打开目录（'r' 会 EPERM），
- *   而 POSIX 上 'r+' 打开目录会 EISDIR（'r' 才行）。两种都试，都不行就放弃：
- *   目录项这一步失败不影响已 fsync 的文件内容本身。
- */
-
+/* global process */
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
-/** 尽最大努力把目录项变更（rename）也钉到磁盘；不支持就静默放弃 */
-function fsyncDirectory(dir) {
-  for (const flag of ['r+', 'r']) {
-    let fd;
-    try {
-      fd = fs.openSync(dir, flag);
-    } catch (_) {
-      continue; // 这种打开方式不行，换下一种
-    }
-    try {
-      fs.fsyncSync(fd);
-      return;
-    } catch (_) {
-      return; // 打开成功但 fsync 不被支持（如某些文件系统），放弃
-    } finally {
-      fs.closeSync(fd);
+// 原子写盘工具：写临时文件 -> fsync -> close -> rename 覆盖 -> 尽力 fsync 父目录。
+//
+// 目的：断电 / 进程被杀时，目标文件要么是旧内容、要么是新内容，绝不会是空文件或
+// 截断文件。仅 writeFile + rename 不够 —— rename 可能先于数据落盘被提交，崩溃后
+// 目标文件可能只剩空文件或旧内容；fsync 把"数据已写稳"钉在 rename 之前。
+//
+// 临时文件以 'wx' 独占创建（已存在则直接报错，天然防止并发实例互踩同一路径），
+// 命名为 <target>.tmp-<pid>-<时间戳>-<随机数>，与目标同目录以保证 rename 是原子操作。
+// 权限沿用 open 的默认值（与原先 writeFile 默认一致），不改动。
+//
+// 任何一步失败都会清理自己创建的临时文件并把错误抛给调用方，绝不静默吞掉。
+
+function tempPathFor(target) {
+  const random = crypto.randomBytes(6).toString('hex');
+  return `${target}.tmp-${process.pid}-${Date.now()}-${random}`;
+}
+
+// 尽力 fsync 父目录，让"目录项已更新"也落盘。
+// Windows 不允许以 'r' 打开目录，此步失败直接忽略（属尽力而为，不影响正确性）。
+function fsyncParentDirSync(dir) {
+  let fd = null;
+
+  try {
+    fd = fs.openSync(dir, 'r');
+    fs.fsyncSync(fd);
+  } catch (_) {
+    // 平台不支持 / 权限不足，忽略
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch (_) {
+        // 关闭失败无可挽回，忽略
+      }
     }
   }
 }
 
-/**
- * 把 data 原子且持久地写入 filePath。
- *
- * - 临时文件名带 pid：多实例不会抢同一个固定名，避免 Windows 上后打开的一方
- *   撞 EPERM 直接崩溃。
- * - 任何一步失败都抛错，由调用方按自己的语义处理（回滚内存、上报错误）——
- *   绝不"写失败了还当成功"。
- *
- * @param {string} filePath 目标文件路径
- * @param {string} data 要写入的文本内容
- */
-function writeFileDurable(filePath, data) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+/** 同步原子写。失败时抛错（与原先 writeFileSync 的错误语义一致，不静默）。 */
+function writeFileAtomicSync(target, data) {
+  const tmpPath = tempPathFor(target);
+  let fd = null;
 
-  const tmpFile = `${filePath}.tmp.${process.pid}`;
-
-  const fd = fs.openSync(tmpFile, 'w');
   try {
+    fd = fs.openSync(tmpPath, 'wx');
     fs.writeFileSync(fd, data, 'utf8');
     fs.fsyncSync(fd);
-  } finally {
     fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(tmpPath, target);
+  } catch (error) {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch (_) {
+        // ignore
+      }
+    }
+
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch (_) {
+      // 临时文件可能还没建出来，忽略
+    }
+
+    throw error;
   }
 
-  fs.renameSync(tmpFile, filePath);
-  fsyncDirectory(path.dirname(filePath));
+  fsyncParentDirSync(path.dirname(target));
 }
 
-module.exports = { writeFileDurable };
+/** 异步原子写。失败时 reject（与原先 fs.promises 的错误语义一致，不静默）。 */
+async function writeFileAtomic(target, data) {
+  const tmpPath = tempPathFor(target);
+  let handle = null;
+
+  try {
+    handle = await fs.promises.open(tmpPath, 'wx');
+    await handle.writeFile(data, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await fs.promises.rename(tmpPath, target);
+  } catch (error) {
+    if (handle) {
+      try {
+        await handle.close();
+      } catch (_) {
+        // ignore
+      }
+    }
+
+    try {
+      await fs.promises.unlink(tmpPath);
+    } catch (_) {
+      // 临时文件可能还没建出来，忽略
+    }
+
+    throw error;
+  }
+
+  fsyncParentDirSync(path.dirname(target));
+}
+
+module.exports = { writeFileAtomic, writeFileAtomicSync };
