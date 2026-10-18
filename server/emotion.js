@@ -1,6 +1,9 @@
 /* global __dirname */
 const fs = require('fs');
 const path = require('path');
+const { logDataEvent } = require('./data-events');
+const { writeFileAtomic, writeFileAtomicSync } = require('./atomic-write');
+const { registerCorruptionHandler, handleCorruption } = require('./corruption');
 
 // 数据目录可通过 BLUEBIRD_DATA_DIR 覆盖：测试用临时目录，避免碰到真实数据。
 // 未设置时与 sessions.js / memory.js 保持一致，落在 server/data/。
@@ -122,52 +125,106 @@ function normalizeState(raw) {
   };
 }
 
-function loadEmotion() {
-  try {
-    if (!fs.existsSync(EMOTION_FILE)) {
-      fs.mkdirSync(path.dirname(EMOTION_FILE), { recursive: true });
-      fs.writeFileSync(
-        EMOTION_FILE,
-        JSON.stringify(createDefaultState(), null, 2),
-        'utf8'
-      );
-      state = createDefaultState();
-      console.log('Emotion loaded: calm (0)');
-      return;
+// 损坏处理契约：emotion 只有"读取失败 / JSON 解析失败"才算损坏 ——
+// normalizeState 本身容忍任意形状（非法值一律回退 calm），形状不对不是损坏。
+registerCorruptionHandler('emotion', {
+  detect(data) {
+    if (data.error) {
+      return {
+        corrupt: true,
+        // 允许调用方为"非解析型异常"（如初始化写盘失败）显式指定原因短码。
+        reason: data.reason || 'read_error',
+        error: data.error,
+      };
     }
 
-    const raw = fs.readFileSync(EMOTION_FILE, 'utf8');
-    state = normalizeState(JSON.parse(raw));
-    console.log(`Emotion loaded: ${state.emotion} (${state.intensity})`);
-  } catch (error) {
-    console.error('Emotion load error:', error.message);
+    try {
+      return { corrupt: false, parsed: JSON.parse(data.text) };
+    } catch (error) {
+      return { corrupt: true, reason: 'json_parse_error', error };
+    }
+  },
+
+  recover(context) {
+    // 处理策略不变（隔离重命名 + 回退默认 calm）；结构化日志由 handleCorruption
+    // 统一记录，刻意不再打印 error.message：JSON.parse 的报错可能夹带文件内容。
+    let isolatedPath = null;
 
     try {
-      const corruptPath = `${EMOTION_FILE}.corrupt-${Date.now()}`;
-      fs.renameSync(EMOTION_FILE, corruptPath);
-      console.error(`Corrupt emotion backed up: ${corruptPath}`);
+      const corruptPath = `${context.file}.corrupt-${Date.now()}`;
+
+      fs.renameSync(context.file, corruptPath);
+
+      isolatedPath = corruptPath;
+
+      console.error(`Corrupt emotion backed up: ${isolatedPath}`);
     } catch (backupError) {
       console.error('Emotion backup error:', backupError.message);
     }
 
-    state = createDefaultState();
+    return {
+      action: isolatedPath ? 'isolated_file' : 'isolation_failed',
+      isolatedPath,
+    };
+  },
+});
+
+function loadEmotion() {
+  if (!fs.existsSync(EMOTION_FILE)) {
+    try {
+      fs.mkdirSync(path.dirname(EMOTION_FILE), { recursive: true });
+      writeFileAtomicSync(
+        EMOTION_FILE,
+        JSON.stringify(createDefaultState(), null, 2)
+      );
+      state = createDefaultState();
+      console.log('Emotion loaded: calm (0)');
+    } catch (error) {
+      // 初始化写盘失败：与旧实现一致地走损坏兜底（隔离 + 回退默认），不向上抛。
+      handleCorruption(
+        'emotion',
+        { text: null, error, reason: 'io_error' },
+        { file: EMOTION_FILE }
+      );
+
+      state = createDefaultState();
+    }
+
+    return;
   }
+
+  let text = null;
+  let error = null;
+
+  try {
+    text = fs.readFileSync(EMOTION_FILE, 'utf8');
+  } catch (readError) {
+    error = readError;
+  }
+
+  const outcome = handleCorruption(
+    'emotion',
+    { text, error },
+    { file: EMOTION_FILE }
+  );
+
+  if (outcome.corrupt) {
+    state = createDefaultState();
+    return;
+  }
+
+  state = normalizeState(outcome.parsed);
+  console.log(`Emotion loaded: ${state.emotion} (${state.intensity})`);
 }
 
 async function saveEmotion(nextState) {
   const dir = path.dirname(EMOTION_FILE);
-  // 与 memory.js / sessions.js 同款：临时文件名带 pid，避免多实例抢同一路径
-  const tmpFile = `${EMOTION_FILE}.tmp.${process.pid}`;
 
   fs.mkdirSync(dir, { recursive: true });
 
-  await fs.promises.writeFile(
-    tmpFile,
-    JSON.stringify(nextState, null, 2),
-    'utf8'
-  );
-
-  await fs.promises.rename(tmpFile, EMOTION_FILE);
+  // 原子写（临时文件 'wx' + fsync + rename + 尽力 fsync 父目录），
+  // 崩溃时不会出现空文件 / 截断文件。
+  await writeFileAtomic(EMOTION_FILE, JSON.stringify(nextState, null, 2));
 }
 
 // 与 memory.js 同款串行写队列：情绪更新和落盘不会被并发请求交错
@@ -175,7 +232,14 @@ function enqueueWrite(task) {
   const run = writeQueue.then(task, task);
 
   writeQueue = run.catch(error => {
-    console.error('Emotion queue error:', error.message);
+    // 结构化记录写入队列里的落盘失败（原本只有一行裸 message，无模块/路径/时间戳）。
+    logDataEvent({
+      module: 'emotion',
+      file: EMOTION_FILE,
+      event: 'write_queue_error',
+      error,
+      action: 'write_failed',
+    });
   });
 
   return run;
