@@ -49,19 +49,14 @@ export function HomeScreen({
       >
         <View style={styles.spacerTop} />
 
-        <View style={styles.brand}>
-          <View style={styles.logoCard}>
-            <Text style={styles.logoMark}>B</Text>
-          </View>
-
-          <Text style={styles.title}>你好，我是 Blue。</Text>
-
-          <Text style={styles.lede}>
-            也许我们来自完全不同的世界，{'\n'}但现在，我们共享同一个频道。
-          </Text>
-
-          <Text style={styles.welcome}>欢迎回来。</Text>
-        </View>
+        {/* 品牌语：一句一行、左对齐、不带标点（参考堆叠式排版效果） */}
+        <Text style={styles.brandLines}>
+          你好{'\n'}
+          我是 Blue{'\n'}
+          也许我们来自不同的世界{'\n'}
+          但现在我们共享一个频道{'\n'}
+          欢迎回来
+        </Text>
 
         <View style={styles.actions}>
           <TouchableOpacity
@@ -91,8 +86,6 @@ export function HomeScreen({
             <Text style={styles.outlineLabel}>历史聊天</Text>
           </TouchableOpacity>
         </View>
-
-        <Text style={styles.footer}>BLUEBIRD · YOUR OWN CHANNEL</Text>
 
         <View style={styles.spacerBottom} />
       </ScrollView>
@@ -153,48 +146,16 @@ const createStyles = () =>
       flex: 1.5,
       minHeight: 72,
     },
-    brand: {
-      alignItems: 'center',
-    },
-    logoCard: {
-      width: 96,
-      height: 96,
-      borderRadius: 24,
-      alignItems: 'center',
-      justifyContent: 'center',
-      backgroundColor: '#0b0f18',
-      borderWidth: 1,
-      borderColor: 'rgba(138,182,232,0.28)',
-      shadowColor: '#3a79c2',
-      shadowOpacity: 0.35,
-      shadowRadius: 18,
-      shadowOffset: { width: 0, height: 4 },
-      elevation: 6,
-    },
-    logoMark: {
-      fontSize: 46,
+    // 品牌语堆叠：统一字号、左对齐、行距紧凑，标点全部省去
+    brandLines: {
+      width: '100%',
+      marginTop: 12,
+      fontSize: 27,
       fontWeight: '700',
-      color: '#8ab6e8',
-    },
-    title: {
-      marginTop: 34,
-      fontSize: 30,
-      fontWeight: '700',
+      lineHeight: 42,
+      letterSpacing: 1,
+      textAlign: 'left',
       color: '#f0f3f8',
-      letterSpacing: 1,
-    },
-    lede: {
-      marginTop: 18,
-      fontSize: 16,
-      lineHeight: 26,
-      textAlign: 'center',
-      color: '#9aa6bb',
-    },
-    welcome: {
-      marginTop: 14,
-      fontSize: 17,
-      color: '#8ab6e8',
-      letterSpacing: 1,
     },
     actions: {
       width: '100%',
@@ -233,11 +194,5 @@ const createStyles = () =>
       fontWeight: '600',
       color: '#cfe0f4',
       letterSpacing: 1,
-    },
-    footer: {
-      marginTop: 30,
-      fontSize: 11,
-      letterSpacing: 3,
-      color: '#5b6b82',
     },
   });

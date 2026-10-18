@@ -1,5 +1,6 @@
 import React, { useLayoutEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   View,
   Text,
   TouchableOpacity,
@@ -24,12 +25,15 @@ export function HistoryScreen({
   theme,
   currentSessionId,
   onSelectSession,
+  onDeleteSession,
 }: {
   visible: boolean;
   onClose: () => void;
   theme: Theme;
   currentSessionId: string;
   onSelectSession: (sessionId: string) => void;
+  // 删除会话：由父级请求后端，成功返回 true（列表据此重拉）
+  onDeleteSession: (sessionId: string) => Promise<boolean>;
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);
 
@@ -64,6 +68,26 @@ export function HistoryScreen({
     } finally {
       setLoadingSessions(false);
     }
+  };
+
+  // 删除确认：二次确认防误触；成功后重拉列表，保证与服务端一致
+  const confirmDelete = (sessionId: string) => {
+    Alert.alert(
+      '删除会话',
+      '会话与其聊天记录将被删除，无法恢复。确定删除？',
+      [
+        { text: '取消', style: 'cancel' },
+        {
+          text: '删除',
+          style: 'destructive',
+          onPress: async () => {
+            const ok = await onDeleteSession(sessionId);
+
+            if (ok) fetchSessions();
+          },
+        },
+      ]
+    );
   };
 
   // 打开即加载：与 MemoryScreen 同一时序约定，不闪旧数据
@@ -169,6 +193,22 @@ export function HistoryScreen({
                         </Text>
                       </View>
                     )}
+
+                    <TouchableOpacity
+                      style={styles.historyDelete}
+                      onPress={() => confirmDelete(item.id)}
+                      activeOpacity={0.7}
+                      accessibilityLabel={`删除会话 ${item.title || '未命名会话'}`}
+                    >
+                      <Text
+                        style={[
+                          styles.historyDeleteText,
+                          { color: theme.danger },
+                        ]}
+                      >
+                        删除
+                      </Text>
+                    </TouchableOpacity>
                   </View>
 
                   <View style={styles.historyCardBottom}>
@@ -312,6 +352,14 @@ const createStyles = (theme: Theme) =>
     historyBadgeText: {
       color: theme.accent,
       fontSize: 12,
+    },
+    historyDelete: {
+      paddingHorizontal: 6,
+      paddingVertical: 4,
+    },
+    historyDeleteText: {
+      fontSize: 12,
+      fontWeight: '600',
     },
     historyCardBottom: {
       flexDirection: 'row',

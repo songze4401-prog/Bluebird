@@ -77,12 +77,7 @@ export default function App() {
     {
       id: 'welcome-1',
       role: 'assistant',
-      content: '我在。',
-    },
-    {
-      id: 'welcome-2',
-      role: 'assistant',
-      content: '这里是属于Bluebird的地方。想说什么就说吧。',
+      content: '我在',
     },
   ];
 
@@ -637,6 +632,41 @@ export default function App() {
     setScreen('chat');
   };
 
+  // 删除会话：DELETE /sessions/:id。删除的是当前会话时切回默认会话，
+  // 服务端保证 default 被删后会立即重建为空会话，不会留下悬空 id
+  const deleteSessionFromHistory = async (
+    sessionId: string
+  ): Promise<boolean> => {
+    try {
+      const response = await fetch(
+        `${process.env.EXPO_PUBLIC_API_URL}/sessions/${encodeURIComponent(sessionId)}`,
+        {
+          method: 'DELETE',
+          headers: {
+            Authorization: `Bearer ${API_TOKEN}`,
+          },
+        }
+      );
+
+      const data = await readJsonResponse(response);
+
+      if (!response.ok) {
+        throw new Error(data.error || '删除失败');
+      }
+
+      if (sessionId === currentSessionId) {
+        setCurrentSessionId(DEFAULT_SESSION_ID);
+        setMessages([]);
+      }
+
+      return true;
+    } catch (error) {
+      console.error('Delete session error:', error);
+      Alert.alert('失败', '删除会话失败，请稍后再试。');
+      return false;
+    }
+  };
+
   if (screen === 'home') {
     return (
       <>
@@ -653,6 +683,7 @@ export default function App() {
           theme={theme}
           currentSessionId={currentSessionId}
           onSelectSession={selectSessionFromHistory}
+          onDeleteSession={deleteSessionFromHistory}
         />
       </>
     );
@@ -729,6 +760,7 @@ export default function App() {
         theme={theme}
         currentSessionId={currentSessionId}
         onSelectSession={selectSessionFromHistory}
+        onDeleteSession={deleteSessionFromHistory}
       />
     </SafeAreaView>
   );

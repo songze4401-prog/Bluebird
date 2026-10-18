@@ -580,6 +580,37 @@ function replaceMessages(sessionId, messages) {
   return true;
 }
 
+// 删除整个会话：元信息与该会话消息一并移除。跨会话共享的长期记忆
+// （memory.json 的贡献归属）与全局情绪状态不属于会话库，刻意不动。
+// 「默认会话始终存在」是本模块不变量：删掉 default 会立即重建一个空的，
+// 客户端切回 DEFAULT_SESSION_ID 永远不会踩到悬空 id。
+// 会话不存在返回 null（调用方据此回 404）；落盘失败回滚内存并返回 false，
+// 绝不允许"内存删了磁盘还在"的静默不一致。
+function deleteSession(sessionId) {
+  const current = loadStore();
+  const index = current.sessions.findIndex(item => item.id === sessionId);
+
+  if (index < 0) return null;
+
+  const removedMeta = current.sessions[index];
+  const removedMessages = current.messages[sessionId];
+
+  current.sessions.splice(index, 1);
+  delete current.messages[sessionId];
+
+  // 维持默认会话不变量：删除的是 default 时补一个空的回来
+  ensureDefaultSession();
+
+  if (!saveStore()) {
+    // 落盘失败：回滚内存，保证内存视图与磁盘事实一致
+    current.sessions.splice(index, 0, removedMeta);
+    current.messages[sessionId] = removedMessages;
+    return false;
+  }
+
+  return true;
+}
+
 module.exports = {
   DEFAULT_SESSION_ID,
   DEFAULT_SESSION_TITLE,
@@ -594,4 +625,5 @@ module.exports = {
   getMessages,
   appendMessages,
   replaceMessages,
+  deleteSession,
 };

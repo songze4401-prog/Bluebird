@@ -111,7 +111,7 @@ node tests/emotion-decay-global.test.js   # 10 — global baseline decay incl. r
 node tests/memory-session-scope.test.js   # 19 — contribution list, attribution, recall scope
 node tests/session-scope-e2e.test.js      # 19 — live HTTP end-to-end for E2/E3
 node tests/sessions-recovery.test.js      # 36
-node tests/sessions.test.js               # 30
+node tests/sessions.test.js               # 39
 ```
 
 - The two `node:test` suites declare `{ concurrency: 1 }` on every `describe`: suites within a file share one data file, and the corruption-recovery case renames it to `.corrupt`. The other ten are minimal custom-runner scripts (not `node:test`) that exit explicitly.

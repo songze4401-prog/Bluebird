@@ -6,6 +6,7 @@
  * 不读写 server/data 下任何真实聊天/记忆/情绪文件。
  *
  * 覆盖：旧历史安全迁移与兼容、会话列表/新建、按会话读写与清空、
+ *       删除会话（HTTP + 落盘 + default 重建不变量）、
  *       不同会话严格隔离、重启（重新加载模块）后的持久化。
  *
  * 运行：node tests/sessions.test.js
@@ -255,6 +256,45 @@ async function waitReady() {
     check('清空只作用于目标会话', aAfter.length === 0 && defAfter.length === 4, `A=${aAfter.length}, default=${defAfter.length}`);
   }
 
+  origLog('\n删除会话（HTTP + 落盘 + 不变量）');
+  {
+    sessions.appendMessages(sessionBId, [{ role: 'user', content: 'B 的留言' }]);
+
+    const noAuth = await req(`/sessions/${sessionBId}`, {
+      method: 'DELETE',
+      token: null,
+    });
+    check('DELETE /sessions/:id 无 token 返回 401', noAuth.status === 401, `实际 ${noAuth.status}`);
+
+    const unknown = await req('/sessions/unknown-id', { method: 'DELETE' });
+    check('DELETE 未知会话返回 404', unknown.status === 404, `实际 ${unknown.status}`);
+
+    const del = await req(`/sessions/${sessionBId}`, { method: 'DELETE' });
+    check(
+      'DELETE /sessions/:id 返回 200 ok',
+      del.status === 200 && del.json && del.json.ok === true,
+      JSON.stringify(del.json)
+    );
+
+    check('被删会话读取返回 null', sessions.getMessages(sessionBId) === null);
+    check(
+      '被删会话不再出现在列表中',
+      !sessions.listSessions().some(s => s.id === sessionBId)
+    );
+    check(
+      '删除只作用于目标会话',
+      sessions.getMessages(sessionAId).length === 0 &&
+        sessions.getMessages(sessions.DEFAULT_SESSION_ID).length === 4
+    );
+
+    const raw = JSON.parse(fs.readFileSync(sessions.STORE_FILE, 'utf8'));
+    check(
+      '落盘后文件中已无该会话（元数据与消息一并移除）',
+      !raw.sessions.some(s => s.id === sessionBId) &&
+        !(sessionBId in raw.messages)
+    );
+  }
+
   origLog('\n重启持久化（重新加载模块，等价重启进程）');
   {
     const sessionsPath = require.resolve(path.join(__dirname, '..', 'server', 'sessions.js'));
@@ -262,7 +302,7 @@ async function waitReady() {
     const fresh = require(sessionsPath);
 
     const list = fresh.listSessions();
-    check('重启后会话列表仍在（3 个）', list.length === 3, `实际 ${list.length}`);
+    check('重启后会话列表仍在（2 个）', list.length === 2, `实际 ${list.length}`);
 
     const defMsgs = fresh.getMessages(fresh.DEFAULT_SESSION_ID);
     check(
@@ -271,8 +311,10 @@ async function waitReady() {
       `实际 ${defMsgs.length}`
     );
 
-    const b = fresh.getSession(sessionBId);
-    check('重启后 B 会话元数据仍在', !!b && b.title === '会话B');
+    check(
+      '重启后 B 会话已删除且不再出现',
+      fresh.getSession(sessionBId) === null
+    );
 
     const backups = fs
       .readdirSync(TMP)
@@ -282,6 +324,21 @@ async function waitReady() {
     check(
       '旧 chat-history.json 始终未被改写',
       fs.readFileSync(LEGACY_FILE, 'utf8') === legacyRawBefore
+    );
+
+    // 删除 default：不变量保证「默认会话始终存在」——立即重建为空会话并落盘
+    const delDef = fresh.deleteSession(fresh.DEFAULT_SESSION_ID);
+    check(
+      '重启后删除 default：立即重建为空会话',
+      delDef === true &&
+        Array.isArray(fresh.getMessages(fresh.DEFAULT_SESSION_ID)) &&
+        fresh.getMessages(fresh.DEFAULT_SESSION_ID).length === 0
+    );
+    check(
+      '重建后的 default 已落盘',
+      JSON.parse(fs.readFileSync(fresh.STORE_FILE, 'utf8')).sessions.some(
+        s => s.id === fresh.DEFAULT_SESSION_ID
+      )
     );
   }
 

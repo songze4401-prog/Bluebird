@@ -49,7 +49,7 @@ jobs:
 
       # 逐文件单独跑（AGENTS.md 约定）。某个套件失败也跑完其余套件，
       # 最后统一以非零退出码结束，方便一次看全失败面。
-      - name: 自定义 runner 十套（逐文件单独跑，共 236 项）
+      - name: 自定义 runner 十套（逐文件单独跑，共 245 项）
         run: |
           fail=0
           for f in api atomic-write chat-persist corruption-contract data-events emotion-decay-global memory-session-scope session-scope-e2e sessions-recovery sessions; do

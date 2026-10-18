@@ -136,6 +136,7 @@ const {
   getMessages,
   appendMessages,
   replaceMessages,
+  deleteSession,
 } = require('./sessions');
 
 // 单实例守卫：必须在 listen 之前、且必须在路由注册之后调用，
@@ -386,6 +387,29 @@ app.get('/sessions/:id', requireAuth, (req, res) => {
   } catch (error) {
     console.error('Session API Error:', error);
     res.status(500).json({ error: '读取会话失败' });
+  }
+});
+
+// 删除指定会话：元信息与消息一并移除；跨会话共享的长期记忆与全局情绪不受影响。
+// default 被删时会立即重建为空会话（sessions.js 的不变量），客户端可安全切回。
+app.delete('/sessions/:id', requireAuth, (req, res) => {
+  try {
+    const result = deleteSession(req.params.id);
+
+    if (result === null) {
+      return res.status(404).json({ error: '会话不存在' });
+    }
+
+    if (result === false) {
+      return res.status(500).json({
+        error: '删除失败：聊天存储当前不可写',
+      });
+    }
+
+    res.json({ ok: true, sessionId: req.params.id, message: '会话已删除' });
+  } catch (error) {
+    console.error('Session delete error:', error);
+    res.status(500).json({ error: '删除会话失败' });
   }
 });
 

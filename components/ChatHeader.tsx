@@ -56,7 +56,7 @@ export function ChatHeader({
       {menuOpen && (
         <View style={styles.menu}>
           <TouchableOpacity style={styles.menuItem} onPress={onOpenMemory}>
-            <Text style={styles.menuItemText}>🧠 记忆库</Text>
+            <Text style={styles.menuItemText}>记忆库</Text>
           </TouchableOpacity>
 
           {MODE_OPTIONS.map(option => {
@@ -74,7 +74,7 @@ export function ChatHeader({
                     active && { color: theme.accent },
                   ]}
                 >
-                  {option.emoji} {option.label}
+                  {option.label}
                   {active ? '  ✓' : ''}
                 </Text>
               </TouchableOpacity>
@@ -82,11 +82,11 @@ export function ChatHeader({
           })}
 
           <TouchableOpacity style={styles.menuItem} onPress={onOpenThemePicker}>
-            <Text style={styles.menuItemText}>🎨 主题色</Text>
+            <Text style={styles.menuItemText}>主题色</Text>
           </TouchableOpacity>
 
           <TouchableOpacity style={styles.menuItem} onPress={onClearHistory}>
-            <Text style={styles.menuItemText}>🗑️ 清理当前会话</Text>
+            <Text style={styles.menuItemText}>清理当前会话</Text>
           </TouchableOpacity>
 
           <View style={styles.menuVersion}>
