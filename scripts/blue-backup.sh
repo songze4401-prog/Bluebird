@@ -30,7 +30,7 @@ fi
 # 运行期产物：单实例锁、写入中的临时文件
 is_runtime_file() {
   case "$1" in
-    .bluebird.lock|*.tmp.*) return 0 ;;
+    .bluebird.lock|*.tmp.*|*.tmp-*) return 0 ;;
     *) return 1 ;;
   esac
 }

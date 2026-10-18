@@ -46,11 +46,14 @@ async function closeHttpServer() {
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-sessions-'));
 
 process.env.BLUEBIRD_DATA_DIR = TMP;
-process.env.PORT = '3997';
+// 端口交给操作系统分配：固定端口被占用时 waitReady 会连上占用者的服务，
+// 把本套件的读写打到别人实例上。
+process.env.PORT = '0';
 process.env.BLUEBIRD_API_TOKEN = 'test-token-sessions';
 delete process.env.DEEPSEEK_API_KEY; // 不配 key，验证降级路径不触碰落盘逻辑
 
-const BASE = 'http://127.0.0.1:3997';
+// BASE 在服务 listening 后回填（见下方 IIFE 开头）
+let BASE = '';
 const TOKEN = 'test-token-sessions';
 
 // ---- 预置「旧版」数据：单份 chat-history.json，且故意混合缺 id / createdAt 的条目 ----
@@ -74,7 +77,7 @@ console.log = () => {};
 console.error = () => {};
 
 const sessions = require(path.join(__dirname, '..', 'server', 'sessions.js'));
-require(path.join(__dirname, '..', 'server', 'index.js'));
+const { server } = require(path.join(__dirname, '..', 'server', 'index.js'));
 
 let passed = 0;
 let failed = 0;
@@ -125,6 +128,13 @@ async function waitReady() {
 }
 
 (async () => {
+  // 等 listening 后从实例读取真实端口：固定端口被占用时，waitReady 的
+  // 轮询会连上占用者的服务，把本套件的读写打到别人实例上。
+  if (!server.listening) {
+    await new Promise(resolve => server.once('listening', resolve));
+  }
+  BASE = `http://127.0.0.1:${server.address().port}`;
+
   const ready = await waitReady();
   if (!ready) {
     origLog('服务未能在 5 秒内启动');

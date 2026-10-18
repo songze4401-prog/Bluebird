@@ -830,7 +830,12 @@ app.post('/chat', requireAuth, async (req, res) => {
 acquireSingleInstance({ port: PORT });
 
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Bluebird API running on port ${PORT}`);
+  // PORT 为 0 时由操作系统分配空闲端口，日志回显真实端口
+  console.log(`Bluebird API running on port ${server.address().port}`);
 });
 
 installShutdownHooks(server);
+
+// 导出 app 与 server 实例：测试可用 PORT=0 拿到系统分配的空闲端口，
+// 避免固定端口被占用时误连到别的服务（会读写对方的真实数据目录）。
+module.exports = { app, server };
