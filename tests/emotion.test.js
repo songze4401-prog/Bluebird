@@ -362,29 +362,27 @@ describe('状态持久化', SERIAL, () => {
     // 记录 open/fsync/rename 的事件序列（与 memory.test.js 同款守卫）。
     // 只数 fsync 次数会被 rename 后的目录 fsync 喂饱，抓不住"文件 fsync 被删掉"
     // 的回归——必须断言 tmp 的 fsync 发生在 rename 之前。
-    const realOpen = fs.openSync;
-    const realClose = fs.closeSync;
-    const realFsync = fs.fsyncSync;
-    const realRename = fs.renameSync;
-    const fdPath = new Map();
+    // 落盘走 server/atomic-write.js 的 writeFileAtomic（异步 FileHandle API）：
+    // handle.sync() 不经过 fs.fsyncSync 的 JS 绑定，rename 走 fs.promises.rename，
+    // 因此挂钩 fs.promises.open（包装返回的 handle 记录 sync）和 fs.promises.rename。
+    const realOpenP = fs.promises.open;
+    const realRenameP = fs.promises.rename;
     const events = [];
 
-    fs.openSync = (p, ...rest) => {
-      const fd = realOpen.call(fs, p, ...rest);
-      fdPath.set(fd, p);
-      return fd;
+    fs.promises.open = async (p, ...rest) => {
+      const handle = await realOpenP.call(fs.promises, p, ...rest);
+      const realSync = handle.sync.bind(handle);
+
+      handle.sync = async () => {
+        events.push(['fsync', String(p)]);
+        return realSync();
+      };
+
+      return handle;
     };
-    fs.closeSync = fd => {
-      fdPath.delete(fd);
-      return realClose.call(fs, fd);
-    };
-    fs.fsyncSync = fd => {
-      events.push(['fsync', fdPath.get(fd)]);
-      return realFsync.call(fs, fd);
-    };
-    fs.renameSync = (from, to) => {
+    fs.promises.rename = (from, to) => {
       events.push(['rename', from, to]);
-      return realRename.call(fs, from, to);
+      return realRenameP.call(fs.promises, from, to);
     };
 
     let onDisk = null;
@@ -402,10 +400,8 @@ describe('状态持久化', SERIAL, () => {
         if (onDisk && onDisk.emotion === 'excited') break;
       }
     } finally {
-      fs.openSync = realOpen;
-      fs.closeSync = realClose;
-      fs.fsyncSync = realFsync;
-      fs.renameSync = realRename;
+      fs.promises.open = realOpenP;
+      fs.promises.rename = realRenameP;
     }
 
     assert.equal(onDisk && onDisk.emotion, 'excited', '情绪状态未落盘');
@@ -415,10 +411,10 @@ describe('状态持久化', SERIAL, () => {
     );
     assert.ok(renameIdx >= 0, '落盘未走原子 rename');
     const tmpPath = events[renameIdx][1];
-    assert.equal(
-      tmpPath,
-      `${EMOTION_FILE}.tmp.${process.pid}`,
-      '临时文件名不符合「带 pid」约定'
+    const pidPrefix = `${EMOTION_FILE}.tmp-${process.pid}-`;
+    assert.ok(
+      tmpPath.startsWith(pidPrefix),
+      `临时文件名不符合「带 pid」约定: ${tmpPath}`
     );
     const fsyncIdx = events.findIndex(
       e => e[0] === 'fsync' && e[1] === tmpPath

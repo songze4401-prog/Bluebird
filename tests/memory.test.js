@@ -479,29 +479,27 @@ describe('落盘持久化（fsync，a5 回归防护）', SERIAL, () => {
     // 落盘，再 rename 覆盖目标"——只数 fsync 次数是不够的：atomic-write 里
     //  rename 之后还有一次目录 fsync，同样调 fs.fsyncSync，"文件 fsync 被删掉"
     // 的回归会被它喂饱而逃过检测（本次开发中实测过这个漏洞）。
-    const realOpen = fs.openSync;
-    const realClose = fs.closeSync;
-    const realFsync = fs.fsyncSync;
-    const realRename = fs.renameSync;
-    const fdPath = new Map();
+    // 落盘走 server/atomic-write.js 的 writeFileAtomic（异步 FileHandle API）：
+    // handle.sync() 不经过 fs.fsyncSync 的 JS 绑定，rename 走 fs.promises.rename，
+    // 因此挂钩 fs.promises.open（包装返回的 handle 记录 sync）和 fs.promises.rename。
+    const realOpenP = fs.promises.open;
+    const realRenameP = fs.promises.rename;
     const events = [];
 
-    fs.openSync = (p, ...rest) => {
-      const fd = realOpen.call(fs, p, ...rest);
-      fdPath.set(fd, p);
-      return fd;
+    fs.promises.open = async (p, ...rest) => {
+      const handle = await realOpenP.call(fs.promises, p, ...rest);
+      const realSync = handle.sync.bind(handle);
+
+      handle.sync = async () => {
+        events.push(['fsync', String(p)]);
+        return realSync();
+      };
+
+      return handle;
     };
-    fs.closeSync = fd => {
-      fdPath.delete(fd);
-      return realClose.call(fs, fd);
-    };
-    fs.fsyncSync = fd => {
-      events.push(['fsync', fdPath.get(fd)]);
-      return realFsync.call(fs, fd);
-    };
-    fs.renameSync = (from, to) => {
+    fs.promises.rename = (from, to) => {
       events.push(['rename', from, to]);
-      return realRename.call(fs, from, to);
+      return realRenameP.call(fs.promises, from, to);
     };
 
     let writeError = null;
@@ -513,10 +511,8 @@ describe('落盘持久化（fsync，a5 回归防护）', SERIAL, () => {
     } catch (error) {
       writeError = error;
     } finally {
-      fs.openSync = realOpen;
-      fs.closeSync = realClose;
-      fs.fsyncSync = realFsync;
-      fs.renameSync = realRename;
+      fs.promises.open = realOpenP;
+      fs.promises.rename = realRenameP;
     }
 
     assert.equal(writeError, null, '落盘改造不应让 processMemory 报错');
@@ -526,10 +522,10 @@ describe('落盘持久化（fsync，a5 回归防护）', SERIAL, () => {
     );
     assert.ok(renameIdx >= 0, '落盘未走原子 rename');
     const tmpPath = events[renameIdx][1];
-    assert.equal(
-      tmpPath,
-      `${MEMORY_FILE}.tmp.${process.pid}`,
-      '临时文件名不符合「带 pid」约定'
+    const pidPrefix = `${MEMORY_FILE}.tmp-${process.pid}-`;
+    assert.ok(
+      tmpPath.startsWith(pidPrefix),
+      `临时文件名不符合「带 pid」约定: ${tmpPath}`
     );
     const fsyncIdx = events.findIndex(
       e => e[0] === 'fsync' && e[1] === tmpPath
