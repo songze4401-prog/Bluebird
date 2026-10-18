@@ -1,4 +1,4 @@
-# Bluebird 数据备份（Windows / PowerShell）
+﻿# Bluebird 数据备份（Windows / PowerShell）
 # 把数据目录里的全部数据文件带时间戳拷贝到仓库之外。
 # 只读源目录：不修改、不删除、不覆盖源文件；不覆盖已存在的备份目录。
 # 运行期产物（.bluebird.lock、*.tmp.*）不备份：锁文件混进备份会在恢复时误报「已有实例在运行」。
