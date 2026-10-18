@@ -21,21 +21,27 @@ function tempPathFor(target) {
 }
 
 // 尽力 fsync 父目录，让"目录项已更新"也落盘。
-// Windows 不允许以 'r' 打开目录，此步失败直接忽略（属尽力而为，不影响正确性）。
+// Windows 只认 'r+' 打开目录（'r' 会 EPERM，之前版本因此在这台机器上
+// 实际从未生效），POSIX 只认 'r'（'r+' 打开目录报 EISDIR）。
+// 两种 flags 依次尝试，任一成功即返回；都失败则放弃
+// （尽力而为，不影响数据正确性——文件本身的 fsync 已在 rename 之前完成）。
 function fsyncParentDirSync(dir) {
-  let fd = null;
+  for (const flags of ['r+', 'r']) {
+    let fd = null;
 
-  try {
-    fd = fs.openSync(dir, 'r');
-    fs.fsyncSync(fd);
-  } catch (_) {
-    // 平台不支持 / 权限不足，忽略
-  } finally {
-    if (fd !== null) {
-      try {
-        fs.closeSync(fd);
-      } catch (_) {
-        // 关闭失败无可挽回，忽略
+    try {
+      fd = fs.openSync(dir, flags);
+      fs.fsyncSync(fd);
+      return;
+    } catch (_) {
+      // 本平台不认这种打开方式 / fsync 失败，换下一个
+    } finally {
+      if (fd !== null) {
+        try {
+          fs.closeSync(fd);
+        } catch (_) {
+          // 关闭失败无可挽回，忽略
+        }
       }
     }
   }
