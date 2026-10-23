@@ -75,9 +75,7 @@ export function ThemeScreen({
                     ]}
                   />
 
-                  <Text style={styles.themeLabel}>
-                    {item.emoji} {item.label}
-                  </Text>
+                  <Text style={styles.themeLabel}>{item.label}</Text>
 
                   {selected && (
                     <Text

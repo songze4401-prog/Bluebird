@@ -8,6 +8,8 @@
     "cors": "^2.8.6",
     "dotenv": "^18.0.4",
     "expo": "~57.0.25",
+    "expo-image": "~57.0.5",
+    "expo-image-picker": "~57.0.20",
     "expo-status-bar": "~57.0.1",
     "express": "^5.2.1",
     "openai": "^7.23.0",

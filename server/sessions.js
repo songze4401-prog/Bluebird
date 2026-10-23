@@ -527,6 +527,26 @@ function getMessages(sessionId, limit) {
 }
 
 // 追加消息到指定会话，返回带 id/createdAt 的消息数组；会话不存在返回 null
+// 附件（多模态图片）形状校验：只透传干净字段，防脏数据落库
+function sanitizeAttachments(list) {
+  if (!Array.isArray(list) || !list.length) return undefined;
+
+  const items = [];
+  for (const raw of list.slice(0, 4)) {
+    if (!raw || typeof raw !== 'object') continue;
+    if (typeof raw.id !== 'string' || !raw.id) continue;
+    const kind = raw.kind === 'sticker' ? 'sticker' : 'image';
+    const mime = typeof raw.mime === 'string' ? raw.mime : 'image/png';
+    const name =
+      typeof raw.name === 'string' && raw.name.trim()
+        ? raw.name.trim().slice(0, 100)
+        : undefined;
+    items.push(name ? { id: raw.id, kind, mime, name } : { id: raw.id, kind, mime });
+  }
+
+  return items.length ? items : undefined;
+}
+
 function appendMessages(sessionId, messages) {
   const current = loadStore();
   const meta = findMeta(sessionId);
@@ -535,12 +555,18 @@ function appendMessages(sessionId, messages) {
 
   const createdAt = nowIso();
 
-  const stamped = messages.map(item => ({
-    id: item.id || crypto.randomUUID(),
-    role: item.role,
-    content: String(item.content),
-    createdAt: item.createdAt || createdAt,
-  }));
+  const stamped = messages.map(item => {
+    const attachments = sanitizeAttachments(item.attachments);
+
+    return {
+      id: item.id || crypto.randomUUID(),
+      role: item.role,
+      content: String(item.content),
+      createdAt: item.createdAt || createdAt,
+      // 无附件的消息不带该字段，保持旧消息结构完全一致
+      ...(attachments ? { attachments } : {}),
+    };
+  });
 
   const existing = current.messages[sessionId] || [];
   const prevUpdatedAt = meta.updatedAt;
@@ -578,6 +604,18 @@ function replaceMessages(sessionId, messages) {
   }
 
   return true;
+}
+
+// 全库消息视图：撤回/清理后判断图片附件是否还有别处引用（决定能否删文件）。
+// 会话数 × 200 条上限，全量合并的成本可忽略。
+function getAllMessages() {
+  const current = loadStore();
+  const all = [];
+  for (const meta of current.sessions) {
+    const list = current.messages[meta.id];
+    if (Array.isArray(list)) all.push(...list);
+  }
+  return all;
 }
 
 // 删除整个会话：元信息与该会话消息一并移除。跨会话共享的长期记忆
@@ -625,5 +663,6 @@ module.exports = {
   getMessages,
   appendMessages,
   replaceMessages,
+  getAllMessages,
   deleteSession,
 };

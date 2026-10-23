@@ -42,7 +42,6 @@ export function SharedTime({ theme }: { theme: Theme }) {
         {timeText}
       </Text>
       <Text style={styles.sharedTimeDate}>{dateText}</Text>
-      <Text style={styles.sharedTimeCaption}>我们现在都在这里</Text>
     </View>
   );
 }
@@ -53,6 +52,8 @@ const createStyles = (theme: Theme) =>
     sharedTime: {
       alignItems: 'flex-end',
       marginRight: 12,
+      // 内容减少后随 header 的 alignItems:'center' 自动垂直居中，
+      // 不写死偏移，位置完全交给 flex 自适应
     },
 
     sharedTimeClock: {
@@ -66,12 +67,5 @@ const createStyles = (theme: Theme) =>
       color: theme.textMuted,
       fontSize: 10,
       marginTop: 2,
-    },
-
-    sharedTimeCaption: {
-      color: theme.textMuted,
-      fontSize: 9,
-      marginTop: 2,
-      opacity: 0.75,
     },
   });

@@ -1,8 +1,10 @@
 import React, { useMemo } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { Image } from 'expo-image';
 
 import type { Theme } from '../theme';
-import type { Message } from '../lib/types';
+import type { Attachment, Message } from '../lib/types';
+import { IMAGE_AUTH_HEADERS, imageUrl, stickerImageUrl } from '../lib/uploads';
 import {
   withAlpha,
   shouldShowMessageTime,
@@ -11,6 +13,51 @@ import {
 
 // 单条消息气泡（纯展示）：时间标签 + 用户/Bluebird 两种气泡 + 重新发送 + 继续说。
 // 所有交互通过回调上抛，组件内不持有任何状态（除样式 memo）。
+// 附件（图片/表情包）渲染在气泡内文字上方，经服务端鉴权路由读取。
+function BubbleAttachments({
+  attachments,
+  styles,
+}: {
+  attachments: Attachment[];
+  styles: ReturnType<typeof createStyles>;
+}) {
+  return (
+    <View style={styles.attachmentStack}>
+      {attachments.map(att =>
+        att.expired ? (
+          // 仓库条目已被物理删除（GET /history 标注）：图片不可达，显示占位
+          <View
+            key={att.id}
+            style={[styles.stickerImage, styles.stickerExpired]}
+          >
+            <Text style={styles.stickerExpiredText}>表情已删除</Text>
+          </View>
+        ) : (
+          <Image
+            key={att.id}
+            source={{
+              // 表情包存仓库（物理删除后不可达），聊天图片走 uploads 临时附件
+              uri:
+                att.kind === 'sticker'
+                  ? stickerImageUrl(att.id)
+                  : imageUrl(att.id),
+              headers: IMAGE_AUTH_HEADERS,
+            }}
+            style={
+              att.kind === 'sticker'
+                ? styles.stickerImage
+                : styles.attachmentImage
+            }
+            contentFit={att.kind === 'sticker' ? 'contain' : 'cover'}
+            transition={120}
+            accessibilityLabel={att.name || '图片'}
+          />
+        )
+      )}
+    </View>
+  );
+}
+
 export function ChatBubble({
   theme,
   item,
@@ -29,7 +76,7 @@ export function ChatBubble({
   sending: boolean;
   continuing: boolean;
   onRecall: (message: Message) => void;
-  onRetry: (text?: string) => void;
+  onRetry: (text?: string, attachments?: Attachment[]) => void;
   onContinue: () => void;
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -59,20 +106,36 @@ export function ChatBubble({
             activeOpacity={0.75}
             onLongPress={() => onRecall(item)}
           >
-            <Text style={[styles.messageText, styles.userMessageText]}>
-              {item.content}
-            </Text>
+            {!!item.attachments?.length && (
+              <BubbleAttachments
+                attachments={item.attachments}
+                styles={styles}
+              />
+            )}
+            {!!item.content && (
+              <Text style={[styles.messageText, styles.userMessageText]}>
+                {item.content}
+              </Text>
+            )}
           </TouchableOpacity>
         ) : (
           // 气泡与「继续说」包在同一列里：列宽 = 气泡宽，按钮靠右即贴住气泡右边缘
           <View style={styles.assistantColumn}>
             <View style={[styles.bubble, styles.bluebirdBubble]}>
-              <Text style={styles.messageText}>{item.content}</Text>
+              {!!item.attachments?.length && (
+                <BubbleAttachments
+                  attachments={item.attachments}
+                  styles={styles}
+                />
+              )}
+              {!!item.content && (
+                <Text style={styles.messageText}>{item.content}</Text>
+              )}
 
               {!!item.retryText && (
                 <TouchableOpacity
                   style={[styles.retryButton, { backgroundColor: theme.bubble }]}
-                  onPress={() => onRetry(item.retryText)}
+                  onPress={() => onRetry(item.retryText, item.retryAttachments)}
                   disabled={sending}
                 >
                   <Text style={styles.retryText}>重新发送</Text>
@@ -183,6 +246,35 @@ const createStyles = (theme: Theme) =>
     // 用户气泡是饱和底色，需要铺在其上的浅色文字
     userMessageText: {
       color: theme.textOnAccent,
+    },
+    // ---- 气泡内附件（图片 / 表情包） ----
+    attachmentStack: {
+      gap: 8,
+      marginBottom: 2,
+    },
+    attachmentImage: {
+      width: 200,
+      height: 200,
+      borderRadius: 12,
+      backgroundColor: theme.surface,
+    },
+    stickerImage: {
+      width: 120,
+      height: 120,
+    },
+    // 已删除表情包的占位盒：与 stickerImage 同尺寸，虚线框 + 弱化文字
+    stickerExpired: {
+      borderWidth: 1,
+      borderStyle: 'dashed',
+      borderColor: theme.borderStrong,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.surface,
+    },
+    stickerExpiredText: {
+      color: theme.textMuted,
+      fontSize: 12,
     },
     // ---- 「继续说」按钮 ----
     continueRow: {
