@@ -1,4 +1,4 @@
-// 全局主题：由两个正交维度合成
+﻿// 全局主题：由两个正交维度合成
 //   1) 模式（浅色 / 深色）—— 决定背景、表面、文字、边框等语义色
 //   2) 强调色（7 套）      —— 决定强调文字、描边、用户气泡、发送按钮
 // 所有颜色都集中在这里，组件里不再硬编码任何浅色/深色色值。
@@ -87,7 +87,6 @@ export type AccentSet = {
 export type AccentTheme = {
   id: ThemeId;
   label: string;
-  emoji: string;
   dark: AccentSet;
   light: AccentSet;
 };
@@ -96,7 +95,6 @@ export const THEMES: AccentTheme[] = [
   {
     id: 'black',
     label: '黑色',
-    emoji: '🖤',
     dark: {
       accent: '#d9c7a1',
       accentBorder: 'rgba(217,199,161,0.45)',
@@ -113,7 +111,6 @@ export const THEMES: AccentTheme[] = [
   {
     id: 'blue',
     label: '蓝色',
-    emoji: '🩵',
     dark: {
       accent: '#8ab6e8',
       accentBorder: 'rgba(138,182,232,0.45)',
@@ -130,7 +127,6 @@ export const THEMES: AccentTheme[] = [
   {
     id: 'purple',
     label: '紫色',
-    emoji: '💜',
     dark: {
       accent: '#b9a3e3',
       accentBorder: 'rgba(185,163,227,0.45)',
@@ -147,7 +143,6 @@ export const THEMES: AccentTheme[] = [
   {
     id: 'green',
     label: '绿色',
-    emoji: '💚',
     dark: {
       accent: '#8ad4a6',
       accentBorder: 'rgba(138,212,166,0.45)',
@@ -164,7 +159,6 @@ export const THEMES: AccentTheme[] = [
   {
     id: 'pink',
     label: '粉色',
-    emoji: '🩷',
     dark: {
       accent: '#f0a8c0',
       accentBorder: 'rgba(240,168,192,0.45)',
@@ -181,7 +175,6 @@ export const THEMES: AccentTheme[] = [
   {
     id: 'orange',
     label: '橙色',
-    emoji: '🧡',
     dark: {
       accent: '#f0b478',
       accentBorder: 'rgba(240,180,120,0.45)',
@@ -198,7 +191,6 @@ export const THEMES: AccentTheme[] = [
   {
     id: 'white',
     label: '白色/灰色',
-    emoji: '🤍',
     dark: {
       accent: '#e6e7ea',
       accentBorder: 'rgba(230,231,234,0.4)',
@@ -219,7 +211,6 @@ export type Theme = ModePalette &
     mode: ThemeMode;
     accentId: ThemeId;
     accentLabel: string;
-    accentEmoji: string;
   };
 
 export const DEFAULT_THEME_ID: ThemeId = 'black';
@@ -230,9 +221,9 @@ export const THEME_STORAGE_KEY = 'bluebird.theme';
 /** 浅色/深色的本地持久化键 */
 export const THEME_MODE_STORAGE_KEY = 'bluebird.themeMode';
 
-export const MODE_OPTIONS: { id: ThemeMode; label: string; emoji: string }[] = [
-  { id: 'light', label: '浅色模式', emoji: '☀️' },
-  { id: 'dark', label: '深色模式', emoji: '🌙' },
+export const MODE_OPTIONS: { id: ThemeMode; label: string }[] = [
+  { id: 'light', label: '浅色模式' },
+  { id: 'dark', label: '深色模式' },
 ];
 
 export function isThemeId(value: unknown): value is ThemeId {
@@ -262,6 +253,5 @@ export function getTheme(mode?: string | null, accentId?: string | null): Theme 
     mode: safeMode,
     accentId: accent.id,
     accentLabel: accent.label,
-    accentEmoji: accent.emoji,
   };
 }

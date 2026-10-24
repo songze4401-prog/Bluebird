@@ -1,6 +1,9 @@
 /* global __dirname */
 const fs = require('fs');
 const path = require('path');
+const { logDataEvent } = require('./data-events');
+const { writeFileAtomic, writeFileAtomicSync } = require('./atomic-write');
+const { registerCorruptionHandler, handleCorruption } = require('./corruption');
 
 // 数据目录可通过 BLUEBIRD_DATA_DIR 覆盖：测试用临时目录，避免碰到真实数据。
 // 未设置时与 sessions.js / memory.js 保持一致，落在 server/data/。
@@ -9,7 +12,6 @@ const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   : path.join(__dirname, 'data');
 
 const EMOTION_FILE = path.join(DATA_DIR, 'emotion-state.json');
-const { writeFileDurable } = require('./atomic-write');
 
 // V1 情绪值域：与人格 Prompt 的 [mood:xxx] 候选值严格一一对应。
 // 这里只有一套情绪概念，不再保留旧的 teasing / surprised / laughing / angry。
@@ -123,42 +125,106 @@ function normalizeState(raw) {
   };
 }
 
-function loadEmotion() {
-  try {
-    if (!fs.existsSync(EMOTION_FILE)) {
-      fs.mkdirSync(path.dirname(EMOTION_FILE), { recursive: true });
-      fs.writeFileSync(
-        EMOTION_FILE,
-        JSON.stringify(createDefaultState(), null, 2),
-        'utf8'
-      );
-      state = createDefaultState();
-      console.log('Emotion loaded: calm (0)');
-      return;
+// 损坏处理契约：emotion 只有"读取失败 / JSON 解析失败"才算损坏 ——
+// normalizeState 本身容忍任意形状（非法值一律回退 calm），形状不对不是损坏。
+registerCorruptionHandler('emotion', {
+  detect(data) {
+    if (data.error) {
+      return {
+        corrupt: true,
+        // 允许调用方为"非解析型异常"（如初始化写盘失败）显式指定原因短码。
+        reason: data.reason || 'read_error',
+        error: data.error,
+      };
     }
 
-    const raw = fs.readFileSync(EMOTION_FILE, 'utf8');
-    state = normalizeState(JSON.parse(raw));
-    console.log(`Emotion loaded: ${state.emotion} (${state.intensity})`);
-  } catch (error) {
-    console.error('Emotion load error:', error.message);
+    try {
+      return { corrupt: false, parsed: JSON.parse(data.text) };
+    } catch (error) {
+      return { corrupt: true, reason: 'json_parse_error', error };
+    }
+  },
+
+  recover(context) {
+    // 处理策略不变（隔离重命名 + 回退默认 calm）；结构化日志由 handleCorruption
+    // 统一记录，刻意不再打印 error.message：JSON.parse 的报错可能夹带文件内容。
+    let isolatedPath = null;
 
     try {
-      const corruptPath = `${EMOTION_FILE}.corrupt-${Date.now()}`;
-      fs.renameSync(EMOTION_FILE, corruptPath);
-      console.error(`Corrupt emotion backed up: ${corruptPath}`);
+      const corruptPath = `${context.file}.corrupt-${Date.now()}`;
+
+      fs.renameSync(context.file, corruptPath);
+
+      isolatedPath = corruptPath;
+
+      console.error(`Corrupt emotion backed up: ${isolatedPath}`);
     } catch (backupError) {
       console.error('Emotion backup error:', backupError.message);
     }
 
-    state = createDefaultState();
+    return {
+      action: isolatedPath ? 'isolated_file' : 'isolation_failed',
+      isolatedPath,
+    };
+  },
+});
+
+function loadEmotion() {
+  if (!fs.existsSync(EMOTION_FILE)) {
+    try {
+      fs.mkdirSync(path.dirname(EMOTION_FILE), { recursive: true });
+      writeFileAtomicSync(
+        EMOTION_FILE,
+        JSON.stringify(createDefaultState(), null, 2)
+      );
+      state = createDefaultState();
+      console.log('Emotion loaded: calm (0)');
+    } catch (error) {
+      // 初始化写盘失败：与旧实现一致地走损坏兜底（隔离 + 回退默认），不向上抛。
+      handleCorruption(
+        'emotion',
+        { text: null, error, reason: 'io_error' },
+        { file: EMOTION_FILE }
+      );
+
+      state = createDefaultState();
+    }
+
+    return;
   }
+
+  let text = null;
+  let error = null;
+
+  try {
+    text = fs.readFileSync(EMOTION_FILE, 'utf8');
+  } catch (readError) {
+    error = readError;
+  }
+
+  const outcome = handleCorruption(
+    'emotion',
+    { text, error },
+    { file: EMOTION_FILE }
+  );
+
+  if (outcome.corrupt) {
+    state = createDefaultState();
+    return;
+  }
+
+  state = normalizeState(outcome.parsed);
+  console.log(`Emotion loaded: ${state.emotion} (${state.intensity})`);
 }
 
 async function saveEmotion(nextState) {
-  // 落盘走统一工具：临时文件名带 pid + fsync + 原子 rename（AGENTS.md C2）。
-  // 写失败会抛错，由 enqueueWrite 的记录逻辑兜底——不允许静默丢数据。
-  writeFileDurable(EMOTION_FILE, JSON.stringify(nextState, null, 2));
+  const dir = path.dirname(EMOTION_FILE);
+
+  fs.mkdirSync(dir, { recursive: true });
+
+  // 原子写（临时文件 'wx' + fsync + rename + 尽力 fsync 父目录），
+  // 崩溃时不会出现空文件 / 截断文件。
+  await writeFileAtomic(EMOTION_FILE, JSON.stringify(nextState, null, 2));
 }
 
 // 与 memory.js 同款串行写队列：情绪更新和落盘不会被并发请求交错
@@ -166,7 +232,14 @@ function enqueueWrite(task) {
   const run = writeQueue.then(task, task);
 
   writeQueue = run.catch(error => {
-    console.error('Emotion queue error:', error.message);
+    // 结构化记录写入队列里的落盘失败（原本只有一行裸 message，无模块/路径/时间戳）。
+    logDataEvent({
+      module: 'emotion',
+      file: EMOTION_FILE,
+      event: 'write_queue_error',
+      error,
+      action: 'write_failed',
+    });
   });
 
   return run;
@@ -196,18 +269,30 @@ function applyTimeDecay() {
     ? Math.max(0, Math.floor((Date.now() - baseline) / 1000))
     : 0;
 
-  // 无论是否真的发生衰减，都推进检查基线（仅内存推进，随下一次状态提交
-  // 一并持久化；没有衰减就等于没有状态变化，不影响重启后的计算）。
+  // 无论是否真的发生衰减，都推进检查基线。未发生衰减时也必须把新基线
+  // 落盘：只在内存推进的话，进程若在"未衰减"的间隙里重启，磁盘上的基线
+  // 仍是旧值，重启后的 gap 会从更早的时刻算起 —— 同一段间隔被更早地判为
+  // 可衰减。实测同一时钟序列 T0→+3min（不衰减）→+12min：不重启时 gap 从
+  // +3min 算只有 9 分钟、不衰减；中途重启则 gap 从 T0 算有 12 分钟、
+  // 衰减 sad 60 -> 47。回归防护见 tests/emotion-decay-global.test.js。
+  // 衰减路径的 commit(next) 已带上新基线，因此不在那里中间写一次旧值 ——
+  // 中间态会被并发的读者观察到（测试的"等到 excited 就停"轮询就撞到过）。
   state = normalizeState({ ...state, lastDecayAt: nowIso });
 
-  if (state.emotion === 'calm') return state;
-  if (gapSeconds <= 0) return state;
+  // 无衰减路径：把推进后的基线落盘后原样返回
+  const persistBaseline = () => {
+    commit(state);
+    return state;
+  };
+
+  if (state.emotion === 'calm') return persistBaseline();
+  if (gapSeconds <= 0) return persistBaseline();
 
   const gapMinutes = gapSeconds / 60;
   const tier = DECAY_TIERS.find(item => gapMinutes < item.maxMinutes);
   const ratio = tier ? tier.ratio : 1;
 
-  if (ratio <= 0) return state; // 刚离开又回来，保留
+  if (ratio <= 0) return persistBaseline(); // 刚离开又回来，保留
 
   const strengthBoost = 0.5 + state.intensity / MAX_INTENSITY;
   const effective = Math.min(1, ratio * strengthBoost);
@@ -223,7 +308,8 @@ function applyTimeDecay() {
     next.emotion === state.emotion &&
     next.intensity === state.intensity
   ) {
-    return state;
+    // 情绪没变，但基线推进了，同样要落盘
+    return persistBaseline();
   }
 
   console.log(`Emotion decay: ${state.emotion} ${state.intensity} -> ${next.emotion} ${next.intensity}`);

@@ -1,8 +1,9 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 
 import { MODE_OPTIONS, type Theme, type ThemeMode } from '../theme';
 import { moodEmoji } from '../lib/utils';
+import { MOOD_LABEL } from '../lib/constants';
 import { SharedTime } from './SharedTime';
 
 // 顶部栏 + 下拉菜单。
@@ -18,6 +19,7 @@ export function ChatHeader({
   onOpenMemory,
   onSelectMode,
   onOpenThemePicker,
+  onOpenControlPanel,
   onClearHistory,
 }: {
   theme: Theme;
@@ -27,15 +29,61 @@ export function ChatHeader({
   onOpenMemory: () => void;
   onSelectMode: (mode: ThemeMode) => void;
   onOpenThemePicker: () => void;
+  onOpenControlPanel: () => void;
   onClearHistory: () => void;
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);
+
+  // 心情气泡：点表情显示/再点收起，2.5s 后自动消失。纯 UI 状态，不外抛
+  const [moodTipVisible, setMoodTipVisible] = useState(false);
+  const moodTipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const toggleMoodTip = () => {
+    if (moodTipTimer.current) {
+      clearTimeout(moodTipTimer.current);
+      moodTipTimer.current = null;
+    }
+
+    setMoodTipVisible(prev => {
+      const next = !prev;
+      if (next) {
+        moodTipTimer.current = setTimeout(() => {
+          setMoodTipVisible(false);
+          moodTipTimer.current = null;
+        }, 2500);
+      }
+      return next;
+    });
+  };
+
+  useEffect(
+    () => () => {
+      if (moodTipTimer.current) clearTimeout(moodTipTimer.current);
+    },
+    []
+  );
 
   return (
     <>
       <View style={styles.header}>
         <View style={styles.headerLeft}>
-          <Text style={styles.headerMood}>{moodEmoji(mood)}</Text>
+          <View style={styles.moodWrap}>
+            <TouchableOpacity
+              onPress={toggleMoodTip}
+              activeOpacity={0.7}
+              accessibilityLabel="查看当前心情"
+            >
+              <Text style={styles.headerMood}>{moodEmoji(mood)}</Text>
+            </TouchableOpacity>
+
+            {moodTipVisible && (
+              <View style={styles.moodTip}>
+                <Text style={styles.moodTipText}>
+                  {MOOD_LABEL[mood] ?? mood}
+                </Text>
+              </View>
+            )}
+          </View>
           <View style={styles.headerTitle}>
             <Text style={styles.title} numberOfLines={1}>
               Bluebird
@@ -56,7 +104,7 @@ export function ChatHeader({
       {menuOpen && (
         <View style={styles.menu}>
           <TouchableOpacity style={styles.menuItem} onPress={onOpenMemory}>
-            <Text style={styles.menuItemText}>🧠 记忆库</Text>
+            <Text style={styles.menuItemText}>记忆库</Text>
           </TouchableOpacity>
 
           {MODE_OPTIONS.map(option => {
@@ -74,7 +122,7 @@ export function ChatHeader({
                     active && { color: theme.accent },
                   ]}
                 >
-                  {option.emoji} {option.label}
+                  {option.label}
                   {active ? '  ✓' : ''}
                 </Text>
               </TouchableOpacity>
@@ -82,11 +130,18 @@ export function ChatHeader({
           })}
 
           <TouchableOpacity style={styles.menuItem} onPress={onOpenThemePicker}>
-            <Text style={styles.menuItemText}>🎨 主题色</Text>
+            <Text style={styles.menuItemText}>主题色</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.menuItem}
+            onPress={onOpenControlPanel}
+          >
+            <Text style={styles.menuItemText}>控制面板</Text>
           </TouchableOpacity>
 
           <TouchableOpacity style={styles.menuItem} onPress={onClearHistory}>
-            <Text style={styles.menuItemText}>🗑️ 清理当前会话</Text>
+            <Text style={styles.menuItemText}>清理当前会话</Text>
           </TouchableOpacity>
 
           <View style={styles.menuVersion}>
@@ -184,6 +239,34 @@ const createStyles = (theme: Theme) =>
 
     headerMood: {
       fontSize: 26,
+    },
+
+    // 表情 + 心情气泡的锚点：气泡相对它绝对定位
+    moodWrap: {
       marginRight: 10,
+    },
+
+    // 心情小气泡：浮在表情正下方，不挤压标题布局
+    moodTip: {
+      position: 'absolute',
+      top: 34,
+      left: -4,
+      zIndex: 60,
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.borderStrong,
+      borderRadius: 8,
+      paddingHorizontal: 9,
+      paddingVertical: 4,
+      shadowColor: '#000',
+      shadowOpacity: 0.18,
+      shadowRadius: 6,
+      shadowOffset: { width: 0, height: 2 },
+      elevation: 4,
+    },
+
+    moodTipText: {
+      color: theme.textPrimary,
+      fontSize: 12,
     },
   });

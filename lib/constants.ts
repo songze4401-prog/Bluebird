@@ -20,9 +20,29 @@ export const MOOD_EMOJI: Record<string, string> = {
   hurt: '🥺',
 };
 
+// 情绪的中文名：点击顶部表情时的小气泡用它解释表情含义
+export const MOOD_LABEL: Record<string, string> = {
+  calm: '平静',
+  happy: '开心',
+  playful: '调皮',
+  excited: '兴奋',
+  tired: '疲惫',
+  sad: '难过',
+  annoyed: '烦躁',
+  hurt: '委屈',
+};
+
 // 微信式时间显示：间隔超过 5 分钟或跨天才显示一次时间标签
 export const MESSAGE_TIME_GAP_MS = 5 * 60 * 1000;
 
 // 距底部小于该距离视为"已在底部"：
 // 决定「新消息是否自动跟随」以及「返回底部按钮是否显示」，两者互补不留死区
 export const AT_BOTTOM_DISTANCE = 80;
+
+// 连续消息逐条展示的节奏：第一条立即出现，后续按上一条长度计算等待，
+// 短消息短等待，长消息最多等 maxMs，避免无意义地吊着用户
+export const REPLY_PACING = {
+  baseMs: 280,
+  perCharMs: 45,
+  maxMs: 1600,
+};
