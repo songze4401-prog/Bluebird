@@ -8,7 +8,7 @@ import {
 } from 'react-native';
 
 import type { Theme } from '../theme';
-import type { Message } from '../lib/types';
+import type { Attachment, Message } from '../lib/types';
 import { AT_BOTTOM_DISTANCE } from '../lib/constants';
 import { withAlpha } from '../lib/utils';
 
@@ -34,7 +34,7 @@ export function MessageList({
   sending: boolean;
   continuing: boolean;
   onRecall: (message: Message) => void;
-  onRetry: (text?: string) => void;
+  onRetry: (text?: string, attachments?: Attachment[]) => void;
   onContinue: () => void;
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);

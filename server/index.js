@@ -17,6 +17,14 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
+
+// 图片上传路由单独放宽 body limit（base64 比原图大约 33%，5MB 图约 6.7MB）。
+// 必须注册在全局 1mb parser 之前：body-parser 按注册顺序消费请求体，
+// 反序的话大 body 会先被全局限制拦死，路由级的 8mb 永远等不到。
+// 已解析过的请求（req._body）会被后续 parser 跳过，不会解析两次。
+app.use('/uploads/image', express.json({ limit: '8mb' }));
+// 表情包仓库上传同理：图片以 dataURL 提交，与 uploads 共用 8mb 路由级限额
+app.use('/sticker-repo', express.json({ limit: '8mb' }));
 app.use(express.json({ limit: '1mb' }));
 
 // 简单内存限流：客户端 bundle 里必然带 EXPO_PUBLIC_ token（纯前端无法隐藏），
@@ -116,7 +124,6 @@ const {
 } = require('./memory');
 
 const {
-  EMOTIONS,
   getEmotion,
   buildEmotionContext,
   applyTimeDecay,
@@ -136,8 +143,74 @@ const {
   getMessages,
   appendMessages,
   replaceMessages,
+  getAllMessages,
   deleteSession,
 } = require('./sessions');
+
+// 在线状态感知：用户活跃状态与「Blue 等待用户回复」分开记录，
+// 独立存于 presence.json，不触碰会话、记忆、情绪数据。
+const {
+  recordReport: recordPresenceReport,
+  recordUserMessage: recordPresenceUserMessage,
+  recordBlueMessage: recordPresenceBlueMessage,
+  resetSessionWait,
+  forgetSession,
+  getPresence,
+} = require('./presence');
+
+// 人格面板配置：独立存于 persona.json，每次 /chat 读取当前值翻译成风格规则。
+const {
+  DEFAULTS: PERSONA_DEFAULTS,
+  getConfig: getPersonaConfig,
+  saveConfig: savePersonaConfig,
+  resetConfig: resetPersonaConfig,
+} = require('./persona');
+
+// 回复分条：按 messageMode 把完整回复拆成 1-4 条气泡（纯函数）。
+const { splitReplyIntoSegments } = require('./split-reply');
+
+// 情绪标签剥离：全量（/chat）与增量（/chat/stream）共用同一套规则。
+const { stripMoodTags, createMoodTagStripper } = require('./stream-strip');
+
+// 多模态图片模块：上传校验 / 存储 / 读取 / 表情包索引
+const {
+  UploadError,
+  KIND_STICKER,
+  saveImage,
+  getImageMeta,
+  readImageBuffer,
+  readImageDataUrl,
+  listStickers,
+  deleteImage,
+} = require('./uploads');
+
+// 表情包仓库：用户与 AI 共享的自包含模块（sha256 去重 / 物理删除 / 候选列表）。
+// 不依赖 uploads.js；聊天消息里的 sticker 附件直接引用仓库 ID。
+const {
+  StickerRepoError,
+  SEMANTIC_AUTO: STICKER_SEMANTIC_AUTO,
+  MAX_CANDIDATES: STICKER_MAX_CANDIDATES,
+  addSticker,
+  getSticker,
+  listStickers: listStickerRepo,
+  updateSticker,
+  deleteSticker,
+  countStickers,
+  readStickerImage,
+  readStickerDataUrl,
+  findStickerByKeyword,
+  buildStickerCandidates,
+  formatCandidateLine,
+  generateStickerSemantic,
+} = require('./sticker-repo');
+
+// 模型选型：纯文本请求继续走 deepseek-chat（行为零变化），
+// 带图请求走 deepseek-flash（DeepSeek 视觉模型，原生多模态）。
+// 说明：DeepSeek 视觉图片仅允许出现在 user 消息，历史里 AI 的图片
+// 消息必须以文本占位形式下发，不能原样回传（会被 API 400 拒绝）。
+const TEXT_MODEL = 'deepseek-chat';
+const VISION_MODEL = 'deepseek-flash';
+const MAX_ATTACHMENTS = 4;
 
 // 单实例守卫：必须在 listen 之前、且必须在路由注册之后调用，
 // 这样被测试 require 时不会先抢锁再崩，而是走到 listen 拦截那里正常起来。
@@ -157,6 +230,158 @@ function resolveSessionId(req, source) {
   const value = typeof raw === 'string' ? raw.trim() : '';
 
   return value || DEFAULT_SESSION_ID;
+}
+
+// ============ 多模态（图片 / 表情包）辅助 ============
+
+// 表情包发送语法（V1 候选列表模式）：仓库非空时与候选列表一起注入。
+// 关键规则——只能使用候选列表里的 ID，从机制上杜绝编造不存在的表情包。
+const STICKER_SYNTAX = `【发送表情包】
+你有一个表情包仓库，可以在合适的时候发送仓库里的表情包来表达情绪。
+规则：
+- 只能发送下方候选列表中的表情包，在正文写 [sticker:ID]，ID 必须原样取自列表；
+- 每条回复最多发一个，文字能说清楚的就不发，不要为了发而发；
+- 列表里没有合适的就不发，不要自己编造 ID 或图片。`;
+
+// 表情包理解指引：仅在用户发来 sticker 类型附件时注入。
+const STICKER_GUIDANCE = `【表情包理解】
+用户发来的消息里可能包含表情包图片。表情包是一种图像化的情绪表达，
+结合画面内容、上面的文字和聊天上下文理解它想表达的情绪或态度
+（常见的如调侃、无语、开心、安慰、撒娇、得意），然后自然地回应。
+不要逐像素描述图片，也不要标榜自己是图片识别专家。`;
+
+// 附件图片读取：kind=sticker 的 id 是仓库 ID，优先读仓库文件；
+// 读不到再退回 uploads（兼容多模态初版：文件仍在 uploads 目录的 sticker 附件）。
+function attachmentDataUrl(att) {
+  if (att && att.kind === KIND_STICKER) {
+    const fromRepo = readStickerDataUrl(att.id);
+    if (fromRepo) return fromRepo;
+  }
+  return readImageDataUrl(att.id);
+}
+
+// 历史消息 → 模型入参。
+// 关键约束：DeepSeek 视觉图片只允许出现在 user 消息，因此
+// - 用户的图片消息转成 content blocks（text + image_url）；
+// - AI 的图片/表情包消息降级为文本占位，原样回传会被 API 400 拒绝；
+// - 图片文件读取失败（被外部删除）时退化为纯文本，不让整轮请求崩掉。
+function historyToModelMessages(items) {
+  const out = [];
+
+  for (const item of items) {
+    if (!item || (item.role !== 'user' && item.role !== 'assistant')) continue;
+
+    const text = typeof item.content === 'string' ? item.content : '';
+    const attachments = Array.isArray(item.attachments)
+      ? item.attachments
+      : [];
+
+    if (item.role === 'user' && attachments.length) {
+      const blocks = [];
+      if (text.trim()) blocks.push({ type: 'text', text });
+
+      for (const att of attachments) {
+        const dataUrl = attachmentDataUrl(att);
+        if (dataUrl) {
+          blocks.push({ type: 'image_url', image_url: { url: dataUrl } });
+        }
+      }
+
+      out.push({
+        role: 'user',
+        content: blocks.length ? blocks : text || '（图片已失效）',
+      });
+      continue;
+    }
+
+    if (item.role === 'assistant' && attachments.length) {
+      const labels = attachments.map(att =>
+        att.kind === KIND_STICKER
+          ? `（发送了表情包${att.name ? `：${att.name}` : ''}）`
+          : '（发送了图片）'
+      );
+      const content = [text, ...labels].filter(Boolean).join('\n');
+
+      out.push({ role: 'assistant', content: content || '（发送了图片）' });
+      continue;
+    }
+
+    if (text) out.push({ role: item.role, content: text });
+  }
+
+  return out;
+}
+
+// 解析 AI 回复里的图片声明：
+// - [sticker:仓库ID]：必须在表情包仓库真实存在（防编造的第一道闸）；
+// - [sticker:关键词]：兼容旧语法，走仓库检索兜底；
+// - [image:图片ID]：引用已上传图片，必须真实存在。
+// 标记从正文剥离并转为消息附件；匹配不到静默忽略，正文不留残留。
+function parseReplyAttachments(text) {
+  let body = String(text || '');
+  const attachments = [];
+
+  // token 长度放到 40：仓库 ID 是 UUID（36 字符）
+  const stickerRe = /\[sticker[:：]\s*([^[\]\s]{1,40})\s*\]/g;
+
+  body = body.replace(stickerRe, (_match, token) => {
+    if (attachments.length) return ''; // 每条回复最多一个表情包
+    const value = String(token || '').trim();
+    if (!value) return '';
+
+    // 1) 仓库 ID 精确匹配：唯一被允许的"正规路径"
+    const byId = getSticker(value);
+    if (byId) {
+      attachments.push({
+        id: byId.id,
+        kind: KIND_STICKER,
+        mime: byId.mime,
+        name: byId.name,
+      });
+      return '';
+    }
+
+    // 2) 兼容旧语法：关键词检索仓库（名称/备注/标签/语义）
+    const byKeyword = findStickerByKeyword(value);
+    if (byKeyword) {
+      attachments.push({
+        id: byKeyword.id,
+        kind: KIND_STICKER,
+        mime: byKeyword.mime,
+        name: byKeyword.name,
+      });
+      return '';
+    }
+
+    // 3) 编造或不存在的 ID/关键词：忽略，正文不留残留
+    return '';
+  });
+
+  const imageRe = /\[image[:：]\s*([0-9a-fA-F-]{8,40})\s*\]/g;
+
+  body = body.replace(imageRe, (_match, id) => {
+    if (attachments.length >= MAX_ATTACHMENTS) return '';
+    const meta = getImageMeta(id);
+    if (!meta) return '';
+
+    attachments.push({
+      id: meta.id,
+      kind: 'image',
+      mime: meta.mime,
+      name: meta.name,
+    });
+    return '';
+  });
+
+  return {
+    // 剥离标记后可能留下连续空白（标记两侧原本各有空格），压缩成一个；
+    // 不影响正常换行结构
+    body: body
+      .replace(/[ \t]{2,}/g, ' ')
+      .replace(/ ?\n ?/g, '\n')
+      .trim(),
+    attachments,
+  };
 }
 
 // 把任意时刻格式化为用户时区的可读时间（与 getTimeContext 同一套方式）
@@ -191,55 +416,21 @@ function gapSemanticLabel(gapMinutes, gapHours, gapDays) {
   if (gapMinutes < 1) return '刚刚';
   if (gapMinutes < 10) return '几分钟前';
   if (gapMinutes < 60) return `约${gapMinutes}分钟前`;
-  if (gapHours < 6) return `约${gapHours}小时前`;
-  if (gapHours < 24) return '已经有一段时间没聊天了';
-  if (gapDays < 2) return '距离上次聊天已经一天左右';
-  return '已经有几天没聊天了';
+  if (gapHours < 24) return `约${gapHours}小时前`;
+  if (gapDays < 2) return '距离上次已经一天左右';
+  return `已经${gapDays}天了`;
 }
 
-// 结构化时间上下文：告诉 Blue 距上一条有效用户消息过去了多久。
-// 历史文件中被撤回的消息已物理删除，天然不参与计算。
-function buildTimeGapContext(timeZone, sessionId) {
-  const history = getMessages(sessionId) || [];
-  const now = new Date();
+// 从 createdAt 计算到 nowMs 的间隔；时间无法解析时返回 null（数据不可靠）
+function computeGap(createdAt, nowMs) {
+  const prevMs = new Date(createdAt).getTime();
 
-  let prevUser = null;
+  if (!Number.isFinite(prevMs)) return null;
 
-  for (let i = history.length - 1; i >= 0; i--) {
-    const m = history[i];
-    if (m && m.role === 'user' && m.createdAt) {
-      prevUser = m;
-      break;
-    }
-  }
-
-  const currentTime = formatTimeInZone(now, timeZone);
-
-  if (!prevUser) {
-    return {
-      currentTime,
-      previousUserMessageTime: null,
-      gapSeconds: null,
-      gapMinutes: null,
-      gapHours: null,
-      gapDays: null,
-      timeContext: '第一次聊天',
-      promptText:
-        '【对话间隔】\n这是有记录以来的第一条用户消息，没有历史间隔。',
-    };
-  }
-
-  const prevTime = new Date(prevUser.createdAt).getTime();
-  const gapSeconds = Math.max(0, Math.floor((now.getTime() - prevTime) / 1000));
+  const gapSeconds = Math.max(0, Math.floor((nowMs - prevMs) / 1000));
   const gapMinutes = Math.floor(gapSeconds / 60);
   const gapHours = Math.floor(gapMinutes / 60);
   const gapDays = Math.floor(gapHours / 24);
-  const timeContext = gapSemanticLabel(gapMinutes, gapHours, gapDays);
-
-  const previousUserMessageTime = formatTimeInZone(
-    prevUser.createdAt,
-    timeZone
-  );
 
   // 人类可读的间隔：10小时40分钟 / 20分钟 / 1天3小时 / 不到1分钟
   const gapHuman =
@@ -253,21 +444,171 @@ function buildTimeGapContext(timeZone, sessionId) {
           .filter(Boolean)
           .join('') || '不到1分钟';
 
+  return { gapSeconds, gapMinutes, gapHours, gapDays, gapHuman };
+}
+
+// 结构化时间上下文：分别告诉 Blue 距上一条用户消息、距上一条 Blue 回复
+// 各过去了多久。两种间隔是两个不同的量：续写只落盘 assistant 消息，
+// 两者会分叉，不能混用。历史文件中被撤回的消息已物理删除，天然不参与计算。
+function buildTimeGapContext(timeZone, sessionId) {
+  const history = getMessages(sessionId) || [];
+  const now = new Date();
+
+  let prevUser = null;
+  let prevAssistant = null;
+
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i];
+
+    if (!m || !m.createdAt) continue;
+    if (!prevUser && m.role === 'user') prevUser = m;
+    if (!prevAssistant && m.role === 'assistant') prevAssistant = m;
+    if (prevUser && prevAssistant) break;
+  }
+
+  const currentTime = formatTimeInZone(now, timeZone);
+
+  const empty = {
+    currentTime,
+    previousUserMessageTime: null,
+    previousBlueMessageTime: null,
+    gapSeconds: null,
+    gapMinutes: null,
+    gapHours: null,
+    gapDays: null,
+    blueGapSeconds: null,
+  };
+
+  if (!prevUser) {
+    return {
+      ...empty,
+      timeContext: '第一次聊天',
+      promptText:
+        '【对话间隔】\n这是有记录以来的第一条用户消息，没有历史间隔。',
+    };
+  }
+
+  const userGap = computeGap(prevUser.createdAt, now.getTime());
+
+  // 用户消息时间无法解析：明确承认无法确定，禁止编造间隔
+  if (!userGap) {
+    return {
+      ...empty,
+      timeContext: '时间数据缺失',
+      promptText: [
+        '【对话间隔】',
+        '上一条消息的时间数据缺失或不可信，无法确定间隔。',
+        '如果用户问"隔了多久"，明确说这边没有可靠的时间记录，不要编造。',
+      ].join('\n'),
+    };
+  }
+
+  const previousUserMessageTime = formatTimeInZone(
+    prevUser.createdAt,
+    timeZone
+  );
+  const timeContext = gapSemanticLabel(
+    userGap.gapMinutes,
+    userGap.gapHours,
+    userGap.gapDays
+  );
+
+  const lines = [
+    '【对话间隔】',
+    `用户上一条消息时间：${previousUserMessageTime}`,
+    `距离上一条用户消息：${userGap.gapHuman}（${timeContext}）`,
+  ];
+
+  // Blue 的上一条回复单独给出，与用户消息间隔分开标注
+  let blueGapSeconds = null;
+  let previousBlueMessageTime = null;
+
+  if (prevAssistant) {
+    const blueGap = computeGap(prevAssistant.createdAt, now.getTime());
+
+    if (blueGap) {
+      previousBlueMessageTime = formatTimeInZone(
+        prevAssistant.createdAt,
+        timeZone
+      );
+      blueGapSeconds = blueGap.gapSeconds;
+      lines.push(`Blue 上一条回复时间：${previousBlueMessageTime}`);
+      lines.push(`距离 Blue 上一条回复：${blueGap.gapHuman}`);
+    }
+  }
+
+  lines.push(
+    '用户问"隔了多久""几天没聊"这类问题时，必须依据上面的实际时间数据给出明确间隔（例如"差不多两天了"），有数据就不要说"没数""不清楚"。',
+    '注意区分两种间隔："距离用户上一条消息"和"距离 Blue 上一条回复"不一定相同，按用户所问选对应的数据。',
+    '其余时候时间间隔只用于把握对话节奏：隔得久可以自然地接住对方，间隔很短就当作连续对话，不要刻意提及，不要每条回复都报告时间。'
+  );
+
   return {
     currentTime,
     previousUserMessageTime,
-    gapSeconds,
-    gapMinutes,
-    gapHours,
-    gapDays,
+    previousBlueMessageTime,
+    gapSeconds: userGap.gapSeconds,
+    gapMinutes: userGap.gapMinutes,
+    gapHours: userGap.gapHours,
+    gapDays: userGap.gapDays,
+    blueGapSeconds,
     timeContext,
-    promptText: [
-      '【对话间隔】',
-      `用户上一条消息时间：${previousUserMessageTime}`,
-      `距离上一条用户消息：${gapHuman}（${timeContext}）`,
-      '时间间隔用于把握对话节奏：隔得久可以自然地接住对方，间隔很短就当作连续对话。除非时间间隔对当前对话有意义，否则不要刻意提及，不要每条回复都报告时间。',
-    ].join('\n'),
+    promptText: lines.join('\n'),
   };
+}
+
+// 人格面板 -> Prompt 规则块：把面板参数翻译成明确、可执行的说话规则。
+// 只追加风格约束，不改人格主 Prompt；分档成文，避免模型自己猜数字含义。
+function personaBand(value) {
+  if (value <= 33) return 'low';
+  if (value <= 66) return 'mid';
+  return 'high';
+}
+
+function buildPersonaPrompt(config) {
+  const colloquial = {
+    low: '表达偏书面：用词规整、句子完整，少用语气词和网络用语。',
+    mid: '表达自然口语：像平时聊天一样说话，语气词适量。',
+    high: '表达非常随意：多用口语短句和语气词，允许偶尔不说完整句子。',
+  }[personaBand(config.colloquial)];
+
+  const warmth = {
+    low: '情绪表达收敛：少安慰少亲昵，回应克制，更像普通朋友。',
+    mid: '温度适中：自然回应对方情绪，不过度热情也不冷淡。',
+    high: '明显温暖：主动关心、接住对方情绪，可以说得更亲昵。',
+  }[personaBand(config.warmth)];
+
+  const initiative = {
+    low: '以回应为主：不主动延展话题、不额外提问，答完即止。',
+    mid: '适度主动：聊到兴头上可以自然延展或反问一句。',
+    high: '很主动：经常主动延伸话题、分享自己的想法并提问，把聊天往前推。',
+  }[personaBand(config.initiative)];
+
+  const length = {
+    low: '回复要短：一两句话说清楚，不展开。',
+    mid: '长度适中：把事情说清楚即可，不长篇大论。',
+    high: '可以详细：该展开时充分展开，允许把细节说透。',
+  }[personaBand(config.length)];
+
+  // 连续消息模式与分条器联动：single 强制单条；auto / frequent 允许换行分段。
+  // 必须明确告知模型「换行 = 一条独立消息」——否则它不知道自己能分条，
+  // 用户点名要两条消息时会输出无换行的拼接文本（如 "12"），无边界可分。
+  const modeRule =
+    config.messageMode === 'single'
+      ? '你的回复会作为一条完整消息发送，不要写成多条短消息的拼接。'
+      : config.messageMode === 'frequent'
+        ? '你的回复会按换行拆成多条独立消息依次发送，每换一行就是一条新消息。你可以像真人聊天一样把回复拆成好几条短消息：多用换行分成自然的短段，每段说一个意思。用户明确要求“分几条发”时，把每条内容各自单独写成一行。'
+        : '你的回复会按换行拆成多条独立消息依次发送，每换一行就是一条新消息。回复较长或情绪有层次时，用换行分成自然的几段；短回答保持一段。用户明确要求“分几条发”时，把每条内容各自单独写成一行。';
+
+  return [
+    '【说话风格调整】',
+    '以下是用户通过控制面板设定的偏好，在不违背你人格的前提下优先遵守：',
+    `口语化 ${config.colloquial}/100：${colloquial}`,
+    `温暖程度 ${config.warmth}/100：${warmth}`,
+    `主动表达 ${config.initiative}/100：${initiative}`,
+    `表达长度 ${config.length}/100：${length}`,
+    `连续消息模式：${modeRule}`,
+  ].join('\n');
 }
 
 const BLUEBIRD_SYSTEM_PROMPT = `
@@ -319,8 +660,6 @@ const BLUEBIRD_SYSTEM_PROMPT = `
 标签要和这条回复的真实情绪一致；拿不准就用 calm。
 标签之后直接跟正常回复内容。不要解释标签，不要在回复正文中再提到标签。
 `.trim();
-
-const MOOD_VALUES = new Set(EMOTIONS);
 
 // 「继续说」的内部续写指令。它只存在于本次 API 请求的 systemPrompt 中：
 // 不写入 chat-history、不进入长期记忆、不污染任何持久化数据。
@@ -406,6 +745,13 @@ app.delete('/sessions/:id', requireAuth, (req, res) => {
       });
     }
 
+    // 会话已删除：移除对应的等待状态，避免 presence.json 残留孤儿条目
+    try {
+      forgetSession(req.params.id);
+    } catch (error) {
+      console.error('Presence forget error:', error);
+    }
+
     res.json({ ok: true, sessionId: req.params.id, message: '会话已删除' });
   } catch (error) {
     console.error('Session delete error:', error);
@@ -427,9 +773,20 @@ app.get('/history', requireAuth, (req, res) => {
       SESSION_MESSAGE_MAX
     );
 
+    // 表情包附件失效标注：仓库已物理删除时给前端明确的占位信号
+    const history = getMessages(sessionId, limit) || [];
+    for (const item of history) {
+      if (!Array.isArray(item.attachments)) continue;
+      for (const att of item.attachments) {
+        if (att && att.kind === KIND_STICKER) {
+          att.expired = !getSticker(att.id);
+        }
+      }
+    }
+
     res.json({
       sessionId,
-      history: getMessages(sessionId, limit),
+      history,
     });
   } catch (error) {
     console.error('History API Error:', error);
@@ -446,10 +803,23 @@ app.post('/history/clear', requireAuth, (req, res) => {
       return res.status(404).json({ error: '会话不存在' });
     }
 
+    // 先取旧消息：清理后它们就没了，但附件回收需要知道删过哪些图
+    const stale = getMessages(sessionId) || [];
+
     if (!replaceMessages(sessionId, [])) {
       return res.status(500).json({
         error: '清理失败：聊天存储当前不可写',
       });
+    }
+
+    // 消息已清空：回收本会话图片附件中不再被其他消息引用的文件
+    releaseOrphanAttachments(stale.map(item => item && item.attachments));
+
+    // 历史清空后，会话内「Blue 等待回复」的计时也应归零
+    try {
+      resetSessionWait(sessionId);
+    } catch (error) {
+      console.error('Presence reset error:', error);
     }
 
     res.json({ ok: true, sessionId, message: '聊天记录已清理' });
@@ -507,6 +877,9 @@ app.post('/history/recall', requireAuth, (req, res) => {
       });
     }
 
+    // 回收被删消息的图片附件（确认无其他消息引用后删文件）
+    releaseOrphanAttachments(removed.map(item => item.attachments));
+
     // 异步撤回由这条用户消息产生的长期记忆（sourceQuote 匹配，优先同会话）
     recallMemoryBySourceQuote(
       removed[0].content,
@@ -515,6 +888,13 @@ app.post('/history/recall', requireAuth, (req, res) => {
     ).catch(error => {
       console.error('Memory recall error:', error.message);
     });
+
+    // 撤回可能移除了最后一条 Blue 消息，等待计时一并归零，避免残留
+    try {
+      resetSessionWait(sessionId);
+    } catch (error) {
+      console.error('Presence reset error:', error);
+    }
 
     res.json({
       ok: true,
@@ -525,6 +905,285 @@ app.post('/history/recall', requireAuth, (req, res) => {
   } catch (error) {
     console.error('History recall error:', error);
     res.status(500).json({ error: '撤回失败' });
+  }
+});
+
+// 多模态附件回收：撤回 / 清理消息后，删掉不再被任何消息引用的图片文件。
+// 同一张图被多个消息引用（重发）时不会误删；删文件失败只记日志，
+// 不影响撤回/清理本身的结果（消息已删，孤儿文件可后续手动清理）。
+function releaseOrphanAttachments(attachmentsList) {
+  const candidates = new Set();
+
+  for (const attachments of attachmentsList) {
+    if (!Array.isArray(attachments)) continue;
+    for (const item of attachments) {
+      if (item && typeof item.id === 'string') candidates.add(item.id);
+    }
+  }
+
+  if (!candidates.size) return [];
+
+  const referenced = new Set();
+  for (const message of getAllMessages()) {
+    if (!message || !Array.isArray(message.attachments)) continue;
+    for (const item of message.attachments) {
+      if (item && typeof item.id === 'string') referenced.add(item.id);
+    }
+  }
+
+  const removed = [];
+  for (const id of candidates) {
+    if (referenced.has(id)) continue;
+    try {
+      if (deleteImage(id)) removed.push(id);
+    } catch (error) {
+      console.error('Orphan image cleanup error:', id, error.message);
+    }
+  }
+  return removed;
+}
+
+// 图片上传：body 由顶部路径级 parser（8mb）解析，这里直接取用。
+app.post('/uploads/image', requireAuth, (req, res) => {
+    try {
+      const { image, kind = 'image', name } = req.body || {};
+      const meta = saveImage({ dataUrl: image, kind, name });
+
+      res.json({ ok: true, ...meta });
+    } catch (error) {
+      if (error instanceof UploadError) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      console.error('Upload error:', error);
+      res.status(500).json({ error: '图片上传失败' });
+    }
+});
+
+// 图片读取：与所有接口一样走 requireAuth，API 密钥只存在于服务端。
+// 文件名由服务端按魔数推导，URL 里只有 UUID，不存在路径遍历面。
+app.get('/uploads/image/:id', requireAuth, (req, res) => {
+  const id = String(req.params.id || '');
+  const buf = readImageBuffer(id);
+
+  if (!buf) {
+    return res.status(404).json({ error: '图片不存在' });
+  }
+
+  const meta = getImageMeta(id);
+  res.setHeader('Content-Type', meta ? meta.mime : 'application/octet-stream');
+  res.setHeader('Content-Length', buf.length);
+  // 内容不可变（UUID 命名），允许前端长期缓存
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  res.end(buf);
+});
+
+// 手动删除图片：仍被聊天记录引用的拒绝删除（409），防前端误删导致历史破图。
+app.delete('/uploads/image/:id', requireAuth, (req, res) => {
+  const id = String(req.params.id || '');
+
+  const referenced = getAllMessages().some(
+    message =>
+      Array.isArray(message.attachments) &&
+      message.attachments.some(item => item && item.id === id)
+  );
+
+  if (referenced) {
+    return res.status(409).json({ error: '图片仍被聊天记录引用，无法删除' });
+  }
+
+  if (!deleteImage(id)) {
+    return res.status(404).json({ error: '图片不存在' });
+  }
+
+  res.json({ ok: true, id });
+});
+
+// 表情包库列表：供前端选择器使用；q 为可选关键词（匹配名称）。
+app.get('/stickers', requireAuth, (req, res) => {
+  try {
+    res.json({
+      stickers: listStickers({ q: req.query.q, limit: req.query.limit }),
+    });
+  } catch (error) {
+    console.error('Stickers error:', error);
+    res.status(500).json({ error: '读取表情包库失败' });
+  }
+});
+
+// ================= 表情包仓库（用户与 AI 共享） =================
+// 独立资源：上传/收藏/查询/物理删除。发送走 POST /chat 的 stickerIds 字段，
+// AI 主动发送走回复里的 [sticker:仓库ID]（后端校验 ID 必须真实存在）。
+
+// 添加表情包（上传 dataURL，或由 collect 内部以 Buffer 形式复用本函数逻辑）
+app.post('/sticker-repo', requireAuth, (req, res) => {
+  try {
+    const { image, name, note, tags } = req.body || {};
+    const { existing, sticker } = addSticker({
+      dataUrl: image,
+      name,
+      note,
+      tags,
+      source: 'upload',
+    });
+
+    // 自动语义生成默认关闭（STICKER_SEMANTIC_AUTO=1 才启用）：
+    // 避免未经确认的视觉 API 费用。开启时异步生成，不阻塞响应。
+    if (!existing && STICKER_SEMANTIC_AUTO && client) {
+      setImmediate(() => {
+        generateStickerSemantic(client, sticker.id).catch(error => {
+          console.error('Sticker semantic error:', sticker.id, error.message);
+        });
+      });
+    }
+
+    res.json({ ok: true, existing, sticker });
+  } catch (error) {
+    if (error instanceof StickerRepoError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+    console.error('Sticker repo add error:', error);
+    res.status(500).json({ error: '表情包添加失败' });
+  }
+});
+
+// 收藏聊天中收到的图片：从 uploads 临时附件复制进仓库（原附件不动，
+// 撤回消息时的孤儿清理逻辑不受影响）。
+app.post('/sticker-repo/collect', requireAuth, (req, res) => {
+  try {
+    const { attachmentId, note, tags } = req.body || {};
+    const id = String(attachmentId || '');
+
+    const buf = readImageBuffer(id);
+    if (!buf) {
+      return res.status(404).json({ error: '聊天图片不存在或已失效' });
+    }
+
+    const meta = getImageMeta(id);
+    const { existing, sticker } = addSticker({
+      dataUrl: `data:${meta.mime};base64,${buf.toString('base64')}`,
+      name: meta.name,
+      note,
+      tags,
+      source: 'chat',
+    });
+
+    if (!existing && STICKER_SEMANTIC_AUTO && client) {
+      setImmediate(() => {
+        generateStickerSemantic(client, sticker.id).catch(error => {
+          console.error('Sticker semantic error:', sticker.id, error.message);
+        });
+      });
+    }
+
+    res.json({ ok: true, existing, sticker });
+  } catch (error) {
+    if (error instanceof StickerRepoError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+    console.error('Sticker collect error:', error);
+    res.status(500).json({ error: '收藏失败' });
+  }
+});
+
+// 列表查询：q 全文（名称/备注/标签/语义），mood/tag 精确筛选
+app.get('/sticker-repo', requireAuth, (req, res) => {
+  try {
+    res.json({
+      stickers: listStickerRepo({
+        q: req.query.q,
+        mood: req.query.mood,
+        tag: req.query.tag,
+        limit: req.query.limit,
+      }),
+      total: countStickers(),
+    });
+  } catch (error) {
+    console.error('Sticker repo list error:', error);
+    res.status(500).json({ error: '读取表情包仓库失败' });
+  }
+});
+
+// 元数据
+app.get('/sticker-repo/:id', requireAuth, (req, res) => {
+  const entry = getSticker(req.params.id);
+  if (!entry) {
+    return res.status(404).json({ error: '表情包不存在' });
+  }
+  const { file, ...rest } = entry;
+  res.json({ sticker: rest });
+});
+
+// 图片读取。物理删除后记录与文件俱失，统一 410：前端据此显示占位，
+// 不把"已删除"和"不存在"混为一谈（404）——对聊天历史来说都是失效。
+app.get('/sticker-repo/:id/image', requireAuth, (req, res) => {
+  const id = String(req.params.id || '');
+  const entry = getSticker(id);
+
+  if (!entry) {
+    return res.status(410).json({ error: 'sticker_deleted' });
+  }
+
+  const buf = readStickerImage(id);
+  if (!buf) {
+    return res.status(410).json({ error: 'sticker_deleted' });
+  }
+
+  res.setHeader('Content-Type', entry.mime);
+  res.setHeader('Content-Length', buf.length);
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  res.end(buf);
+});
+
+// 修改备注 / 标签
+app.patch('/sticker-repo/:id', requireAuth, (req, res) => {
+  try {
+    const updated = updateSticker(req.params.id, {
+      note: req.body && req.body.note,
+      tags: req.body && req.body.tags,
+    });
+    if (!updated) {
+      return res.status(404).json({ error: '表情包不存在' });
+    }
+    res.json({ ok: true, sticker: updated });
+  } catch (error) {
+    console.error('Sticker repo update error:', error);
+    res.status(500).json({ error: '更新失败' });
+  }
+});
+
+// 物理删除：文件 + 索引记录一并移除。聊天历史里的消息快照不动，
+// 历史引用此 ID 时图片接口返回 410，前端显示占位。
+app.delete('/sticker-repo/:id', requireAuth, (req, res) => {
+  try {
+    if (!deleteSticker(req.params.id)) {
+      return res.status(404).json({ error: '表情包不存在' });
+    }
+    res.json({ ok: true, id: req.params.id });
+  } catch (error) {
+    console.error('Sticker repo delete error:', error);
+    res.status(500).json({ error: '删除失败' });
+  }
+});
+
+// 语义描述手动生成（默认不自动：见 POST /sticker-repo）。
+// 每次调用消耗 1 次视觉 API（图片 ≤1024 token + 少量文本）。
+// 结果与失败原因都写入索引，可重复调用重试。
+app.post('/sticker-repo/:id/semantic', requireAuth, async (req, res) => {
+  try {
+    if (!getSticker(req.params.id)) {
+      return res.status(404).json({ error: '表情包不存在' });
+    }
+    if (!client) {
+      return res.status(500).json({
+        error: '服务端未配置 DEEPSEEK_API_KEY，无法生成语义描述',
+      });
+    }
+
+    const semantic = await generateStickerSemantic(client, req.params.id);
+    res.json({ ok: true, id: req.params.id, semantic });
+  } catch (error) {
+    console.error('Sticker semantic error:', error);
+    res.status(500).json({ error: '语义描述生成失败' });
   }
 });
 
@@ -558,6 +1217,117 @@ app.get('/emotion', requireAuth, (req, res) => {
   }
 });
 
+// ---- 在线状态（Presence V1） ----
+
+// 客户端上报：前后台切换、心跳、用户互动。三类信息都走同一个接口，
+// 重复请求按 eventId 去重，乱序到达的旧事件不会回滚状态。
+app.post('/presence/report', requireAuth, (req, res) => {
+  try {
+    const body = req.body || {};
+    const appState = body.appState;
+    const heartbeat = body.heartbeat === true;
+    const interaction = body.interaction === true;
+
+    if (
+      appState !== undefined &&
+      appState !== 'foreground' &&
+      appState !== 'background'
+    ) {
+      return res.status(400).json({
+        error: 'appState 只能是 foreground 或 background',
+      });
+    }
+
+    if (!appState && !heartbeat && !interaction) {
+      return res.status(400).json({ error: '缺少状态上报内容' });
+    }
+
+    if (
+      body.eventId !== undefined &&
+      (typeof body.eventId !== 'string' || !body.eventId.trim())
+    ) {
+      return res.status(400).json({ error: 'eventId 必须是非空字符串' });
+    }
+
+    if (
+      body.occurredAt !== undefined &&
+      (typeof body.occurredAt !== 'string' ||
+        Number.isNaN(Date.parse(body.occurredAt)))
+    ) {
+      return res.status(400).json({ error: 'occurredAt 必须是合法时间' });
+    }
+
+    if (body.sessionId !== undefined && typeof body.sessionId !== 'string') {
+      return res.status(400).json({ error: 'sessionId 必须是字符串' });
+    }
+
+    // 只接受真实存在的会话，避免上报把等待状态写到任意 id 上
+    const requested = typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
+    const sessionId = requested && getSession(requested) ? requested : null;
+
+    const result = recordPresenceReport(
+      {
+        appState: appState || null,
+        heartbeat,
+        interaction,
+        eventId:
+          typeof body.eventId === 'string' ? body.eventId.trim() : null,
+        occurredAt: body.occurredAt,
+        sessionId,
+      },
+      Date.now()
+    );
+
+    res.json({
+      ok: true,
+      duplicate: result.duplicate,
+      presence: result.presence,
+    });
+  } catch (error) {
+    console.error('Presence report error:', error);
+    res.status(500).json({ error: '状态上报失败' });
+  }
+});
+
+// 读取当前状态快照：用户活跃状态 + 指定会话的 Blue 等待回复状态。
+app.get('/presence', requireAuth, (req, res) => {
+  try {
+    const sessionId = resolveSessionId(req, 'query');
+
+    if (!getSession(sessionId)) {
+      return res.status(404).json({ error: '会话不存在' });
+    }
+
+    res.json({ presence: getPresence(sessionId, Date.now()) });
+  } catch (error) {
+    console.error('Presence API Error:', error);
+    res.status(500).json({ error: '读取在线状态失败' });
+  }
+});
+
+// 人格面板：读取当前配置 + 服务端默认值（前端「恢复默认」以此为准）。
+app.get('/persona', requireAuth, (req, res) => {
+  res.json({ config: getPersonaConfig(), defaults: PERSONA_DEFAULTS });
+});
+
+// 保存人格配置：{ config: {...} } 整体覆盖；{ reset: true } 恢复服务端默认。
+// 配置文件损坏时 persona 模块原地只读保护，返回 409 而不是覆盖用户配置。
+app.put('/persona', requireAuth, (req, res) => {
+  const body = req.body || {};
+  const saved =
+    body.reset === true
+      ? resetPersonaConfig()
+      : savePersonaConfig(body.config);
+
+  if (!saved) {
+    return res
+      .status(409)
+      .json({ error: '人格配置文件已损坏，已原地保护，拒绝写入' });
+  }
+
+  res.json({ config: saved });
+});
+
 // 记忆库：按 createdAt + content 删除单条记忆
 app.post('/memory/delete', requireAuth, async (req, res) => {
   try {
@@ -580,6 +1350,380 @@ app.post('/memory/delete', requireAuth, async (req, res) => {
   }
 });
 
+// ---- /chat 与 /chat/stream 共享的内部流程 ----
+// 两条路由的差异只在模型调用方式（一次性 / 流式）与响应形式（JSON / SSE），
+// 前置校验、上下文组装、清洗分条、落盘、presence、记忆提取完全一致。
+
+// 前置：解析参数 + 校验 + 组装 systemPrompt。
+// 校验失败返回 { error: [status, body] }，路由直接回 JSON（此时未切 SSE）；
+// 成功返回 { ctx }。
+function prepareChatRequest(req) {
+  const { message, history = [], mode, attachmentIds, stickerIds } = req.body;
+  const sessionId = resolveSessionId(req, 'body');
+
+  // 续写模式：「继续说」不是真实用户消息，只是一次内部 continuation 请求
+  const isContinue = mode === 'continue';
+
+  // 多模态附件：引用已上传图片的 id（POST /uploads/image 返回值）。
+  // 续写不产生新用户消息，忽略附件。
+  const attachments = [];
+
+  if (!isContinue) {
+    const rawIds = Array.isArray(attachmentIds) ? attachmentIds : [];
+
+    if (rawIds.length > MAX_ATTACHMENTS) {
+      return {
+        error: [400, { error: `单条消息最多携带 ${MAX_ATTACHMENTS} 张图片` }],
+      };
+    }
+
+    for (const rawId of rawIds) {
+      const meta = getImageMeta(String(rawId || ''));
+
+      if (!meta) {
+        return {
+          error: [400, { error: `图片不存在或已失效：${rawId}` }],
+        };
+      }
+
+      attachments.push(meta);
+    }
+
+    // 表情包消息：引用仓库 ID（POST /sticker-repo 返回值）。
+    // 与临时图片共用同一个 attachments 数组与同一条数量上限，
+    // 消息结构对前端统一（kind==='sticker' 走仓库图片接口）。
+    const rawStickerIds = Array.isArray(stickerIds) ? stickerIds : [];
+
+    if (rawStickerIds.length + rawIds.length > MAX_ATTACHMENTS) {
+      return {
+        error: [
+          400,
+          { error: `单条消息最多携带 ${MAX_ATTACHMENTS} 个图片或表情包` },
+        ],
+      };
+    }
+
+    for (const rawId of rawStickerIds) {
+      const entry = getSticker(String(rawId || ''));
+
+      if (!entry) {
+        return {
+          error: [400, { error: `表情包不存在：${rawId}` }],
+        };
+      }
+
+      attachments.push({
+        id: entry.id,
+        kind: KIND_STICKER,
+        mime: entry.mime,
+        name: entry.name,
+      });
+    }
+  }
+
+  // 纯发图（无文字）合法：有附件时放空文本校验
+  if (
+    !isContinue &&
+    !attachments.length &&
+    (typeof message !== 'string' || !message.trim())
+  ) {
+    return { error: [400, { error: '消息不能为空' }] };
+  }
+
+  // 会话必须已存在：跨会话或未知会话一律拒绝，保证严格隔离
+  if (!getSession(sessionId)) {
+    return { error: [404, { error: '会话不存在' }] };
+  }
+
+  // message 非字符串且无附件时已在上面 400；这里兼容纯发图场景
+  const userText = isContinue
+    ? ''
+    : typeof message === 'string'
+      ? message.trim()
+      : '';
+
+  if (!client) {
+    return {
+      error: [
+        500,
+        { error: '服务端未配置 DEEPSEEK_API_KEY，请在 server/.env 中填写后重启' },
+      ],
+    };
+  }
+
+  const clientHistory = historyToModelMessages(
+    Array.isArray(history) ? history : []
+  ).slice(-20);
+
+  // 上下文历史以服务端存储为准：不同会话严格隔离，客户端就算传来别的
+  // 会话的历史也不会串进来。图片消息在这里转成模型可用的形态。
+  const storedItems = getMessages(sessionId) || [];
+  const storedHistory = historyToModelMessages(storedItems).slice(-20);
+
+  // 会话历史里出现过图片：本次请求即便没带附件，也走视觉模型，
+  // 保证多模态上下文可被理解；同时启用表情包输出语法。
+  const historyHasImages = storedItems.some(
+    item => item && Array.isArray(item.attachments) && item.attachments.length
+  );
+  const useVision = attachments.length > 0 || historyHasImages;
+
+  // B1：客户端历史回退只对「默认会话」开放。
+  // 默认会话是旧客户端（不带 sessionId）的唯一落点，保留回退以兼容
+  // 「存储为空但客户端握着历史」的旧行为；而新建的独立会话一旦为空，
+  // 其上下文就该是空的——否则前端只要误传上一段会话的历史，就会把
+  // 别的会话的内容注入进来，破坏严格隔离。
+  const promptHistory =
+    storedHistory.length || sessionId !== DEFAULT_SESSION_ID
+      ? storedHistory
+      : clientHistory;
+
+  // 续写没有新的用户消息，用最近一条用户消息作为记忆检索的查询，
+  // 保证续写仍然复用现有 Memory System，而不是绕过它。
+  // 图片消息的 content 是 blocks 数组，不能当查询词，跳过取最近一条文本。
+  const memoryQuery = isContinue
+    ? (
+        [...promptHistory]
+          .reverse()
+          .find(
+            item => item.role === 'user' && typeof item.content === 'string'
+          ) || {}
+      ).content || ''
+    : userText;
+
+  const memoryContext = buildMemoryContext(memoryQuery);
+  const timeContext = getTimeContext(req.body.timeZone || 'Asia/Shanghai');
+  const gapContext = buildTimeGapContext(
+    req.body.timeZone || 'Asia/Shanghai',
+    sessionId
+  );
+
+  // 情绪惯性：先做时间衰减，再生成情绪上下文。
+  // E3：衰减基于"全局上次衰减检查时间"（emotion 模块内部维护），
+  // 不再使用当前会话的 gapSeconds —— 切换旧会话不会额外衰减全局情绪。
+  applyTimeDecay();
+  const emotionContext = buildEmotionContext();
+
+  // 人格面板：每轮读取当前配置（用户可能刚在面板里改过），翻译成风格规则
+  const personaConfig = getPersonaConfig();
+  const personaContext = buildPersonaPrompt(personaConfig);
+
+  console.log(
+    `Time gap: ${gapContext.timeContext}` +
+      (gapContext.gapSeconds != null ? ` (${gapContext.gapSeconds}s)` : '')
+  );
+
+  // 多模态上下文说明：STICKER_GUIDANCE 仅在本次会话涉及图片时注入；
+  // 纯文本请求在无表情包仓库时 system prompt 与改造前逐字节一致。
+  const visionInstructions = [];
+
+  if (useVision) {
+    if (attachments.some(att => att.kind === KIND_STICKER)) {
+      visionInstructions.push(STICKER_GUIDANCE);
+    }
+  }
+
+  // AI 候选列表（V1）：按当前情绪打分取前 N 条（上限 STICKER_MAX_CANDIDATES），
+  // 仓库非空即注入。注入后纯文本会话的 AI 也能主动发表情包——"是否发、
+  // 发哪一个"由模型按对话情境判断，prompt 规则约束不硬发；
+  // 后端只校验 ID 真实性（parseReplyAttachments），编造的 ID 一律忽略。
+  // 候选列表注入不改变模型选择：纯文本会话仍走 TEXT_MODEL。
+  const stickerCandidates = buildStickerCandidates({
+    emotion: getEmotion().emotion,
+    limit: STICKER_MAX_CANDIDATES,
+  });
+
+  if (stickerCandidates.length) {
+    visionInstructions.push(STICKER_SYNTAX);
+    visionInstructions.push(
+      `【可发送的表情包】\n${stickerCandidates
+        .map(formatCandidateLine)
+        .join('\n')}`
+    );
+  }
+
+  const systemPrompt = [
+      BLUEBIRD_SYSTEM_PROMPT,
+      timeContext,
+      gapContext.promptText,
+      memoryContext,
+      emotionContext,
+      personaContext,
+      isContinue ? CONTINUE_INSTRUCTION : '',
+      ...visionInstructions,
+  ]
+      .filter(Boolean)
+      .join('\n\n');
+
+  // 当前用户消息：带附件时转成 content blocks（文本 + 图片 dataURL）。
+  // 图片从服务端磁盘读取，不信任客户端传来的任何图片字节。
+  let userContent = isContinue ? '（继续）' : userText;
+
+  if (attachments.length) {
+    const blocks = [];
+    if (userText) blocks.push({ type: 'text', text: userText });
+
+    for (const att of attachments) {
+      const dataUrl = attachmentDataUrl(att);
+      if (dataUrl) {
+        blocks.push({ type: 'image_url', image_url: { url: dataUrl } });
+      }
+    }
+
+    if (blocks.length) userContent = blocks;
+  }
+
+  return {
+    ctx: {
+      sessionId,
+      isContinue,
+      userText,
+      attachments,
+      useVision,
+      userContent,
+      promptHistory,
+      systemPrompt,
+      personaConfig,
+    },
+  };
+}
+
+// 收尾：清洗情绪标签 -> 分条 -> 落盘 -> presence。
+// isClientGone 是函数：流式路由里客户端可能在生成中途断开，取值发生在收尾时刻。
+function completeChatTurn({ ctx, rawReply, isClientGone, userMessageReceivedAt }) {
+  const { sessionId, isContinue, userText, attachments, personaConfig } = ctx;
+
+  const { reply: cleanedReply, mood } = stripMoodTags(rawReply);
+
+  // 图片/表情包声明解析（[sticker:关键词] / [image:ID]）在情绪标签清洗之后：
+  // 标记可能在正文任意位置，剥离后转为消息附件。
+  // 极端情况：整条回复剥完标记后为空则保留清洗前文本，避免发出空消息
+  // （此路径不解析附件——原文本来就是兜底展示）。
+  const parsedReply = parseReplyAttachments(cleanedReply);
+  const reply = parsedReply.body || cleanedReply;
+  const replyAttachments = parsedReply.body ? parsedReply.attachments : [];
+
+  // 连续消息模式：single 强制单条（与旧行为一致）；auto / frequent 按自然
+  // 边界拆成多条气泡。每条分条是独立的 assistant 消息，撤回会整轮删除。
+  const segments = splitReplyIntoSegments(reply, personaConfig.messageMode);
+
+  // 同步生成稳定 id 并立即返回给前端（撤回需要）；appendMessages 会沿用已有 id。
+  const now = new Date().toISOString();
+
+  // 回复带出的图片/表情包附件挂在最后一格气泡上：阅读顺序与
+  // 「先文字后表情」的自然节奏一致，历史读回时也在同一条消息里
+  const assistantMessages = segments.map((content, index) => ({
+    id: crypto.randomUUID(),
+    role: 'assistant',
+    content,
+    createdAt: now,
+    ...(index === segments.length - 1 && replyAttachments.length
+      ? { attachments: replyAttachments }
+      : {}),
+  }));
+
+  // 续写只落盘 assistant 消息：不产生"继续说"用户消息，不污染 chat-history
+  const stamped = isContinue
+    ? assistantMessages
+    : [
+        {
+          id: crypto.randomUUID(),
+          role: 'user',
+          content: userText,
+          createdAt: now,
+          ...(attachments.length ? { attachments } : {}),
+        },
+        ...assistantMessages,
+      ];
+
+  // 本轮 [mood:] 只是"观察信号"，交给情绪系统做惯性更新后再返回当期真实状态
+  const emotion = applyObservation(mood);
+
+  // A1：落盘改到返回之前同步完成。此前是 setImmediate 异步写盘，客户端先拿到
+  // 200、写失败却完全看不到；同步写还顺带消掉了同一会话并发读-改-写的毫秒级
+  // 竞争（Node 单线程下这段同步代码不可被打断）。
+  // 客户端已断开时不落盘，避免回复成为"幽灵消息"（用户没收到却已入库）。
+  let persisted = false;
+
+  if (!isClientGone()) {
+    try {
+      persisted = !!appendMessages(sessionId, stamped);
+
+      if (!persisted) {
+        console.error(
+          'History persist FAILED:',
+          sessionId,
+          stamped.length,
+          'messages were NOT saved'
+        );
+      }
+    } catch (error) {
+      console.error('History save error:', error);
+    }
+  }
+
+  // Presence 联动：用户消息无论是否落盘都算一次真实互动；
+  // Blue 的回复只有真正返回给客户端（非 clientGone）才开启等待计时。
+  // 失败只记录日志，绝不影响聊天主流程。
+  try {
+    if (!isContinue) {
+      recordPresenceUserMessage(sessionId, userMessageReceivedAt);
+    }
+
+    if (!isClientGone()) {
+      recordPresenceBlueMessage(sessionId, Date.now());
+    }
+  } catch (error) {
+    console.error('Presence update error:', error);
+  }
+
+  return {
+    // reply 保留完整原文：旧客户端（不识 replies）显示行为不变
+    reply,
+    // 分条后的气泡数组：新客户端按此逐条展示；每条都是已落盘的独立消息
+    replies: assistantMessages.map(
+      ({ id, content, createdAt, attachments: att }) => ({
+        id,
+        content,
+        createdAt,
+        ...(att ? { attachments: att } : {}),
+      })
+    ),
+    persisted,
+    mood: emotion.emotion,
+    intensity: emotion.intensity,
+    userMessageId: isContinue ? null : stamped[0].id,
+    assistantMessageId: assistantMessages[0].id,
+    // 多模态附件：前端据此展示图片/表情包，历史接口同样会返回
+    userAttachments: isContinue ? [] : attachments,
+    assistantAttachments: replyAttachments,
+    // 服务端统一时间，供前端展示，避免客户端时钟偏差
+    createdAt: now,
+  };
+}
+
+// 长期记忆提取：响应完成后异步进行，失败只记日志
+function scheduleMemoryExtraction(isContinue, userText, sessionId, attachments = []) {
+  setImmediate(() => {
+    if (!client) return; // 未配置模型 key，跳过记忆提取
+    if (isContinue) return; // 续写不是用户说的话，不产生长期记忆
+    // 纯发图（无文字）时给记忆提取一个占位文本，避免空串进提取器
+    const memoryText =
+      userText ||
+      (attachments.length
+        ? `（发送了${attachments.length}张${
+            attachments[0].kind === KIND_STICKER ? '表情包' : '图片'
+          }）`
+        : userText);
+    processMemory(client, memoryText, sessionId)
+      .catch(error => {
+        console.error(
+          'Memory processing error:',
+          error.message
+        );
+      });
+  });
+}
+
 app.post('/chat', requireAuth, async (req, res) => {
   // 客户端提前断开时标记，避免回复落盘成"幽灵消息"（用户没收到却已入库）
   let clientGone = false;
@@ -587,124 +1731,43 @@ app.post('/chat', requireAuth, async (req, res) => {
     if (!res.writableEnded) clientGone = true;
   });
 
+  // 用户消息的到达时刻：Presence 用它计算「用户最后互动时间」，
+  // 与模型耗时无关（回复可能几十秒后才完成）。
+  const userMessageReceivedAt = Date.now();
+
   try {
-    const { message, history = [], mode } = req.body;
-    const sessionId = resolveSessionId(req, 'body');
+    const prepared = prepareChatRequest(req);
 
-    // 续写模式：「继续说」不是真实用户消息，只是一次内部 continuation 请求
-    const isContinue = mode === 'continue';
-
-    if (!isContinue && (typeof message !== 'string' || !message.trim())) {
-      return res.status(400).json({
-        error: '消息不能为空',
-      });
+    if (prepared.error) {
+      const [status, body] = prepared.error;
+      return res.status(status).json(body);
     }
 
-    // 会话必须已存在：跨会话或未知会话一律拒绝，保证严格隔离
-    if (!getSession(sessionId)) {
-      return res.status(404).json({
-        error: '会话不存在',
-      });
-    }
-
-    const userText = isContinue ? '' : message.trim();
-
-    if (!client) {
-      return res.status(500).json({
-        error: '服务端未配置 DEEPSEEK_API_KEY，请在 server/.env 中填写后重启',
-      });
-    }
-
-    const clientHistory = Array.isArray(history)
-      ? history
-          .filter(
-            item =>
-              item &&
-              (item.role === 'user' || item.role === 'assistant') &&
-              typeof item.content === 'string'
-          )
-          .slice(-20)
-      : [];
-
-    // 上下文历史以服务端存储为准：不同会话严格隔离，客户端就算传来别的
-    // 会话的历史也不会串进来。
-    const storedHistory = (getMessages(sessionId) || [])
-      .filter(
-        item =>
-          item &&
-          (item.role === 'user' || item.role === 'assistant') &&
-          typeof item.content === 'string'
-      )
-      .map(item => ({ role: item.role, content: item.content }))
-      .slice(-20);
-
-    // B1：客户端历史回退只对「默认会话」开放。
-    // 默认会话是旧客户端（不带 sessionId）的唯一落点，保留回退以兼容
-    // 「存储为空但客户端握着历史」的旧行为；而新建的独立会话一旦为空，
-    // 其上下文就该是空的——否则前端只要误传上一段会话的历史，就会把
-    // 别的会话的内容注入进来，破坏严格隔离。
-    const promptHistory =
-      storedHistory.length || sessionId !== DEFAULT_SESSION_ID
-        ? storedHistory
-        : clientHistory;
-
-    // 续写没有新的用户消息，用最近一条用户消息作为记忆检索的查询，
-    // 保证续写仍然复用现有 Memory System，而不是绕过它
-    const memoryQuery = isContinue
-      ? ([...promptHistory].reverse().find(item => item.role === 'user') || {})
-          .content || ''
-      : userText;
-
-    const memoryContext = buildMemoryContext(memoryQuery);
-    const timeContext = getTimeContext(req.body.timeZone || 'Asia/Shanghai');
-    const gapContext = buildTimeGapContext(
-      req.body.timeZone || 'Asia/Shanghai',
-      sessionId
-    );
-
-    // 情绪惯性：先做时间衰减，再生成情绪上下文。
-    // E3：衰减基于"全局上次衰减检查时间"（emotion 模块内部维护），
-    // 不再使用当前会话的 gapSeconds —— 切换旧会话不会额外衰减全局情绪。
-    applyTimeDecay();
-    const emotionContext = buildEmotionContext();
-
-    console.log(
-      `Time gap: ${gapContext.timeContext}` +
-        (gapContext.gapSeconds != null ? ` (${gapContext.gapSeconds}s)` : '')
-    );
-
-    const systemPrompt = [
-        BLUEBIRD_SYSTEM_PROMPT,
-        timeContext,
-        gapContext.promptText,
-        memoryContext,
-        emotionContext,
-        isContinue ? CONTINUE_INSTRUCTION : '',
-    ]
-        .filter(Boolean)
-        .join('\n\n');
+    const { ctx } = prepared;
 
     // 真实 API 调用流水：每次消耗 DEEPSEEK_API_KEY 都在日志留痕，
     // 便于与 DeepSeek 控制台用量对账、排查意外调用来源。纯日志，不影响逻辑。
     console.log(
-      `[AI call] main-reply session=${sessionId} at=${new Date().toISOString()}`
+      `[AI call] main-reply session=${ctx.sessionId} at=${new Date().toISOString()}` +
+        ` model=${ctx.useVision ? VISION_MODEL : TEXT_MODEL}` +
+        ` attachments=${ctx.attachments.length}`
     );
 
     const completion = await client.chat.completions.create(
       {
-        model: 'deepseek-chat',
+        model: ctx.useVision ? VISION_MODEL : TEXT_MODEL,
         temperature: 0.8,
         max_tokens: 1200,
         messages: [
           {
             role: 'system',
-            content: systemPrompt,
+            content: ctx.systemPrompt,
           },
-          ...promptHistory,
+          ...ctx.promptHistory,
           {
             // 续写模式用一个内部短指令占位：只存在于本次请求，不落任何盘
             role: 'user',
-            content: isContinue ? '（继续）' : userText,
+            content: ctx.userContent,
           },
         ],
       },
@@ -717,126 +1780,20 @@ app.post('/chat', requireAuth, async (req, res) => {
       throw new Error('模型没有返回有效内容');
     }
 
-    // 情绪标签兼容实际出现的三种形式：
-    // 1) 规范格式 [mood:calm]（认领情绪观察信号）；
-    // 2) 模型偶发的裸格式 [calm]（词项严格限定在 8 个已知情绪值内才剥离，
-    //    避免误删正文里的普通方括号内容）；
-    // 3) 其他前缀写法 [mood:任意词]（只剥离不认领，保持旧版剥离范围不缩水）。
-    const moodTagSource = `(?:［|\\[)\\s*(?:mood\\s*[:：]\\s*)?(${EMOTIONS.join('|')})\\s*(?:］|\\])`;
-    const prefixedTagSource = `(?:［|\\[)\\s*mood\\s*[:：]\\s*[a-z]+\\s*(?:］|\\])`;
-    const leadingTagRe = new RegExp(
-      `^\\s*(?:${moodTagSource}|${prefixedTagSource})`,
-      'i'
-    );
-    const anyTagRe = new RegExp(
-      `${prefixedTagSource}|${moodTagSource}`,
-      'gi'
-    );
-
-    let mood = 'calm';
-    let moodSignalSet = false;
-    let body = rawReply;
-
-    // 1) 循环清掉开头的标签（模型偶尔会连发多个），第一个合法值作为本轮观察信号
-    let leading = body.match(leadingTagRe);
-
-    while (leading) {
-      const value =
-        typeof leading[1] === 'string' ? leading[1].toLowerCase() : '';
-
-      if (!moodSignalSet && MOOD_VALUES.has(value)) {
-        mood = value;
-        moodSignalSet = true;
-      }
-
-      body = body.slice(leading[0].length);
-      leading = body.match(leadingTagRe);
-    }
-
-    // 2) 兜底清掉正文中任何位置残留的标签，避免标签原文展示给用户或落库
-    const cleaned = body.replace(anyTagRe, '').trim();
-
-    // 极端情况：整条回复只有标签，清洗后为空则保留原文，避免发出空消息
-    const reply = cleaned || rawReply;
-
-    // 同步生成稳定 id 并立即返回给前端（撤回需要）；appendMessages 会沿用已有 id。
-    const now = new Date().toISOString();
-
-    // 续写只落盘 assistant 消息：不产生"继续说"用户消息，不污染 chat-history
-    const stamped = isContinue
-      ? [
-          {
-            id: crypto.randomUUID(),
-            role: 'assistant',
-            content: reply,
-            createdAt: now,
-          },
-        ]
-      : [
-          {
-            id: crypto.randomUUID(),
-            role: 'user',
-            content: userText,
-            createdAt: now,
-          },
-          {
-            id: crypto.randomUUID(),
-            role: 'assistant',
-            content: reply,
-            createdAt: now,
-          },
-        ];
-
-    // 本轮 [mood:] 只是"观察信号"，交给情绪系统做惯性更新后再返回当期真实状态
-    const emotion = applyObservation(mood);
-
-    // A1：落盘改到返回之前同步完成。此前是 setImmediate 异步写盘，客户端先拿到
-    // 200、写失败却完全看不到；同步写还顺带消掉了同一会话并发读-改-写的毫秒级
-    // 竞争（Node 单线程下这段同步代码不可被打断）。
-    // 客户端已断开时不落盘，避免回复成为"幽灵消息"（用户没收到却已入库）。
-    let persisted = false;
-
-    if (!clientGone) {
-      try {
-        persisted = !!appendMessages(sessionId, stamped);
-
-        if (!persisted) {
-          console.error(
-            'History persist FAILED:',
-            sessionId,
-            stamped.length,
-            'messages were NOT saved'
-          );
-        }
-      } catch (error) {
-        console.error('History save error:', error);
-      }
-    }
+    const result = completeChatTurn({
+      ctx,
+      rawReply,
+      isClientGone: () => clientGone,
+      userMessageReceivedAt,
+    });
 
     res.json({
-      reply,
+      ...result,
       model: completion.model,
-      sessionId,
-      persisted,
-      mood: emotion.emotion,
-      intensity: emotion.intensity,
-      userMessageId: isContinue ? null : stamped[0].id,
-      assistantMessageId: isContinue ? stamped[0].id : stamped[1].id,
-      // 服务端统一时间，供前端展示，避免客户端时钟偏差
-      createdAt: now,
+      sessionId: ctx.sessionId,
     });
 
-    setImmediate(() => {
-      if (!client) return; // 未配置模型 key，跳过记忆提取
-      if (isContinue) return; // 续写不是用户说的话，不产生长期记忆
-      processMemory(client, userText, sessionId)
-        .catch(error => {
-          console.error(
-            'Memory processing error:',
-            error.message
-          );
-        });
-    });
+    scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments);
   } catch (error) {
     console.error('AI API Error:', error);
 
@@ -848,6 +1805,175 @@ app.post('/chat', requireAuth, async (req, res) => {
           : undefined,
     });
   }
+});
+
+// 流式聊天：与 /chat 完全相同的前置校验、上下文组装与收尾落盘，
+// 差异仅在模型以 stream:true 调用，回复增量通过 SSE 逐段推送给客户端。
+// 事件协议（每事件一行 data: JSON + 空行）：
+//   {"type":"delta","content":"..."}  增量正文（前导情绪标签已被服务端剥掉）
+//   {"type":"done", ...}              收尾，字段与 /chat 响应完全一致
+//   {"type":"error","error":"..."}    失败（不落盘、不产生幽灵消息）
+app.post('/chat/stream', requireAuth, async (req, res) => {
+  let clientGone = false;
+  res.on('close', () => {
+    if (!res.writableEnded) clientGone = true;
+  });
+
+  const userMessageReceivedAt = Date.now();
+
+  // 校验与上下文组装：失败时还没切 SSE，按普通 JSON 错误返回，
+  // 客户端收到非 200 可走旧 /chat 回退路径
+  let prepared;
+
+  try {
+    prepared = prepareChatRequest(req);
+  } catch (error) {
+    console.error('AI API Error:', error);
+    return res.status(500).json({ error: 'AI 请求失败' });
+  }
+
+  if (prepared.error) {
+    const [status, body] = prepared.error;
+    return res.status(status).json(body);
+  }
+
+  const { ctx } = prepared;
+
+  res.status(200);
+  res.set({
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    // 反向代理（如有）禁用缓冲，保证 delta 即时到达
+    'X-Accel-Buffering': 'no',
+  });
+  res.flushHeaders();
+
+  const sendEvent = payload => {
+    if (clientGone || res.writableEnded) return false;
+
+    try {
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  };
+
+  console.log(
+    `[AI call] main-reply session=${ctx.sessionId} (stream) at=${new Date().toISOString()}` +
+      ` model=${ctx.useVision ? VISION_MODEL : TEXT_MODEL}` +
+      ` attachments=${ctx.attachments.length}`
+  );
+
+  let rawReply = '';
+  let model = ctx.useVision ? VISION_MODEL : TEXT_MODEL;
+  const stripper = createMoodTagStripper();
+  let streamError = null;
+
+  try {
+    const stream = await client.chat.completions.create(
+      {
+        model: ctx.useVision ? VISION_MODEL : TEXT_MODEL,
+        temperature: 0.8,
+        max_tokens: 1200,
+        messages: [
+          {
+            role: 'system',
+            content: ctx.systemPrompt,
+          },
+          ...ctx.promptHistory,
+          {
+            role: 'user',
+            content: ctx.userContent,
+          },
+        ],
+        stream: true,
+      },
+      { timeout: 90000 }
+    );
+
+    for await (const chunk of stream) {
+      // 客户端已断开：中止上游流，不落盘，避免幽灵消息
+      if (clientGone) {
+        try {
+          if (stream.controller) stream.controller.abort();
+        } catch (_) {
+          /* 中止失败不影响主流程 */
+        }
+        break;
+      }
+
+      if (chunk && typeof chunk.model === 'string') model = chunk.model;
+
+      const delta =
+        chunk &&
+        chunk.choices &&
+        chunk.choices[0] &&
+        chunk.choices[0].delta &&
+        typeof chunk.choices[0].delta.content === 'string'
+          ? chunk.choices[0].delta.content
+          : '';
+
+      if (!delta) continue;
+
+      rawReply += delta;
+
+      const emit = stripper.push(delta);
+      if (emit && !sendEvent({ type: 'delta', content: emit })) break;
+    }
+  } catch (error) {
+    streamError = error;
+  }
+
+  // 客户端断开：直接结束，不落盘、不发 done
+  if (clientGone) {
+    try {
+      res.end();
+    } catch (_) {
+      /* ignore */
+    }
+    return;
+  }
+
+  if (streamError) {
+    console.error('AI stream error:', streamError);
+    sendEvent({ type: 'error', error: 'AI 请求失败' });
+    res.end();
+    return;
+  }
+
+  if (!rawReply) {
+    sendEvent({ type: 'error', error: '模型没有返回有效内容' });
+    res.end();
+    return;
+  }
+
+  // 缓冲里剩余的非标签内容放行（若有半截标签说明模型输出截断，
+  // done 事件的权威文本仍由 stripMoodTags 全量清洗兜底）
+  const tail = stripper.flush();
+  if (tail) sendEvent({ type: 'delta', content: tail });
+
+  let result;
+
+  try {
+    result = completeChatTurn({
+      ctx,
+      rawReply,
+      isClientGone: () => clientGone,
+      userMessageReceivedAt,
+    });
+  } catch (error) {
+    console.error('AI stream finalize error:', error);
+    sendEvent({ type: 'error', error: 'AI 请求失败' });
+    res.end();
+    return;
+  }
+
+  sendEvent({ type: 'done', ...result, model, sessionId: ctx.sessionId });
+  res.end();
+
+  scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId);
 });
 
 // 先抢占数据目录锁：已有实例在跑就直接退出，绝不带病启动造成静默覆盖
@@ -862,4 +1988,5 @@ installShutdownHooks(server);
 
 // 导出 app 与 server 实例：测试可用 PORT=0 拿到系统分配的空闲端口，
 // 避免固定端口被占用时误连到别的服务（会读写对方的真实数据目录）。
-module.exports = { app, server };
+// buildTimeGapContext / gapSemanticLabel 导出仅供时间间隔测试断言，运行行为不变。
+module.exports = { app, server, buildTimeGapContext, gapSemanticLabel };

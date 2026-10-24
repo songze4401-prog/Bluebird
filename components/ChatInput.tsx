@@ -6,12 +6,15 @@ import {
   TouchableOpacity,
   StyleSheet,
 } from 'react-native';
+import { Image } from 'expo-image';
 
 import type { Theme } from '../theme';
+import type { PendingAttachment } from '../lib/types';
 import { BlueAvatar } from './BlueAvatar';
 
 // 底部悬浮输入栏：左头像 / 中间输入框 / 右侧「＋」或发送按钮，全包在同一条大胶囊里。
 // 纯受控组件：value / sending / onSend 全部由 App 提供，内部不持有任何聊天状态。
+// 待发送附件以预览行形式浮在胶囊正上方，随附件出现/消失。
 export function ChatInput({
   theme,
   value,
@@ -20,6 +23,10 @@ export function ChatInput({
   onSend,
   onReturnHome,
   loadingHistory,
+  pendingAttachments = [],
+  onRemoveAttachment,
+  onPlus,
+  uploadingImage,
 }: {
   theme: Theme;
   value: string;
@@ -29,12 +36,52 @@ export function ChatInput({
   onReturnHome: () => void;
   // 会话历史加载中：发送会带错上下文，先禁用
   loadingHistory?: boolean;
+  // 已上传待发送的图片附件（点 × 移除）
+  pendingAttachments?: PendingAttachment[];
+  onRemoveAttachment?: (id: string) => void;
+  // 「＋」打开加号面板（图片 / 表情包入口）
+  onPlus?: () => void;
+  // 图片上传进行中：预览行显示占位，并禁用发送避免半成品请求
+  uploadingImage?: boolean;
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);
 
+  const hasPending = pendingAttachments.length > 0 || !!uploadingImage;
+  const canSend = value.trim().length > 0 || pendingAttachments.length > 0;
+  const sendDisabled = sending || loadingHistory || !!uploadingImage;
+
   return (
     // 悬浮输入栏 dock：留在正常流里，键盘弹起时仍会被 KeyboardAvoidingView 顶上去
-    <View style={styles.inputDock}>
+    <View style={[styles.inputDock, hasPending && styles.inputDockRaised]}>
+      {/* 待发送附件预览行：浮在输入胶囊正上方 */}
+      {hasPending && (
+        <View style={styles.pendingRow}>
+          {pendingAttachments.map(item => (
+            <View key={item.attachment.id} style={styles.pendingItem}>
+              <Image
+                source={{ uri: item.previewUri }}
+                style={styles.pendingThumb}
+                contentFit="cover"
+              />
+              <TouchableOpacity
+                style={styles.pendingRemove}
+                onPress={() => onRemoveAttachment?.(item.attachment.id)}
+                accessibilityLabel="移除图片"
+                hitSlop={6}
+              >
+                <Text style={styles.pendingRemoveText}>×</Text>
+              </TouchableOpacity>
+            </View>
+          ))}
+
+          {!!uploadingImage && (
+            <View style={[styles.pendingItem, styles.pendingUploading]}>
+              <Text style={styles.pendingUploadingText}>…</Text>
+            </View>
+          )}
+        </View>
+      )}
+
       <View style={styles.inputArea}>
         {/* 整条输入栏是一个大胶囊，左头像 / 中间输入 / 右按钮全包在里面 */}
         <View style={styles.inputCapsule}>
@@ -58,26 +105,31 @@ export function ChatInput({
             multiline
           />
 
-          {value.trim().length > 0 ? (
-            // 有输入内容：右侧变为发送按钮（向上箭头，不显示文字）
+          {canSend ? (
+            // 有输入内容或待发送图片：右侧变为发送按钮（向上箭头，不显示文字）
             <TouchableOpacity
               style={[
                 styles.sendButton,
-                (sending || loadingHistory) && styles.sendButtonDisabled,
+                sendDisabled && styles.sendButtonDisabled,
                 { backgroundColor: theme.sendButton },
               ]}
               onPress={onSend}
-              disabled={sending || loadingHistory}
+              disabled={sendDisabled}
               activeOpacity={0.75}
               accessibilityLabel="发送"
             >
               <Text style={styles.sendText}>{sending ? '···' : '↑'}</Text>
             </TouchableOpacity>
           ) : (
-            // 无输入内容：右侧是白色描边「＋」
-            <View style={styles.plusButton}>
+            // 无输入内容：右侧是白色描边「＋」，点击打开加号面板
+            <TouchableOpacity
+              style={styles.plusButton}
+              onPress={onPlus}
+              activeOpacity={0.75}
+              accessibilityLabel="更多功能"
+            >
               <Text style={styles.plusIcon}>+</Text>
-            </View>
+            </TouchableOpacity>
           )}
         </View>
       </View>
@@ -94,6 +146,63 @@ const createStyles = (theme: Theme) =>
       // 上移 80 叠在消息列表底部之上：列表照旧铺满，胶囊浮在消息上面
       marginTop: -80,
       backgroundColor: 'transparent',
+    },
+    // 有待发送附件时 dock 增高：预览行 52 + 间距 12，盖在消息列表上的区域同步扩大
+    inputDockRaised: {
+      height: 144,
+      marginTop: -144,
+    },
+    // ---- 待发送附件预览行 ----
+    pendingRow: {
+      position: 'absolute',
+      top: 0,
+      left: 16,
+      right: 16,
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 10,
+    },
+    pendingItem: {
+      width: 52,
+      height: 52,
+      borderRadius: 12,
+    },
+    pendingThumb: {
+      width: 52,
+      height: 52,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: theme.borderStrong,
+      backgroundColor: theme.surface,
+    },
+    pendingRemove: {
+      position: 'absolute',
+      top: -6,
+      right: -6,
+      width: 20,
+      height: 20,
+      borderRadius: 10,
+      backgroundColor: 'rgba(0,0,0,0.75)',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    pendingRemoveText: {
+      color: '#fff',
+      fontSize: 13,
+      lineHeight: 16,
+      fontWeight: '700',
+    },
+    pendingUploading: {
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: theme.borderStrong,
+      backgroundColor: theme.surface,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    pendingUploadingText: {
+      color: theme.textMuted,
+      fontSize: 18,
     },
     inputArea: {
       // 贴底悬浮：相对 inputDock（底部已在安全区之上），所以 bottom 只要 8
