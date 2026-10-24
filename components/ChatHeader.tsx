@@ -20,6 +20,7 @@ export function ChatHeader({
   onSelectMode,
   onOpenThemePicker,
   onOpenControlPanel,
+  onOpenModels,
   onClearHistory,
 }: {
   theme: Theme;
@@ -30,6 +31,7 @@ export function ChatHeader({
   onSelectMode: (mode: ThemeMode) => void;
   onOpenThemePicker: () => void;
   onOpenControlPanel: () => void;
+  onOpenModels: () => void;
   onClearHistory: () => void;
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);
@@ -138,6 +140,10 @@ export function ChatHeader({
             onPress={onOpenControlPanel}
           >
             <Text style={styles.menuItemText}>控制面板</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.menuItem} onPress={onOpenModels}>
+            <Text style={styles.menuItemText}>模型</Text>
           </TouchableOpacity>
 
           <TouchableOpacity style={styles.menuItem} onPress={onClearHistory}>

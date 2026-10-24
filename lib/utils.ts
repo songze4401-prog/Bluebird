@@ -4,6 +4,14 @@
 import { Message } from './types';
 import { WEEKDAYS, MOOD_EMOJI, MESSAGE_TIME_GAP_MS } from './constants';
 
+// 表情包标记解析统一从 utils 出口转发：组件只依赖 utils，纯函数实现
+// 放在 sticker-markers.js，便于 node 内置测试直接 require。
+export {
+  parseStickerMarkers,
+  parseStickerMarkersForStream,
+  isValidStickerId,
+} from './sticker-markers';
+
 // 本地临时消息的 id（服务端返回稳定 id 后会被替换）
 export function makeLocalId(): string {
   return Date.now().toString();

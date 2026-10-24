@@ -431,22 +431,28 @@ async function main() {
     `model=${modelCalls[modelCalls.length - 1].model}`
   );
 
-  // C4 历史含图片的会话，后续纯文本也走视觉模型（上下文可理解）
+  // C4 历史含图片的会话，后续纯文本仍严格使用用户选择的默认模型
+  // （旧实现会因历史有图而悄悄换成 deepseek-flash，导致设置里切模型失效）
   modelCalls.length = 0;
   const chatAfterImage = await req('/chat', {
     method: 'POST',
     body: { message: '刚才那张图再说说', sessionId },
   });
   check(
-    '会话历史有图片时纯文本请求也走 deepseek-flash',
-    modelCalls[modelCalls.length - 1].model === 'deepseek-flash',
+    '会话历史有图片时纯文本请求仍走所选模型 deepseek-chat',
+    modelCalls[modelCalls.length - 1].model === 'deepseek-chat',
     `model=${modelCalls[modelCalls.length - 1].model}`
   );
   check(
-    '历史用户图片消息以 blocks 形式进入上下文',
+    '目标模型无视觉能力时历史图片降级为文本（不发 image_url block）',
+    !modelCalls[modelCalls.length - 1].messages.some(
+      m => Array.isArray(m.content) && m.content.some(b => b.type === 'image_url')
+    )
+  );
+  check(
+    '降级后的历史用户消息保留原文',
     modelCalls[modelCalls.length - 1].messages.some(
-      m => m.role === 'user' && Array.isArray(m.content) &&
-        m.content.some(b => b.type === 'image_url')
+      m => m.role === 'user' && m.content === '看看这是啥'
     )
   );
 
