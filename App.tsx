@@ -1369,6 +1369,7 @@ export default function App() {
         <MessageList
           theme={theme}
           messages={messages}
+          sessionId={currentSessionId}
           loadingHistory={loadingHistory}
           sending={sending}
           continuing={continuing}
