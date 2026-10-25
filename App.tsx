@@ -25,7 +25,7 @@ import {
   ReplySegment,
   SessionMeta,
 } from './lib/types';
-import { API_TOKEN, DEFAULT_SESSION_ID, REPLY_PACING } from './lib/constants';
+import { API_TOKEN, DEFAULT_SESSION_ID } from './lib/constants';
 import {
   makeLocalId,
   readJsonResponse,
@@ -64,15 +64,9 @@ import {
   type ThemeMode,
 } from './theme';
 
-const sleep = (ms: number) =>
-  new Promise<void>(resolve => setTimeout(resolve, ms));
-
-// 逐条展示间隔：按上一条长度计算，短消息不做无意义的长等待
-const pacingDelay = (content: string) =>
-  Math.min(
-    REPLY_PACING.maxMs,
-    REPLY_PACING.baseMs + content.length * REPLY_PACING.perCharMs
-  );
+// 「流式输出」开关的本地持久化键（纯前端偏好，不进服务端 /persona）。
+// 未保存过 → 默认开启（true）。
+const STREAMING_STORAGE_KEY = 'BLUEBIRD_STREAMING_ENABLED';
 
 // /chat 响应归一化为分条数组：优先服务端 replies[]（连续消息模式），
 // 字段缺失时回退为单条 reply —— 新旧服务端双向兼容
@@ -188,6 +182,35 @@ function removeStreamBubble(prev: Message[], tempId: string): Message[] {
   return prev.filter(m => m.id !== tempId);
 }
 
+// 服务端最终回复（流式 done 或非流式 /chat）统一切成气泡数组。
+// 两条路径共用这一个切分函数，避免"复制消息处理逻辑"：边界、mood、
+// modelNote、附件透传全部在此处，done 与回退路径零差异。
+function buildReplyBubbles(
+  data: {
+    mood?: string;
+    createdAt?: string;
+    modelRoute?: ModelRoute;
+  },
+  segments: ReplySegment[]
+): { bubbles: Message[]; replyMood: string } {
+  const replyMood = typeof data.mood === 'string' ? data.mood : 'calm';
+  const modelNote = buildModelNote(data.modelRoute);
+
+  const bubbles: Message[] = segments.map((seg, index) => ({
+    id: seg.id || `${makeLocalId()}-ai`,
+    role: 'assistant',
+    content: seg.content,
+    mood: replyMood,
+    createdAt: seg.createdAt ?? data.createdAt ?? new Date().toISOString(),
+    // AI 回复的图片/表情包附件（服务端约定挂在最后一格气泡）
+    ...(seg.attachments?.length ? { attachments: seg.attachments } : {}),
+    // 自动视觉路由提示只挂在最后一格，避免整轮重复
+    ...(index === segments.length - 1 && modelNote ? { modelNote } : {}),
+  }));
+
+  return { bubbles, replyMood };
+}
+
 export default function App() {
   const [input, setInput] = useState('');
   const [messages, setMessagesState] = useState<Message[]>([]);
@@ -246,6 +269,18 @@ export default function App() {
   const [panelOpen, setPanelOpen] = useState(false);
   // 模型与 API 管理弹层
   const [modelsOpen, setModelsOpen] = useState(false);
+
+  // 「流式输出」开关：纯前端本地偏好（AsyncStorage 持久化），默认开启。
+  // 开启走 /chat/stream（逐字显示），关闭走 /chat（一次性显示）。
+  // 与服务端 persona 配置无关，不进 /persona。
+  const [streamingEnabled, setStreamingEnabled] = useState(true);
+
+  const setStreaming = useCallback((next: boolean) => {
+    setStreamingEnabled(next);
+    AsyncStorage.setItem(STREAMING_STORAGE_KEY, String(next)).catch(error => {
+      console.error('Save streaming setting error:', error);
+    });
+  }, []);
   // 当前所选模型（服务端 api-configs.json 的 defaults 是唯一数据源）。
   // 前端只做一份镜像，用于在每个聊天请求里显式携带 providerId/modelId；
   // 读取失败时保持 null，请求不带 ids，由服务端全局默认兜底。
@@ -469,6 +504,30 @@ export default function App() {
   }, []);
 
   // 切换强调色：先立即生效（UI 不等 IO），再异步落盘
+  // 启动时读取本地保存的「流式输出」开关（默认开启）
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadStreaming = async () => {
+      try {
+        const saved = await AsyncStorage.getItem(STREAMING_STORAGE_KEY);
+
+        if (cancelled) return;
+
+        // 未保存过 → 默认开启（true）；只有显式存过 'false' 才关
+        if (saved !== null) setStreamingEnabled(saved === 'true');
+      } catch (error) {
+        console.error('Load streaming setting error:', error);
+      }
+    };
+
+    loadStreaming();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const selectTheme = (next: ThemeId) => {
     setThemeId(next);
 
@@ -808,112 +867,110 @@ export default function App() {
       ...(stickerIds.length ? { stickerIds } : {}),
     };
 
-    // 流式回复的临时气泡前缀：流式期按分段规则切成 tempId#0..#n
-    const streamTempId = `stream-${makeLocalId()}`;
-    const streamCreatedAt = new Date().toISOString();
-    // 累计正文与分段模式：模式由服务端 meta 事件下发（默认 auto）
-    let streamedText = '';
-    let streamMode: StreamMode = 'auto';
-
     try {
-      // 优先走流式（SSE）：文字随模型生成逐步显示。
-      // 一个 delta 都没收到就失败时自动回退非流式 /chat（兼容旧服务端）。
-      const outcome = await streamChatRequest(payload, {
-        onMeta: meta => {
-          if (
-            meta.messageMode === 'single' ||
-            meta.messageMode === 'auto' ||
-            meta.messageMode === 'frequent'
-          ) {
-            streamMode = meta.messageMode;
-          }
-        },
-        onDelta: delta => {
-          // 用户已切走会话：停止渲染（服务端照常落盘，切回时历史完整恢复）
-          if (currentSessionIdRef.current !== sessionId) return;
-          streamedText += delta;
-          setMessages(prev =>
-            applyStreamingText(
-              prev,
-              streamTempId,
-              streamedText,
-              streamMode,
-              streamCreatedAt
-            )
-          );
-        },
-      });
+      // 流式开关关闭时跳过 SSE，直接走 /chat（一次性显示）；
+      // 开启时优先 SSE，一个 delta 都没收到才回退 /chat（兼容旧服务端）。
+      // 两条路径最终都用 buildReplyBubbles 同源切分，done 与回退零跳变。
+      if (streamingEnabled) {
+        // 流式回复的临时气泡前缀：流式期按分段规则切成 tempId#0..#n
+        const streamTempId = `stream-${makeLocalId()}`;
+        const streamCreatedAt = new Date().toISOString();
+        // 累计正文与分段模式：模式由服务端 meta 事件下发（默认 auto）
+        let streamedText = '';
+        let streamMode: StreamMode = 'auto';
 
-      if (outcome.kind === 'done') {
-        const data = outcome.data;
-        const replyMood = typeof data.mood === 'string' ? data.mood : 'calm';
-        const segments = normalizeSegments(data);
-        // 图片自动视觉路由的提示挂在最后一格气泡上（同一轮所有分条同模型）
-        const modelNote = buildModelNote(data.modelRoute);
-
-        // 撤回需要服务端稳定 id：用服务端返回的 id 替换本地临时 id
-        const serverUserId =
-          typeof data.userMessageId === 'string' ? data.userMessageId : null;
-
-        if (serverUserId) {
-          setMessages(prev => {
-            // 正常发送更新刚发出的气泡；重试时更新最后一条用户消息
-            const targetId = retryText
-              ? [...prev].reverse().find(m => m.role === 'user')?.id
-              : userMessage.id;
-
-            return prev.map(m =>
-              m.id === targetId ? { ...m, id: serverUserId } : m
+        const outcome = await streamChatRequest(payload, {
+          onMeta: meta => {
+            if (
+              meta.messageMode === 'single' ||
+              meta.messageMode === 'auto' ||
+              meta.messageMode === 'frequent'
+            ) {
+              streamMode = meta.messageMode;
+            }
+          },
+          onDelta: delta => {
+            // 用户已切走会话：停止渲染（服务端照常落盘，切回时历史完整恢复）
+            if (currentSessionIdRef.current !== sessionId) return;
+            streamedText += delta;
+            setMessages(prev =>
+              applyStreamingText(
+                prev,
+                streamTempId,
+                streamedText,
+                streamMode,
+                streamCreatedAt
+              )
             );
-          });
+          },
+        });
+
+        if (outcome.kind === 'done') {
+          const data = outcome.data;
+          const segments = normalizeSegments(data);
+
+          // 撤回需要服务端稳定 id：用服务端返回的 id 替换本地临时 id
+          const serverUserId =
+            typeof data.userMessageId === 'string'
+              ? data.userMessageId
+              : null;
+
+          if (serverUserId) {
+            setMessages(prev => {
+              // 正常发送更新刚发出的气泡；重试时更新最后一条用户消息
+              const targetId = retryText
+                ? [...prev].reverse().find(m => m.role === 'user')?.id
+                : userMessage.id;
+
+              return prev.map(m =>
+                m.id === targetId ? { ...m, id: serverUserId } : m
+              );
+            });
+          }
+
+          const { bubbles, replyMood } = buildReplyBubbles(data, segments);
+
+          setMood(replyMood);
+
+          // 用服务端权威分条替换临时气泡：内容在流式期间已逐步读完，
+          // 不再加逐条等待；id 换成服务端稳定 id，撤回逻辑不受影响
+          if (
+            currentSessionIdRef.current === sessionId &&
+            bubbles.length > 0
+          ) {
+            setMessages(prev =>
+              reconcileStreamDone(prev, streamTempId, bubbles)
+            );
+          }
+
+          return;
         }
 
-        setMood(replyMood);
-
-        // 用服务端权威分条替换临时气泡：内容在流式期间已逐步读完，
-        // 不再加逐条等待；id 换成服务端稳定 id，撤回逻辑不受影响
-        if (currentSessionIdRef.current === sessionId && segments.length > 0) {
-          const bubbles: Message[] = segments.map((seg, index) => ({
-            id: seg.id || `${makeLocalId()}-ai`,
-            role: 'assistant',
-            content: seg.content,
-            mood: replyMood,
-            createdAt:
-              seg.createdAt ?? data.createdAt ?? new Date().toISOString(),
-            // AI 回复的图片/表情包附件（服务端约定挂在最后一格气泡）
-            ...(seg.attachments?.length
-              ? { attachments: seg.attachments }
-              : {}),
-            // 自动视觉路由提示只挂在最后一格，避免整轮重复
-            ...(index === segments.length - 1 && modelNote ? { modelNote } : {}),
-          }));
-
+        if (outcome.kind === 'error') {
+          // 流式中途失败：临时气泡（可能已有部分内容）替换为错误气泡
           setMessages(prev =>
-            reconcileStreamDone(prev, streamTempId, bubbles)
+            reconcileStreamDone(prev, streamTempId, [
+              {
+                id: `error-${makeLocalId()}`,
+                role: 'assistant',
+                content: outcome.message,
+                retryText: text,
+                // 带图消息失败后重试需原样带回附件
+                ...(attachments.length
+                  ? { retryAttachments: attachments }
+                  : {}),
+              },
+            ])
           );
+          return;
         }
 
-        return;
+        // outcome.kind === 'fallback'：一个 delta 都没收到，落到下方 /chat
       }
 
-      if (outcome.kind === 'error') {
-        // 流式中途失败：临时气泡（可能已有部分内容）替换为错误气泡
-        setMessages(prev =>
-          reconcileStreamDone(prev, streamTempId, [
-            {
-              id: `error-${makeLocalId()}`,
-              role: 'assistant',
-              content: outcome.message,
-              retryText: text,
-              // 带图消息失败后重试需原样带回附件
-              ...(attachments.length ? { retryAttachments: attachments } : {}),
-            },
-          ])
-        );
-        return;
-      }
-
-      // outcome.kind === 'fallback'：非流式旧路径（一个 delta 都没收到）
+      // ---- 非流式 /chat 路径（开关关闭，或流式回退）----
+      // 一次性写入全部气泡（不做假分条动画），与流式 done 同源切分；
+      // 用户已切走会话则不追加（消息已落盘，切回时历史完整恢复）
       const response = await fetch(
         `${process.env.EXPO_PUBLIC_API_URL}/chat`,
         {
@@ -938,11 +995,7 @@ export default function App() {
         throw serverError(data.error || '请求失败');
       }
 
-      const replyMood = typeof data.mood === 'string' ? data.mood : 'calm';
       const segments = normalizeSegments(data);
-      const modelNote = buildModelNote(
-        (data as { modelRoute?: ModelRoute }).modelRoute
-      );
 
       // 撤回需要服务端稳定 id：用服务端返回的 id 替换本地临时 id
       const serverUserId =
@@ -961,36 +1014,15 @@ export default function App() {
         });
       }
 
+      const { bubbles, replyMood } = buildReplyBubbles(data, segments);
+
       setMood(replyMood);
 
-      // 分条逐条展示：第一条立即出现，后续按上一条长度等待，模拟真人
-      // 连续发消息的节奏。展示期间 sending 保持 true，沿用现有防连发；
-      // 空 segments（异常响应）时不追加任何气泡，由下方静默兜底
-      for (let i = 0; i < segments.length; i++) {
-        // 用户已切走会话：停止展示（消息已落盘，切回时历史完整恢复）
-        if (currentSessionIdRef.current !== sessionId) return;
-
-        const seg = segments[i];
-
-        setMessages(prev => [
-          ...prev,
-          {
-            id: seg.id || `${makeLocalId()}-ai`,
-            role: 'assistant',
-            content: seg.content,
-            mood: replyMood,
-            createdAt:
-              seg.createdAt ?? data.createdAt ?? new Date().toISOString(),
-            ...(seg.attachments?.length
-              ? { attachments: seg.attachments }
-              : {}),
-            ...(i === segments.length - 1 && modelNote ? { modelNote } : {}),
-          },
-        ]);
-
-        if (i < segments.length - 1) {
-          await sleep(pacingDelay(seg.content));
-        }
+      if (
+        currentSessionIdRef.current === sessionId &&
+        bubbles.length > 0
+      ) {
+        setMessages(prev => [...prev, ...bubbles]);
       }
     } catch (error) {
       console.error(error);
@@ -1058,79 +1090,76 @@ export default function App() {
         : {}),
     };
 
-    const streamTempId = `stream-${makeLocalId()}`;
-    const streamCreatedAt = new Date().toISOString();
-    let streamedText = '';
-    let streamMode: StreamMode = 'auto';
-
     try {
       // 续写同样优先走流式；回退/失败语义与 sendMessage 一致
-      const outcome = await streamChatRequest(payload, {
-        onMeta: meta => {
+      if (streamingEnabled) {
+        // 流式回复的临时气泡前缀：流式期按分段规则切成 tempId#0..#n
+        const streamTempId = `stream-${makeLocalId()}`;
+        const streamCreatedAt = new Date().toISOString();
+        // 累计正文与分段模式：模式由服务端 meta 事件下发（默认 auto）
+        let streamedText = '';
+        let streamMode: StreamMode = 'auto';
+
+        const outcome = await streamChatRequest(payload, {
+          onMeta: meta => {
+            if (
+              meta.messageMode === 'single' ||
+              meta.messageMode === 'auto' ||
+              meta.messageMode === 'frequent'
+            ) {
+              streamMode = meta.messageMode;
+            }
+          },
+          onDelta: delta => {
+            if (currentSessionIdRef.current !== sessionId) return;
+            streamedText += delta;
+            setMessages(prev =>
+              applyStreamingText(
+                prev,
+                streamTempId,
+                streamedText,
+                streamMode,
+                streamCreatedAt
+              )
+            );
+          },
+        });
+
+        if (outcome.kind === 'done') {
+          const data = outcome.data;
+          const segments = normalizeSegments(data);
+
+          const { bubbles, replyMood } = buildReplyBubbles(data, segments);
+
+          setMood(replyMood);
+
+          // 用服务端权威分条替换临时气泡：内容在流式期间已逐步读完，
+          // 不再加逐条等待；id 换成服务端稳定 id，撤回逻辑不受影响
           if (
-            meta.messageMode === 'single' ||
-            meta.messageMode === 'auto' ||
-            meta.messageMode === 'frequent'
+            currentSessionIdRef.current === sessionId &&
+            bubbles.length > 0
           ) {
-            streamMode = meta.messageMode;
+            setMessages(prev =>
+              reconcileStreamDone(prev, streamTempId, bubbles)
+            );
           }
-        },
-        onDelta: delta => {
-          if (currentSessionIdRef.current !== sessionId) return;
-          streamedText += delta;
-          setMessages(prev =>
-            applyStreamingText(
-              prev,
-              streamTempId,
-              streamedText,
-              streamMode,
-              streamCreatedAt
-            )
-          );
-        },
-      });
 
-      if (outcome.kind === 'done') {
-        const data = outcome.data;
-        const replyMood = typeof data.mood === 'string' ? data.mood : 'calm';
-        const segments = normalizeSegments(data);
-        // 图片自动视觉路由的提示挂在最后一格气泡上（同一轮所有分条同模型）
-        const modelNote = buildModelNote(data.modelRoute);
-
-        setMood(replyMood);
-
-        if (currentSessionIdRef.current === sessionId && segments.length > 0) {
-          const bubbles: Message[] = segments.map((seg, index) => ({
-            id: seg.id || `${makeLocalId()}-ai`,
-            role: 'assistant',
-            content: seg.content,
-            mood: replyMood,
-            createdAt:
-              seg.createdAt ?? data.createdAt ?? new Date().toISOString(),
-            // AI 回复的图片/表情包附件（服务端约定挂在最后一格气泡）
-            ...(seg.attachments?.length
-              ? { attachments: seg.attachments }
-              : {}),
-            // 自动视觉路由提示只挂在最后一格，避免整轮重复
-            ...(index === segments.length - 1 && modelNote ? { modelNote } : {}),
-          }));
-
-          setMessages(prev =>
-            reconcileStreamDone(prev, streamTempId, bubbles)
-          );
+          return;
         }
 
-        return;
+        if (outcome.kind === 'error') {
+          // 续写失败不展示错误气泡（沿用原有 Alert 提示），移除临时气泡
+          setMessages(prev => removeStreamBubble(prev, streamTempId));
+          Alert.alert('失败', outcome.message || '继续说失败了，请稍后再试。');
+          return;
+        }
+
+        // outcome.kind === 'fallback'：一个 delta 都没收到，落到下方 /chat
       }
 
-      if (outcome.kind === 'error') {
-        // 续写失败不展示错误气泡（沿用原有 Alert 提示），移除临时气泡
-        setMessages(prev => removeStreamBubble(prev, streamTempId));
-        Alert.alert('失败', outcome.message || '继续说失败了，请稍后再试。');
-        return;
-      }
-
-      // outcome.kind === 'fallback'：非流式旧路径
+      // ---- 非流式 /chat 路径（开关关闭，或流式回退）----
+      // 一次性写入全部气泡（不做假分条动画），与流式 done 同源切分；
+      // 用户已切走会话则不追加（消息已落盘，切回时历史完整恢复）
       const response = await fetch(
         `${process.env.EXPO_PUBLIC_API_URL}/chat`,
         {
@@ -1150,39 +1179,17 @@ export default function App() {
         throw serverError(data.error || '请求失败');
       }
 
-      const replyMood = typeof data.mood === 'string' ? data.mood : 'calm';
       const segments = normalizeSegments(data);
-      const modelNote = buildModelNote(
-        (data as { modelRoute?: ModelRoute }).modelRoute
-      );
+
+      const { bubbles, replyMood } = buildReplyBubbles(data, segments);
 
       setMood(replyMood);
 
-      // 与 sendMessage 相同的分条逐条展示；续写没有用户气泡要补丁
-      for (let i = 0; i < segments.length; i++) {
-        if (currentSessionIdRef.current !== sessionId) return;
-
-        const seg = segments[i];
-
-        setMessages(prev => [
-          ...prev,
-          {
-            id: seg.id || `${makeLocalId()}-ai`,
-            role: 'assistant',
-            content: seg.content,
-            mood: replyMood,
-            createdAt:
-              seg.createdAt ?? data.createdAt ?? new Date().toISOString(),
-            ...(seg.attachments?.length
-              ? { attachments: seg.attachments }
-              : {}),
-            ...(i === segments.length - 1 && modelNote ? { modelNote } : {}),
-          },
-        ]);
-
-        if (i < segments.length - 1) {
-          await sleep(pacingDelay(seg.content));
-        }
+      if (
+        currentSessionIdRef.current === sessionId &&
+        bubbles.length > 0
+      ) {
+        setMessages(prev => [...prev, ...bubbles]);
       }
     } catch (error) {
       console.error('Continue error:', error);
@@ -1415,6 +1422,8 @@ export default function App() {
         visible={panelOpen}
         onClose={() => setPanelOpen(false)}
         theme={theme}
+        streamingEnabled={streamingEnabled}
+        onToggleStreaming={setStreaming}
       />
 
       {/* 模型与 API 管理：独立弹层，服务商配置走后端 /model-providers */}
