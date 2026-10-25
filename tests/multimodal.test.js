@@ -559,14 +559,34 @@ async function main() {
       storedAssistant.attachments[0].kind === 'sticker'
   );
 
-  // C9 历史里 AI 的图片消息降级为文本占位（DeepSeek 只接受 user 消息带图）
+  // C9 历史里 AI 的表情包消息以协议标记回显（DeepSeek 只接受 user 消息带图）：
+  // 占位即唯一合法输出格式——入参必须含 [sticker: 标记，且文件名不得随占位出现
   modelCalls.length = 0;
   await req('/chat', { method: 'POST', body: { message: '继续聊', sessionId } });
-  const degraded = modelCalls[modelCalls.length - 1].messages.find(
+  const c9Messages = modelCalls[modelCalls.length - 1].messages;
+  const degraded = c9Messages.find(
     m => m.role === 'assistant' && typeof m.content === 'string' &&
-      m.content.includes('（发送了表情包')
+      m.content.includes('[sticker:')
   );
-  check('历史 AI 表情包消息降级为文本占位', !!degraded);
+  check(
+    '历史 AI 表情包消息降级为含 [sticker: 的文本占位',
+    !!degraded,
+    JSON.stringify(c9Messages.filter(m => m.role === 'assistant').map(m => m.content))
+  );
+  check(
+    '历史占位不含表情包文件名（哈哈.gif）',
+    !!degraded && !degraded.content.includes('哈哈.gif'),
+    degraded ? degraded.content : '(未找到占位消息)'
+  );
+
+  // C9b 占位必须携带对应仓库 ID（模型复述即合法），且不出现 att.name
+  check(
+    '历史占位携带对应表情包仓库 ID 且不出现 att.name',
+    !!degraded &&
+      degraded.content.includes(`[sticker:${okGif.json.id}]`) &&
+      !degraded.content.includes('哈哈.gif'),
+    degraded ? degraded.content : '(未找到占位消息)'
+  );
 
   // C10 AI 回复引用不存在图片 / 不匹配的表情包：静默忽略
   stubReply = '看图 [image:00000000-0000-4000-8000-000000000000] 和 [sticker:不存在的词]';
@@ -579,6 +599,18 @@ async function main() {
     chatBadRefs.json.assistantAttachments.length === 0 &&
       !/\[image:|\[sticker:/.test(chatBadRefs.json.reply),
     JSON.stringify(chatBadRefs.json.reply)
+  );
+
+  // C11 防御：模型复述旧版占位文案「（发送了表情包：…）」→ 整句剥除，不入正文
+  stubReply = '好吧 （发送了表情包：哈哈.gif）';
+  const chatParrot = await req('/chat', {
+    method: 'POST',
+    body: { message: '复述占位', sessionId },
+  });
+  check(
+    '模型复述的旧版占位文案被整句剥除',
+    chatParrot.status === 200 && chatParrot.json.reply === '好吧',
+    JSON.stringify(chatParrot.json.reply)
   );
 
   // 恢复正常回复
