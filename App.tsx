@@ -30,9 +30,12 @@ import {
   makeLocalId,
   readJsonResponse,
   parseStickerMarkers,
-  parseStickerMarkersForStream,
 } from './lib/utils';
 import { streamChatRequest } from './lib/stream';
+import {
+  buildStreamingBubbles,
+  replaceStreamingBlock,
+} from './lib/streaming-segments';
 import { addSticker, uploadImage } from './lib/uploads';
 
 import { ChatInput } from './components/ChatInput';
@@ -145,51 +148,39 @@ function ensureSegments(message: Message): Message {
   return { ...message, segments: parseStickerMarkers(message.content) };
 }
 
-// 流式临时气泡：delta 原地累加到同一条消息，不新建气泡。
-// content 保留原文（收尾/重试需要），segments 用流式解析：
-// 半截标记（[sticker:9829f2）先扣留，状态里永远是可直接渲染的片段，
-// 因此从消息出现到图片出现，屏幕上不会闪出方括号+数字。
-function applyStreamDelta(
+type StreamMode = 'single' | 'auto' | 'frequent';
+
+// 流式分段：每收到一段 delta，就用与服务端 done 完全相同的规则
+// （splitReplyIntoSegments）把累计文本切成气泡，最后一个是增长中的尾段。
+// 之前是「全塞进一个临时气泡、done 时整体替换成 N 个」——那正是
+// 「三段回复先并成一坨、下一帧才分裂」的根因。现在边界在流式期就按数据层
+// 规则定死，done 时权威分条与这里同源，替换不会有跳变。
+function applyStreamingText(
   prev: Message[],
   tempId: string,
-  delta: string
+  text: string,
+  mode: StreamMode,
+  createdAt: string
 ): Message[] {
-  const index = prev.findIndex(m => m.id === tempId);
-  const target = index >= 0 ? prev[index] : undefined;
-
-  if (target) {
-    const content = target.content + delta;
-    const next = [...prev];
-    next[index] = {
-      ...target,
-      content,
-      segments: parseStickerMarkersForStream(content),
-    };
-    return next;
-  }
-
-  return [
-    ...prev,
-    {
-      id: tempId,
-      role: 'assistant',
-      content: delta,
-      createdAt: new Date().toISOString(),
-      segments: parseStickerMarkersForStream(delta),
-    },
-  ];
+  return replaceStreamingBlock(
+    prev,
+    tempId,
+    buildStreamingBubbles(text, mode, {
+      idPrefix: tempId,
+      createdAt,
+    }) as Message[]
+  );
 }
 
-// 流式收尾：用一组气泡替换临时气泡（done 的权威分条，或失败时的错误气泡）。
-// 临时气泡不存在（用户已切走会话等）时直接追加。
+// 流式收尾：用一组气泡替换整个流式块（done 的权威分条，或失败时的错误气泡）。
+// 流式期可能已切成 tempId#0..#n 多个气泡，这里按前缀整体替换；
+// 块不存在（用户已切走会话等）时直接追加。
 function reconcileStreamDone(
   prev: Message[],
   tempId: string,
   bubbles: Message[]
 ): Message[] {
-  const index = prev.findIndex(m => m.id === tempId);
-  if (index < 0) return [...prev, ...bubbles];
-  return [...prev.slice(0, index), ...bubbles, ...prev.slice(index + 1)];
+  return replaceStreamingBlock(prev, tempId, bubbles) as Message[];
 }
 
 // 移除流式临时气泡（失败且不展示错误气泡的场景，如「继续说」失败）
@@ -519,7 +510,11 @@ export default function App() {
                     'Content-Type': 'application/json',
                     Authorization: `Bearer ${API_TOKEN}`,
                   },
-                  body: JSON.stringify({ sessionId: currentSessionId }),
+                  body: JSON.stringify({
+                    sessionId: currentSessionId,
+                    // 真实数据目录下服务端要求二次确认；此处已在 Alert 里确认过
+                    confirm: true,
+                  }),
                 }
               );
 
@@ -813,17 +808,39 @@ export default function App() {
       ...(stickerIds.length ? { stickerIds } : {}),
     };
 
-    // 流式回复的临时气泡 id：delta 原地累加进同一条消息
+    // 流式回复的临时气泡前缀：流式期按分段规则切成 tempId#0..#n
     const streamTempId = `stream-${makeLocalId()}`;
+    const streamCreatedAt = new Date().toISOString();
+    // 累计正文与分段模式：模式由服务端 meta 事件下发（默认 auto）
+    let streamedText = '';
+    let streamMode: StreamMode = 'auto';
 
     try {
       // 优先走流式（SSE）：文字随模型生成逐步显示。
       // 一个 delta 都没收到就失败时自动回退非流式 /chat（兼容旧服务端）。
       const outcome = await streamChatRequest(payload, {
+        onMeta: meta => {
+          if (
+            meta.messageMode === 'single' ||
+            meta.messageMode === 'auto' ||
+            meta.messageMode === 'frequent'
+          ) {
+            streamMode = meta.messageMode;
+          }
+        },
         onDelta: delta => {
           // 用户已切走会话：停止渲染（服务端照常落盘，切回时历史完整恢复）
           if (currentSessionIdRef.current !== sessionId) return;
-          setMessages(prev => applyStreamDelta(prev, streamTempId, delta));
+          streamedText += delta;
+          setMessages(prev =>
+            applyStreamingText(
+              prev,
+              streamTempId,
+              streamedText,
+              streamMode,
+              streamCreatedAt
+            )
+          );
         },
       });
 
@@ -1042,13 +1059,34 @@ export default function App() {
     };
 
     const streamTempId = `stream-${makeLocalId()}`;
+    const streamCreatedAt = new Date().toISOString();
+    let streamedText = '';
+    let streamMode: StreamMode = 'auto';
 
     try {
       // 续写同样优先走流式；回退/失败语义与 sendMessage 一致
       const outcome = await streamChatRequest(payload, {
+        onMeta: meta => {
+          if (
+            meta.messageMode === 'single' ||
+            meta.messageMode === 'auto' ||
+            meta.messageMode === 'frequent'
+          ) {
+            streamMode = meta.messageMode;
+          }
+        },
         onDelta: delta => {
           if (currentSessionIdRef.current !== sessionId) return;
-          setMessages(prev => applyStreamDelta(prev, streamTempId, delta));
+          streamedText += delta;
+          setMessages(prev =>
+            applyStreamingText(
+              prev,
+              streamTempId,
+              streamedText,
+              streamMode,
+              streamCreatedAt
+            )
+          );
         },
       });
 

@@ -60,7 +60,11 @@ function Slider({
   const widthRef = useRef(0);
   const valueRef = useRef(value);
 
-  valueRef.current = value;
+  // 最新值同步到 ref：放进 effect，避免在渲染期间写 ref（react-hooks/refs）。
+  // 手势回调发生在事件阶段，读到的仍是最新值，行为与原实现在渲染期直写一致。
+  useEffect(() => {
+    valueRef.current = value;
+  }, [value]);
 
   const setFromX = (x: number) => {
     const w = widthRef.current;
@@ -72,15 +76,23 @@ function Slider({
     if (next !== valueRef.current) onChange(next);
   };
 
-  const panResponder = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      // 手指落在轨道 / 在轨道内滑动时，locationX 相对轨道自身
-      onPanResponderGrant: evt => setFromX(evt.nativeEvent.locationX),
-      onPanResponderMove: evt => setFromX(evt.nativeEvent.locationX),
-    })
-  ).current;
+  // PanResponder 只需创建一次；用 useMemo 持有实例（而非 useRef().current），
+  // 渲染期不再读 ref.current。回调只在手势事件里读 ref，符合 refs 使用约束。
+  // 该规则无法区分"渲染期调用"与"事件期回调"，对 PanResponder 属已知假阳性，
+  // 这里定点抑制（行为与抑制前完全一致）。
+  const panResponder = useMemo(
+    () =>
+      // eslint-disable-next-line react-hooks/refs -- 手势回调仅在事件阶段读 ref，渲染期不读
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        // 手指落在轨道 / 在轨道内滑动时，locationX 相对轨道自身
+        onPanResponderGrant: evt => setFromX(evt.nativeEvent.locationX),
+        onPanResponderMove: evt => setFromX(evt.nativeEvent.locationX),
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
 
   const ratio = Math.min(1, Math.max(0, value / 100));
   const thumbLeft = trackWidth > 0 ? ratio * trackWidth : 0;

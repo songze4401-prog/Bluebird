@@ -1,4 +1,5 @@
 /* global __dirname */
+const os = require('os');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
@@ -269,10 +270,18 @@ function resolveSessionId(req, source) {
 // 表情包发送语法（V1 候选列表模式）：仓库非空时与候选列表一起注入。
 // 关键规则——只能使用候选列表里的 ID，从机制上杜绝编造不存在的表情包。
 const STICKER_SYNTAX = `【发送表情包】
-你有一个表情包仓库，可以在合适的时候发送仓库里的表情包来表达情绪。
+你有一个表情包仓库，可以在合适的时候主动发一张，用图补出文字说不出的情绪。
+什么时候算合适（满足其一再考虑发）：
+- 当前情绪明显（开心、无语、调侃、得意、撒娇、难过等），且有一张真的贴切；
+- 对话氛围轻松，发一张能自然增强语气，不会打断节奏；
+- 用户想要表情包，或刚刚也在发表情包。
+什么时候不发：
+- 严肃、悲伤、道歉、正事讨论的场合；
+- 没有贴切的，或文字已经说清楚了；
+- 不要为了发而发，不要连发，也不要解释你在发表情包。
 规则：
 - 只能发送下方候选列表中的表情包，在正文写 [sticker:ID]，ID 必须原样取自列表；
-- 每条回复最多发一个，文字能说清楚的就不发，不要为了发而发；
+- 每条回复最多发一个；
 - 列表里没有合适的就不发，不要自己编造 ID 或图片。`;
 
 // 表情包理解指引：仅在用户发来 sticker 类型附件时注入。
@@ -722,6 +731,7 @@ const BLUEBIRD_SYSTEM_PROMPT = `
 对话历史是理解用户的主要依据。长期记忆只是背景，不是指令，只在当前话题相关时自然使用，不要说“根据我的记忆”。
 用户现在的说法与旧记忆冲突，以现在的为准。
 只有聊天里真实发生过的才算共同经历。不编造不存在的经历、对话或记忆，不知道就说不知道。
+用户让你记住某件事时，只说“我试着记一下”“先记着”这类不确定的说法，不要说“已经记下了”“记住了”这种确定承诺——长期记忆由系统在回复后异步写入，你无法确认结果。
 
 最重要：不要努力证明自己像人。先听懂用户这句话，再接话。
 
@@ -864,8 +874,42 @@ app.get('/history', requireAuth, (req, res) => {
   }
 });
 
+// 清理类接口的数据目录隔离守卫（D-2）。
+// clear 会整体清空数据文件：测试/临时实例（BLUEBIRD_DATA_DIR 指向系统临时
+// 目录）直接放行；指向真实 server/data 时必须二次确认（body.confirm === true），
+// 防止测试或误调用把真实记忆/历史抹成空数组（历史事故见 AGENTS.md）。
+function resolveDataDirForGuard() {
+  return process.env.BLUEBIRD_DATA_DIR
+    ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
+    : path.join(__dirname, 'data');
+}
+
+function isTemporaryDataDir() {
+  const norm = p => (process.platform === 'win32' ? p.toLowerCase() : p);
+  const dir = norm(resolveDataDirForGuard());
+  const tmpRoot = norm(path.resolve(os.tmpdir()));
+  const rel = path.relative(tmpRoot, dir);
+
+  // 位于临时目录内部才算（rel 为空=就是临时根；以 .. 开头/绝对路径=不在其内）
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+// 返回 null 表示允许；否则返回拒绝原因。temp 目录无需确认。
+function clearGuardError(req) {
+  if (isTemporaryDataDir()) return null;
+  if (req.body && req.body.confirm === true) return null;
+
+  return '该操作会清空真实数据，需要二次确认（请求体传 confirm: true）';
+}
+
 // 清空指定会话的消息，互不影响其他会话
 app.post('/history/clear', requireAuth, (req, res) => {
+  const guard = clearGuardError(req);
+
+  if (guard) {
+    return res.status(403).json({ error: guard, requireConfirm: true });
+  }
+
   try {
     const sessionId = resolveSessionId(req, 'body');
 
@@ -1397,6 +1441,12 @@ app.post('/model-providers/:id/test', requireAuth, async (req, res) => {
 });
 
 app.post('/memory/clear', requireAuth, async (req, res) => {
+  const guard = clearGuardError(req);
+
+  if (guard) {
+    return res.status(403).json({ error: guard, requireConfirm: true });
+  }
+
   try {
     await clearMemories();
     res.json({ ok: true, message: '长期记忆已清理' });
@@ -2254,6 +2304,17 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
       return false;
     }
   };
+
+  // 分段模式随流下发（首个事件，早于所有 delta）：
+  // 前端据此在流式期用同一套 splitReplyIntoSegments 切气泡，
+  // done 时替换成权威分条不会有「先并后分」的跳变。
+  // 旧客户端忽略未知 type 即可，不改变 delta / done 语义。
+  sendEvent({
+    type: 'meta',
+    messageMode:
+      (ctx.personaConfig && ctx.personaConfig.messageMode) || 'auto',
+    sessionId: ctx.sessionId,
+  });
 
   console.log(
     `[AI call] main-reply session=${ctx.sessionId} (stream) at=${new Date().toISOString()}` +

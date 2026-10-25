@@ -34,6 +34,8 @@ export type StreamEvent = {
   type?: string;
   content?: string;
   error?: string;
+  // meta 事件：服务端在 delta 之前下发本轮分段模式，供前端流式期分段
+  messageMode?: 'single' | 'auto' | 'frequent';
 };
 
 // SSE 增量解析器：分帧逻辑独立为纯函数，便于测试与复用。
@@ -75,7 +77,11 @@ export function createSSEParser(onEvent: (event: StreamEvent) => void) {
 // 超时沿用现有 /chat 的 60s 预算；onDelta 回调只做渲染，不参与成败判定。
 export function streamChatRequest(
   payload: Record<string, unknown>,
-  handlers: { onDelta: (content: string) => void }
+  handlers: {
+    onDelta: (content: string) => void;
+    // 服务端在首个 delta 前下发的元信息（当前用于分段模式）
+    onMeta?: (meta: { messageMode?: 'single' | 'auto' | 'frequent' }) => void;
+  }
 ): Promise<StreamOutcome> {
   return new Promise(resolve => {
     let receivedDelta = false;
@@ -88,6 +94,13 @@ export function streamChatRequest(
     };
 
     const parser = createSSEParser(event => {
+      if (event.type === 'meta') {
+        if (handlers.onMeta) {
+          handlers.onMeta({ messageMode: event.messageMode });
+        }
+        return;
+      }
+
       if (event.type === 'delta' && typeof event.content === 'string') {
         if (event.content) {
           receivedDelta = true;

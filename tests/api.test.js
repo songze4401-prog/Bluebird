@@ -242,6 +242,38 @@ async function waitReady() {
     );
   }
 
+  origLog('\n数据目录隔离守卫（D-2）');
+  {
+    // 把「有效数据目录」临时指向真实 server/data（非临时目录）：无 confirm 的
+    // clear 必须被 403 拦截。守卫在写盘之前返回，不会触碰任何数据；
+    // 且各数据模块的 DATA_DIR 在加载时已固定为临时目录，即便误放行也只会清临时数据。
+    const prevDir = process.env.BLUEBIRD_DATA_DIR;
+    process.env.BLUEBIRD_DATA_DIR = path.join(__dirname, '..', 'server', 'data');
+
+    try {
+      const memGuard = await req('/memory/clear', { method: 'POST' });
+      check(
+        '真实目录下 POST /memory/clear 无 confirm 返回 403',
+        memGuard.status === 403,
+        `实际 ${memGuard.status}`
+      );
+      check(
+        '403 响应带 requireConfirm 标记',
+        memGuard.json && memGuard.json.requireConfirm === true,
+        JSON.stringify(memGuard.json)
+      );
+
+      const histGuard = await req('/history/clear', { method: 'POST' });
+      check(
+        '真实目录下 POST /history/clear 无 confirm 返回 403',
+        histGuard.status === 403,
+        `实际 ${histGuard.status}`
+      );
+    } finally {
+      process.env.BLUEBIRD_DATA_DIR = prevDir;
+    }
+  }
+
   origLog('\n聊天历史接口');
   {
     const h = await req('/history');

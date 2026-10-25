@@ -534,12 +534,17 @@ function formatCandidateLine(entry) {
   const parts = [`[${entry.id}]`];
 
   if (sem && sem.mood) parts.push(`情绪:${String(sem.mood).slice(0, 10)}`);
+  // 语义描述是"什么时候该发这张"的核心依据：有就注入，没有就退化为备注/文件名。
+  // C-5：每张图尽量配一句使用场景描述，纯文本模型据此即可判断贴不贴切。
+  if (sem && sem.scene) parts.push(`场景:${String(sem.scene).slice(0, 12)}`);
+  if (sem && sem.meaning) parts.push(`含义:${String(sem.meaning).slice(0, 16)}`);
   const tags = (sem && sem.tags) || entry.tags || [];
   if (tags.length) parts.push(`标签:${tags.slice(0, 3).join(',')}`.slice(0, 40));
   if (entry.note) parts.push(`备注:${entry.note.slice(0, 20)}`);
   else if (entry.name) parts.push(String(entry.name).slice(0, 20));
 
-  return parts.join(' ').slice(0, 80);
+  // 上限放宽到 120：容纳场景/含义后仍保持每行简短，20 条候选也不会撑爆上下文。
+  return parts.join(' ').slice(0, 120);
 }
 
 function parseModelJson(text) {

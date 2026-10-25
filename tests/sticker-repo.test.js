@@ -700,6 +700,33 @@ async function main() {
     `lines=${candidateBlock.split('\n').length - 1}`
   );
 
+  // B-1：提示词必须给出「什么时候算合适 / 什么时候不发」的判断依据，
+  // 否则模型缺主动发送的判据（"日常几乎不触发"的根因之一）。
+  check(
+    '提示词含「何时算合适 / 何时不发」判断依据（B-1）',
+    /什么时候算合适/.test(plainSystem) && /什么时候不发/.test(plainSystem),
+    'sticker guidance'
+  );
+
+  // C-5：语义完成后，候选行必须带上场景/含义（纯文本模型据此判断贴切度）。
+  const { formatCandidateLine: fmtCandidateLine } = require('../server/sticker-repo');
+  const semLine = fmtCandidateLine({
+    id: '00000000-0000-0000-0000-000000000000',
+    name: 'x.png',
+    semantic: {
+      status: 'done',
+      mood: '开心',
+      scene: '朋友调侃',
+      meaning: '开心大笑',
+      tags: ['搞笑', '开心'],
+    },
+  });
+  check(
+    '候选行注入场景/含义（C-5）',
+    /场景:朋友调侃/.test(semLine) && /含义:开心大笑/.test(semLine),
+    semLine
+  );
+
   // AI 回复引用仓库 ID → 解析为附件、正文剥离
   const gifId = addGif.json.sticker.id;
   stubReply = `[calm] 送你一个 [sticker:${gifId}] 收好`;
