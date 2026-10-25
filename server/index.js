@@ -222,11 +222,20 @@ const {
   resolveTarget,
   resolveVisionTarget,
   createChatCompletion,
+  supportsTools,
   classifyError,
   testProviderConnection,
   invalidateProviderCache,
   getMemoryClient,
 } = require('./model-adapter');
+
+// Agent 工具调用（V1）：工具注册、多轮循环与开关判定都在 agent-runtime。
+// 默认关闭，只有 BLUEBIRD_AGENT_TOOLS=1 且模型声明 tools 能力时才启用。
+const {
+  runAgentTurn,
+  agentToolsEnabled,
+  noteSwitchObservation,
+} = require('./agent-runtime');
 
 // 模型选型已移交 model-adapter.js：服务商/模型的解析、视觉能力校验与
 // 调用统一在那里完成（内置 DeepSeek 的文本/视觉模型 ID 见 api-configs.js
@@ -1859,7 +1868,15 @@ function prepareChatRequest(req) {
 
 // 收尾：清洗情绪标签 -> 分条 -> 落盘 -> presence。
 // isClientGone 是函数：流式路由里客户端可能在生成中途断开，取值发生在收尾时刻。
-function completeChatTurn({ ctx, rawReply, isClientGone, userMessageReceivedAt }) {
+// toolSteps：Agent 工具执行摘要（可选）。作为消息独立字段挂在最后一条
+// assistant 消息上并随落盘保存，绝不拼进 content；普通聊天不传即零变化。
+function completeChatTurn({
+  ctx,
+  rawReply,
+  isClientGone,
+  userMessageReceivedAt,
+  toolSteps,
+}) {
   const { sessionId, isContinue, userText, attachments, personaConfig } = ctx;
 
   const { reply: cleanedReply, mood } = stripMoodTags(rawReply);
@@ -1883,6 +1900,8 @@ function completeChatTurn({ ctx, rawReply, isClientGone, userMessageReceivedAt }
 
   // 回复带出的图片/表情包附件挂在最后一格气泡上：阅读顺序与
   // 「先文字后表情」的自然节奏一致，历史读回时也在同一条消息里
+  // Agent 工具摘要同理：只在最后一格带，前端可据此展示执行痕迹。
+  const hasToolSteps = Array.isArray(toolSteps) && toolSteps.length > 0;
   const assistantMessages = segments.map((content, index) => ({
     id: crypto.randomUUID(),
     role: 'assistant',
@@ -1891,6 +1910,7 @@ function completeChatTurn({ ctx, rawReply, isClientGone, userMessageReceivedAt }
     ...(index === segments.length - 1 && replyAttachments.length
       ? { attachments: replyAttachments }
       : {}),
+    ...(index === segments.length - 1 && hasToolSteps ? { toolSteps } : {}),
   }));
 
   // 续写只落盘 assistant 消息：不产生"继续说"用户消息，不污染 chat-history
@@ -1953,11 +1973,13 @@ function completeChatTurn({ ctx, rawReply, isClientGone, userMessageReceivedAt }
     reply,
     // 分条后的气泡数组：新客户端按此逐条展示；每条都是已落盘的独立消息
     replies: assistantMessages.map(
-      ({ id, content, createdAt, attachments: att }) => ({
+      ({ id, content, createdAt, attachments: att, toolSteps: steps }) => ({
         id,
         content,
         createdAt,
         ...(att ? { attachments: att } : {}),
+        // Agent 工具执行摘要（仅最后一格可能出现）：独立字段，不含敏感内容
+        ...(steps ? { toolSteps: steps } : {}),
       })
     ),
     persisted,
@@ -1968,6 +1990,8 @@ function completeChatTurn({ ctx, rawReply, isClientGone, userMessageReceivedAt }
     // 多模态附件：前端据此展示图片/表情包，历史接口同样会返回
     userAttachments: isContinue ? [] : attachments,
     assistantAttachments: replyAttachments,
+    // Agent 工具执行摘要：有则随响应返回，无则整个字段不出现（旧响应零变化）
+    ...(hasToolSteps ? { toolSteps } : {}),
     // 服务端统一时间，供前端展示，避免客户端时钟偏差
     createdAt: now,
   };
@@ -2000,10 +2024,15 @@ function scheduleMemoryExtraction(isContinue, userText, sessionId, attachments =
 }
 
 app.post('/chat', requireAuth, async (req, res) => {
-  // 客户端提前断开时标记，避免回复落盘成"幽灵消息"（用户没收到却已入库）
+  // 客户端提前断开时标记，避免回复落盘成"幽灵消息"（用户没收到却已入库）；
+  // 同时中止进行中的工具执行——已完成的只读工具不回滚，但不再做无用功。
   let clientGone = false;
+  const disconnect = new AbortController();
   res.on('close', () => {
-    if (!res.writableEnded) clientGone = true;
+    if (!res.writableEnded) {
+      clientGone = true;
+      disconnect.abort();
+    }
   });
 
   // 用户消息的到达时刻：Presence 用它计算「用户最后互动时间」，
@@ -2028,28 +2057,89 @@ app.post('/chat', requireAuth, async (req, res) => {
         ` attachments=${ctx.attachments.length}`
     );
 
-    const completion = await createChatCompletion({
-      providerId: ctx.providerId,
-      modelId: ctx.modelId,
-      wantVision: ctx.useVision,
-      temperature: 0.8,
-      maxTokens: 1200,
-      timeout: 90000,
-      messages: [
-        {
-          role: 'system',
-          content: ctx.systemPrompt,
-        },
-        ...ctx.promptHistory,
-        {
-          // 续写模式用一个内部短指令占位：只存在于本次请求，不落任何盘
-          role: 'user',
-          content: ctx.userContent,
-        },
-      ],
-    });
+    // Agent 工具调用（V1）三重门控，全部在后端强制执行：
+    // ① 紧急开关 BLUEBIRD_AGENT_TOOLS=1（默认关，每请求重读）；
+    // ② 模型显式声明支持 Tool Calling（supportsTools，未知一律 false）；
+    // ③ 非带图请求——带图（useVision）后端强制无工具，不依赖前端。
+    // 任一不满足都走下方原路径，行为与改造前逐字节一致。
+    noteSwitchObservation();
+    const agentOn =
+      agentToolsEnabled() &&
+      !ctx.useVision &&
+      supportsTools(ctx.providerId, ctx.modelId);
 
-    const rawReply = completion.choices?.[0]?.message?.content;
+    if (agentOn) {
+      console.log(
+        `[agent] tools enabled session=${ctx.sessionId} provider=${ctx.providerId}` +
+          ` model=${ctx.modelId}`
+      );
+    }
+
+    let completion;
+    let rawReply;
+    let toolSteps = null;
+
+    if (agentOn) {
+      const outcome = await runAgentTurn({
+        providerId: ctx.providerId,
+        modelId: ctx.modelId,
+        sessionId: ctx.sessionId,
+        temperature: 0.8,
+        maxTokens: 1200,
+        timeout: 90000,
+        isClientGone: () => clientGone,
+        abortSignal: disconnect.signal,
+        messages: [
+          {
+            role: 'system',
+            content: ctx.systemPrompt,
+          },
+          ...ctx.promptHistory,
+          {
+            // 续写模式用一个内部短指令占位：只存在于本次请求，不落任何盘
+            role: 'user',
+            content: ctx.userContent,
+          },
+        ],
+      });
+
+      completion = outcome.completion;
+      rawReply = outcome.rawReply;
+      toolSteps = outcome.toolSteps.length ? outcome.toolSteps : null;
+
+      console.log(
+        `[agent] finished session=${ctx.sessionId} rounds=${outcome.rounds}` +
+          ` tools=${outcome.toolSteps.length}`
+      );
+
+      if (!completion) {
+        // 客户端在首轮模型调用前就已断开：没有任何可收尾内容
+        throw new Error('模型没有返回有效内容');
+      }
+    } else {
+      completion = await createChatCompletion({
+        providerId: ctx.providerId,
+        modelId: ctx.modelId,
+        wantVision: ctx.useVision,
+        temperature: 0.8,
+        maxTokens: 1200,
+        timeout: 90000,
+        messages: [
+          {
+            role: 'system',
+            content: ctx.systemPrompt,
+          },
+          ...ctx.promptHistory,
+          {
+            // 续写模式用一个内部短指令占位：只存在于本次请求，不落任何盘
+            role: 'user',
+            content: ctx.userContent,
+          },
+        ],
+      });
+
+      rawReply = completion.choices?.[0]?.message?.content;
+    }
 
     if (!rawReply) {
       throw new Error('模型没有返回有效内容');
@@ -2060,6 +2150,7 @@ app.post('/chat', requireAuth, async (req, res) => {
       rawReply,
       isClientGone: () => clientGone,
       userMessageReceivedAt,
+      ...(toolSteps ? { toolSteps } : {}),
     });
 
     res.json({
@@ -2110,8 +2201,12 @@ app.post('/chat', requireAuth, async (req, res) => {
 //   {"type":"error","error":"..."}    失败（不落盘、不产生幽灵消息）
 app.post('/chat/stream', requireAuth, async (req, res) => {
   let clientGone = false;
+  const disconnect = new AbortController();
   res.on('close', () => {
-    if (!res.writableEnded) clientGone = true;
+    if (!res.writableEnded) {
+      clientGone = true;
+      disconnect.abort();
+    }
   });
 
   const userMessageReceivedAt = Date.now();
@@ -2166,59 +2261,124 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   // upstreamModel 单独记录供应商响应里的 model（部分供应商会改写）。
   const model = ctx.modelId;
   let upstreamModel = null;
+  let toolSteps = null;
   const stripper = createMoodTagStripper();
   let streamError = null;
 
+  // Agent 工具调用（V1）：与 /chat 完全相同的三重门控（开关 / 模型能力 /
+  // 非带图），全部后端强制。工具轮以非流式执行，经 tool_start / tool_end
+  // 事件向客户端反馈进度；最终文本仍走 stripper → delta → done，
+  // 不新增也不改变既有事件格式（旧客户端忽略新 type 即可）。
+  noteSwitchObservation();
+  const agentOn =
+    agentToolsEnabled() &&
+    !ctx.useVision &&
+    supportsTools(ctx.providerId, ctx.modelId);
+
+  if (agentOn) {
+    console.log(
+      `[agent] tools enabled (stream) session=${ctx.sessionId}` +
+        ` provider=${ctx.providerId} model=${ctx.modelId}`
+    );
+  }
+
   try {
-    const stream = await createChatCompletion({
-      providerId: ctx.providerId,
-      modelId: ctx.modelId,
-      wantVision: ctx.useVision,
-      temperature: 0.8,
-      maxTokens: 1200,
-      timeout: 90000,
-      stream: true,
-      messages: [
-        {
-          role: 'system',
-          content: ctx.systemPrompt,
+    if (agentOn) {
+      const outcome = await runAgentTurn({
+        providerId: ctx.providerId,
+        modelId: ctx.modelId,
+        sessionId: ctx.sessionId,
+        temperature: 0.8,
+        maxTokens: 1200,
+        timeout: 90000,
+        isClientGone: () => clientGone,
+        abortSignal: disconnect.signal,
+        onToolEvent: event => {
+          sendEvent(event);
         },
-        ...ctx.promptHistory,
-        {
-          role: 'user',
-          content: ctx.userContent,
-        },
-      ],
-    });
+        messages: [
+          {
+            role: 'system',
+            content: ctx.systemPrompt,
+          },
+          ...ctx.promptHistory,
+          {
+            role: 'user',
+            content: ctx.userContent,
+          },
+        ],
+      });
 
-    for await (const chunk of stream) {
-      // 客户端已断开：中止上游流，不落盘，避免幽灵消息
-      if (clientGone) {
-        try {
-          if (stream.controller) stream.controller.abort();
-        } catch (_) {
-          /* 中止失败不影响主流程 */
-        }
-        break;
+      if (outcome.completion) {
+        rawReply = outcome.rawReply;
+        // model 语义与 /chat 一致：始终是本系统实际下发的 ctx.modelId；
+        // 供应商回显只写入 upstreamModel，绝不覆盖 model。
+        upstreamModel =
+          typeof outcome.completion.model === 'string'
+            ? outcome.completion.model
+            : null;
+        toolSteps = outcome.toolSteps.length ? outcome.toolSteps : null;
+
+        console.log(
+          `[agent] finished (stream) session=${ctx.sessionId}` +
+            ` rounds=${outcome.rounds} tools=${outcome.toolSteps.length}`
+        );
+
+        // 最终文本经同一套情绪标签剥离后以 delta 发出
+        const emit = stripper.push(rawReply);
+        if (emit) sendEvent({ type: 'delta', content: emit });
       }
+    } else {
+      const stream = await createChatCompletion({
+        providerId: ctx.providerId,
+        modelId: ctx.modelId,
+        wantVision: ctx.useVision,
+        temperature: 0.8,
+        maxTokens: 1200,
+        timeout: 90000,
+        stream: true,
+        messages: [
+          {
+            role: 'system',
+            content: ctx.systemPrompt,
+          },
+          ...ctx.promptHistory,
+          {
+            role: 'user',
+            content: ctx.userContent,
+          },
+        ],
+      });
 
-      if (chunk && typeof chunk.model === 'string') upstreamModel = chunk.model;
+      for await (const chunk of stream) {
+        // 客户端已断开：中止上游流，不落盘，避免幽灵消息
+        if (clientGone) {
+          try {
+            if (stream.controller) stream.controller.abort();
+          } catch (_) {
+            /* 中止失败不影响主流程 */
+          }
+          break;
+        }
 
-      const delta =
-        chunk &&
-        chunk.choices &&
-        chunk.choices[0] &&
-        chunk.choices[0].delta &&
-        typeof chunk.choices[0].delta.content === 'string'
-          ? chunk.choices[0].delta.content
-          : '';
+        if (chunk && typeof chunk.model === 'string') upstreamModel = chunk.model;
 
-      if (!delta) continue;
+        const delta =
+          chunk &&
+          chunk.choices &&
+          chunk.choices[0] &&
+          chunk.choices[0].delta &&
+          typeof chunk.choices[0].delta.content === 'string'
+            ? chunk.choices[0].delta.content
+            : '';
 
-      rawReply += delta;
+        if (!delta) continue;
 
-      const emit = stripper.push(delta);
-      if (emit && !sendEvent({ type: 'delta', content: emit })) break;
+        rawReply += delta;
+
+        const emit = stripper.push(delta);
+        if (emit && !sendEvent({ type: 'delta', content: emit })) break;
+      }
     }
   } catch (error) {
     streamError = error;
@@ -2271,6 +2431,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
       rawReply,
       isClientGone: () => clientGone,
       userMessageReceivedAt,
+      ...(toolSteps ? { toolSteps } : {}),
     });
   } catch (error) {
     console.error('AI stream finalize error:', error);

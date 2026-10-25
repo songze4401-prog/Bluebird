@@ -69,15 +69,17 @@ function builtinProvider() {
         id: BUILTIN_TEXT_MODEL,
         name: 'DeepSeek Chat',
         enabled: true,
-        // 能力声明只写代码确实依赖且确实存在的：视觉能力（flash 原生多模态）。
-        // 工具调用 / 上下文长度本项目未使用，一律不声明——不虚报。
-        capabilities: { vision: false },
+        // 能力声明只写代码确实依赖且确实存在的：视觉能力（flash 原生多模态）、
+        // 工具调用（Agent V1 用 deepseek-chat 的 Function Calling）。
+        // 上下文长度本项目未使用，不声明——不虚报。
+        capabilities: { vision: false, tools: true },
       },
       {
         id: BUILTIN_VISION_MODEL,
         name: 'DeepSeek Flash（视觉）',
         enabled: true,
-        capabilities: { vision: true },
+        // 视觉模型不参与工具循环：Agent 走纯文本路由
+        capabilities: { vision: true, tools: false },
       },
     ],
   };
@@ -273,7 +275,8 @@ function normalizeModel(m) {
     name: typeof m.name === 'string' ? m.name.slice(0, MAX_NAME_LEN) : m.id,
     enabled: m.enabled !== false,
     // 只接受布尔能力；缺省 = 未知 = 不支持（调用方按不支持处理，不虚报）
-    capabilities: { vision: caps.vision === true },
+    // tools：Tool Calling 支持。自定义服务商必须显式声明 true 才会启用
+    capabilities: { vision: caps.vision === true, tools: caps.tools === true },
   };
 }
 

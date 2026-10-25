@@ -381,6 +381,11 @@ function getMemoryClient() {
 /**
  * 创建聊天补全。stream:true 时返回 SDK 的 async iterable，
  * 由调用方 for-await 消费（/chat/stream 现有循环原样复用）。
+ *
+ * tools / tool_choice 为 Agent 工具调用专用：**不传时请求体与改造前
+ * 逐字节一致**（条件展开，绝不下发空数组或默认值）。传入时原样透传
+ * 给 OpenAI 兼容服务商，响应里的 tool_calls 由调用方（agent-runtime）
+ * 解析执行。
  */
 async function createChatCompletion({
   providerId,
@@ -391,6 +396,8 @@ async function createChatCompletion({
   maxTokens = 1200,
   timeout = 90000,
   wantVision = false,
+  tools,
+  tool_choice,
 }) {
   const target = wantVision
     ? resolveVisionTarget({ providerId, modelId })
@@ -406,11 +413,31 @@ async function createChatCompletion({
         max_tokens: maxTokens,
         messages,
         ...(stream ? { stream: true } : {}),
+        ...(tools ? { tools } : {}),
+        ...(tool_choice ? { tool_choice } : {}),
       },
       { timeout }
     );
   } catch (error) {
     throw normalizeSdkError(error, key);
+  }
+}
+
+/**
+ * 目标模型是否声明支持 Tool Calling。
+ * 规则（任务书）：只有"已验证"（内置 deepseek-chat，官方文档确认）或
+ * "用户显式声明"（自定义服务商模型 capabilities.tools === true）两种来源
+ * 返回 true；未声明/未知一律 false——绝不仅因 OpenAI 兼容接口就假定支持。
+ * 目标解析失败（服务商/模型不存在）同样返回 false（安全默认）。
+ */
+function supportsTools(providerId, modelId) {
+  try {
+    const target = resolveTarget({ providerId, modelId });
+    return Boolean(
+      target.model.capabilities && target.model.capabilities.tools === true
+    );
+  } catch (_) {
+    return false;
   }
 }
 
@@ -624,6 +651,7 @@ module.exports = {
   resolveTarget,
   resolveVisionTarget,
   createChatCompletion,
+  supportsTools,
   classifyError,
   testProviderConnection,
   invalidateProviderCache,
