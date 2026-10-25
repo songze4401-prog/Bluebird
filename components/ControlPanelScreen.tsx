@@ -5,6 +5,7 @@ import {
   SafeAreaView,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TouchableOpacity,
   View,
@@ -161,10 +162,14 @@ export function ControlPanelScreen({
   theme,
   visible,
   onClose,
+  streamingEnabled,
+  onToggleStreaming,
 }: {
   theme: Theme;
   visible: boolean;
   onClose: () => void;
+  streamingEnabled: boolean;
+  onToggleStreaming: (next: boolean) => void;
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);
 
@@ -291,6 +296,26 @@ export function ControlPanelScreen({
           <Text style={styles.caption}>
             调整 Blue 的说话风格，保存后从下一轮聊天开始生效。
           </Text>
+
+          {/* 本机设置：纯前端偏好（AsyncStorage 持久化），与服务端 persona 无关 */}
+          <View style={styles.localCard}>
+            <Text style={styles.localTitle}>本机设置</Text>
+            <View style={styles.toggleRow}>
+              <View style={styles.toggleText}>
+                <Text style={styles.toggleLabel}>流式输出</Text>
+                <Text style={styles.toggleHint}>
+                  开启后回复逐字显示；关闭则一次性显示
+                </Text>
+              </View>
+              <Switch
+                value={streamingEnabled}
+                onValueChange={onToggleStreaming}
+                trackColor={{ false: theme.borderStrong, true: theme.accent }}
+                thumbColor={theme.background}
+                ios_backgroundColor={theme.borderStrong}
+              />
+            </View>
+          </View>
 
           {loading && <Text style={styles.muted}>加载中…</Text>}
           {loadError && <Text style={styles.errorText}>{loadError}</Text>}
@@ -441,6 +466,39 @@ const createStyles = (theme: Theme) =>
       fontSize: 13,
       lineHeight: 19,
       marginBottom: 20,
+    },
+    localCard: {
+      backgroundColor: theme.surface,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: theme.borderStrong,
+      padding: 14,
+      marginBottom: 22,
+    },
+    localTitle: {
+      color: theme.textSecondary,
+      fontSize: 13,
+      marginBottom: 10,
+    },
+    toggleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+    },
+    toggleText: {
+      flex: 1,
+      marginRight: 12,
+    },
+    toggleLabel: {
+      color: theme.textPrimary,
+      fontSize: 16,
+      fontWeight: '600',
+    },
+    toggleHint: {
+      color: theme.textMuted,
+      fontSize: 12,
+      lineHeight: 17,
+      marginTop: 2,
     },
     muted: {
       color: theme.textMuted,
