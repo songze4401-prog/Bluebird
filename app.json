@@ -2,7 +2,7 @@
   "expo": {
     "name": "Bluebird",
     "slug": "bluebird",
-    "version": "0.3.0",
+    "version": "0.4.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
