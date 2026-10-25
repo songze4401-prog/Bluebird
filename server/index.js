@@ -325,9 +325,11 @@ function historyToModelMessages(items, { includeImages = true } = {}) {
     }
 
     if (item.role === 'assistant' && attachments.length) {
+      // 表情包占位直接回显协议标记（用仓库 ID，不带文件名）：
+      // 上下文里示范的格式即唯一合法输出格式，模型复述时也只会复述对的。
       const labels = attachments.map(att =>
         att.kind === KIND_STICKER
-          ? `（发送了表情包${att.name ? `：${att.name}` : ''}）`
+          ? `[sticker:${att.id}]`
           : '（发送了图片）'
       );
       const content = [text, ...labels].filter(Boolean).join('\n');
@@ -424,6 +426,9 @@ function buildAssistantReplyText(parsedBody, attachments) {
   const cleaned = String(parsedBody || '')
     .replace(/\[sticker[:：][^\]]*\]/gi, '')
     .replace(/\[image[:：][^\]]*\]/gi, '')
+    // 防御：旧版占位文案若被模型复述进回复，整句剥除。
+    // 本函数只处理 assistant 回复文本，用户消息不经过这里。
+    .replace(/（发送了表情包[^）]*）/g, '')
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/ ?\n ?/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
