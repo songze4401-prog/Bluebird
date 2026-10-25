@@ -44,6 +44,17 @@ export function PlusPanel({
   const [stickers, setStickers] = useState<Attachment[] | null>(null);
   const [stickerError, setStickerError] = useState<string | null>(null);
 
+  // 面板关闭时收起表情包页，下次打开回到入口行。
+  // 采用 React 推荐的「prop 变化时在渲染期调整 state」模式（而非 effect），
+  // 避免 effect 内同步 setState 触发的级联渲染（react-hooks/set-state-in-effect）。
+  const [prevVisible, setPrevVisible] = useState(visible);
+
+  if (prevVisible !== visible) {
+    setPrevVisible(visible);
+
+    if (!visible) setStickersOpen(false);
+  }
+
   // 打开表情包页时重新拉取库列表（添加后也会触发刷新）
   useEffect(() => {
     if (!visible || !stickersOpen) return;
@@ -64,11 +75,6 @@ export function PlusPanel({
       cancelled = true;
     };
   }, [visible, stickersOpen]);
-
-  // 面板关闭时收起表情包页，下次打开回到入口行
-  useEffect(() => {
-    if (!visible) setStickersOpen(false);
-  }, [visible]);
 
   const handleAddSticker = async () => {
     const added = await onAddSticker();

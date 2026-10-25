@@ -319,6 +319,40 @@ describe('processMemory 提取流程（假 client 拦截）', SERIAL, () => {
     assert.ok(list[0].createdAt, '应写入创建时间');
   });
 
+  test('「记一下…」也能触发记忆提取（B-2）', async () => {
+    await quiesce();
+    seed([]);
+    const { client, state } = fakeClient(
+      JSON.stringify({
+        content: '用户提到我记不住时间',
+        type: 'fact',
+        keywords: ['记不住时间'],
+        confidence: 0.95,
+        sourceQuote: '你记不住时间这个问题',
+      })
+    );
+    await memory.processMemory(client, '记一下你记不住时间这个问题');
+    assert.equal(state.calls, 1, '「记一下」应触发记忆提取');
+    assert.equal(memory.getMemories().length, 1, '应写入一条记忆');
+  });
+
+  test('「别忘了…」也能触发记忆提取（B-2）', async () => {
+    await quiesce();
+    seed([]);
+    const { client, state } = fakeClient(
+      JSON.stringify({
+        content: '用户希望明天被提醒',
+        type: 'goal',
+        keywords: ['明天', '提醒'],
+        confidence: 0.95,
+        sourceQuote: '明天提醒我',
+      })
+    );
+    await memory.processMemory(client, '别忘了明天提醒我');
+    assert.equal(state.calls, 1, '「别忘了」应触发记忆提取');
+    assert.equal(memory.getMemories().length, 1, '应写入一条记忆');
+  });
+
   test('相同内容重复保存时去重（更新而非新增）', async () => {
     await quiesce();
     seed([{ content: '用户叫宋泽', type: 'identity', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }]);

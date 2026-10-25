@@ -90,11 +90,23 @@ export function HistoryScreen({
     );
   };
 
-  // 打开即加载：与 MemoryScreen 同一时序约定，不闪旧数据
+  // 打开即加载：与 MemoryScreen 同一时序约定，不闪旧数据。
+  // 用微任务把首帧 setState 移出 effect 同步体（避免 cascading render 告警）；
+  // 微任务在绘制前 flush，时序与原实现一致。
   useLayoutEffect(() => {
     if (!visible) return;
 
-    fetchSessions();
+    let cancelled = false;
+
+    void (async () => {
+      await Promise.resolve();
+
+      if (!cancelled) fetchSessions();
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [visible]);
 
   return (

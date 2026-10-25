@@ -574,8 +574,8 @@ async function main() {
   const stream = await readSse('/chat/stream', { message: '我的猫叫什么？' });
   const types = stream.events.map(e => e.type);
   check(
-    'SSE 事件顺序：tool_start → tool_end → delta → done',
-    JSON.stringify(types) === JSON.stringify(['tool_start', 'tool_end', 'delta', 'done']),
+    'SSE 事件顺序：meta → tool_start → tool_end → delta → done',
+    JSON.stringify(types) === JSON.stringify(['meta', 'tool_start', 'tool_end', 'delta', 'done']),
     JSON.stringify(types)
   );
   const startEv = stream.events.find(e => e.type === 'tool_start');

@@ -131,10 +131,22 @@ export function MemoryScreen({
 
   // 打开即加载：useLayoutEffect 保证"先是 loading、再拉取"在同一帧内生效，
   // 与原实现（打开时立即调用 fetchMemories）的时序一致，不会闪一帧旧数据。
+  // 用微任务把首帧 setState 移出 effect 同步体（避免 cascading render 告警）；
+  // 微任务在绘制前 flush，时序不变。
   useLayoutEffect(() => {
     if (!visible) return;
 
-    fetchMemories();
+    let cancelled = false;
+
+    void (async () => {
+      await Promise.resolve();
+
+      if (!cancelled) fetchMemories();
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [visible]);
 
   const deleteOneMemory = (item: MemoryItem) => {
@@ -201,8 +213,11 @@ export function MemoryScreen({
                 {
                   method: 'POST',
                   headers: {
+                    'Content-Type': 'application/json',
                     Authorization: `Bearer ${API_TOKEN}`,
                   },
+                  // 真实数据目录下服务端要求二次确认；此处已在 Alert 里确认过
+                  body: JSON.stringify({ confirm: true }),
                 }
               );
 
