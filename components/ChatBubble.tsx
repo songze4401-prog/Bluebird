@@ -282,12 +282,14 @@ const createStyles = (theme: Theme) =>
       paddingVertical: 10,
       borderRadius: 18,
     },
-    // 对方消息：气泡与「继续说」同一列，列宽由气泡决定
+    // 对方消息：气泡与「继续说」同一列。
+    // 定宽 80%（而非按内容收缩的 maxWidth）：流式时正文持续变长，
+    // 若宽度随文本自适应，气泡会逐帧变宽、看起来在抖；定宽后文本
+    // 只影响高度，宽度恒定。
     assistantColumn: {
-      // 相对 messageRow（宽度确定），限制整列不超过 85%
-      maxWidth: '85%',
-      // 让气泡按内容收缩，而不是被拉伸到整列宽度
-      alignItems: 'flex-start',
+      width: '80%',
+      // 让气泡和「继续说」行都撑满这 80% 的列宽
+      alignItems: 'stretch',
     },
     bluebirdBubble: {
       // 通透材质：半透明底（深色模式更透、浅色模式略实，保证文字对比度）
@@ -306,8 +308,9 @@ const createStyles = (theme: Theme) =>
       elevation: 2,
     },
     userBubble: {
-      // 78% 从共享的 bubble 挪到这里：用户气泡父级是 messageRow（宽度确定），百分比有效
-      maxWidth: '78%',
+      // 定宽 80%：父级是 messageRow（宽度确定），百分比生效。
+      // 与 Bluebird 气泡同样定宽，避免文字/附件让气泡宽度抖动。
+      width: '80%',
       // 用户气泡更实体、更稳定：不透明度高于 Bluebird 气泡
       backgroundColor: withAlpha(theme.bubble, theme.mode === 'dark' ? 0.88 : 0.92),
       borderWidth: 1,
