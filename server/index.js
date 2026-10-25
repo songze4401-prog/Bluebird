@@ -4,14 +4,10 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const express = require('express');
 const cors = require('cors');
-const OpenAI = require('openai');
 
-// 容错初始化：缺 DEEPSEEK_API_KEY 时服务仍能启动（管理接口可用），
-// /chat 再返回清晰提示，而不是模块加载即崩溃。
-const apiKey = process.env.DEEPSEEK_API_KEY;
-const client = apiKey
-  ? new OpenAI({ apiKey, baseURL: "https://api.deepseek.com" })
-  : null;
+// 模型客户端统一由 model-adapter.js 按服务商配置创建（内置 DeepSeek 从
+// DEEPSEEK_API_KEY 派生）。缺 key 时服务照常启动（管理接口可用），
+// /chat 返回明确提示，而不是模块加载即崩溃。
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -204,12 +200,48 @@ const {
   generateStickerSemantic,
 } = require('./sticker-repo');
 
-// 模型选型：纯文本请求继续走 deepseek-chat（行为零变化），
-// 带图请求走 deepseek-flash（DeepSeek 视觉模型，原生多模态）。
+// 多服务商 / 多模型配置：持久化在 api-configs.js（元数据与密钥分离存储），
+// 网络调用与 SSRF 防护在 model-adapter.js。内置 DeepSeek 服务商从环境变量
+// 派生，默认服务商/模型即内置 DeepSeek——升级后无需任何重新配置。
+const {
+  BUILTIN_PROVIDER_ID,
+  listModelProviders,
+  getModelProvider,
+  getDefaults,
+  isConfigCorrupted,
+  addModelProvider,
+  updateModelProvider,
+  deleteModelProvider,
+  setDefaultModel,
+  setProviderEnabled,
+} = require('./api-configs');
+
+const {
+  ModelCallError,
+  assertPublicUrl,
+  resolveTarget,
+  resolveVisionTarget,
+  createChatCompletion,
+  supportsTools,
+  classifyError,
+  testProviderConnection,
+  invalidateProviderCache,
+  getMemoryClient,
+} = require('./model-adapter');
+
+// Agent 工具调用（V1）：工具注册、多轮循环与开关判定都在 agent-runtime。
+// 默认关闭，只有 BLUEBIRD_AGENT_TOOLS=1 且模型声明 tools 能力时才启用。
+const {
+  runAgentTurn,
+  agentToolsEnabled,
+  noteSwitchObservation,
+} = require('./agent-runtime');
+
+// 模型选型已移交 model-adapter.js：服务商/模型的解析、视觉能力校验与
+// 调用统一在那里完成（内置 DeepSeek 的文本/视觉模型 ID 见 api-configs.js
+// 的 BUILTIN_TEXT_MODEL / BUILTIN_VISION_MODEL）。
 // 说明：DeepSeek 视觉图片仅允许出现在 user 消息，历史里 AI 的图片
 // 消息必须以文本占位形式下发，不能原样回传（会被 API 400 拒绝）。
-const TEXT_MODEL = 'deepseek-chat';
-const VISION_MODEL = 'deepseek-flash';
 const MAX_ATTACHMENTS = 4;
 
 // 单实例守卫：必须在 listen 之前、且必须在路由注册之后调用，
@@ -265,7 +297,9 @@ function attachmentDataUrl(att) {
 // - 用户的图片消息转成 content blocks（text + image_url）；
 // - AI 的图片/表情包消息降级为文本占位，原样回传会被 API 400 拒绝；
 // - 图片文件读取失败（被外部删除）时退化为纯文本，不让整轮请求崩掉。
-function historyToModelMessages(items) {
+// - includeImages=false 时（目标模型未声明视觉能力）用户图片一并降级为文本占位，
+//   避免把 image_url block 发给看不懂图的模型。
+function historyToModelMessages(items, { includeImages = true } = {}) {
   const out = [];
 
   for (const item of items) {
@@ -277,6 +311,11 @@ function historyToModelMessages(items) {
       : [];
 
     if (item.role === 'user' && attachments.length) {
+      if (!includeImages) {
+        out.push({ role: 'user', content: text.trim() || '（图片消息）' });
+        continue;
+      }
+
       const blocks = [];
       if (text.trim()) blocks.push({ type: 'text', text });
 
@@ -295,9 +334,11 @@ function historyToModelMessages(items) {
     }
 
     if (item.role === 'assistant' && attachments.length) {
+      // 表情包占位直接回显协议标记（用仓库 ID，不带文件名）：
+      // 上下文里示范的格式即唯一合法输出格式，模型复述时也只会复述对的。
       const labels = attachments.map(att =>
         att.kind === KIND_STICKER
-          ? `（发送了表情包${att.name ? `：${att.name}` : ''}）`
+          ? `[sticker:${att.id}]`
           : '（发送了图片）'
       );
       const content = [text, ...labels].filter(Boolean).join('\n');
@@ -382,6 +423,35 @@ function parseReplyAttachments(text) {
       .trim(),
     attachments,
   };
+}
+
+// 助手正文最终兜底（BUG-03）：
+// 表情包/图片标记剥离后正文可能为空，旧实现会把原始 [sticker:...] 拼回正文，
+// 前端只能原样显示标记。这里保证：
+//   1) 任何形态的残留标记（空 ID、超长、畸形）整段删除，绝不回退成原文；
+//   2) 压缩标记删除后留下的多余空格与空行；
+//   3) 正文全空时补一句兜底文案，不产生空气泡。
+function buildAssistantReplyText(parsedBody, attachments) {
+  const cleaned = String(parsedBody || '')
+    .replace(/\[sticker[:：][^\]]*\]/gi, '')
+    .replace(/\[image[:：][^\]]*\]/gi, '')
+    // 防御：旧版占位文案若被模型复述进回复，整句剥除。
+    // 本函数只处理 assistant 回复文本，用户消息不经过这里。
+    .replace(/（发送了表情包[^）]*）/g, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/ ?\n ?/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  if (cleaned) return cleaned;
+
+  const list = Array.isArray(attachments) ? attachments : [];
+
+  if (list.length === 0) return '（这条消息没有内容）';
+
+  return list.every(att => att.kind === KIND_STICKER)
+    ? '（表情包已发送）'
+    : '（图片已发送）';
 }
 
 // 把任意时刻格式化为用户时区的可读时间（与 getTimeContext 同一套方式）
@@ -1028,12 +1098,16 @@ app.post('/sticker-repo', requireAuth, (req, res) => {
 
     // 自动语义生成默认关闭（STICKER_SEMANTIC_AUTO=1 才启用）：
     // 避免未经确认的视觉 API 费用。开启时异步生成，不阻塞响应。
-    if (!existing && STICKER_SEMANTIC_AUTO && client) {
-      setImmediate(() => {
-        generateStickerSemantic(client, sticker.id).catch(error => {
-          console.error('Sticker semantic error:', sticker.id, error.message);
+    // 视觉任务固定走内置 DeepSeek 客户端（与改造前一致）。
+    if (!existing && STICKER_SEMANTIC_AUTO) {
+      const semanticClient = getMemoryClient();
+      if (semanticClient) {
+        setImmediate(() => {
+          generateStickerSemantic(semanticClient, sticker.id).catch(error => {
+            console.error('Sticker semantic error:', sticker.id, error.message);
+          });
         });
-      });
+      }
     }
 
     res.json({ ok: true, existing, sticker });
@@ -1067,12 +1141,15 @@ app.post('/sticker-repo/collect', requireAuth, (req, res) => {
       source: 'chat',
     });
 
-    if (!existing && STICKER_SEMANTIC_AUTO && client) {
-      setImmediate(() => {
-        generateStickerSemantic(client, sticker.id).catch(error => {
-          console.error('Sticker semantic error:', sticker.id, error.message);
+    if (!existing && STICKER_SEMANTIC_AUTO) {
+      const semanticClient = getMemoryClient();
+      if (semanticClient) {
+        setImmediate(() => {
+          generateStickerSemantic(semanticClient, sticker.id).catch(error => {
+            console.error('Sticker semantic error:', sticker.id, error.message);
+          });
         });
-      });
+      }
     }
 
     res.json({ ok: true, existing, sticker });
@@ -1173,18 +1250,150 @@ app.post('/sticker-repo/:id/semantic', requireAuth, async (req, res) => {
     if (!getSticker(req.params.id)) {
       return res.status(404).json({ error: '表情包不存在' });
     }
-    if (!client) {
+    // 语义描述走内置 DeepSeek 视觉能力（与改造前一致：辅助任务固定内置）
+    const semanticClient = getMemoryClient();
+    if (!semanticClient) {
       return res.status(500).json({
         error: '服务端未配置 DEEPSEEK_API_KEY，无法生成语义描述',
       });
     }
 
-    const semantic = await generateStickerSemantic(client, req.params.id);
+    const semantic = await generateStickerSemantic(semanticClient, req.params.id);
     res.json({ ok: true, id: req.params.id, semantic });
   } catch (error) {
     console.error('Sticker semantic error:', error);
     res.status(500).json({ error: '语义描述生成失败' });
   }
+});
+
+// ============ 多服务商 / 多模型管理 ============
+// 配置持久化与密钥存储在 api-configs.js；SSRF 防护 / 连接测试 / 错误归一化
+// 在 model-adapter.js。所有路由沿用 requireAuth；响应一律脱敏——
+// 只返回 keyConfigured + keyHint，绝不下发完整 API Key。
+
+// 服务商与模型配置列表（含内置 DeepSeek、当前默认值）
+app.get('/model-providers', requireAuth, (req, res) => {
+  res.json({
+    providers: listModelProviders(),
+    defaults: getDefaults(),
+    builtinProviderId: BUILTIN_PROVIDER_ID,
+    configCorrupted: isConfigCorrupted(),
+  });
+});
+
+// 单个服务商详情（脱敏）
+app.get('/model-providers/:id', requireAuth, (req, res) => {
+  const provider = getModelProvider(req.params.id);
+  if (!provider) {
+    return res.status(404).json({ error: '服务商不存在' });
+  }
+  res.json({ provider });
+});
+
+// 新增服务商：{ name, baseUrl, apiKey, models: [{ id, name?, capabilities?: { vision?: true } }] }
+// baseUrl 先过 SSRF 校验再落盘——被拦截的 URL 绝不进入配置。
+app.post('/model-providers', requireAuth, async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (typeof body.baseUrl === 'string' && body.baseUrl.trim()) {
+      await assertPublicUrl(body.baseUrl);
+    }
+
+    const result = addModelProvider(body);
+    if (result.error) {
+      return res
+        .status(result.error === 'config_corrupted' ? 409 : 400)
+        .json({ error: result.error });
+    }
+
+    res.status(201).json({ provider: result.provider });
+  } catch (error) {
+    const info = classifyError(error);
+    res.status(info.status).json({ error: info.error, code: info.code });
+  }
+});
+
+// 编辑服务商：局部更新。apiKey 缺省或空串 = 保留原有密钥（不意外覆盖）；
+// 改 baseUrl 需重新过 SSRF 校验。
+app.patch('/model-providers/:id', requireAuth, async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (typeof body.baseUrl === 'string' && body.baseUrl.trim()) {
+      await assertPublicUrl(body.baseUrl);
+    }
+
+    const result = updateModelProvider(req.params.id, body);
+    if (result.error) {
+      const status =
+        result.error === 'not_found'
+          ? 404
+          : result.error === 'config_corrupted'
+            ? 409
+            : 400;
+      return res.status(status).json({ error: result.error });
+    }
+
+    invalidateProviderCache(req.params.id);
+    res.json({ provider: result.provider });
+  } catch (error) {
+    const info = classifyError(error);
+    res.status(info.status).json({ error: info.error, code: info.code });
+  }
+});
+
+// 删除服务商：内置不可删；当前默认服务商不可删（先切换默认）。
+app.delete('/model-providers/:id', requireAuth, (req, res) => {
+  const result = deleteModelProvider(req.params.id);
+  if (result.error) {
+    const status =
+      result.error === 'not_found'
+        ? 404
+        : result.error === 'config_corrupted'
+          ? 409
+          : 400;
+    return res.status(status).json({ error: result.error });
+  }
+
+  invalidateProviderCache(req.params.id);
+  res.json({ ok: true });
+});
+
+// 设置默认服务商 + 默认模型：{ providerId, modelId }
+app.put('/model-providers/default', requireAuth, (req, res) => {
+  const result = setDefaultModel(req.body || {});
+  if (result.error) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json({ defaults: result.defaults });
+});
+
+// 启用 / 禁用服务商：{ enabled: true|false }。默认服务商不可禁用。
+app.post('/model-providers/:id/enabled', requireAuth, (req, res) => {
+  const body = req.body || {};
+  if (typeof body.enabled !== 'boolean') {
+    return res.status(400).json({ error: '缺少布尔字段 enabled' });
+  }
+
+  const result = setProviderEnabled(req.params.id, body.enabled);
+  if (result.error) {
+    const status =
+      result.error === 'not_found'
+        ? 404
+        : result.error === 'config_corrupted'
+          ? 409
+          : 400;
+    return res.status(status).json({ error: result.error });
+  }
+
+  if (body.enabled === false) invalidateProviderCache(req.params.id);
+  res.json({ provider: result.provider });
+});
+
+// 连接测试：GET {baseUrl}/models（5s 超时 / 64KB 响应上限）。
+// 自定义 Base URL 先过 SSRF 校验；错误摘要不含密钥。
+app.post('/model-providers/:id/test', requireAuth, async (req, res) => {
+  const result = await testProviderConnection(req.params.id);
+  res.json(result);
 });
 
 app.post('/memory/clear', requireAuth, async (req, res) => {
@@ -1442,30 +1651,84 @@ function prepareChatRequest(req) {
       ? message.trim()
       : '';
 
-  if (!client) {
-    return {
-      error: [
-        500,
-        { error: '服务端未配置 DEEPSEEK_API_KEY，请在 server/.env 中填写后重启' },
-      ],
-    };
-  }
-
-  const clientHistory = historyToModelMessages(
-    Array.isArray(history) ? history : []
-  ).slice(-20);
-
   // 上下文历史以服务端存储为准：不同会话严格隔离，客户端就算传来别的
   // 会话的历史也不会串进来。图片消息在这里转成模型可用的形态。
   const storedItems = getMessages(sessionId) || [];
-  const storedHistory = historyToModelMessages(storedItems).slice(-20);
 
-  // 会话历史里出现过图片：本次请求即便没带附件，也走视觉模型，
-  // 保证多模态上下文可被理解；同时启用表情包输出语法。
-  const historyHasImages = storedItems.some(
-    item => item && Array.isArray(item.attachments) && item.attachments.length
+  // 历史里只有 user 消息会产生 image blocks（AI 的图片/表情包本就降级为文本），
+  // 所以只统计用户图片；它决定目标模型能否承载完整上下文。
+  const historyHasUserImages = storedItems.some(
+    item =>
+      item &&
+      item.role === 'user' &&
+      Array.isArray(item.attachments) &&
+      item.attachments.length
   );
-  const useVision = attachments.length > 0 || historyHasImages;
+
+  // 模型目标解析（多服务商）：
+  // 1) 请求级 providerId/modelId 优先——前端每次聊天都带上当前所选模型；
+  // 2) 两者都缺省时回退到服务端全局默认模型（兼容旧客户端，行为与改造前一致）；
+  // 3) 缺失/无效/已禁用的服务商或模型一律明确报错，绝不静默改用其他文本模型。
+  // 请求级选择只影响本次请求，不写回全局默认配置（resolveTarget 纯读）。
+  const requestedProviderId =
+    typeof req.body.providerId === 'string' ? req.body.providerId.trim() : '';
+  const requestedModelId =
+    typeof req.body.modelId === 'string' ? req.body.modelId.trim() : '';
+
+  let modelTarget;
+
+  try {
+    modelTarget = resolveTarget({
+      providerId: requestedProviderId || undefined,
+      modelId: requestedModelId || undefined,
+    });
+  } catch (error) {
+    const info = classifyError(error);
+    return {
+      error: [info.status, { error: info.error, code: info.code }],
+    };
+  }
+
+  // 解析成功后先记下「用户所选模型」：它是自动路由提示里要展示的对照目标
+  const selectedTarget = modelTarget;
+
+  // 图片能力路由：所选模型未声明视觉能力时，沿用现有的能力路由
+  // （同一服务商内挑默认视觉模型，其次第一个启用的视觉模型），
+  // 并把实际使用的模型如实回报给前端——绝不把纯文本模型当成「看过图」。
+  // 服务商没有可用视觉模型时明确报错，不跨服务商乱跳，也不静默降级。
+  let visionAutoRouted = false;
+
+  if (attachments.length && modelTarget.model.capabilities?.vision !== true) {
+    try {
+      const visionTarget = resolveVisionTarget({
+        providerId: modelTarget.providerId,
+      });
+
+      visionAutoRouted = visionTarget.modelId !== modelTarget.modelId;
+      modelTarget = visionTarget;
+    } catch (error) {
+      const info = classifyError(error);
+      return {
+        error: [info.status, { error: info.error, code: info.code }],
+      };
+    }
+  }
+
+  // 历史图片只在目标模型声明视觉能力时才随上下文上行；否则降级为文本占位，
+  // 保证「选哪个模型就用哪个模型」，不因历史图片被迫换模型。
+  const includeHistoryImages =
+    historyHasUserImages && modelTarget.model.capabilities?.vision === true;
+
+  const useVision = attachments.length > 0 || includeHistoryImages;
+
+  const storedHistory = historyToModelMessages(storedItems, {
+    includeImages: includeHistoryImages,
+  }).slice(-20);
+
+  const clientHistory = historyToModelMessages(
+    Array.isArray(history) ? history : [],
+    { includeImages: includeHistoryImages }
+  ).slice(-20);
 
   // B1：客户端历史回退只对「默认会话」开放。
   // 默认会话是旧客户端（不带 sessionId）的唯一落点，保留回退以兼容
@@ -1526,7 +1789,7 @@ function prepareChatRequest(req) {
   // 仓库非空即注入。注入后纯文本会话的 AI 也能主动发表情包——"是否发、
   // 发哪一个"由模型按对话情境判断，prompt 规则约束不硬发；
   // 后端只校验 ID 真实性（parseReplyAttachments），编造的 ID 一律忽略。
-  // 候选列表注入不改变模型选择：纯文本会话仍走 TEXT_MODEL。
+  // 候选列表注入不改变模型选择：纯文本会话仍走默认文本模型。
   const stickerCandidates = buildStickerCandidates({
     emotion: getEmotion().emotion,
     limit: STICKER_MAX_CANDIDATES,
@@ -1583,24 +1846,55 @@ function prepareChatRequest(req) {
       promptHistory,
       systemPrompt,
       personaConfig,
+      providerId: modelTarget.providerId,
+      providerName: modelTarget.provider.name,
+      modelId: modelTarget.modelId,
+      // 结构化路由结果（前端提示的唯一来源）：
+      // requested 是本次「所选模型」（请求级 ids 优先，缺省为全局默认），
+      // actual 才是真正下发的服务商/模型；auto=true 表示图片触发了能力路由。
+      modelRoute: {
+        requested: {
+          providerId: selectedTarget.providerId,
+          providerName: selectedTarget.provider.name,
+          modelId: selectedTarget.modelId,
+          source: requestedProviderId || requestedModelId ? 'request' : 'default',
+        },
+        actual: {
+          providerId: modelTarget.providerId,
+          providerName: modelTarget.provider.name,
+          modelId: modelTarget.modelId,
+        },
+        auto: visionAutoRouted,
+        reason: visionAutoRouted ? 'vision_unsupported' : null,
+      },
     },
   };
 }
 
 // 收尾：清洗情绪标签 -> 分条 -> 落盘 -> presence。
 // isClientGone 是函数：流式路由里客户端可能在生成中途断开，取值发生在收尾时刻。
-function completeChatTurn({ ctx, rawReply, isClientGone, userMessageReceivedAt }) {
+// toolSteps：Agent 工具执行摘要（可选）。作为消息独立字段挂在最后一条
+// assistant 消息上并随落盘保存，绝不拼进 content；普通聊天不传即零变化。
+function completeChatTurn({
+  ctx,
+  rawReply,
+  isClientGone,
+  userMessageReceivedAt,
+  toolSteps,
+}) {
   const { sessionId, isContinue, userText, attachments, personaConfig } = ctx;
 
   const { reply: cleanedReply, mood } = stripMoodTags(rawReply);
 
-  // 图片/表情包声明解析（[sticker:关键词] / [image:ID]）在情绪标签清洗之后：
-  // 标记可能在正文任意位置，剥离后转为消息附件。
-  // 极端情况：整条回复剥完标记后为空则保留清洗前文本，避免发出空消息
-  // （此路径不解析附件——原文本来就是兜底展示）。
+  // 图片/表情包声明解析（[sticker:ID] / [image:ID]）在情绪标签清洗之后：
+  // 标记可能在正文任意位置，三级校验通过转为消息附件，不通过整段删除。
   const parsedReply = parseReplyAttachments(cleanedReply);
-  const reply = parsedReply.body || cleanedReply;
-  const replyAttachments = parsedReply.body ? parsedReply.attachments : [];
+
+  // BUG-03：整条回复只有一个表情包标记时，剥离后正文为空；旧实现用
+  // `body || cleanedReply` 兜底，把原始 [sticker:...] 又拼回正文。
+  // 现在统一走兜底函数：清残留标记 → 压缩空白 → 空则补文案。
+  const reply = buildAssistantReplyText(parsedReply.body, parsedReply.attachments);
+  const replyAttachments = parsedReply.attachments;
 
   // 连续消息模式：single 强制单条（与旧行为一致）；auto / frequent 按自然
   // 边界拆成多条气泡。每条分条是独立的 assistant 消息，撤回会整轮删除。
@@ -1611,6 +1905,8 @@ function completeChatTurn({ ctx, rawReply, isClientGone, userMessageReceivedAt }
 
   // 回复带出的图片/表情包附件挂在最后一格气泡上：阅读顺序与
   // 「先文字后表情」的自然节奏一致，历史读回时也在同一条消息里
+  // Agent 工具摘要同理：只在最后一格带，前端可据此展示执行痕迹。
+  const hasToolSteps = Array.isArray(toolSteps) && toolSteps.length > 0;
   const assistantMessages = segments.map((content, index) => ({
     id: crypto.randomUUID(),
     role: 'assistant',
@@ -1619,6 +1915,7 @@ function completeChatTurn({ ctx, rawReply, isClientGone, userMessageReceivedAt }
     ...(index === segments.length - 1 && replyAttachments.length
       ? { attachments: replyAttachments }
       : {}),
+    ...(index === segments.length - 1 && hasToolSteps ? { toolSteps } : {}),
   }));
 
   // 续写只落盘 assistant 消息：不产生"继续说"用户消息，不污染 chat-history
@@ -1681,11 +1978,13 @@ function completeChatTurn({ ctx, rawReply, isClientGone, userMessageReceivedAt }
     reply,
     // 分条后的气泡数组：新客户端按此逐条展示；每条都是已落盘的独立消息
     replies: assistantMessages.map(
-      ({ id, content, createdAt, attachments: att }) => ({
+      ({ id, content, createdAt, attachments: att, toolSteps: steps }) => ({
         id,
         content,
         createdAt,
         ...(att ? { attachments: att } : {}),
+        // Agent 工具执行摘要（仅最后一格可能出现）：独立字段，不含敏感内容
+        ...(steps ? { toolSteps: steps } : {}),
       })
     ),
     persisted,
@@ -1696,15 +1995,20 @@ function completeChatTurn({ ctx, rawReply, isClientGone, userMessageReceivedAt }
     // 多模态附件：前端据此展示图片/表情包，历史接口同样会返回
     userAttachments: isContinue ? [] : attachments,
     assistantAttachments: replyAttachments,
+    // Agent 工具执行摘要：有则随响应返回，无则整个字段不出现（旧响应零变化）
+    ...(hasToolSteps ? { toolSteps } : {}),
     // 服务端统一时间，供前端展示，避免客户端时钟偏差
     createdAt: now,
   };
 }
 
-// 长期记忆提取：响应完成后异步进行，失败只记日志
+// 长期记忆提取：响应完成后异步进行，失败只记日志。
+// client 取自适配层：固定内置 DeepSeek（extractMemory 内部硬编码
+// deepseek-chat，与改造前逐字节一致）；没有任何可用服务商时跳过。
 function scheduleMemoryExtraction(isContinue, userText, sessionId, attachments = []) {
   setImmediate(() => {
-    if (!client) return; // 未配置模型 key，跳过记忆提取
+    const memoryClient = getMemoryClient();
+    if (!memoryClient) return; // 未配置任何模型 key，跳过记忆提取
     if (isContinue) return; // 续写不是用户说的话，不产生长期记忆
     // 纯发图（无文字）时给记忆提取一个占位文本，避免空串进提取器
     const memoryText =
@@ -1714,7 +2018,7 @@ function scheduleMemoryExtraction(isContinue, userText, sessionId, attachments =
             attachments[0].kind === KIND_STICKER ? '表情包' : '图片'
           }）`
         : userText);
-    processMemory(client, memoryText, sessionId)
+    processMemory(memoryClient, memoryText, sessionId)
       .catch(error => {
         console.error(
           'Memory processing error:',
@@ -1725,10 +2029,15 @@ function scheduleMemoryExtraction(isContinue, userText, sessionId, attachments =
 }
 
 app.post('/chat', requireAuth, async (req, res) => {
-  // 客户端提前断开时标记，避免回复落盘成"幽灵消息"（用户没收到却已入库）
+  // 客户端提前断开时标记，避免回复落盘成"幽灵消息"（用户没收到却已入库）；
+  // 同时中止进行中的工具执行——已完成的只读工具不回滚，但不再做无用功。
   let clientGone = false;
+  const disconnect = new AbortController();
   res.on('close', () => {
-    if (!res.writableEnded) clientGone = true;
+    if (!res.writableEnded) {
+      clientGone = true;
+      disconnect.abort();
+    }
   });
 
   // 用户消息的到达时刻：Presence 用它计算「用户最后互动时间」，
@@ -1745,19 +2054,46 @@ app.post('/chat', requireAuth, async (req, res) => {
 
     const { ctx } = prepared;
 
-    // 真实 API 调用流水：每次消耗 DEEPSEEK_API_KEY 都在日志留痕，
-    // 便于与 DeepSeek 控制台用量对账、排查意外调用来源。纯日志，不影响逻辑。
+    // 真实 API 调用流水：每次消耗密钥都在日志留痕，便于与服务商控制台
+    // 用量对账、排查意外调用来源。纯日志，不影响逻辑，绝不含密钥本身。
     console.log(
       `[AI call] main-reply session=${ctx.sessionId} at=${new Date().toISOString()}` +
-        ` model=${ctx.useVision ? VISION_MODEL : TEXT_MODEL}` +
+        ` provider=${ctx.providerId} model=${ctx.modelId}` +
         ` attachments=${ctx.attachments.length}`
     );
 
-    const completion = await client.chat.completions.create(
-      {
-        model: ctx.useVision ? VISION_MODEL : TEXT_MODEL,
+    // Agent 工具调用（V1）三重门控，全部在后端强制执行：
+    // ① 紧急开关 BLUEBIRD_AGENT_TOOLS=1（默认关，每请求重读）；
+    // ② 模型显式声明支持 Tool Calling（supportsTools，未知一律 false）；
+    // ③ 非带图请求——带图（useVision）后端强制无工具，不依赖前端。
+    // 任一不满足都走下方原路径，行为与改造前逐字节一致。
+    noteSwitchObservation();
+    const agentOn =
+      agentToolsEnabled() &&
+      !ctx.useVision &&
+      supportsTools(ctx.providerId, ctx.modelId);
+
+    if (agentOn) {
+      console.log(
+        `[agent] tools enabled session=${ctx.sessionId} provider=${ctx.providerId}` +
+          ` model=${ctx.modelId}`
+      );
+    }
+
+    let completion;
+    let rawReply;
+    let toolSteps = null;
+
+    if (agentOn) {
+      const outcome = await runAgentTurn({
+        providerId: ctx.providerId,
+        modelId: ctx.modelId,
+        sessionId: ctx.sessionId,
         temperature: 0.8,
-        max_tokens: 1200,
+        maxTokens: 1200,
+        timeout: 90000,
+        isClientGone: () => clientGone,
+        abortSignal: disconnect.signal,
         messages: [
           {
             role: 'system',
@@ -1770,11 +2106,45 @@ app.post('/chat', requireAuth, async (req, res) => {
             content: ctx.userContent,
           },
         ],
-      },
-      { timeout: 90000 }
-    );
+      });
 
-    const rawReply = completion.choices?.[0]?.message?.content;
+      completion = outcome.completion;
+      rawReply = outcome.rawReply;
+      toolSteps = outcome.toolSteps.length ? outcome.toolSteps : null;
+
+      console.log(
+        `[agent] finished session=${ctx.sessionId} rounds=${outcome.rounds}` +
+          ` tools=${outcome.toolSteps.length}`
+      );
+
+      if (!completion) {
+        // 客户端在首轮模型调用前就已断开：没有任何可收尾内容
+        throw new Error('模型没有返回有效内容');
+      }
+    } else {
+      completion = await createChatCompletion({
+        providerId: ctx.providerId,
+        modelId: ctx.modelId,
+        wantVision: ctx.useVision,
+        temperature: 0.8,
+        maxTokens: 1200,
+        timeout: 90000,
+        messages: [
+          {
+            role: 'system',
+            content: ctx.systemPrompt,
+          },
+          ...ctx.promptHistory,
+          {
+            // 续写模式用一个内部短指令占位：只存在于本次请求，不落任何盘
+            role: 'user',
+            content: ctx.userContent,
+          },
+        ],
+      });
+
+      rawReply = completion.choices?.[0]?.message?.content;
+    }
 
     if (!rawReply) {
       throw new Error('模型没有返回有效内容');
@@ -1785,16 +2155,37 @@ app.post('/chat', requireAuth, async (req, res) => {
       rawReply,
       isClientGone: () => clientGone,
       userMessageReceivedAt,
+      ...(toolSteps ? { toolSteps } : {}),
     });
 
     res.json({
       ...result,
-      model: completion.model,
+      // model 是本次请求实际解析并按此下发的服务商模型（与设置页所选一致）；
+      // upstreamModel 才是供应商响应里回显的 model 字段（部分供应商会改写，
+      // 例如 DeepSeek 对 deepseek-chat 也回显 deepseek-flash，不能用来判断切换）。
+      model: ctx.modelId,
+      providerId: ctx.providerId,
+      upstreamModel: typeof completion.model === 'string' ? completion.model : null,
+      // 结构化路由结果：requested / actual / auto / reason，与流式 done 语义一致
+      modelRoute: ctx.modelRoute,
       sessionId: ctx.sessionId,
     });
 
     scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments);
   } catch (error) {
+    // 模型调用类错误：按 kind 映射 HTTP 状态，返回结构化错误（已脱敏）；
+    // 其余（内部 bug）保持原有 500 语义不变。
+    if (error instanceof ModelCallError) {
+      console.error('AI API Error:', error.kind, error.message);
+      return res.status(error.status).json({
+        error: error.message,
+        code: error.kind,
+        ...(process.env.NODE_ENV === 'development' && error.detail
+          ? { detail: String(error.detail).slice(0, 300) }
+          : {}),
+      });
+    }
+
     console.error('AI API Error:', error);
 
     res.status(500).json({
@@ -1815,8 +2206,12 @@ app.post('/chat', requireAuth, async (req, res) => {
 //   {"type":"error","error":"..."}    失败（不落盘、不产生幽灵消息）
 app.post('/chat/stream', requireAuth, async (req, res) => {
   let clientGone = false;
+  const disconnect = new AbortController();
   res.on('close', () => {
-    if (!res.writableEnded) clientGone = true;
+    if (!res.writableEnded) {
+      clientGone = true;
+      disconnect.abort();
+    }
   });
 
   const userMessageReceivedAt = Date.now();
@@ -1862,21 +2257,50 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
 
   console.log(
     `[AI call] main-reply session=${ctx.sessionId} (stream) at=${new Date().toISOString()}` +
-      ` model=${ctx.useVision ? VISION_MODEL : TEXT_MODEL}` +
+      ` provider=${ctx.providerId} model=${ctx.modelId}` +
       ` attachments=${ctx.attachments.length}`
   );
 
   let rawReply = '';
-  let model = ctx.useVision ? VISION_MODEL : TEXT_MODEL;
+  // model 保持为「本次实际请求的模型」，不被上游回显覆盖；
+  // upstreamModel 单独记录供应商响应里的 model（部分供应商会改写）。
+  const model = ctx.modelId;
+  let upstreamModel = null;
+  let toolSteps = null;
   const stripper = createMoodTagStripper();
   let streamError = null;
 
+  // Agent 工具调用（V1）：与 /chat 完全相同的三重门控（开关 / 模型能力 /
+  // 非带图），全部后端强制。工具轮以非流式执行，经 tool_start / tool_end
+  // 事件向客户端反馈进度；最终文本仍走 stripper → delta → done，
+  // 不新增也不改变既有事件格式（旧客户端忽略新 type 即可）。
+  noteSwitchObservation();
+  const agentOn =
+    agentToolsEnabled() &&
+    !ctx.useVision &&
+    supportsTools(ctx.providerId, ctx.modelId);
+
+  if (agentOn) {
+    console.log(
+      `[agent] tools enabled (stream) session=${ctx.sessionId}` +
+        ` provider=${ctx.providerId} model=${ctx.modelId}`
+    );
+  }
+
   try {
-    const stream = await client.chat.completions.create(
-      {
-        model: ctx.useVision ? VISION_MODEL : TEXT_MODEL,
+    if (agentOn) {
+      const outcome = await runAgentTurn({
+        providerId: ctx.providerId,
+        modelId: ctx.modelId,
+        sessionId: ctx.sessionId,
         temperature: 0.8,
-        max_tokens: 1200,
+        maxTokens: 1200,
+        timeout: 90000,
+        isClientGone: () => clientGone,
+        abortSignal: disconnect.signal,
+        onToolEvent: event => {
+          sendEvent(event);
+        },
         messages: [
           {
             role: 'system',
@@ -1888,39 +2312,78 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
             content: ctx.userContent,
           },
         ],
-        stream: true,
-      },
-      { timeout: 90000 }
-    );
+      });
 
-    for await (const chunk of stream) {
-      // 客户端已断开：中止上游流，不落盘，避免幽灵消息
-      if (clientGone) {
-        try {
-          if (stream.controller) stream.controller.abort();
-        } catch (_) {
-          /* 中止失败不影响主流程 */
-        }
-        break;
+      if (outcome.completion) {
+        rawReply = outcome.rawReply;
+        // model 语义与 /chat 一致：始终是本系统实际下发的 ctx.modelId；
+        // 供应商回显只写入 upstreamModel，绝不覆盖 model。
+        upstreamModel =
+          typeof outcome.completion.model === 'string'
+            ? outcome.completion.model
+            : null;
+        toolSteps = outcome.toolSteps.length ? outcome.toolSteps : null;
+
+        console.log(
+          `[agent] finished (stream) session=${ctx.sessionId}` +
+            ` rounds=${outcome.rounds} tools=${outcome.toolSteps.length}`
+        );
+
+        // 最终文本经同一套情绪标签剥离后以 delta 发出
+        const emit = stripper.push(rawReply);
+        if (emit) sendEvent({ type: 'delta', content: emit });
       }
+    } else {
+      const stream = await createChatCompletion({
+        providerId: ctx.providerId,
+        modelId: ctx.modelId,
+        wantVision: ctx.useVision,
+        temperature: 0.8,
+        maxTokens: 1200,
+        timeout: 90000,
+        stream: true,
+        messages: [
+          {
+            role: 'system',
+            content: ctx.systemPrompt,
+          },
+          ...ctx.promptHistory,
+          {
+            role: 'user',
+            content: ctx.userContent,
+          },
+        ],
+      });
 
-      if (chunk && typeof chunk.model === 'string') model = chunk.model;
+      for await (const chunk of stream) {
+        // 客户端已断开：中止上游流，不落盘，避免幽灵消息
+        if (clientGone) {
+          try {
+            if (stream.controller) stream.controller.abort();
+          } catch (_) {
+            /* 中止失败不影响主流程 */
+          }
+          break;
+        }
 
-      const delta =
-        chunk &&
-        chunk.choices &&
-        chunk.choices[0] &&
-        chunk.choices[0].delta &&
-        typeof chunk.choices[0].delta.content === 'string'
-          ? chunk.choices[0].delta.content
-          : '';
+        if (chunk && typeof chunk.model === 'string') upstreamModel = chunk.model;
 
-      if (!delta) continue;
+        const delta =
+          chunk &&
+          chunk.choices &&
+          chunk.choices[0] &&
+          chunk.choices[0].delta &&
+          typeof chunk.choices[0].delta.content === 'string'
+            ? chunk.choices[0].delta.content
+            : '';
 
-      rawReply += delta;
+        if (!delta) continue;
 
-      const emit = stripper.push(delta);
-      if (emit && !sendEvent({ type: 'delta', content: emit })) break;
+        rawReply += delta;
+
+        const emit = stripper.push(delta);
+        if (emit && !sendEvent({ type: 'delta', content: emit })) break;
+      }
     }
   } catch (error) {
     streamError = error;
@@ -1937,8 +2400,19 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   }
 
   if (streamError) {
-    console.error('AI stream error:', streamError);
-    sendEvent({ type: 'error', error: 'AI 请求失败' });
+    // 模型调用类错误带 code（连接/限流/超时/服务商/模型，已脱敏）；
+    // 内部错误保持原有通用文案。客户端断开的场景上面已提前返回。
+    if (streamError instanceof ModelCallError) {
+      console.error('AI stream error:', streamError.kind, streamError.message);
+      sendEvent({
+        type: 'error',
+        error: streamError.message,
+        code: streamError.kind,
+      });
+    } else {
+      console.error('AI stream error:', streamError);
+      sendEvent({ type: 'error', error: 'AI 请求失败' });
+    }
     res.end();
     return;
   }
@@ -1962,6 +2436,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
       rawReply,
       isClientGone: () => clientGone,
       userMessageReceivedAt,
+      ...(toolSteps ? { toolSteps } : {}),
     });
   } catch (error) {
     console.error('AI stream finalize error:', error);
@@ -1970,7 +2445,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
     return;
   }
 
-  sendEvent({ type: 'done', ...result, model, sessionId: ctx.sessionId });
+  sendEvent({ type: 'done', ...result, model, providerId: ctx.providerId, upstreamModel, modelRoute: ctx.modelRoute, sessionId: ctx.sessionId });
   res.end();
 
   scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId);

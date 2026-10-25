@@ -16,6 +16,17 @@ export type PendingAttachment = {
   previewUri: string;
 };
 
+// 正文渲染结构：消息进入 state 前由 parseStickerMarkers 切好，
+// 渲染层不再对原始字符串跑正则（避免流式半截标记闪成文字）。
+export type TextSegment = { type: 'text'; text: string };
+export type StickerSegment = {
+  type: 'sticker';
+  id: string;
+  valid: boolean;
+  marker: string;
+};
+export type ContentSegment = TextSegment | StickerSegment;
+
 export type Message = {
   id: string;
   role: 'user' | 'assistant';
@@ -26,6 +37,11 @@ export type Message = {
   retryAttachments?: Attachment[];
   mood?: string;
   attachments?: Attachment[];
+  // 已切好的正文片段（仅 assistant）：有值即直接渲染，不再解析 content
+  segments?: ContentSegment[];
+  // 模型路由提示（仅 assistant）：后端 modelRoute.auto 为真时展示
+  // 「所选模型不支持图片输入，实际由哪个模型处理」，不落盘
+  modelNote?: string;
 };
 
 // 会话元数据（与 GET /sessions 返回结构一致）
@@ -44,6 +60,55 @@ export type PersonaConfig = {
   initiative: number; // 主动表达 0-100
   length: number; // 表达长度 0-100
   messageMode: 'single' | 'auto' | 'frequent'; // 连续消息模式
+};
+
+// 模型服务商（GET /model-providers 的脱敏视图）
+// 后端永不下发完整 Key：只有 keyConfigured 布尔与脱敏 keyHint
+export type ModelCapabilities = {
+  vision: boolean;
+};
+
+export type ModelEntry = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  capabilities: ModelCapabilities;
+};
+
+export type ModelProvider = {
+  id: string;
+  name: string;
+  type: string;
+  baseUrl: string;
+  builtin: boolean;
+  enabled: boolean;
+  keyConfigured: boolean;
+  keyHint: string | null;
+  models: ModelEntry[];
+};
+
+export type ModelDefaults = {
+  providerId: string;
+  modelId: string;
+};
+
+// 后端路由结果（/chat 响应与 /chat/stream 的 done 事件同结构）
+// requested 是本次所选模型（source=request 表示请求级选择，default 表示全局默认）
+// actual 是真正下发的服务商/模型；auto 表示图片触发了视觉能力路由
+export type ModelRoute = {
+  requested: {
+    providerId: string;
+    providerName: string;
+    modelId: string;
+    source: 'request' | 'default';
+  };
+  actual: {
+    providerId: string;
+    providerName: string;
+    modelId: string;
+  };
+  auto: boolean;
+  reason: 'vision_unsupported' | null;
 };
 
 // /chat 响应里的单条回复气泡（replies 数组的元素）

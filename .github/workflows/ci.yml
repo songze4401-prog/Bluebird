@@ -49,10 +49,10 @@ jobs:
 
       # 逐文件单独跑（AGENTS.md 约定）。某个套件失败也跑完其余套件，
       # 最后统一以非零退出码结束，方便一次看全失败面。
-      - name: 自定义 runner 十六套（逐文件单独跑，共 503 项）
+      - name: 自定义 runner 十八套（逐文件单独跑，共 717 项）
         run: |
           fail=0
-          for f in api atomic-write chat-persist corruption-contract data-events emotion-decay-global memory-session-scope session-scope-e2e sessions-recovery sessions presence time-gap persona chat-stream multimodal sticker-repo; do
+          for f in api atomic-write chat-persist corruption-contract data-events emotion-decay-global memory-session-scope session-scope-e2e sessions-recovery sessions presence time-gap persona chat-stream multimodal sticker-repo model-providers agent-tools; do
             echo "::group::node tests/$f.test.js"
             node "tests/$f.test.js" || fail=1
             echo "::endgroup::"

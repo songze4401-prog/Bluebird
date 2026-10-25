@@ -4,13 +4,16 @@
 // Expo Go 均支持，不新增依赖），按 SSE 的 \n\n 分帧、解析 data: 行 JSON。
 
 import { API_TOKEN } from './constants';
-import { ReplySegment } from './types';
+import { ModelRoute, ReplySegment } from './types';
 
 // done 事件的载荷：字段与 POST /chat 的响应完全一致
 export type StreamDonePayload = {
   reply?: string;
   replies?: ReplySegment[];
   model?: string;
+  providerId?: string;
+  upstreamModel?: string | null;
+  modelRoute?: ModelRoute;
   sessionId?: string;
   persisted?: boolean;
   mood?: string;

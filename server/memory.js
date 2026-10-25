@@ -4,6 +4,7 @@ const path = require('path');
 const { logDataEvent } = require('./data-events');
 const { writeFileAtomic, writeFileAtomicSync } = require('./atomic-write');
 const { registerCorruptionHandler, handleCorruption } = require('./corruption');
+const { textLength, truncateText } = require('./text-utils');
 
 // 数据目录可通过 BLUEBIRD_DATA_DIR 覆盖：测试用临时目录，避免碰到真实数据。
 // 未设置时与 sessions.js / emotion.js 保持一致，落在 server/data/。
@@ -717,6 +718,189 @@ function buildMemoryContext(message) {
   }
 }
 
+// 相关性算分与选取：buildMemoryContext（全局注入）与 Agent 工具检索
+// （searchMemories，scope 化）共用同一套算分，不另造轮子。
+// current 传原始查询串：关键词命中按归一化文本比较，内容二元组按原文
+// 计算——与 buildMemoryContext 的内联算分行为逐字节一致。
+// identity 类型优先（≤2 条），保证身份类事实不会因字面 0 分被丢弃；
+// 其余按 关键词命中 0.7 + 内容二元组重合 0.3 打分，得分 > 0 入选，
+// 总分排序、并列时关键词命中多者优先。cap 为返回条数上限。
+function rankMemories(validMemories, current, cap = 10) {
+  const identity = validMemories
+    .filter(item => item.type === 'identity')
+    .slice(0, 2);
+
+  const currentNormalized = normalize(current);
+  const currentBigrams = getBigrams(current);
+
+  const scored = validMemories
+    .map(item => {
+      const keywords = Array.isArray(item.keywords)
+        ? item.keywords
+            .filter(item => typeof item === 'string')
+            .map(item => normalize(item))
+            .filter(Boolean)
+        : [];
+
+      let keywordHits = 0;
+
+      for (const keyword of keywords) {
+        if (currentNormalized.includes(keyword)) {
+          keywordHits++;
+        }
+      }
+
+      const keywordScore = keywords.length
+        ? keywordHits / keywords.length
+        : 0;
+
+      const memoryBigrams = getBigrams(item.content);
+
+      let hits = 0;
+
+      for (const bigram of currentBigrams) {
+        if (memoryBigrams.has(bigram)) {
+          hits++;
+        }
+      }
+
+      const contentScore =
+        memoryBigrams.size > 0
+          ? hits / memoryBigrams.size
+          : 0;
+
+      const score = keywords.length
+        ? keywordScore * 0.7 + contentScore * 0.3
+        : contentScore;
+
+      return {
+        item,
+        score,
+        keywordHits,
+      };
+    })
+    .filter(({ score }) => score > 0)
+    .sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+
+      return b.keywordHits - a.keywordHits;
+    });
+
+  return [
+    ...identity,
+    ...scored
+      .map(entry => entry.item)
+      .filter(item => !identity.includes(item)),
+  ].slice(0, cap);
+}
+
+// ---- Agent 工具专用：scope 化记忆检索 ----
+// 与 buildMemoryContext 的差异：按会话 scope 过滤 + 结构化返回 + 硬上限。
+// scope 规则与 recallMemoryBySourceQuote 完全一致：当前会话名下的贡献优先；
+// 当前会话没有任何贡献时才回退无归属（sessionId===null）的旧贡献；
+// 只属于其他会话的贡献一律不返回——绝不跨会话读私有记忆。
+// 三类硬上限（调用方传入，工具层再兜底）：条数 / 单条长度 / 总预算，
+// 长度一律按 text-utils 的码点规则计算并截断。
+function searchMemories({ query, sessionId, limits = {} } = {}) {
+  const maxItems =
+    Number.isFinite(limits.maxItems) && limits.maxItems > 0
+      ? Math.min(Math.floor(limits.maxItems), 50)
+      : 10;
+  const perItemMax =
+    Number.isFinite(limits.perItemMax) && limits.perItemMax > 0
+      ? Math.floor(limits.perItemMax)
+      : 300;
+  const totalMax =
+    Number.isFinite(limits.totalMax) && limits.totalMax > 0
+      ? Math.floor(limits.totalMax)
+      : 2000;
+
+  const emptyResult = reason => ({
+    results: [],
+    total: 0,
+    truncated: false,
+    ...(reason ? { reason } : {}),
+  });
+
+  if (!MEMORY_ENABLED) return emptyResult('memory_disabled');
+
+  const current = String(query || '').trim();
+  if (!current) return emptyResult('empty_query');
+
+  const targetSessionId =
+    typeof sessionId === 'string' && sessionId.trim()
+      ? sessionId.trim()
+      : null;
+
+  const valid = memories.filter(
+    item =>
+      item &&
+      typeof item.content === 'string' &&
+      item.content.trim()
+  );
+
+  if (!valid.length) return emptyResult('empty_store');
+
+  const scopeOf = item => {
+    const contributions = Array.isArray(item.contributions)
+      ? item.contributions
+      : [];
+
+    if (contributions.some(c => c && c.sessionId === targetSessionId)) {
+      return 'primary';
+    }
+    if (contributions.some(c => c && c.sessionId === null)) {
+      return 'legacy';
+    }
+    return 'excluded';
+  };
+
+  // 多取 10 条余量：rankMemories 自身有上限，直接按 maxItems 取会分不清
+  // "本来就不多"和"被裁过"，导致截断标记不诚实。余量只在工具路径生效，
+  // 注入路径（buildMemoryContext）仍用默认 10，行为不变。
+  const ranked = rankMemories(valid, current, maxItems + 10);
+  const primary = ranked.filter(item => scopeOf(item) === 'primary');
+
+  // 当前会话有相关贡献时只用它们；否则才回退无归属旧贡献
+  const pool = primary.length
+    ? primary
+    : ranked.filter(item => scopeOf(item) === 'legacy');
+
+  const results = [];
+  let total = 0;
+  let truncated = false;
+
+  for (const item of pool) {
+    if (results.length >= maxItems) {
+      truncated = true;
+      break;
+    }
+
+    let content = truncateText(item.content, perItemMax);
+    let cost = textLength(content);
+
+    // 单条就吃掉全部预算：截到预算内并标记，后续不再追加
+    if (cost > totalMax) {
+      content = truncateText(content, totalMax);
+      cost = totalMax;
+    }
+
+    if (results.length && total + cost > totalMax) {
+      truncated = true;
+      break;
+    }
+
+    results.push({ content, type: item.type });
+    total += cost;
+
+    if (cost < textLength(item.content)) truncated = true;
+  }
+
+  return { results, total, truncated };
+}
+
 loadMemories();
 
 async function clearMemories() {
@@ -902,6 +1086,7 @@ module.exports = {
   getMemories,
   deleteMemory,
   buildMemoryContext,
+  searchMemories,
   processMemory,
   clearMemories,
   recallMemoryBySourceQuote,
