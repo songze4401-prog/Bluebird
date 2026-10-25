@@ -4,6 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { logDataEvent } = require('./data-events');
 const { registerCorruptionHandler, handleCorruption } = require('./corruption');
+const { truncateText } = require('./text-utils');
 
 // 数据目录可通过 BLUEBIRD_DATA_DIR 覆盖：测试用临时目录，避免碰到真实数据。
 // 未设置时与 memory.js / emotion.js 保持一致，落在 server/data/。
@@ -547,6 +548,41 @@ function sanitizeAttachments(list) {
   return items.length ? items : undefined;
 }
 
+// Agent 工具摘要：这是 appendMessages 白名单里继 attachments 之后第二个可选字段——
+// 之前未知字段会被静默丢弃，导致摘要存不下、读不回（已实测确认）。
+// 硬约束：只存 {name, ok, summary, durationMs}，禁敏感参数原文、
+// 记忆原文与模型内部推理；条数、字段长度全部钳制。
+const TOOL_STEPS_MAX = 10;
+
+function sanitizeToolSteps(list) {
+  if (!Array.isArray(list) || !list.length) return undefined;
+
+  const items = [];
+  for (const raw of list.slice(0, TOOL_STEPS_MAX)) {
+    if (!raw || typeof raw !== 'object') continue;
+
+    const name =
+      typeof raw.name === 'string' && raw.name.trim()
+        ? raw.name.trim().slice(0, 40)
+        : '';
+    if (!name) continue;
+
+    const ok = raw.ok === true;
+    const summary =
+      typeof raw.summary === 'string' && raw.summary.trim()
+        ? truncateText(raw.summary.trim(), 120)
+        : '';
+    const durationMs =
+      typeof raw.durationMs === 'number' && Number.isFinite(raw.durationMs)
+        ? Math.max(0, Math.round(raw.durationMs))
+        : 0;
+
+    items.push({ name, ok, summary, durationMs });
+  }
+
+  return items.length ? items : undefined;
+}
+
 function appendMessages(sessionId, messages) {
   const current = loadStore();
   const meta = findMeta(sessionId);
@@ -557,6 +593,7 @@ function appendMessages(sessionId, messages) {
 
   const stamped = messages.map(item => {
     const attachments = sanitizeAttachments(item.attachments);
+    const toolSteps = sanitizeToolSteps(item.toolSteps);
 
     return {
       id: item.id || crypto.randomUUID(),
@@ -565,6 +602,8 @@ function appendMessages(sessionId, messages) {
       createdAt: item.createdAt || createdAt,
       // 无附件的消息不带该字段，保持旧消息结构完全一致
       ...(attachments ? { attachments } : {}),
+      // 无工具摘要的消息同样不带该字段（普通聊天零变化）
+      ...(toolSteps ? { toolSteps } : {}),
     };
   });
 
