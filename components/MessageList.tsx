@@ -112,14 +112,57 @@ export function MessageList({
   // 消息效应与切会话效应在同一批内容上各滚一次，用它去重。
   const lastScrolledMessagesRef = useRef<Message[] | null>(null);
 
-  // 唯一允许的自动贴底入口。调用方只有三处：
-  // 新消息追加、切换会话、用户主动要求（箭头 / 新消息提示）。
-  // 内容尺寸变化不再触发任何滚动。
+  // 内容尺寸通道：只跟「变高」，且只跟 follow 态（见 handleContentSizeChange）
+  const lastContentHeightRef = useRef(0);
+  const contentScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
+
+  // 唯一允许的自动贴底入口。调用方只有四处：
+  // 新消息追加、切换会话、内容变高（仅 follow 态）、用户主动要求（箭头 / 新消息提示）。
   const scrollToEndOnce = useCallback((animated: boolean) => {
     lastScrolledMessagesRef.current = messagesRef.current;
 
     flatListRef.current?.scrollToEnd({ animated });
   }, []);
+
+  // 内容变高的跟随通道：流式增量、流式收尾渲染撑高、图片消息都靠它跟住。
+  // 第一道闸就是状态机 —— locked / batch 直接返回，不会把正在翻历史的用户拽回底部；
+  // 只有 follow（用户就在底部）才允许跟随。
+  const handleContentSizeChange = useCallback(
+    (_width: number, height: number) => {
+      const prevHeight = lastContentHeightRef.current;
+
+      lastContentHeightRef.current = height;
+
+      if (autoScrollState.current !== 'follow') return;
+      // 只跟变高：footer 隐藏、键盘收起导致的变小不触发，避免上跳
+      if (height <= prevHeight) return;
+      // 节流：避免流式逐 token 贴底堆积滚动
+      if (contentScrollTimerRef.current !== null) return;
+
+      contentScrollTimerRef.current = setTimeout(() => {
+        contentScrollTimerRef.current = null;
+
+        // 定时器触发前用户可能已开始拖动（状态已转 locked），必须再确认一次
+        if (autoScrollState.current !== 'follow') return;
+
+        scrollToEndOnce(false);
+      }, 100);
+    },
+    [scrollToEndOnce]
+  );
+
+  // 卸载时清理内容尺寸通道的节流定时器
+  useEffect(
+    () => () => {
+      if (contentScrollTimerRef.current !== null) {
+        clearTimeout(contentScrollTimerRef.current);
+        contentScrollTimerRef.current = null;
+      }
+    },
+    []
+  );
 
   // 1) 切换会话 → 置 follow、清空未读、贴底一次
   useEffect(() => {
@@ -148,7 +191,7 @@ export function MessageList({
     }
   }, [sessionId, scrollToEndOnce]);
 
-  // 2) 消息变化 → 只认「新消息追加」，绝不再因 contentSize 变化而滚动
+  // 2) 消息变化 → 只认「新消息追加」；内容撑高走 onContentSizeChange（仅 follow 态）
   useEffect(() => {
     const prevCount = prevCountRef.current;
     const nextCount = messages.length;
@@ -294,6 +337,8 @@ export function MessageList({
         // 只有用户主动拖拽才进入 locked；滚动事件本身不再改写状态机
         onScrollBeginDrag={handleScrollBeginDrag}
         onScroll={handleScroll}
+        // 内容变高时仅 follow 态跟随（流式增量 / 图片 / footer 撑高）
+        onContentSizeChange={handleContentSizeChange}
         // 解除锁定只有两条路：用户自己滚回底部（下面两个回调），
         // 或点右下角箭头 / 新消息提示（scrollToBottom）
         onScrollEndDrag={handleScrollSettled}
