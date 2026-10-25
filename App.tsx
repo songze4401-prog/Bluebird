@@ -1,4 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   View,
@@ -13,12 +19,19 @@ import * as ImagePicker from 'expo-image-picker';
 import {
   Attachment,
   Message,
+  ModelDefaults,
+  ModelRoute,
   PendingAttachment,
   ReplySegment,
   SessionMeta,
 } from './lib/types';
 import { API_TOKEN, DEFAULT_SESSION_ID, REPLY_PACING } from './lib/constants';
-import { makeLocalId, readJsonResponse } from './lib/utils';
+import {
+  makeLocalId,
+  readJsonResponse,
+  parseStickerMarkers,
+  parseStickerMarkersForStream,
+} from './lib/utils';
 import { streamChatRequest } from './lib/stream';
 import { addSticker, uploadImage } from './lib/uploads';
 
@@ -31,6 +44,7 @@ import { ThemeScreen } from './components/ThemeScreen';
 import { HomeScreen } from './components/HomeScreen';
 import { HistoryScreen } from './components/HistoryScreen';
 import { ControlPanelScreen } from './components/ControlPanelScreen';
+import { ModelScreen } from './components/ModelScreen';
 import { PlusPanel } from './components/PlusPanel';
 import { usePresence } from './lib/presence';
 
@@ -87,7 +101,54 @@ function normalizeSegments(data: {
     : [];
 }
 
-// 流式临时气泡：delta 原地累加到同一条消息，不新建气泡
+// 图片触发了服务端视觉能力路由时的提示文案。
+// 唯一依据是后端返回的 modelRoute（前端不按预设规则猜测），
+// auto=false 时返回 undefined，避免展示误导性的切换提示。
+function buildModelNote(route?: ModelRoute): string | undefined {
+  if (!route || !route.auto || !route.actual) return undefined;
+
+  const actual = [route.actual.providerName, route.actual.modelId]
+    .filter(Boolean)
+    .join(' · ');
+
+  if (!actual) return undefined;
+
+  const requested = [route.requested?.providerName, route.requested?.modelId]
+    .filter(Boolean)
+    .join(' · ');
+
+  return requested
+    ? `所选模型 ${requested} 不支持图片输入，本条由 ${actual} 处理`
+    : `所选模型不支持图片输入，本条由 ${actual} 处理`;
+}
+
+// 服务端明确错误（无效模型 / 无视觉模型 / 缺 Key 等）：把后端给出的原因原样
+// 展示给用户，而不是统一成「连接失败」。网络类错误仍用统一文案。
+type ServerError = Error & { fromServer?: true };
+
+function serverError(message: string): ServerError {
+  const error = new Error(message) as ServerError;
+  error.fromServer = true;
+  return error;
+}
+
+function isServerError(error: unknown): error is ServerError {
+  return error instanceof Error && (error as ServerError).fromServer === true;
+}
+
+// 数据层切分：assistant 消息进入 state 时就把 [sticker:ID] 解析成片段，
+// 渲染层只拿可直接渲染的结构，不再对原始字符串跑正则。
+// 已有片段的对象原样返回，避免流式每个 delta 都重建全部历史消息。
+function ensureSegments(message: Message): Message {
+  if (message.role !== 'assistant' || message.segments) return message;
+
+  return { ...message, segments: parseStickerMarkers(message.content) };
+}
+
+// 流式临时气泡：delta 原地累加到同一条消息，不新建气泡。
+// content 保留原文（收尾/重试需要），segments 用流式解析：
+// 半截标记（[sticker:9829f2）先扣留，状态里永远是可直接渲染的片段，
+// 因此从消息出现到图片出现，屏幕上不会闪出方括号+数字。
 function applyStreamDelta(
   prev: Message[],
   tempId: string,
@@ -97,8 +158,13 @@ function applyStreamDelta(
   const target = index >= 0 ? prev[index] : undefined;
 
   if (target) {
+    const content = target.content + delta;
     const next = [...prev];
-    next[index] = { ...target, content: target.content + delta };
+    next[index] = {
+      ...target,
+      content,
+      segments: parseStickerMarkersForStream(content),
+    };
     return next;
   }
 
@@ -109,6 +175,7 @@ function applyStreamDelta(
       role: 'assistant',
       content: delta,
       createdAt: new Date().toISOString(),
+      segments: parseStickerMarkersForStream(delta),
     },
   ];
 }
@@ -132,7 +199,21 @@ function removeStreamBubble(prev: Message[], tempId: string): Message[] {
 
 export default function App() {
   const [input, setInput] = useState('');
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessagesState] = useState<Message[]>([]);
+
+  // 所有消息统一从数据层入口过一遍：assistant 正文在进入 state 前就切好片段，
+  // 渲染层（ChatBubble）只消费 segments，不再解析原始标记。
+  const setMessages: React.Dispatch<React.SetStateAction<Message[]>> =
+    useCallback(updater => {
+      setMessagesState(prev => {
+        const next =
+          typeof updater === 'function'
+            ? (updater as (current: Message[]) => Message[])(prev)
+            : updater;
+
+        return next.map(ensureSegments);
+      });
+    }, []);
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
   const [sending, setSending] = useState(false);
@@ -172,6 +253,35 @@ export default function App() {
   // 记忆库 / 控制面板弹层开关
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
+  // 模型与 API 管理弹层
+  const [modelsOpen, setModelsOpen] = useState(false);
+  // 当前所选模型（服务端 api-configs.json 的 defaults 是唯一数据源）。
+  // 前端只做一份镜像，用于在每个聊天请求里显式携带 providerId/modelId；
+  // 读取失败时保持 null，请求不带 ids，由服务端全局默认兜底。
+  const [selectedModel, setSelectedModel] = useState<ModelDefaults | null>(
+    null
+  );
+
+  const refreshModelSelection = useCallback(async () => {
+    try {
+      const response = await fetch(
+        `${process.env.EXPO_PUBLIC_API_URL}/model-providers`,
+        { headers: { Authorization: `Bearer ${API_TOKEN}` } }
+      );
+
+      const data = await readJsonResponse(response);
+
+      if (!response.ok || !data || !data.defaults) return;
+
+      const { providerId, modelId } = data.defaults;
+
+      if (typeof providerId === 'string' && typeof modelId === 'string') {
+        setSelectedModel({ providerId, modelId });
+      }
+    } catch (error) {
+      console.error('Load model selection error:', error);
+    }
+  }, []);
 
   // 加号面板 / 待发送图片附件 / 上传进行中
   const [plusOpen, setPlusOpen] = useState(false);
@@ -335,6 +445,11 @@ export default function App() {
     };
   }, []);
 
+  // 启动时读取一次当前所选模型（服务端 defaults 为准）
+  useEffect(() => {
+    refreshModelSelection();
+  }, [refreshModelSelection]);
+
   // 启动时读取本地保存的主题（模式 + 强调色）；读不到就用默认（浅色 + 黑色强调）
   useEffect(() => {
     let cancelled = false;
@@ -438,6 +553,11 @@ export default function App() {
   const openControlPanel = () => {
     setMenuOpen(false);
     setPanelOpen(true);
+  };
+
+  const openModels = () => {
+    setMenuOpen(false);
+    setModelsOpen(true);
   };
 
   const recallMessage = (message: Message) => {
@@ -674,11 +794,21 @@ export default function App() {
       .filter(att => att.kind !== 'sticker')
       .map(att => att.id);
 
+    // 本次请求的模型选择快照（在请求发出前取值）：即使用户随后切换模型，
+    // 这条已在途的请求仍按发出时的模型执行。未读到选择时省略，服务端用全局默认。
+    const modelSelection = selectedModel
+      ? {
+          providerId: selectedModel.providerId,
+          modelId: selectedModel.modelId,
+        }
+      : {};
+
     const payload = {
       message: text,
       history,
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       sessionId,
+      ...modelSelection,
       ...(imageIds.length ? { attachmentIds: imageIds } : {}),
       ...(stickerIds.length ? { stickerIds } : {}),
     };
@@ -701,6 +831,8 @@ export default function App() {
         const data = outcome.data;
         const replyMood = typeof data.mood === 'string' ? data.mood : 'calm';
         const segments = normalizeSegments(data);
+        // 图片自动视觉路由的提示挂在最后一格气泡上（同一轮所有分条同模型）
+        const modelNote = buildModelNote(data.modelRoute);
 
         // 撤回需要服务端稳定 id：用服务端返回的 id 替换本地临时 id
         const serverUserId =
@@ -724,7 +856,7 @@ export default function App() {
         // 用服务端权威分条替换临时气泡：内容在流式期间已逐步读完，
         // 不再加逐条等待；id 换成服务端稳定 id，撤回逻辑不受影响
         if (currentSessionIdRef.current === sessionId && segments.length > 0) {
-          const bubbles: Message[] = segments.map(seg => ({
+          const bubbles: Message[] = segments.map((seg, index) => ({
             id: seg.id || `${makeLocalId()}-ai`,
             role: 'assistant',
             content: seg.content,
@@ -735,6 +867,8 @@ export default function App() {
             ...(seg.attachments?.length
               ? { attachments: seg.attachments }
               : {}),
+            // 自动视觉路由提示只挂在最后一格，避免整轮重复
+            ...(index === segments.length - 1 && modelNote ? { modelNote } : {}),
           }));
 
           setMessages(prev =>
@@ -784,11 +918,14 @@ export default function App() {
           Alert.alert('会话已失效', '返回主页后请重新选择会话。');
         }
 
-        throw new Error(data.error || '请求失败');
+        throw serverError(data.error || '请求失败');
       }
 
       const replyMood = typeof data.mood === 'string' ? data.mood : 'calm';
       const segments = normalizeSegments(data);
+      const modelNote = buildModelNote(
+        (data as { modelRoute?: ModelRoute }).modelRoute
+      );
 
       // 撤回需要服务端稳定 id：用服务端返回的 id 替换本地临时 id
       const serverUserId =
@@ -830,6 +967,7 @@ export default function App() {
             ...(seg.attachments?.length
               ? { attachments: seg.attachments }
               : {}),
+            ...(i === segments.length - 1 && modelNote ? { modelNote } : {}),
           },
         ]);
 
@@ -843,7 +981,9 @@ export default function App() {
       const errorMessage =
         error instanceof Error && error.name === 'AbortError'
           ? '连接Bluebird超时了，再试一次。'
-          : '连接Bluebird失败了，再试一次。';
+          : isServerError(error) && error.message
+            ? error.message
+            : '连接Bluebird失败了，再试一次。';
 
       setMessages(prev => [
         ...prev,
@@ -892,6 +1032,13 @@ export default function App() {
       history,
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       sessionId,
+      // 续写同样是聊天请求：沿用发出时的模型选择
+      ...(selectedModel
+        ? {
+            providerId: selectedModel.providerId,
+            modelId: selectedModel.modelId,
+          }
+        : {}),
     };
 
     const streamTempId = `stream-${makeLocalId()}`;
@@ -909,11 +1056,13 @@ export default function App() {
         const data = outcome.data;
         const replyMood = typeof data.mood === 'string' ? data.mood : 'calm';
         const segments = normalizeSegments(data);
+        // 图片自动视觉路由的提示挂在最后一格气泡上（同一轮所有分条同模型）
+        const modelNote = buildModelNote(data.modelRoute);
 
         setMood(replyMood);
 
         if (currentSessionIdRef.current === sessionId && segments.length > 0) {
-          const bubbles: Message[] = segments.map(seg => ({
+          const bubbles: Message[] = segments.map((seg, index) => ({
             id: seg.id || `${makeLocalId()}-ai`,
             role: 'assistant',
             content: seg.content,
@@ -924,6 +1073,8 @@ export default function App() {
             ...(seg.attachments?.length
               ? { attachments: seg.attachments }
               : {}),
+            // 自动视觉路由提示只挂在最后一格，避免整轮重复
+            ...(index === segments.length - 1 && modelNote ? { modelNote } : {}),
           }));
 
           setMessages(prev =>
@@ -937,7 +1088,7 @@ export default function App() {
       if (outcome.kind === 'error') {
         // 续写失败不展示错误气泡（沿用原有 Alert 提示），移除临时气泡
         setMessages(prev => removeStreamBubble(prev, streamTempId));
-        Alert.alert('失败', '继续说失败了，请稍后再试。');
+        Alert.alert('失败', outcome.message || '继续说失败了，请稍后再试。');
         return;
       }
 
@@ -958,11 +1109,14 @@ export default function App() {
       const data = await readJsonResponse(response);
 
       if (!response.ok) {
-        throw new Error(data.error || '请求失败');
+        throw serverError(data.error || '请求失败');
       }
 
       const replyMood = typeof data.mood === 'string' ? data.mood : 'calm';
       const segments = normalizeSegments(data);
+      const modelNote = buildModelNote(
+        (data as { modelRoute?: ModelRoute }).modelRoute
+      );
 
       setMood(replyMood);
 
@@ -984,6 +1138,7 @@ export default function App() {
             ...(seg.attachments?.length
               ? { attachments: seg.attachments }
               : {}),
+            ...(i === segments.length - 1 && modelNote ? { modelNote } : {}),
           },
         ]);
 
@@ -994,7 +1149,12 @@ export default function App() {
     } catch (error) {
       console.error('Continue error:', error);
 
-      Alert.alert('失败', '继续说失败了，请稍后再试。');
+      Alert.alert(
+        '失败',
+        isServerError(error) && error.message
+          ? error.message
+          : '继续说失败了，请稍后再试。'
+      );
     } finally {
       clearTimeout(timeout);
       setContinuing(false);
@@ -1157,6 +1317,7 @@ export default function App() {
           onSelectMode={selectMode}
           onOpenThemePicker={openThemePicker}
           onOpenControlPanel={openControlPanel}
+          onOpenModels={openModels}
           onClearHistory={clearChatHistory}
         />
 
@@ -1215,6 +1376,17 @@ export default function App() {
       <ControlPanelScreen
         visible={panelOpen}
         onClose={() => setPanelOpen(false)}
+        theme={theme}
+      />
+
+      {/* 模型与 API 管理：独立弹层，服务商配置走后端 /model-providers */}
+      <ModelScreen
+        visible={modelsOpen}
+        onClose={() => {
+          setModelsOpen(false);
+          // 设置里可能刚切换了默认模型：重新读取，保证下一条请求携带新选择
+          refreshModelSelection();
+        }}
         theme={theme}
       />
 

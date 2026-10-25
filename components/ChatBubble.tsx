@@ -1,14 +1,25 @@
-import React, { useMemo } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import React, { useMemo, useState } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  Image as RNImage,
+} from 'react-native';
 import { Image } from 'expo-image';
 
 import type { Theme } from '../theme';
-import type { Attachment, Message } from '../lib/types';
-import { IMAGE_AUTH_HEADERS, imageUrl, stickerImageUrl } from '../lib/uploads';
+import type { Attachment, ContentSegment, Message } from '../lib/types';
+import {
+  IMAGE_AUTH_HEADERS,
+  imageUrl,
+  stickerImageUrl,
+} from '../lib/uploads';
 import {
   withAlpha,
   shouldShowMessageTime,
   formatMessageTime,
+  parseStickerMarkers,
 } from '../lib/utils';
 
 // 单条消息气泡（纯展示）：时间标签 + 用户/Bluebird 两种气泡 + 重新发送 + 继续说。
@@ -55,6 +66,68 @@ function BubbleAttachments({
         )
       )}
     </View>
+  );
+}
+
+// 正文里的表情包标记（[sticker:ID]）渲染为行内图片：
+// 图片走现有的表情包仓库路由 /sticker-repo/:id/image，不另造路径。
+// 请求失败或 410（仓库条目已删）时显示灰色「表情包已失效」，
+// 绝不把原始标记退回成文字（BUG-03）。
+function InlineSticker({
+  id,
+  valid,
+  styles,
+}: {
+  id: string;
+  valid: boolean;
+  styles: ReturnType<typeof createStyles>;
+}) {
+  const [failed, setFailed] = useState(!valid);
+
+  if (failed) {
+    return <Text style={styles.inlineStickerExpired}>表情包已失效</Text>;
+  }
+
+  return (
+    <RNImage
+      source={{ uri: stickerImageUrl(id), headers: IMAGE_AUTH_HEADERS }}
+      style={styles.inlineSticker}
+      onError={() => setFailed(true)}
+      accessibilityLabel="表情包"
+    />
+  );
+}
+
+// Bluebird 正文：直接渲染数据层切好的片段（App 在消息进入 state 前已解析）。
+// 命中标记的片段换成行内图片，其余片段原样传给孩子 Text，
+// 换行与字号/行高完全沿用气泡样式。
+// segments 缺失只可能来自绕过 App 数据层的调用，此时才退回一次解析（不会闪）。
+function AssistantContent({
+  content,
+  segments,
+  styles,
+}: {
+  content: string;
+  segments?: ContentSegment[];
+  styles: ReturnType<typeof createStyles>;
+}) {
+  const resolved = segments ?? parseStickerMarkers(content);
+
+  return (
+    <Text style={styles.messageText}>
+      {resolved.map((segment, index) =>
+        segment.type === 'text' ? (
+          <Text key={`text-${index}`}>{segment.text}</Text>
+        ) : (
+          <InlineSticker
+            key={`sticker-${index}`}
+            id={segment.id}
+            valid={segment.valid}
+            styles={styles}
+          />
+        )
+      )}
+    </Text>
   );
 }
 
@@ -129,7 +202,16 @@ export function ChatBubble({
                 />
               )}
               {!!item.content && (
-                <Text style={styles.messageText}>{item.content}</Text>
+                <AssistantContent
+                  content={item.content}
+                  segments={item.segments}
+                  styles={styles}
+                />
+              )}
+
+              {/* 图片触发了视觉能力路由：如实说明实际使用的模型（后端结果） */}
+              {!!item.modelNote && (
+                <Text style={styles.modelNote}>{item.modelNote}</Text>
               )}
 
               {!!item.retryText && (
@@ -247,6 +329,13 @@ const createStyles = (theme: Theme) =>
     userMessageText: {
       color: theme.textOnAccent,
     },
+    // 模型路由提示：弱化的小字，附在气泡正文下方，不参与正文排版
+    modelNote: {
+      color: theme.textMuted,
+      fontSize: 11,
+      lineHeight: 16,
+      marginTop: 6,
+    },
     // ---- 气泡内附件（图片 / 表情包） ----
     attachmentStack: {
       gap: 8,
@@ -261,6 +350,17 @@ const createStyles = (theme: Theme) =>
     stickerImage: {
       width: 120,
       height: 120,
+    },
+    // 正文行内表情包：尺寸与行高配合，避免撑破气泡
+    inlineSticker: {
+      width: 96,
+      height: 96,
+      borderRadius: 8,
+      marginHorizontal: 2,
+    },
+    inlineStickerExpired: {
+      color: theme.textMuted,
+      fontSize: 13,
     },
     // 已删除表情包的占位盒：与 stickerImage 同尺寸，虚线框 + 弱化文字
     stickerExpired: {
