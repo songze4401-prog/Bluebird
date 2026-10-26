@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 import {
   Alert,
   View,
@@ -13,17 +13,21 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { Theme } from '../theme';
 import type { SessionMeta } from '../lib/types';
-import { apiFetch } from '../lib/api/client';
-import { formatMessageTime, readJsonResponse } from '../lib/utils';
+import { formatMessageTime } from '../lib/utils';
 
-// 历史聊天（自治）：状态、加载、选择逻辑全部内聚在此。
-// 父级只保留打开开关（visible）与回调；打开即加载。
+// 历史聊天（受控）：只负责渲染与交互，不再自己请求 /sessions。
+// 会话列表的唯一数据源是 App 的 useSessionList —— 重构前这里与 App 各拉一份，
+// 删除会话后只有本弹层刷新、App 那份仍是旧的，切回首页再进历史会看到脏数据。
 // 列表顺序直接采用服务端返回（listSessions 已按 updatedAt 倒序），不在前端二次排序。
 export function HistoryScreen({
   visible,
   onClose,
   theme,
   currentSessionId,
+  sessions,
+  loadingSessions,
+  sessionsError,
+  onRefresh,
   onSelectSession,
   onDeleteSession,
 }: {
@@ -31,39 +35,18 @@ export function HistoryScreen({
   onClose: () => void;
   theme: Theme;
   currentSessionId: string;
+  // 列表数据与加载态由父级注入（唯一数据源）
+  sessions: SessionMeta[];
+  loadingSessions: boolean;
+  sessionsError: string;
+  onRefresh: () => void;
   onSelectSession: (sessionId: string) => void;
-  // 删除会话：由父级请求后端，成功返回 true（列表据此重拉）
+  // 删除会话：由父级请求后端并刷新列表，成功返回 true
   onDeleteSession: (sessionId: string) => Promise<boolean>;
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);
 
-  const [sessions, setSessions] = useState<SessionMeta[]>([]);
-  const [loadingSessions, setLoadingSessions] = useState(false);
-  const [sessionsError, setSessionsError] = useState('');
-
-  const fetchSessions = async () => {
-    setLoadingSessions(true);
-    setSessionsError('');
-
-    try {
-      const response = await apiFetch('/sessions');
-
-      const data = await readJsonResponse(response);
-
-      if (!response.ok || !Array.isArray(data.sessions)) {
-        throw new Error(data.error || '读取失败');
-      }
-
-      setSessions(data.sessions as SessionMeta[]);
-    } catch (error) {
-      console.error('Load sessions error:', error);
-      setSessionsError('读取会话列表失败，请稍后再试。');
-    } finally {
-      setLoadingSessions(false);
-    }
-  };
-
-  // 删除确认：二次确认防误触；成功后重拉列表，保证与服务端一致
+  // 删除确认：二次确认防误触；列表刷新由父级在删除成功后完成
   const confirmDelete = (sessionId: string) => {
     Alert.alert(
       '删除会话',
@@ -74,33 +57,12 @@ export function HistoryScreen({
           text: '删除',
           style: 'destructive',
           onPress: async () => {
-            const ok = await onDeleteSession(sessionId);
-
-            if (ok) fetchSessions();
+            await onDeleteSession(sessionId);
           },
         },
       ]
     );
   };
-
-  // 打开即加载：与 MemoryScreen 同一时序约定，不闪旧数据。
-  // 用微任务把首帧 setState 移出 effect 同步体（避免 cascading render 告警）；
-  // 微任务在绘制前 flush，时序与原实现一致。
-  useLayoutEffect(() => {
-    if (!visible) return;
-
-    let cancelled = false;
-
-    void (async () => {
-      await Promise.resolve();
-
-      if (!cancelled) fetchSessions();
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [visible]);
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
@@ -116,7 +78,7 @@ export function HistoryScreen({
 
           <TouchableOpacity
             style={styles.historyRefresh}
-            onPress={fetchSessions}
+            onPress={onRefresh}
             disabled={loadingSessions}
             activeOpacity={0.6}
             accessibilityLabel="刷新会话列表"
@@ -144,7 +106,7 @@ export function HistoryScreen({
 
             <TouchableOpacity
               style={styles.historyRetry}
-              onPress={fetchSessions}
+              onPress={onRefresh}
             >
               <Text
                 style={[styles.historyRetryText, { color: theme.accent }]}

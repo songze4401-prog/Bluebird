@@ -20,9 +20,14 @@
     "react-native-web": "^0.21.4"
   },
   "devDependencies": {
+    "@testing-library/react-native": "^14.1.0",
+    "@types/jest": "^30.0.0",
     "@types/react": "~19.3.0",
     "eslint": "^9.39.5",
     "eslint-config-expo": "~58.0.4",
+    "jest": "^30.5.2",
+    "jest-expo": "~58.0.12",
+    "test-renderer": "^1.3.1",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -31,7 +36,14 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "test": "node scripts/run-tests.js"
+    "test": "node scripts/run-tests.js",
+    "test:unit": "jest"
   },
-  "private": true
+  "private": true,
+  "jest": {
+    "preset": "jest-expo",
+    "testMatch": [
+      "<rootDir>/tests/unit/**/*.test.[jt]s?(x)"
+    ]
+  }
 }

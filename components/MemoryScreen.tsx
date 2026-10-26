@@ -13,18 +13,15 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { Theme } from '../theme';
 import { apiFetch } from '../lib/api/client';
+import { API_PATHS } from '../lib/api/endpoints';
+import { apiErrorFromPayload } from '../lib/api/errors';
+import type {
+  MemoryClearResponse,
+  MemoryDeleteResponse,
+  MemoryItem,
+  MemoryListResponse,
+} from '../lib/api/types';
 import { readJsonResponse } from '../lib/utils';
-
-// 长期记忆条目（与服务端 memory.json 的结构一致，无 id 字段）
-type MemoryItem = {
-  content: string;
-  type?: string;
-  keywords?: string[];
-  confidence?: number;
-  sourceQuote?: string;
-  createdAt?: string;
-  updatedAt?: string;
-};
 
 // 记忆库单条定位键：与后端删除接口的 createdAt + content 保持一致
 function memoryKey(item: MemoryItem): string {
@@ -105,12 +102,12 @@ export function MemoryScreen({
     setMemoryError('');
 
     try {
-      const response = await apiFetch('/memory');
+      const response = await apiFetch(API_PATHS.memory);
 
-      const data = await readJsonResponse(response);
+      const data = (await readJsonResponse(response)) as MemoryListResponse;
 
       if (!response.ok) {
-        throw new Error(data.error || '读取失败');
+        throw apiErrorFromPayload(data, response.status, '读取失败');
       }
 
       setMemories(Array.isArray(data.memories) ? data.memories : []);
@@ -154,7 +151,7 @@ export function MemoryScreen({
           setDeletingMemoryKey(key);
 
           try {
-            const response = await apiFetch('/memory/delete', {
+            const response = await apiFetch(API_PATHS.memoryDelete, {
               method: 'POST',
               body: JSON.stringify({
                 createdAt: item.createdAt,
@@ -162,10 +159,12 @@ export function MemoryScreen({
               }),
             });
 
-            const data = await readJsonResponse(response);
+            const data = (await readJsonResponse(
+              response
+            )) as MemoryDeleteResponse;
 
             if (!response.ok) {
-              throw new Error(data.error || '删除失败');
+              throw apiErrorFromPayload(data, response.status, '删除失败');
             }
 
             // 后端确认删除成功后才更新 UI，不做乐观更新
@@ -194,16 +193,18 @@ export function MemoryScreen({
           style: 'destructive',
           onPress: async () => {
             try {
-              const response = await apiFetch('/memory/clear', {
+              const response = await apiFetch(API_PATHS.memoryClear, {
                 method: 'POST',
                 // 真实数据目录下服务端要求二次确认；此处已在 Alert 里确认过
                 body: JSON.stringify({ confirm: true }),
               });
 
-              const data = await readJsonResponse(response);
+              const data = (await readJsonResponse(
+                response
+              )) as MemoryClearResponse;
 
               if (!response.ok) {
-                throw new Error(data.error || '清空失败');
+                throw apiErrorFromPayload(data, response.status, '清空失败');
               }
 
               setMemories([]);

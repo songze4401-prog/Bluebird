@@ -11,13 +11,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
 
-import { API_TOKEN } from './constants';
+import { apiFetch, TIMEOUTS } from './api/client';
+import { API_PATHS } from './api/endpoints';
 import { readJsonResponse } from './utils';
 
 // 与后端 HEARTBEAT_TTL_MS（90 秒）配合：每 30 秒一次，允许丢一次心跳。
 export const PRESENCE_HEARTBEAT_MS = 30 * 1000;
-
-const REPORT_TIMEOUT_MS = 10 * 1000;
 
 export type PresenceStatus = 'active' | 'away' | 'unknown';
 
@@ -69,26 +68,17 @@ function nextEventId(): string {
 async function postPresence(
   report: PresenceReport
 ): Promise<PresenceSnapshot | null> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REPORT_TIMEOUT_MS);
-
   try {
-    const response = await fetch(
-      `${process.env.EXPO_PUBLIC_API_URL}/presence/report`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${API_TOKEN}`,
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          ...report,
-          eventId: nextEventId(),
-          occurredAt: new Date().toISOString(),
-        }),
-      }
-    );
+    const response = await apiFetch(API_PATHS.presenceReport, {
+      method: 'POST',
+      // 心跳超时预算比默认短：宁可丢弃也拖住后续心跳
+      timeoutMs: TIMEOUTS.presence,
+      body: JSON.stringify({
+        ...report,
+        eventId: nextEventId(),
+        occurredAt: new Date().toISOString(),
+      }),
+    });
 
     const data = await readJsonResponse(response);
 
@@ -100,8 +90,6 @@ async function postPresence(
   } catch {
     // 网络断开 / 后端不可用：保持静默，交给后续心跳重试
     return null;
-  } finally {
-    clearTimeout(timeout);
   }
 }
 

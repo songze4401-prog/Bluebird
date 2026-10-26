@@ -13,6 +13,14 @@ import {
 
 import { type Theme } from '../theme';
 import { apiFetch } from '../lib/api/client';
+import { API_PATHS } from '../lib/api/endpoints';
+import { apiErrorFromPayload } from '../lib/api/errors';
+import type {
+  ModelDefaultsResponse,
+  ModelProviderResponse,
+  ModelProvidersResponse,
+  ModelTestResponse,
+} from '../lib/api/types';
 import { readJsonResponse } from '../lib/utils';
 import { type ModelDefaults, type ModelProvider } from '../lib/types';
 
@@ -40,10 +48,14 @@ export function ModelScreen({
   theme,
   visible,
   onClose,
+  onDefaultsChanged,
 }: {
   theme: Theme;
   visible: boolean;
   onClose: () => void;
+  // 默认模型变化后通知父级刷新镜像（唯一数据源仍是服务端 defaults）。
+  // 重构前靠「关闭本页时父级再拉一次」兜底，现在改成显式通知。
+  onDefaultsChanged?: () => void;
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);
 
@@ -70,7 +82,9 @@ export function ModelScreen({
       setForm(null);
 
       try {
-        const data = await requestJson('/model-providers');
+        const data = await requestJson<ModelProvidersResponse>(
+          API_PATHS.modelProviders
+        );
 
         if (cancelled) return;
 
@@ -90,7 +104,9 @@ export function ModelScreen({
   }, [visible]);
 
   const refresh = async () => {
-    const data = await requestJson('/model-providers');
+    const data = await requestJson<ModelProvidersResponse>(
+      API_PATHS.modelProviders
+    );
 
     setProviders(Array.isArray(data.providers) ? data.providers : []);
     setDefaults(data.defaults ?? null);
@@ -109,11 +125,13 @@ export function ModelScreen({
     setNotice(null);
 
     try {
-      await requestJson('/model-providers/default', {
+      await requestJson<ModelDefaultsResponse>(API_PATHS.modelDefaults, {
         method: 'PUT',
         body: { providerId, modelId },
       });
       await refresh();
+      // 服务端默认模型已变：通知父级同步聊天请求携带的 providerId/modelId
+      onDefaultsChanged?.();
       setNotice(`已切换到 ${modelId}，下一轮聊天生效`);
     } catch (error) {
       setNotice(
@@ -131,10 +149,10 @@ export function ModelScreen({
     setNotice(null);
 
     try {
-      const data = await requestJson(`/model-providers/${provider.id}/test`, {
-        method: 'POST',
-        body: {},
-      });
+      const data = await requestJson<ModelTestResponse>(
+        API_PATHS.modelProviderTest(provider.id),
+        { method: 'POST', body: {} }
+      );
 
       setNotice(
         data.ok
@@ -166,9 +184,10 @@ export function ModelScreen({
             setNotice(null);
 
             try {
-              await requestJson(`/model-providers/${provider.id}`, {
-                method: 'DELETE',
-              });
+              await requestJson<{ ok: true }>(
+                API_PATHS.modelProvider(provider.id),
+                { method: 'DELETE' }
+              );
               await refresh();
               setNotice('已删除');
             } catch (error) {
@@ -219,13 +238,16 @@ export function ModelScreen({
     if (apiKey) body.apiKey = apiKey;
 
     const data = form.id
-      ? await requestJson(`/model-providers/${form.id}`, {
-          method: 'PATCH',
+      ? await requestJson<ModelProviderResponse>(
+          API_PATHS.modelProvider(form.id),
+          { method: 'PATCH', body }
+        )
+      : await requestJson<ModelProviderResponse>(API_PATHS.modelProviders, {
+          method: 'POST',
           body,
-        })
-      : await requestJson('/model-providers', { method: 'POST', body });
+        });
 
-    return (data.provider as ModelProvider) ?? null;
+    return data.provider ?? null;
   };
 
   const handleSave = async () => {
@@ -268,10 +290,10 @@ export function ModelScreen({
         return;
       }
 
-      const data = await requestJson(`/model-providers/${provider.id}/test`, {
-        method: 'POST',
-        body: {},
-      });
+      const data = await requestJson<ModelTestResponse>(
+        API_PATHS.modelProviderTest(provider.id),
+        { method: 'POST', body: {} }
+      );
 
       await refresh();
 
@@ -584,23 +606,26 @@ export function ModelScreen({
   );
 }
 
-// 统一请求封装：错误优先取后端 { error } 文案，非 JSON 时给出连接提示
-async function requestJson(
+// 统一请求封装：调用方用泛型声明期望的响应体（契约见 lib/api/types）。
+// 错误统一抛 ApiError（带 status / code），非 JSON 时给出连接提示。
+async function requestJson<T>(
   path: string,
   options: { method?: string; body?: unknown } = {}
-): Promise<any> {
+): Promise<T> {
   const response = await apiFetch(path, {
     method: options.method ?? 'GET',
-    ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
+    ...(options.body !== undefined
+      ? { body: JSON.stringify(options.body) }
+      : {}),
   });
 
-  const data = await readJsonResponse(response);
+  const data = (await readJsonResponse(response)) as T;
 
   if (!response.ok) {
-    throw new Error(
-      typeof data.error === 'string' && data.error
-        ? data.error
-        : `请求失败（HTTP ${response.status}）`
+    throw apiErrorFromPayload(
+      data,
+      response.status,
+      `请求失败（HTTP ${response.status}）`
     );
   }
 

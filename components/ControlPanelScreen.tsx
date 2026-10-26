@@ -13,6 +13,12 @@ import {
 
 import { type Theme } from '../theme';
 import { apiFetch } from '../lib/api/client';
+import { API_PATHS } from '../lib/api/endpoints';
+import { apiErrorFromPayload } from '../lib/api/errors';
+import type {
+  PersonaResponse,
+  PersonaSaveResponse,
+} from '../lib/api/types';
 import { type PersonaConfig } from '../lib/types';
 
 // Blue 人格控制面板：独立弹层，不挤占主聊天界面。
@@ -191,11 +197,13 @@ export function ControlPanelScreen({
       setNotice(null);
 
       try {
-        const response = await apiFetch('/persona');
+        const response = await apiFetch(API_PATHS.persona);
 
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = (await response.json()) as PersonaResponse;
 
-        const data = await response.json();
+        if (!response.ok) {
+          throw apiErrorFromPayload(data, response.status, '配置加载失败');
+        }
 
         if (!cancelled) setConfig(data.config);
       } catch {
@@ -221,19 +229,21 @@ export function ControlPanelScreen({
   };
 
   const putConfig = async (body: object): Promise<boolean> => {
-    const response = await apiFetch('/persona', {
+    const response = await apiFetch(API_PATHS.persona, {
       method: 'PUT',
       body: JSON.stringify(body),
     });
+
+    const data = (await response.json()) as PersonaSaveResponse;
 
     if (response.status === 409) {
       setNotice('配置文件已损坏，服务端已原地保护，拒绝写入');
       return false;
     }
 
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-    const data = await response.json();
+    if (!response.ok) {
+      throw apiErrorFromPayload(data, response.status, '保存失败');
+    }
 
     setConfig(data.config);
     return true;
