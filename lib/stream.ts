@@ -4,24 +4,11 @@
 // Expo Go 均支持，不新增依赖），按 SSE 的 \n\n 分帧、解析 data: 行 JSON。
 
 import { API_TOKEN } from './constants';
-import { ModelRoute, ReplySegment } from './types';
+import { API_PATHS } from './api/endpoints';
+import type { ChatResponse } from './api/types';
 
-// done 事件的载荷：字段与 POST /chat 的响应完全一致
-export type StreamDonePayload = {
-  reply?: string;
-  replies?: ReplySegment[];
-  model?: string;
-  providerId?: string;
-  upstreamModel?: string | null;
-  modelRoute?: ModelRoute;
-  sessionId?: string;
-  persisted?: boolean;
-  mood?: string;
-  intensity?: number;
-  userMessageId?: string | null;
-  assistantMessageId?: string;
-  createdAt?: string;
-};
+// done 事件的载荷：字段与 POST /chat 的响应完全一致（同源契约，不再各写一份）
+export type StreamDonePayload = ChatResponse;
 
 export type StreamOutcome =
   | { kind: 'done'; data: StreamDonePayload }
@@ -30,13 +17,30 @@ export type StreamOutcome =
   | { kind: 'fallback' }
   | { kind: 'error'; message: string };
 
-export type StreamEvent = {
-  type?: string;
-  content?: string;
-  error?: string;
-  // meta 事件：服务端在 delta 之前下发本轮分段模式，供前端流式期分段
-  messageMode?: 'single' | 'auto' | 'frequent';
-};
+// 服务端下发的 SSE 事件（判别联合，逐条对照 server/index.js 与 agent-runtime.js）
+// 旧客户端忽略未知 type 即可；这里把已知的六种显式列出，
+// 让 switch/if 分支由 tsc 校验字段，而不是靠字符串猜。
+export type StreamEvent =
+  | {
+      type: 'meta';
+      // 服务端在 delta 之前下发本轮分段模式，供前端流式期分段
+      messageMode: 'single' | 'auto' | 'frequent';
+      sessionId?: string;
+    }
+  | { type: 'delta'; content: string }
+  | ({ type: 'done' } & ChatResponse)
+  // code 仅在模型调用类错误时出现（auth / rate_limit / timeout / ...）
+  | { type: 'error'; error?: string; code?: string }
+  | { type: 'tool_start'; name: string; callId: string }
+  | {
+      type: 'tool_end';
+      name: string;
+      callId: string;
+      ok: boolean;
+      code?: string;
+      deduped?: boolean;
+      summary?: string;
+    };
 
 // SSE 增量解析器：分帧逻辑独立为纯函数，便于测试与复用。
 // 用法：网络层每拿到一段新文本就 push()，解析出完整事件时回调 onEvent。
@@ -190,7 +194,7 @@ export function streamChatRequest(
     };
 
     try {
-      xhr.open('POST', `${process.env.EXPO_PUBLIC_API_URL}/chat/stream`);
+      xhr.open('POST', `${process.env.EXPO_PUBLIC_API_URL}${API_PATHS.chatStream}`);
       xhr.setRequestHeader('Content-Type', 'application/json');
       xhr.setRequestHeader('Authorization', `Bearer ${API_TOKEN}`);
       xhr.timeout = 60000;

@@ -8,6 +8,8 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { apiFetch } from '../lib/api/client';
+import { API_PATHS } from '../lib/api/endpoints';
+import type { ModelProvidersResponse } from '../lib/api/types';
 import { readJsonResponse } from '../lib/utils';
 import type { ModelDefaults } from '../lib/types';
 
@@ -21,9 +23,9 @@ export function useModelSelection(): {
 
   const refreshModelSelection = useCallback(async () => {
     try {
-      const response = await apiFetch('/model-providers');
+      const response = await apiFetch(API_PATHS.modelProviders);
 
-      const data = await readJsonResponse(response);
+      const data = (await readJsonResponse(response)) as ModelProvidersResponse;
 
       // 读取失败时保持 null：请求不带 ids，由服务端全局默认兜底
       if (!response.ok || !data || !data.defaults) return;

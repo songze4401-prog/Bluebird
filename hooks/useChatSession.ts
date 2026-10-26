@@ -15,6 +15,19 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert } from 'react-native';
 
 import { apiFetch, TIMEOUTS } from '../lib/api/client';
+import { API_PATHS } from '../lib/api/endpoints';
+import {
+  ApiError,
+  apiErrorFromPayload,
+  errorMessageWithHint,
+  isAbortError,
+} from '../lib/api/errors';
+import type {
+  ChatResponse,
+  ClearHistoryResponse,
+  HistoryResponse,
+  RecallResponse,
+} from '../lib/api/types';
 import { createRequestGate } from '../lib/api/latest-request';
 import { makeLocalId, readJsonResponse } from '../lib/utils';
 import { streamChatRequest } from '../lib/stream';
@@ -42,27 +55,13 @@ const HISTORY_LIMIT = 200;
 // 进入模型上下文的最大历史条数
 const HISTORY_CONTEXT_LIMIT = 20;
 
-// 服务端明确错误（无效模型 / 无视觉模型 / 缺 Key 等）：把后端给出的原因原样
-// 展示给用户，而不是统一成「连接失败」。网络类错误仍用统一文案。
-type ServerError = Error & { fromServer?: true };
-
-function serverError(message: string): ServerError {
-  const error = new Error(message) as ServerError;
-  error.fromServer = true;
-  return error;
-}
-
-function isServerError(error: unknown): error is ServerError {
-  return error instanceof Error && (error as ServerError).fromServer === true;
-}
-
-// 统一的失败文案：超时 / 服务端明确原因 / 通用连接失败
+// 统一的失败文案：超时 / 服务端明确原因（带 code 时补下一步提示）/ 通用连接失败
 function toErrorMessage(error: unknown): string {
-  if (error instanceof Error && error.name === 'AbortError') {
+  if (isAbortError(error)) {
     return '连接Bluebird超时了，再试一次。';
   }
 
-  if (isServerError(error) && error.message) return error.message;
+  if (error instanceof ApiError) return errorMessageWithHint(error);
 
   return '连接Bluebird失败了，再试一次。';
 }
@@ -172,13 +171,11 @@ export function useChatSession({
 
     try {
       const response = await apiFetch(
-        `/history?sessionId=${encodeURIComponent(
-          targetSessionId
-        )}&limit=${HISTORY_LIMIT}`,
+        API_PATHS.history(targetSessionId, HISTORY_LIMIT),
         { signal: ticket.signal }
       );
 
-      const data = await readJsonResponse(response);
+      const data = (await readJsonResponse(response)) as HistoryResponse;
 
       // 旧响应一律丢弃：不写消息、不改会话、不弹错
       if (!historyGate.isCurrent(ticket.id)) {
@@ -314,14 +311,14 @@ export function useChatSession({
       // ---- 非流式 /chat 路径（开关关闭，或流式回退）----
       // 一次性写入全部气泡（不做假分条动画），与流式 done 同源切分；
       // 用户已切走会话则不追加（消息已落盘，切回时历史完整恢复）
-      const response = await apiFetch('/chat', {
+      const response = await apiFetch(API_PATHS.chat, {
         method: 'POST',
         // 超时由 apiFetch 统一负责（此处保留原有 60s 预算）
         timeoutMs: TIMEOUTS.chat,
         body: JSON.stringify(payload),
       });
 
-      const data = await readJsonResponse(response);
+      const data = (await readJsonResponse(response)) as ChatResponse;
 
       if (!response.ok) {
         // 会话被清理/只读保护时给出明确的下一步指引
@@ -329,7 +326,7 @@ export function useChatSession({
           Alert.alert('会话已失效', '返回主页后请重新选择会话。');
         }
 
-        throw serverError(data.error || '请求失败');
+        throw apiErrorFromPayload(data, response.status, '请求失败');
       }
 
       const segments = normalizeSegments(data);
@@ -556,7 +553,7 @@ export function useChatSession({
           style: 'destructive',
           onPress: async () => {
             try {
-              const response = await apiFetch('/history/clear', {
+              const response = await apiFetch(API_PATHS.historyClear, {
                 method: 'POST',
                 body: JSON.stringify({
                   sessionId,
@@ -565,10 +562,12 @@ export function useChatSession({
                 }),
               });
 
-              const data = await readJsonResponse(response);
+              const data = (await readJsonResponse(
+                response
+              )) as ClearHistoryResponse;
 
               if (!response.ok) {
-                throw new Error(data.error || '清理失败');
+                throw apiErrorFromPayload(data, response.status, '清理失败');
               }
 
               setMessages([]);
@@ -597,7 +596,7 @@ export function useChatSession({
         style: 'destructive',
         onPress: async () => {
           try {
-            const response = await apiFetch('/history/recall', {
+            const response = await apiFetch(API_PATHS.historyRecall, {
               method: 'POST',
               body: JSON.stringify({
                 sessionId,
@@ -605,10 +604,10 @@ export function useChatSession({
               }),
             });
 
-            const data = await readJsonResponse(response);
+            const data = (await readJsonResponse(response)) as RecallResponse;
 
             if (!response.ok) {
-              throw new Error(data.error || '撤回失败');
+              throw apiErrorFromPayload(data, response.status, '撤回失败');
             }
 
             // 服务端返回真实删除的 id 列表（含配对的 AI 回复），按它移除

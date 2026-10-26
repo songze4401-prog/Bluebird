@@ -11,8 +11,11 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { apiFetch } from '../lib/api/client';
+import { API_PATHS } from '../lib/api/endpoints';
+import { apiErrorFromPayload } from '../lib/api/errors';
 import { createRequestGate } from '../lib/api/latest-request';
 import { readJsonResponse } from '../lib/utils';
+import type { SessionsResponse } from '../lib/api/types';
 import type { SessionMeta } from '../lib/types';
 
 export const SESSIONS_ERROR_TEXT = '读取会话列表失败，请稍后再试。';
@@ -44,17 +47,17 @@ export function useSessionList(): SessionListApi {
     setError('');
 
     try {
-      const response = await apiFetch('/sessions', {
+      const response = await apiFetch(API_PATHS.sessions, {
         signal: ticket.signal,
       });
 
-      const data = await readJsonResponse(response);
+      const data = (await readJsonResponse(response)) as SessionsResponse;
 
       // 已被更新的刷新取代：不覆盖列表、不改 loading
       if (!gate.isCurrent(ticket.id)) return null;
 
       if (!response.ok || !Array.isArray(data.sessions)) {
-        throw new Error(data.error || '读取失败');
+        throw apiErrorFromPayload(data, response.status, '读取失败');
       }
 
       const list = data.sessions as SessionMeta[];

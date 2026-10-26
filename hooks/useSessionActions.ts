@@ -11,6 +11,12 @@ import { useState } from 'react';
 import { Alert } from 'react-native';
 
 import { apiFetch } from '../lib/api/client';
+import { API_PATHS } from '../lib/api/endpoints';
+import { apiErrorFromPayload } from '../lib/api/errors';
+import type {
+  CreateSessionResponse,
+  DeleteSessionResponse,
+} from '../lib/api/types';
 import { readJsonResponse } from '../lib/utils';
 import { DEFAULT_SESSION_ID } from '../lib/constants';
 import type { ChatSessionApi } from './useChatSession';
@@ -53,15 +59,15 @@ export function useSessionActions({
     setCreatingSession(true);
 
     try {
-      const response = await apiFetch('/sessions', {
+      const response = await apiFetch(API_PATHS.sessions, {
         method: 'POST',
         body: JSON.stringify({}),
       });
 
-      const data = await readJsonResponse(response);
+      const data = (await readJsonResponse(response)) as CreateSessionResponse;
 
       if (!response.ok || !data.session?.id) {
-        throw new Error(data.error || '新建会话失败');
+        throw apiErrorFromPayload(data, response.status, '新建会话失败');
       }
 
       setCurrentSessionId(data.session.id);
@@ -107,15 +113,14 @@ export function useSessionActions({
   // 服务端保证 default 被删后会立即重建为空会话，不会留下悬空 id
   const deleteSession = async (sessionId: string): Promise<boolean> => {
     try {
-      const response = await apiFetch(
-        `/sessions/${encodeURIComponent(sessionId)}`,
-        { method: 'DELETE' }
-      );
+      const response = await apiFetch(API_PATHS.session(sessionId), {
+        method: 'DELETE',
+      });
 
-      const data = await readJsonResponse(response);
+      const data = (await readJsonResponse(response)) as DeleteSessionResponse;
 
       if (!response.ok) {
-        throw new Error(data.error || '删除失败');
+        throw apiErrorFromPayload(data, response.status, '删除失败');
       }
 
       if (sessionId === currentSessionId) {

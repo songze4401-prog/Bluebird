@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
 
 import { apiFetch, TIMEOUTS } from './api/client';
+import { API_PATHS } from './api/endpoints';
 import { readJsonResponse } from './utils';
 
 // 与后端 HEARTBEAT_TTL_MS（90 秒）配合：每 30 秒一次，允许丢一次心跳。
@@ -68,7 +69,7 @@ async function postPresence(
   report: PresenceReport
 ): Promise<PresenceSnapshot | null> {
   try {
-    const response = await apiFetch('/presence/report', {
+    const response = await apiFetch(API_PATHS.presenceReport, {
       method: 'POST',
       // 心跳超时预算比默认短：宁可丢弃也拖住后续心跳
       timeoutMs: TIMEOUTS.presence,
