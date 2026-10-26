@@ -1,0 +1,43 @@
+{
+  "schemaVersion": "v2.3",
+  "ttl": {
+    "realtime_data": { "ttlMs": 30000, "on_expire": "refetch", "ttlRequired": true },
+    "user_preference": { "ttlMs": 2592000000, "on_expire": "demote_to_pending" },
+    "project_fact": { "ttlMs": 604800000, "on_expire": "revalidate" }
+  },
+  "budget": {
+    "softTarget": 6000,
+    "hardCap": 8000,
+    "guaranteedSystem": 1200,
+    "guaranteedTask": 400,
+    "perTypeMax": {
+      "realtime_data": 600,
+      "user_preference": 400,
+      "project_fact": 400,
+      "doc": 800,
+      "web": 800,
+      "tool": 800,
+      "memory": 800,
+      "user": 500
+    }
+  },
+  "retry": {
+    "maxRetries": 1,
+    "retryableOnlyReadonly": true
+  },
+  "circuitBreaker": {
+    "failureThreshold": 3,
+    "windowMs": 30000
+  },
+  "routing": {
+    "plannerKeywordThreshold": 6,
+    "complexKeywords": ["比较", "分析", "计划", "对比", "方案", "为什么", "如何", "流程", "规划", "总结", "研究", "股价", "价格", "今天", "最新", "状态", "检查", "筛选", "评估", "风险", "多个", "列出", "对比一下", "差异", "区别", "预算", "安排"],
+    "simpleTaskMaxLength": 40
+  },
+  "metrics": {
+    "demoteRateThreshold": 0.2,
+    "conflictRateThreshold": 0.1
+  },
+  "verificationOrder": ["delivered", "schema_valid", "cross_checked", "user_confirmed"],
+  "sourceOrder": ["user", "tool", "memory", "doc", "web"]
+}
