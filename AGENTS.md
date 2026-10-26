@@ -59,25 +59,56 @@ Everything the user owns lives in one directory: `server/data/`, or `BLUEBIRD_DA
 
 ### Backup
 
+There is exactly **one** implementation: `server/backup.js` (logic) driven by `scripts/bluebird-backup.js` (CLI). `scripts/blue-backup.sh` / `scripts/blue-backup.ps1` are thin wrappers that forward to it — do not reimplement the flow in a shell script.
+
+**Why the wrappers exist:** the pre-2026-10 shell/PowerShell versions copied only *top-level files* (`for src in "$DATA_DIR"/*` filtered by `-f`), so `uploads/` (chat images) and `sticker-repo/` (sticker library) were skipped **silently** — the run printed `✓ 备份完成` while a restore would lose every image and the whole sticker library. The Node implementation walks the tree recursively; that gap is the reason both old entry points now delegate instead of staying independent.
+
 ```bash
-bash scripts/blue-backup.sh               # -> $HOME/bluebird-backups/data-<ts>/
-bash scripts/blue-backup.sh /mnt/usb      # explicit destination root
+node scripts/bluebird-backup.js                     # -> $HOME/bluebird-backups/data-<ts>/
+node scripts/bluebird-backup.js --out-dir /mnt/usb  # another disk = a different failure domain
+node scripts/bluebird-backup.js --keep 14
+node scripts/bluebird-backup.js --check             # status only; exit 2 when stale or last run failed
+node scripts/bluebird-restore-drill.js              # isolated restore rehearsal (see below)
+
+bash scripts/blue-backup.sh /mnt/usb                # wrapper, positional arg = backup root
+pwsh scripts/blue-backup.ps1 -OutDir 'E:\backups'   # wrapper (ASCII-only on purpose, see below)
 ```
 
-```powershell
-pwsh scripts/blue-backup.ps1
-pwsh scripts/blue-backup.ps1 -DataDir 'D:\...\Bluebird\server\data' -OutDir 'E:\backups'
+What a run guarantees:
+
+- **Scope** — recursive over the whole data directory, dotfiles included; runtime artifacts (`.bluebird.lock`, `*.tmp.*` / `*.tmp-*`) are skipped and reported, because restoring a lock makes the server refuse to start, believing another instance is alive. `.corrupt-<ts>` / `.bak-<ts>` files *are* included (forensic value, tiny).
+- **Secrets are excluded by default** — `api-keys.json` (the plaintext key store) is **never** placed in a snapshot. It is recorded under `skippedSecrets` in the manifest and the run prints `未备份（密钥，默认排除）`. If a deployment genuinely needs the keys backed up, pass `--encrypt-secrets` together with `BLUEBIRD_BACKUP_KEY` (a high-entropy passphrase, stored in a secret manager — never committed); the key is then written as `<name>.enc` (AES-256-GCM) and the plaintext never appears in the snapshot. `restoreSnapshot` decrypts it back only when `BLUEBIRD_BACKUP_KEY` is present at restore time (`restore_missing_key` otherwise).
+- **Integrity** — every file must be non-empty, parse as JSON (with a shape rule for the store-critical ones: `sessions.sessions` must be an **array** and `sessions.messages` an **object**), and match its copy's SHA-256. `MANIFEST.json` records `path / bytes / sha256 / structure` per file.
+- **Consistency** — each module persists via temp file + `fsync` + atomic rename, so a single file is always self-consistent; there is no cross-file transaction. The run therefore re-stats every source file after copying and retries once if any changed, and **fails** (`source_changed_during_copy`) rather than shipping a possibly-skewed snapshot.
+- **Traceable run log** — `<backup root>/_state/runs.jsonl` gets one appended JSON line per run: `ts`, `ok`, `snapshotDir`, `durationMs`, `files`, `bytes`, `manifestSha256`, `error`. `<backup root>/_state/last-status.json` holds `lastRunOk`, `lastSuccessAt`, `lastSuccessSnapshot`, `consecutiveFailures`, `lastError`, `disasterRecoveryGrade`.
+- **Staleness is detectable, not assumed** — `--check` exits `0` when healthy, `2` when there is no status file, no successful run, the last success is older than `--stale-hours` (default 24), or the last run failed, and `1` on a check error. Exit `0` means "the status is healthy", **not** "a scheduler is running".
+- **Retention** — `--keep N` (default 7) prunes only snapshots this tool wrote (`data-*` containing `MANIFEST.json` with a matching `formatVersion`). Legacy `MANIFEST.txt`-only directories are never deleted.
+- **Failure domain / disaster recovery is NOT claimed by a local path** — a backup root inside the data directory is refused (`out_root_inside_data`). When the root sits on a different drive letter it records `differentLogicalDrive: true` but still sets `disasterRecoveryGrade: false` with `offHostUnverified: true`: a different drive letter on the **same physical disk** (e.g. this host's C: and D: are both `KINGSTON SA400S37240G`, Disk0) is only logical separation and survives neither a dead disk nor a dead machine. True DR requires the root to be on a **different machine or remote storage**; the tool cannot confirm that from a local path, so it never asserts it.
+
+**Alerting watchdog.** `scripts/bluebird-backup-check-alert.js` wraps `--check`: on a non-zero exit it appends one JSON line to `<backup root>/_state/alerts.jsonl` and, if `BLUEBIRD_ALERT_CMD` is set, executes that command (the alert JSON is passed via the `BLUEBIRD_ALERT_PAYLOAD` env var; it does not touch stdout logs). A scheduler should call the watchdog (not the bare backup) so failures surface. The watchdog preserves the check's exit code, so the scheduler's own failure notification also fires.
+
+**Scheduling is not configured by this repo.** Nothing in the repository installs a cron job, systemd timer, or Windows scheduled task, and the tests do not simulate one. The deployment must wire it explicitly, for example on Windows:
+
+```bat
+:: 每日 03:07 备份（指向异机/远端时才是真正 DR；本机 C:/D: 同盘仅逻辑隔离）
+schtasks /Create /TN "BluebirdBackup" /SC DAILY /ST 03:07 /TR "cmd /c node <repo>\scripts\bluebird-backup.js --out-dir <independent-or-remote-root> --keep 7"
+
+:: 每日 03:37 检查健康度，异常则写 alerts.jsonl 并可外发
+schtasks /Create /TN "BluebirdBackupWatchdog" /SC DAILY /ST 03:37 /TR "cmd /c set BLUEBIRD_ALERT_CMD=<your-notifier> && node <repo>\scripts\bluebird-backup-check-alert.js --out-dir <independent-or-remote-root>"
 ```
 
-Both scripts are the same tool. They enumerate every data file in the directory (dotfiles included), skip runtime artifacts (`.bluebird.lock`, `*.tmp.*` — restoring a lock would make the server refuse to start, believing another instance is alive), copy each file into a timestamped sub-directory with one retry, write a `MANIFEST.txt` recording size and SHA-256 per file plus the skipped names, re-hash every copy and fail loudly on any mismatch, never write to or delete from the source, and never overwrite an existing backup directory. The source defaults to `BLUEBIRD_DATA_DIR` (else `<repo>/server/data`) and the destination to `BLUEBIRD_BACKUP_DIR` (else `$HOME/bluebird-backups`), so they back up the directory the server actually uses. Backing up while the server runs is safe per file — every module persists by writing a temp file and renaming it into place (`sessions.json` also `fsync`s), so a reader always sees one complete previous version — but a cross-file consistent snapshot (memory / sessions / emotion at the same instant) needs the server stopped.
+On Linux/macOS the equivalent is a crontab line (`0 3 * * * cd <repo> && node scripts/bluebird-backup.js --keep 7`, plus a `--check` probe). A manual run is **not** evidence that scheduled backups work, and a local `--out-dir` is **not** evidence of disaster recovery.
 
-`scripts/blue-backup.ps1` must keep its UTF-8 **BOM** (PowerShell 5 decodes a BOM-less file with the system ANSI codepage, which garbles the Chinese text and fails to parse); `scripts/blue-backup.sh` must not have one (a BOM breaks the shebang).
+`scripts/blue-backup.ps1` is intentionally **ASCII-only** so it no longer depends on the UTF-8 BOM (PowerShell 5 decodes a BOM-less file with the system ANSI codepage). If you ever re-add non-ASCII text to it, the BOM becomes mandatory again. `scripts/blue-backup.sh` must not have a BOM (it breaks the shebang).
 
 ### Restore
 
-1. Stop the server and confirm no instance holds `<DATA_DIR>/.bluebird.lock`.
-2. Replace the contents of `<DATA_DIR>` with the backup directory's contents — keep the old directory aside instead of deleting it.
-3. Start the server: the JSON is loaded as-is, and sessions, memories, and emotion come back exactly as they were at backup time.
+1. **Rehearse first.** `node scripts/bluebird-restore-drill.js` restores the latest snapshot into an isolated `mkdtemp` directory, re-verifies every hash and structure, loads the restored data through the real `server/` modules (`sessions.listSessions`, `sessions.getAllMessages`, `memory.getMemories`, `emotion.getEmotion`, `persona.getConfig`), cross-checks the counts the modules report against the counts in the files, and proves the production directory's tree digest is unchanged. It never writes to the production data directory, never starts the server, and never calls a model. Records land in `<backup root>/_state/drills.jsonl`.
+2. Stop the server and confirm no instance holds `<DATA_DIR>/.bluebird.lock`.
+3. Replace the contents of `<DATA_DIR>` with the backup directory's contents — keep the old directory aside instead of deleting it.
+4. Start the server: the JSON is loaded as-is, and sessions, memories, and emotion come back exactly as they were at backup time.
+
+A drill note: `sessions.js` enforces "the default session always exists", so a restored store that lacks it gets one created on first load. The drill tolerates `sessions >= file count` for that reason and treats a *shortfall* as the failure signal.
 
 Reviving the **legacy** history out of `chat-history.json.pre-multisession.bak` is a separate manual path, because that file is a `chat-history.json` and not a `sessions.json`:
 
@@ -106,10 +137,10 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-Twenty-three files, 861 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
+Twenty-four files, 905 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
-node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js   # node:test suites (96)
+node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js   # node:test suites (140)
 node tests/api.test.js                    # 26 — HTTP/auth/rate-limit, custom runner
 node tests/atomic-write.test.js           # 16 — temp+fsync+rename atomic writes, incl. a SIGKILL crash simulation
 node tests/chat-persist.test.js           # 23
@@ -131,7 +162,7 @@ node tests/time-gap.test.js               # 29 — chat time-gap context: minute
 node tests/agent-tools.test.js            # 119 — agent tool calling V1: three gates (switch / capability / no-image), 3-round cap, per-session memory scope, tool timeout & abort, late-result handling, toolSteps persistence & read-back, SSE tool_start/tool_end, model semantics on downgrade
 ```
 
-- Four `node:test` suites plus nineteen custom-runner scripts. `memory` / `emotion` declare `{ concurrency: 1 }` on every `describe` because suites within a file share one data file (the corruption-recovery case renames it to `.corrupt`); `sticker-markers` and `streaming-segments` are pure functions with no shared state. The nineteen custom runners (not `node:test`) exit explicitly.
+- Five `node:test` suites plus nineteen custom-runner scripts. `memory` / `emotion` declare `{ concurrency: 1 }` on every `describe` because suites within a file share one data file (the corruption-recovery case renames it to `.corrupt`); `sticker-markers` and `streaming-segments` are pure functions with no shared state. The nineteen custom runners (not `node:test`) exit explicitly.
 - `tests/data-events.test.js` covers the corruption events end to end: it corrupts each of the three data files in its own temp directory and asserts the structured stderr line has every field (`ts` / `module` / `file` / `reason` / `action`) and that the original protection behaviour is unchanged (`sessions.json` left byte-identical with writes refused, `memory.json` / `emotion-state.json` renamed aside). It also seeds a sentinel string into each corrupt file and asserts it never appears in the log, guarding the "no chat / memory content in logs" rule. The `isolation_failed` case is forced with `Object.defineProperty(fs, 'renameSync', …)` — a plain assignment does not work because Node's `fs` exports some functions as lazy getters. It also covers the non-corruption anomalies: a corrupt `chat-history.json` (`legacy_import_skipped`, asserting the file's chat text never reaches the log), orphan `messages` keys (`orphan_messages_detected`, keeping the old human warning), a refused `sessions.json` write (`store_write_failed`), and failed memory / emotion writes (`write_queue_error`, with `fs.promises.rename` forced to fail the same way).
 - `tests/atomic-write.test.js` proves the atomic write helper: `writeFileAtomicSync` / `writeFileAtomic` create, overwrite, and keep the target intact when the `rename` fails (old content preserved, temp file cleaned up). Its crash case spawns a child process that writes the old value, makes `fs.promises.rename` kill itself with `SIGKILL` **before** the rename, then writes the new value — after the child dies, the parent asserts the target still holds a complete, parseable old (or new) value and is never empty or truncated, and that any leftover temp file matches the `.tmp-<pid>-<ts>-<rand>` naming.
 - `tests/corruption-contract.test.js` guards the unified contract: section 1 unit-tests the dispatcher (registration rejects a handler missing `detect` / `recover`, an unregistered module throws, healthy data skips `recover` and logs nothing, corrupt data calls `recover` with the reason / error injected and logs exactly one event); section 2 replaces `handleCorruption` with a recording spy **before** requiring the modules (they destructure it, so the spy wins) and asserts each module reaches it — `sessions`, `sessions.legacy` (corrupt `chat-history.json`), `memory`, `emotion` — while each strategy still behaves as documented; section 3 asserts `emotion` still does not treat a wrong shape as corruption; section 4 asserts healthy files never trigger recovery. The spy wraps the real implementation so the event assertions still hold.
