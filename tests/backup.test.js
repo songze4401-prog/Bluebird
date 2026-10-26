@@ -805,6 +805,96 @@ describe('密钥备份策略（默认排除，可选加密）', { concurrency: 1
   });
 });
 
+describe('isSecretFile 跨平台路径判断', { concurrency: 1 }, () => {
+  test('顶层 api-keys.json 应识别为密钥', () => {
+    assert.strictEqual(backup.isSecretFile('api-keys.json'), true);
+  });
+
+  test('嵌套目录（POSIX 分隔符）中的 api-keys.json 也应识别', () => {
+    assert.strictEqual(backup.isSecretFile('nested/api-keys.json'), true);
+    assert.strictEqual(backup.isSecretFile('a/b/c/api-keys.json'), true);
+  });
+
+  test('嵌套目录（Windows 分隔符）中的 api-keys.json 也应识别', () => {
+    assert.strictEqual(backup.isSecretFile('nested\\api-keys.json'), true);
+    assert.strictEqual(backup.isSecretFile('a\\b\\c\\api-keys.json'), true);
+  });
+
+  test('非密钥文件不应被误判（含同名前缀/后缀）', () => {
+    assert.strictEqual(backup.isSecretFile('other.json'), false);
+    assert.strictEqual(backup.isSecretFile('nested/other.json'), false);
+    assert.strictEqual(backup.isSecretFile('api-keys.json.bak'), false);
+    assert.strictEqual(backup.isSecretFile('my-api-keys.json'), false);
+  });
+});
+
+describe('嵌套 api-keys.json 实际排除（集成）', { concurrency: 1 }, () => {
+  test('位于子目录的 api-keys.json 不进快照，记入 skippedSecrets', () => {
+    const { dataDir, outRoot } = makeFixture({ name: 'nested-secret' });
+
+    writeFile(
+      path.join(dataDir, 'sub/api-keys.json'),
+      JSON.stringify({ providers: { deepseek: { apiKey: 'SUB_SECRET' } } })
+    );
+    writeFile(
+      path.join(dataDir, 'a/b/c/api-keys.json'),
+      JSON.stringify({ providers: { deepseek: { apiKey: 'DEEP_SECRET' } } })
+    );
+
+    const result = backup.createBackup({ dataDir, outRoot });
+
+    assert.strictEqual(result.ok, true, JSON.stringify(result.error));
+
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(result.snapshotDir, 'MANIFEST.json'), 'utf8')
+    );
+
+    assert.ok(
+      !manifest.files.some(item => item.path === 'sub/api-keys.json'),
+      '子目录密钥不得进快照'
+    );
+    assert.ok(
+      !manifest.files.some(item => item.path === 'a/b/c/api-keys.json'),
+      '深层密钥不得进快照'
+    );
+    assert.ok(manifest.skippedSecrets.includes('sub/api-keys.json'));
+    assert.ok(manifest.skippedSecrets.includes('a/b/c/api-keys.json'));
+  });
+});
+
+describe('诚实故障域不变量（disasterRecoveryGrade 恒为 false）', { concurrency: 1 }, () => {
+  test('本地路径备份成功后，状态文件 disasterRecoveryGrade 必须为 false 且 offHostUnverified 为 true', () => {
+    const { dataDir, outRoot } = makeFixture({ name: 'dr-grade' });
+    const result = backup.createBackup({ dataDir, outRoot });
+
+    assert.strictEqual(result.ok, true, JSON.stringify(result.error));
+
+    const status = backup.readStatus(outRoot);
+
+    assert.strictEqual(status.disasterRecoveryGrade, false, '本地备份不得宣称灾难恢复就绪');
+    assert.strictEqual(status.offHostUnverified, true, '是否异机/远端必须由部署层核实');
+
+    // 结果对象本身不得携带任何「灾难恢复就绪」标记，避免被误读
+    assert.ok(
+      !('disasterRecoveryGrade' in result),
+      'createBackup 结果不应误导性地携带 DR 标记'
+    );
+  });
+
+  test('即使不同逻辑盘符，disasterRecoveryGrade 仍为 false（不同盘符≠不同物理盘）', () => {
+    const { dataDir } = makeFixture({ name: 'dr-grade-drive' });
+    const outRoot = path.join(TMP_ROOT, 'dr-grade-drive-backups');
+
+    const result = backup.createBackup({ dataDir, outRoot });
+
+    assert.strictEqual(result.ok, true, JSON.stringify(result.error));
+
+    const status = backup.readStatus(outRoot);
+
+    assert.strictEqual(status.disasterRecoveryGrade, false);
+  });
+});
+
 describe('看门狗告警链路', { concurrency: 1 }, () => {
   const runWatchdog = args =>
     spawnSync(
@@ -899,6 +989,77 @@ describe('看门狗告警链路', { concurrency: 1 }, () => {
     const alertsPath = path.join(backup.stateDirOf(outRoot), 'alerts.jsonl');
 
     assert.ok(!fs.existsSync(alertsPath), '正常时不应写告警');
+  });
+
+  test('--check 期间 checkStatus 抛异常时，CLI 显式返回退出码 1（而非崩溃）', () => {
+    const cli = require('../scripts/bluebird-backup.js');
+    const backupMod = require('../server/backup');
+    const orig = backupMod.checkStatus;
+
+    backupMod.checkStatus = () => {
+      throw new Error('simulated check failure');
+    };
+
+    const prevArgv = process.argv;
+
+    try {
+      process.argv = [
+        'node',
+        'bluebird-backup.js',
+        '--check',
+        '--out-dir',
+        path.join(TMP_ROOT, 'cli-check-err'),
+      ];
+
+      const code = cli.main();
+
+      assert.strictEqual(code, 1, '异常路径必须显式返回退出码 1');
+    } finally {
+      backupMod.checkStatus = orig;
+      process.argv = prevArgv;
+    }
+  });
+
+  test('check 子进程退出码 1 时，看门狗记录 kind=backup_check_error 并透传退出码', () => {
+    const cp = require('node:child_process');
+    const origSpawn = cp.spawnSync;
+    const outRoot = path.join(TMP_ROOT, 'wd-check-err');
+
+    // 让看门狗内部 spawnSync 的 check 子进程返回退出码 1
+    cp.spawnSync = (cmd, args) => {
+      if (Array.isArray(args) && args.includes('--check')) {
+        return { status: 1, stdout: '{}', stderr: '' };
+      }
+
+      return origSpawn(cmd, args);
+    };
+
+    const prevArgv = process.argv;
+
+    try {
+      // 必须在首次 require 看门狗前注入 mock（看门狗在模块加载时即解构 spawnSync）
+      const watchdog = require('../scripts/bluebird-backup-check-alert.js');
+
+      process.argv = ['node', 'watchdog', '--out-dir', outRoot, '--json'];
+
+      const code = watchdog.main();
+
+      assert.strictEqual(code, 1, '看门狗应透传 check 的退出码 1');
+
+      const alerts = readJsonLines(
+        path.join(backup.stateDirOf(outRoot), 'alerts.jsonl')
+      );
+
+      assert.strictEqual(alerts.length, 1, '异常路径必须写一条告警');
+      assert.strictEqual(alerts[0].kind, 'backup_check_error', '退出码 1 必须记为 backup_check_error');
+      assert.strictEqual(alerts[0].exitCode, 1);
+    } finally {
+      cp.spawnSync = origSpawn;
+      process.argv = prevArgv;
+      delete require.cache[
+        require.resolve('../scripts/bluebird-backup-check-alert.js')
+      ];
+    }
   });
 });
 

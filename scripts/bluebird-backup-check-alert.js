@@ -165,4 +165,8 @@ function main() {
   return exitCode;
 }
 
-process.exitCode = main();
+module.exports = { main, parseArgs };
+
+if (require.main === module) {
+  process.exitCode = main();
+}

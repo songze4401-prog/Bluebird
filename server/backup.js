@@ -68,11 +68,16 @@ function isRuntimeArtifact(name) {
  * 密钥文件：默认不进备份。api-keys.json 是明文密钥库（API key 等），
  * 进快照等于把密钥存进一份可能被同步/外发的副本。默认排除；若业务确有需求，
  * 走加密通道（见 createBackup 的 encryptSecrets）。
+ *
+ * 跨平台判定：relPath 可能来自 collectEntries 的 POSIX 拼接（永远是 `/`），
+ * 也可能在某些调用方传入 Windows 风格 `\\`。先统一成 `/` 再取 basename，
+ * 保证「嵌套目录里的 api-keys.json」在两种分隔符下都能正确排除。
  */
 function isSecretFile(relPath) {
-  const base = relPath.split('/').pop();
+  const normalized = String(relPath).replace(/\\/g, '/');
+  const base = normalized.split('/').pop();
 
-  return base === 'api-keys.json' || relPath === 'api-keys.json';
+  return base === 'api-keys.json';
 }
 
 function sha256File(filePath) {
@@ -90,6 +95,11 @@ function sha256Text(text) {
 // 仅用于「业务确实要求备份密钥」时的可选通道：AES-256-GCM。
 // 密钥本身由调用方通过环境变量 BLUEBIRD_BACKUP_KEY 提供（高熵口令），
 // 经 SHA-256 派生为 32 字节。口令不得写入备份、日志或测试报告。
+//
+// 已知限制（本轮刻意不改，待独立审查）：单次摘要无 KDF 拉伸，若部署方使用低
+// 熵口令，抗暴力破解能力弱。后续若引入 PBKDF2/scrypt 拉伸，会同时改变加密方
+// （encryptBuffer）与解密方（decryptBuffer）约定，并使既有 .enc 副本无法解密——
+// 属于加密格式变更，必须经专门审查，不能随手改。本轮仅保留当前行为，风险单独记录。
 
 function deriveKey(passphrase) {
   return crypto.createHash('sha256').update(passphrase, 'utf8').digest();

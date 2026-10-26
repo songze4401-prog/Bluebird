@@ -104,32 +104,42 @@ function main() {
   const outRoot = backup.resolveOutRoot(args.outDir);
 
   if (args.check) {
-    const check = backup.checkStatus(outRoot, {
-      maxAgeHours: args.staleHours === null ? undefined : args.staleHours,
-    });
+    try {
+      const check = backup.checkStatus(outRoot, {
+        maxAgeHours: args.staleHours === null ? undefined : args.staleHours,
+      });
 
-    if (args.json) {
-      console.log(JSON.stringify(check, null, 2));
-    } else if (check.ok) {
-      console.log('✓ 备份状态正常');
-      console.log(`  最近成功: ${check.status.lastSuccessAt}（${check.ageHours} 小时前）`);
-      console.log(`  快照:     ${check.status.lastSuccessSnapshot}`);
-      console.log(`  连续失败: ${check.status.consecutiveFailures}`);
-    } else {
-      console.log('✗ 备份状态异常');
-      console.log(`  原因:     ${check.reason}`);
-      if (check.ageHours !== null) {
-        console.log(`  距上次成功: ${check.ageHours} 小时（阈值 ${check.maxAgeHours}）`);
+      if (args.json) {
+        console.log(JSON.stringify(check, null, 2));
+      } else if (check.ok) {
+        console.log('✓ 备份状态正常');
+        console.log(`  最近成功: ${check.status.lastSuccessAt}（${check.ageHours} 小时前）`);
+        console.log(`  快照:     ${check.status.lastSuccessSnapshot}`);
+        console.log(`  连续失败: ${check.status.consecutiveFailures}`);
+      } else {
+        console.log('✗ 备份状态异常');
+        console.log(`  原因:     ${check.reason}`);
+        if (check.ageHours !== null) {
+          console.log(`  距上次成功: ${check.ageHours} 小时（阈值 ${check.maxAgeHours}）`);
+        }
+        if (check.status && check.status.lastError) {
+          console.log(
+            `  最近失败: ${check.status.lastError.code} — ${check.status.lastError.message}`
+          );
+        }
+        console.log(`  备份根:   ${outRoot}`);
       }
-      if (check.status && check.status.lastError) {
-        console.log(
-          `  最近失败: ${check.status.lastError.code} — ${check.status.lastError.message}`
-        );
-      }
-      console.log(`  备份根:   ${outRoot}`);
+
+      return check.ok ? 0 : 2;
+    } catch (error) {
+      // check 自身异常（不同于「状态异常」）：显式退出码 1，让调度器/看门狗
+      // 与「状态未通过（退出码 2）」区分开。看门狗据此记录 backup_check_error。
+      console.error(
+        `✗ 备份状态检查异常: ${error && error.message ? error.message : error}`
+      );
+
+      return 1;
     }
-
-    return check.ok ? 0 : 2;
   }
 
   const result = backup.createBackup({
@@ -208,4 +218,8 @@ function main() {
   return 0;
 }
 
-process.exitCode = main();
+module.exports = { main, parseArgs };
+
+if (require.main === module) {
+  process.exitCode = main();
+}
