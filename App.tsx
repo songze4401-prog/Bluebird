@@ -131,6 +131,13 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 启动时读取服务端持久化的真实情绪状态，让顶部 Emoji 与 Emotion System 保持一致。
+  // 与上面的会话引导并行：情绪读取失败不影响聊天，静默保持默认值。
+  useEffect(() => {
+    void chat.loadEmotion();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // 历史聊天：打开列表弹层，并让列表刷新一次（服务端为权威）
   const openChatHistory = () => {
     if (actions.busy) return;

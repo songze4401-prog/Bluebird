@@ -25,6 +25,7 @@ import {
 import type {
   ChatResponse,
   ClearHistoryResponse,
+  EmotionResponse,
   HistoryResponse,
   RecallResponse,
 } from '../lib/api/types';
@@ -106,6 +107,8 @@ export type ChatSessionApi = {
     sessionId: string
   ) => Promise<{ ok: boolean; status: number; stale?: boolean }>;
   markHistoryLoaded: () => void;
+  // 启动时读取服务端持久化的情绪状态（顶部 Emoji 与 Emotion System 保持一致）
+  loadEmotion: () => Promise<void>;
   clearHistory: () => void;
   recallMessage: (message: Message) => void;
   resetMessages: () => void;
@@ -152,6 +155,23 @@ export function useChatSession({
 
   const markHistoryLoaded = useCallback(() => setLoadingHistory(false), []);
   const resetMessages = useCallback(() => setMessages([]), [setMessages]);
+
+  // 启动时读取服务端持久化的真实情绪状态，让顶部 Emoji 与 Emotion System 保持一致。
+  // mood 属于本 hook，所以由这里发起读取；与聊天回复的 setMood 写同一份状态。
+  // 失败静默：情绪展示不阻塞聊天，下一轮回复仍会带回最新值。
+  const loadEmotion = async (): Promise<void> => {
+    try {
+      const response = await apiFetch(API_PATHS.emotion);
+
+      const data = (await readJsonResponse(response)) as EmotionResponse;
+
+      if (!response.ok) return;
+
+      if (typeof data.emotion === 'string') setMood(data.emotion);
+    } catch (error) {
+      console.error('Load emotion error:', error);
+    }
+  };
 
   // 历史加载的竞态防护（阶段 3）：快速切换会话时 A→B 会并发两个请求，
   // 若 A 的响应后到就会覆盖 B 的消息并把会话切回 A。
@@ -635,6 +655,7 @@ export function useChatSession({
     sendContinuation,
     loadHistory,
     markHistoryLoaded,
+    loadEmotion,
     clearHistory,
     recallMessage,
     resetMessages,

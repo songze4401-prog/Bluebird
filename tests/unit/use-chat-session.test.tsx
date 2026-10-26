@@ -203,6 +203,37 @@ describe('历史加载的竞态防护', () => {
   });
 });
 
+describe('启动情绪读取', () => {
+  it('读取服务端情绪并写入 mood', async () => {
+    mockApiFetch.mockImplementationOnce(() =>
+      Promise.resolve(jsonResponse({ emotion: 'happy', intensity: 0.6 }))
+    );
+
+    const hook = await setup();
+
+    await act(async () => {
+      await hook.result.current.loadEmotion();
+    });
+
+    expect(mockApiFetch.mock.calls[0][0]).toBe('/emotion');
+    expect(hook.result.current.mood).toBe('happy');
+  });
+
+  it('非 2xx 或缺少 emotion 字段时保持默认情绪', async () => {
+    mockApiFetch.mockImplementationOnce(() =>
+      Promise.resolve(jsonResponse({}, 500))
+    );
+
+    const hook = await setup();
+
+    await act(async () => {
+      await hook.result.current.loadEmotion();
+    });
+
+    expect(hook.result.current.mood).toBe('calm');
+  });
+});
+
 describe('发送守卫', () => {
   it('首次加载未完成（loadingHistory）时不发请求', async () => {
     const hook = await setup();
