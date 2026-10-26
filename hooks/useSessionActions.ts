@@ -86,6 +86,9 @@ export function useSessionActions({
 
     const result = await chat.loadHistory(sessionId);
 
+    // 已被更新的选择取代：本次结果作废，不改会话也不弹错（由最新那次收场）
+    if (result.stale) return;
+
     if (!result.ok) {
       Alert.alert(
         '打开会话失败',

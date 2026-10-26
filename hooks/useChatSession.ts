@@ -14,7 +14,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert } from 'react-native';
 
-import { apiFetch } from '../lib/api/client';
+import { apiFetch, TIMEOUTS } from '../lib/api/client';
+import { createRequestGate } from '../lib/api/latest-request';
 import { makeLocalId, readJsonResponse } from '../lib/utils';
 import { streamChatRequest } from '../lib/stream';
 import {
@@ -34,9 +35,6 @@ import type {
   ModelDefaults,
   PendingAttachment,
 } from '../lib/types';
-
-// /chat 与 /chat/stream 的共享超时预算（与重构前一致：60s）
-const CHAT_TIMEOUT_MS = 60_000;
 
 // 历史一次性拉取上限（服务端按需截断）
 const HISTORY_LIMIT = 200;
@@ -104,9 +102,10 @@ export type ChatSessionApi = {
     extras?: ChatSendExtras
   ) => Promise<void>;
   sendContinuation: () => Promise<void>;
+  // stale=true：结果已被更新的请求取代，调用方不得据此改会话或弹错
   loadHistory: (
     sessionId: string
-  ) => Promise<{ ok: boolean; status: number }>;
+  ) => Promise<{ ok: boolean; status: number; stale?: boolean }>;
   markHistoryLoaded: () => void;
   clearHistory: () => void;
   recallMessage: (message: Message) => void;
@@ -155,18 +154,36 @@ export function useChatSession({
   const markHistoryLoaded = useCallback(() => setLoadingHistory(false), []);
   const resetMessages = useCallback(() => setMessages([]), [setMessages]);
 
-  // 读取指定会话的消息并渲染；返回是否成功（失败时由调用方决定文案）
+  // 历史加载的竞态防护（阶段 3）：快速切换会话时 A→B 会并发两个请求，
+  // 若 A 的响应后到就会覆盖 B 的消息并把会话切回 A。
+  // RequestGate 同时负责「中止上一个」与「令牌校验」，规则见 lib/api/latest-request。
+  // 用 useState 惰性持有稳定实例：不参与渲染，也不会在每次渲染重建
+  const [historyGate] = useState(createRequestGate);
+
+  // 卸载时中止在途的历史请求：避免请求悬挂，也避免卸载后再写 state
+  useEffect(() => () => historyGate.abort(), [historyGate]);
+
+  // 读取指定会话的消息并渲染；返回是否成功（失败时由调用方决定文案）。
+  // stale=true 表示本次结果已被更新的请求取代，调用方不得据此改会话或弹错。
   const loadHistory = async (
     targetSessionId: string
-  ): Promise<{ ok: boolean; status: number }> => {
+  ): Promise<{ ok: boolean; status: number; stale?: boolean }> => {
+    const ticket = historyGate.begin();
+
     try {
       const response = await apiFetch(
         `/history?sessionId=${encodeURIComponent(
           targetSessionId
-        )}&limit=${HISTORY_LIMIT}`
+        )}&limit=${HISTORY_LIMIT}`,
+        { signal: ticket.signal }
       );
 
       const data = await readJsonResponse(response);
+
+      // 旧响应一律丢弃：不写消息、不改会话、不弹错
+      if (!historyGate.isCurrent(ticket.id)) {
+        return { ok: false, status: response.status, stale: true };
+      }
 
       if (!response.ok || !Array.isArray(data.history)) {
         return { ok: false, status: response.status };
@@ -181,6 +198,12 @@ export function useChatSession({
       return { ok: true, status: response.status };
     } catch (error) {
       console.error('History load error:', error);
+
+      // 被更新的请求取消：不是错误，交给新请求收场
+      if (!historyGate.isCurrent(ticket.id)) {
+        return { ok: false, status: 0, stale: true };
+      }
+
       return { ok: false, status: 0 };
     }
   };
@@ -198,9 +221,6 @@ export function useChatSession({
     onError: (message: string) => void;
   }): Promise<void> => {
     const { requestSessionId, payload, retry, localUserId } = options;
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), CHAT_TIMEOUT_MS);
 
     // 服务端 id 落地：撤回需要稳定 id，用服务端返回的 id 替换本地临时 id
     const applyServerUserId = (serverUserId: string) => {
@@ -296,7 +316,8 @@ export function useChatSession({
       // 用户已切走会话则不追加（消息已落盘，切回时历史完整恢复）
       const response = await apiFetch('/chat', {
         method: 'POST',
-        signal: controller.signal,
+        // 超时由 apiFetch 统一负责（此处保留原有 60s 预算）
+        timeoutMs: TIMEOUTS.chat,
         body: JSON.stringify(payload),
       });
 
@@ -328,8 +349,6 @@ export function useChatSession({
     } catch (error) {
       console.error(error);
       options.onError(toErrorMessage(error));
-    } finally {
-      clearTimeout(timeout);
     }
   };
 
