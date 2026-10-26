@@ -1,7 +1,14 @@
 @echo off
+rem Watchdog wrapper. Same repo-relative path resolution as the backup wrapper.
+rem Overrides: BLUEBIRD_NODE (node executable), BLUEBIRD_ALERT_CMD (notifier).
 setlocal
 set "OUT=%~1"
 if "%OUT%"=="" set "OUT=D:\bluebird-backups"
-set "BLUEBIRD_ALERT_CMD=D:\dev\nodejs\node.exe C:\Users\Administrator\WorkBuddy\2026-10-09-20-25-04\bluebird-repo\scripts\bluebird-alert-notify.js"
-"D:\dev\nodejs\node.exe" "C:\Users\Administrator\WorkBuddy\2026-10-09-20-25-04\bluebird-repo\scripts\bluebird-backup-check-alert.js" --out-dir "%OUT%"
+
+set "NODE=%BLUEBIRD_NODE%"
+if "%NODE%"=="" set "NODE=node"
+
+if not defined BLUEBIRD_ALERT_CMD set BLUEBIRD_ALERT_CMD="%NODE%" "%~dp0bluebird-alert-notify.js"
+
+"%NODE%" "%~dp0bluebird-backup-check-alert.js" --out-dir "%OUT%"
 exit /b %ERRORLEVEL%
