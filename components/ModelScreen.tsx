@@ -12,17 +12,13 @@ import {
 } from 'react-native';
 
 import { type Theme } from '../theme';
-import { API_TOKEN } from '../lib/constants';
+import { apiFetch } from '../lib/api/client';
 import { readJsonResponse } from '../lib/utils';
 import { type ModelDefaults, type ModelProvider } from '../lib/types';
 
 // 模型与 API 管理：独立弹层，不新增路由。
 // 服务商配置与默认模型都在后端（/model-providers），前端不留副本。
 // 后端永不下发完整 API Key：编辑时留空即保留原密钥，界面只展示脱敏 keyHint。
-
-const API_BASE = process.env.EXPO_PUBLIC_API_URL;
-
-const AUTH_HEADERS = { Authorization: `Bearer ${API_TOKEN}` };
 
 type FormState = {
   id: string | null; // null = 新增
@@ -593,12 +589,8 @@ async function requestJson(
   path: string,
   options: { method?: string; body?: unknown } = {}
 ): Promise<any> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await apiFetch(path, {
     method: options.method ?? 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      ...AUTH_HEADERS,
-    },
     ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
   });
 

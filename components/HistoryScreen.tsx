@@ -13,7 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { Theme } from '../theme';
 import type { SessionMeta } from '../lib/types';
-import { API_TOKEN } from '../lib/constants';
+import { apiFetch } from '../lib/api/client';
 import { formatMessageTime, readJsonResponse } from '../lib/utils';
 
 // 历史聊天（自治）：状态、加载、选择逻辑全部内聚在此。
@@ -46,14 +46,7 @@ export function HistoryScreen({
     setSessionsError('');
 
     try {
-      const response = await fetch(
-        `${process.env.EXPO_PUBLIC_API_URL}/sessions`,
-        {
-          headers: {
-            Authorization: `Bearer ${API_TOKEN}`,
-          },
-        }
-      );
+      const response = await apiFetch('/sessions');
 
       const data = await readJsonResponse(response);
 

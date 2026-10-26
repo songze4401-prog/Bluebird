@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 
 import { type Theme } from '../theme';
-import { API_TOKEN } from '../lib/constants';
+import { apiFetch } from '../lib/api/client';
 import { type PersonaConfig } from '../lib/types';
 
 // Blue 人格控制面板：独立弹层，不挤占主聊天界面。
@@ -191,10 +191,7 @@ export function ControlPanelScreen({
       setNotice(null);
 
       try {
-        const response = await fetch(
-          `${process.env.EXPO_PUBLIC_API_URL}/persona`,
-          { headers: { Authorization: `Bearer ${API_TOKEN}` } }
-        );
+        const response = await apiFetch('/persona');
 
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
@@ -224,12 +221,8 @@ export function ControlPanelScreen({
   };
 
   const putConfig = async (body: object): Promise<boolean> => {
-    const response = await fetch(`${process.env.EXPO_PUBLIC_API_URL}/persona`, {
+    const response = await apiFetch('/persona', {
       method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${API_TOKEN}`,
-      },
       body: JSON.stringify(body),
     });
 

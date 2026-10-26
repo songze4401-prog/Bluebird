@@ -25,7 +25,8 @@ import {
   ReplySegment,
   SessionMeta,
 } from './lib/types';
-import { API_TOKEN, DEFAULT_SESSION_ID } from './lib/constants';
+import { DEFAULT_SESSION_ID } from './lib/constants';
+import { apiFetch } from './lib/api/client';
 import {
   makeLocalId,
   readJsonResponse,
@@ -290,10 +291,7 @@ export default function App() {
 
   const refreshModelSelection = useCallback(async () => {
     try {
-      const response = await fetch(
-        `${process.env.EXPO_PUBLIC_API_URL}/model-providers`,
-        { headers: { Authorization: `Bearer ${API_TOKEN}` } }
-      );
+      const response = await apiFetch('/model-providers');
 
       const data = await readJsonResponse(response);
 
@@ -338,15 +336,8 @@ export default function App() {
     sessionId: string
   ): Promise<{ ok: boolean; status: number }> => {
     try {
-      const response = await fetch(
-        `${process.env.EXPO_PUBLIC_API_URL}/history?sessionId=${encodeURIComponent(
-          sessionId
-        )}&limit=200`,
-        {
-          headers: {
-            Authorization: `Bearer ${API_TOKEN}`,
-          },
-        }
+      const response = await apiFetch(
+        `/history?sessionId=${encodeURIComponent(sessionId)}&limit=200`
       );
 
       const data = await readJsonResponse(response);
@@ -395,14 +386,7 @@ export default function App() {
 
     const loadSessions = async (): Promise<SessionMeta[] | null> => {
       try {
-        const response = await fetch(
-          `${process.env.EXPO_PUBLIC_API_URL}/sessions`,
-          {
-            headers: {
-              Authorization: `Bearer ${API_TOKEN}`,
-            },
-          }
-        );
+        const response = await apiFetch('/sessions');
 
         const data = await readJsonResponse(response);
 
@@ -445,14 +429,7 @@ export default function App() {
 
     const loadEmotion = async () => {
       try {
-        const response = await fetch(
-          `${process.env.EXPO_PUBLIC_API_URL}/emotion`,
-          {
-            headers: {
-              Authorization: `Bearer ${API_TOKEN}`,
-            },
-          }
-        );
+        const response = await apiFetch('/emotion');
 
         const data = await readJsonResponse(response);
 
@@ -561,21 +538,14 @@ export default function App() {
           style: 'destructive',
           onPress: async () => {
             try {
-              const response = await fetch(
-                `${process.env.EXPO_PUBLIC_API_URL}/history/clear`,
-                {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${API_TOKEN}`,
-                  },
-                  body: JSON.stringify({
-                    sessionId: currentSessionId,
-                    // 真实数据目录下服务端要求二次确认；此处已在 Alert 里确认过
-                    confirm: true,
-                  }),
-                }
-              );
+              const response = await apiFetch('/history/clear', {
+                method: 'POST',
+                body: JSON.stringify({
+                  sessionId: currentSessionId,
+                  // 真实数据目录下服务端要求二次确认；此处已在 Alert 里确认过
+                  confirm: true,
+                }),
+              });
 
               const data = await readJsonResponse(response);
 
@@ -627,20 +597,13 @@ export default function App() {
         style: 'destructive',
         onPress: async () => {
           try {
-            const response = await fetch(
-              `${process.env.EXPO_PUBLIC_API_URL}/history/recall`,
-              {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${API_TOKEN}`,
-                },
-                body: JSON.stringify({
-                  sessionId: currentSessionId,
-                  messageId: message.id,
-                }),
-              }
-            );
+            const response = await apiFetch('/history/recall', {
+              method: 'POST',
+              body: JSON.stringify({
+                sessionId: currentSessionId,
+                messageId: message.id,
+              }),
+            });
 
             const data = await readJsonResponse(response);
 
@@ -971,18 +934,11 @@ export default function App() {
       // ---- 非流式 /chat 路径（开关关闭，或流式回退）----
       // 一次性写入全部气泡（不做假分条动画），与流式 done 同源切分；
       // 用户已切走会话则不追加（消息已落盘，切回时历史完整恢复）
-      const response = await fetch(
-        `${process.env.EXPO_PUBLIC_API_URL}/chat`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${API_TOKEN}`,
-          },
-          signal: controller.signal,
-          body: JSON.stringify(payload),
-        }
-      );
+      const response = await apiFetch('/chat', {
+        method: 'POST',
+        signal: controller.signal,
+        body: JSON.stringify(payload),
+      });
 
       const data = await readJsonResponse(response);
 
@@ -1160,18 +1116,11 @@ export default function App() {
       // ---- 非流式 /chat 路径（开关关闭，或流式回退）----
       // 一次性写入全部气泡（不做假分条动画），与流式 done 同源切分；
       // 用户已切走会话则不追加（消息已落盘，切回时历史完整恢复）
-      const response = await fetch(
-        `${process.env.EXPO_PUBLIC_API_URL}/chat`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${API_TOKEN}`,
-          },
-          signal: controller.signal,
-          body: JSON.stringify(payload),
-        }
-      );
+      const response = await apiFetch('/chat', {
+        method: 'POST',
+        signal: controller.signal,
+        body: JSON.stringify(payload),
+      });
 
       const data = await readJsonResponse(response);
 
@@ -1217,17 +1166,10 @@ export default function App() {
     setCreatingSession(true);
 
     try {
-      const response = await fetch(
-        `${process.env.EXPO_PUBLIC_API_URL}/sessions`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${API_TOKEN}`,
-          },
-          body: JSON.stringify({}),
-        }
-      );
+      const response = await apiFetch('/sessions', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
 
       const data = await readJsonResponse(response);
 
@@ -1284,14 +1226,9 @@ export default function App() {
     sessionId: string
   ): Promise<boolean> => {
     try {
-      const response = await fetch(
-        `${process.env.EXPO_PUBLIC_API_URL}/sessions/${encodeURIComponent(sessionId)}`,
-        {
-          method: 'DELETE',
-          headers: {
-            Authorization: `Bearer ${API_TOKEN}`,
-          },
-        }
+      const response = await apiFetch(
+        `/sessions/${encodeURIComponent(sessionId)}`,
+        { method: 'DELETE' }
       );
 
       const data = await readJsonResponse(response);
