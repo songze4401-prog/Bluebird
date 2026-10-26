@@ -173,10 +173,17 @@ function main() {
       '  ⚠ 故障域: 备份根与数据目录在同一个卷上——这能挡住误删和损坏，'
     );
     console.log(
-      '            但挡不住整盘/整机故障。真正灾难恢复请把 --out-dir 指向另一块盘或远端。'
+      '            但挡不住整盘/整机故障。真正灾难恢复请把 --out-dir 指向异机或远端。'
     );
   } else {
-    console.log('  故障域: 与数据目录不在同一卷');
+    // 不同盘符 ≠ 不同物理盘：本机 C:/D: 同属一块 SSD，落 D: 只是逻辑分离，
+    // 不构成灾难恢复。只有异机/远端才能确认 off-host，本地路径一律不宣称 DR。
+    console.log(
+      '  故障域: 与数据目录不在同一逻辑盘符（仅逻辑分离；若同物理盘不构成灾难恢复）'
+    );
+    console.log(
+      '            真正灾难恢复需指向异机或远端存储；本地路径无法确认，disasterRecoveryGrade=false。'
+    );
   }
 
   console.log(`  运行日志: ${backup.runLogPath(result.outRoot)}`);
@@ -190,6 +197,12 @@ function main() {
 
   if (result.skipped.length) {
     console.log(`  未备份（运行期产物）: ${result.skipped.join(' ')}`);
+  }
+
+  if (result.skippedSecrets.length) {
+    console.log(
+      `  未备份（密钥，默认排除）: ${result.skippedSecrets.join(' ')}`
+    );
   }
 
   return 0;

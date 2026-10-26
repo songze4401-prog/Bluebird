@@ -64,6 +64,17 @@ function isRuntimeArtifact(name) {
   return name === '.bluebird.lock' || /\.tmp[.-]/.test(name);
 }
 
+/**
+ * 密钥文件：默认不进备份。api-keys.json 是明文密钥库（API key 等），
+ * 进快照等于把密钥存进一份可能被同步/外发的副本。默认排除；若业务确有需求，
+ * 走加密通道（见 createBackup 的 encryptSecrets）。
+ */
+function isSecretFile(relPath) {
+  const base = relPath.split('/').pop();
+
+  return base === 'api-keys.json' || relPath === 'api-keys.json';
+}
+
 function sha256File(filePath) {
   const hash = crypto.createHash('sha256');
   hash.update(fs.readFileSync(filePath));
@@ -73,6 +84,48 @@ function sha256File(filePath) {
 
 function sha256Text(text) {
   return crypto.createHash('sha256').update(text).digest('hex').toUpperCase();
+}
+
+// ---------------------------------------------------------------- 密钥加密
+// 仅用于「业务确实要求备份密钥」时的可选通道：AES-256-GCM。
+// 密钥本身由调用方通过环境变量 BLUEBIRD_BACKUP_KEY 提供（高熵口令），
+// 经 SHA-256 派生为 32 字节。口令不得写入备份、日志或测试报告。
+
+function deriveKey(passphrase) {
+  return crypto.createHash('sha256').update(passphrase, 'utf8').digest();
+}
+
+function encryptBuffer(buf, key) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+
+  cipher.setAAD(Buffer.from('bluebird-secret', 'utf8'));
+
+  const ct = Buffer.concat([cipher.update(buf), cipher.final()]);
+  const tag = cipher.getAuthTag();
+
+  return {
+    v: 1,
+    iv: iv.toString('base64'),
+    tag: tag.toString('base64'),
+    ct: ct.toString('base64'),
+  };
+}
+
+function decryptBuffer(payload, key) {
+  const decipher = crypto.createDecipheriv(
+    'aes-256-gcm',
+    key,
+    Buffer.from(payload.iv, 'base64')
+  );
+
+  decipher.setAAD(Buffer.from('bluebird-secret', 'utf8'));
+  decipher.setAuthTag(Buffer.from(payload.tag, 'base64'));
+
+  return Buffer.concat([
+    decipher.update(Buffer.from(payload.ct, 'base64')),
+    decipher.final(),
+  ]);
 }
 
 function isPlainObject(value) {
@@ -132,12 +185,16 @@ function drillLogPath(outRoot) {
 
 /**
  * 递归列出数据目录里需要备份的内容。
- * @returns {{files: string[], dirs: string[], skipped: string[]}} 相对路径，POSIX 分隔符
+ * @param {{excludeSecrets?: boolean}} [opts] excludeSecrets 默认 true（密钥不进备份）
+ * @returns {{files: string[], dirs: string[], skipped: string[], skippedSecrets: string[]}}
+ *          相对路径，POSIX 分隔符
  */
-function collectEntries(dataDir) {
+function collectEntries(dataDir, opts = {}) {
+  const excludeSecrets = opts.excludeSecrets !== false;
   const files = [];
   const dirs = [];
   const skipped = [];
+  const skippedSecrets = [];
 
   const walk = (absDir, relBase) => {
     const entries = fs
@@ -160,6 +217,10 @@ function collectEntries(dataDir) {
         dirs.push(relPath);
         walk(abs, relPath);
       } else if (entry.isFile()) {
+        if (excludeSecrets && isSecretFile(relPath)) {
+          skippedSecrets.push(relPath);
+          continue;
+        }
         files.push(relPath);
       }
       // 符号链接等其它类型既不备份也不报告：避免跟随链接读到数据目录之外
@@ -168,7 +229,7 @@ function collectEntries(dataDir) {
 
   walk(dataDir, '');
 
-  return { files, dirs, skipped };
+  return { files, dirs, skipped, skippedSecrets };
 }
 
 // ---------------------------------------------------------------- 结构校验
@@ -392,7 +453,12 @@ function formatBytes(bytes) {
  * 失败时快照目录改名为 `<name>.incomplete`，恢复工具不会把它当完整备份。
  *
  * @param {{dataDir?: string, outRoot?: string, keep?: number,
- *          staleHours?: number, now?: number, snapshotName?: string}} [options]
+ *          staleHours?: number, now?: number, snapshotName?: string,
+ *          excludeSecrets?: boolean, encryptSecrets?: boolean,
+ *          backupKey?: string}} [options]
+ *   - excludeSecrets 默认 true：api-keys.json 不进快照
+ *   - encryptSecrets 默认 false：若 true，需 backupKey（环境变量 BLUEBIRD_BACKUP_KEY
+ *     或 options.backupKey），把密钥加密为 <name>.enc 后入库，明文不出现
  */
 function createBackup(options = {}) {
   const dataDir = resolveDataDir(options.dataDir);
@@ -401,6 +467,9 @@ function createBackup(options = {}) {
   const staleHours =
     typeof options.staleHours === 'number' ? options.staleHours : DEFAULT_STALE_HOURS;
   const nowMs = typeof options.now === 'number' ? options.now : Date.now();
+  const excludeSecrets = options.excludeSecrets !== false;
+  const encryptSecrets = options.encryptSecrets === true;
+  const backupKey = options.backupKey || process.env.BLUEBIRD_BACKUP_KEY || '';
 
   const startedAt = nowMs;
   const result = {
@@ -414,8 +483,10 @@ function createBackup(options = {}) {
     bytes: 0,
     consistent: false,
     sameVolumeAsSource: null,
+    differentLogicalDrive: null,
     attempts: 0,
     skipped: [],
+    skippedSecrets: [],
     error: null,
     retention: null,
   };
@@ -467,9 +538,22 @@ function createBackup(options = {}) {
     );
   }
 
-  const { files, dirs, skipped } = collectEntries(dataDir);
+  // 加密模式下要重新把密钥文件纳入采集，再单独加密入库
+  const collectExcludeSecrets = !(encryptSecrets && backupKey);
+  const { files, dirs, skipped, skippedSecrets } = collectEntries(dataDir, {
+    excludeSecrets: collectExcludeSecrets,
+  });
+  const derivedKey = encryptSecrets && backupKey ? deriveKey(backupKey) : null;
 
   result.skipped = skipped;
+  result.skippedSecrets = skippedSecrets;
+
+  if (encryptSecrets && !backupKey) {
+    return fail(
+      'missing_backup_key',
+      'encryptSecrets 已开启但缺少 BLUEBIRD_BACKUP_KEY，无法加密密钥文件'
+    );
+  }
 
   if (files.length === 0) {
     return fail('no_data_files', `数据目录里没有可备份的数据文件: ${dataDir}`);
@@ -505,6 +589,25 @@ function createBackup(options = {}) {
 
     const copyOne = rel => {
       const abs = path.join(dataDir, rel);
+
+      // 加密通道：密钥文件写成 <name>.enc，明文不进快照
+      if (encryptSecrets && derivedKey && isSecretFile(rel)) {
+        const dest = path.join(snapshotDir, `${rel}.enc`);
+
+        ensureDir(path.dirname(dest));
+
+        const enc = encryptBuffer(fs.readFileSync(abs), derivedKey);
+
+        fs.writeFileSync(dest, `${JSON.stringify(enc)}\n`, 'utf8');
+        try {
+          fs.chmodSync(dest, 0o600);
+        } catch (_) {
+          /* best-effort */
+        }
+
+        return dest;
+      }
+
       const dest = path.join(snapshotDir, rel);
 
       ensureDir(path.dirname(dest));
@@ -554,6 +657,48 @@ function createBackup(options = {}) {
 
     for (const rel of files) {
       const srcAbs = path.join(dataDir, rel);
+
+      // 加密密钥：校验「能解密回明文且与原文件一致」，不校验 JSON 结构
+      if (encryptSecrets && derivedKey && isSecretFile(rel)) {
+        const destAbs = path.join(snapshotDir, `${rel}.enc`);
+
+        if (!fs.existsSync(destAbs)) {
+          return fail('copy_missing', `加密副本缺失: ${rel}.enc`);
+        }
+
+        const enc = JSON.parse(fs.readFileSync(destAbs, 'utf8'));
+        const plain = fs.readFileSync(srcAbs);
+
+        let restored;
+
+        try {
+          restored = decryptBuffer(enc, derivedKey);
+        } catch (_) {
+          return fail('secret_decrypt_failed', `密钥解密失败: ${rel}`);
+        }
+
+        if (restored.toString('utf8') !== plain.toString('utf8')) {
+          return fail(
+            'secret_decrypt_mismatch',
+            `密钥解密后与原文不一致: ${rel}`
+          );
+        }
+
+        const encBuf = fs.readFileSync(destAbs);
+
+        entries.push({
+          path: `${rel}.enc`,
+          originalPath: rel,
+          bytes: encBuf.length,
+          sha256: sha256Text(encBuf),
+          plainSha256: sha256Text(plain),
+          structure: 'secret_enc',
+        });
+        bytes += encBuf.length;
+
+        continue;
+      }
+
       const destAbs = path.join(snapshotDir, rel);
 
       if (!fs.existsSync(destAbs)) {
@@ -594,6 +739,7 @@ function createBackup(options = {}) {
     result.bytes = bytes;
     result.consistent = true;
     result.sameVolumeAsSource = isSameVolume(outRoot, dataDir);
+    result.differentLogicalDrive = !result.sameVolumeAsSource;
 
     const manifest = {
       formatVersion: BACKUP_FORMAT_VERSION,
@@ -608,6 +754,8 @@ function createBackup(options = {}) {
       counts: { files: entries.length, dirs: dirs.length, bytes },
       dirs,
       skippedRuntime: skipped,
+      skippedSecrets,
+      differentLogicalDrive: result.differentLogicalDrive,
       files: entries,
     };
 
@@ -625,7 +773,10 @@ function createBackup(options = {}) {
       `# dirs:      ${dirs.length}`,
       `# bytes:     ${bytes} (${formatBytes(bytes)})`,
       `# skipped:   ${skipped.length ? skipped.join(' ') : '(none)'}`,
+      `# skipped-secrets: ${skippedSecrets.length ? skippedSecrets.join(' ') : '(none)'}`,
       `# same-vol:  ${result.sameVolumeAsSource}`,
+      `# diff-drive: ${result.differentLogicalDrive}`,
+      `# dr-grade:  false (本地备份无法确认是否异机/远端，需由部署层核实独立存储)`,
       '# files:     (path  bytes  sha256)',
       ...entries.map(e => `${e.path}  ${e.bytes}  ${e.sha256}`),
     ];
@@ -676,8 +827,12 @@ function createBackup(options = {}) {
       consecutiveFailures: 0,
       lastError: null,
       sameVolumeAsSource: result.sameVolumeAsSource,
-      // 提醒：同卷备份不构成灾难恢复证据
-      disasterRecoveryGrade: !result.sameVolumeAsSource,
+      differentLogicalDrive: result.differentLogicalDrive,
+      // 本地备份路径无法确认目标是否落在异机/远端；真正的灾难恢复需要 off-host。
+      // 因此 disasterRecoveryGrade 在本地路径下永远为 false，必须由部署层去核实
+      // 备份根是否指向独立存储（另一块物理盘或远端）。不同盘符 ≠ 不同物理盘。
+      disasterRecoveryGrade: false,
+      offHostUnverified: true,
     });
 
     result.retention = applyRetention(outRoot, keep);
@@ -960,17 +1115,82 @@ function restoreSnapshot(snapshotDir, targetDir) {
   try {
     ensureDir(targetDir);
 
+    // 恢复时若遇到加密密钥条目，必须能拿到口令；否则直接失败，绝不落半份数据
+    const hasSecret = verification.manifest.files.some(
+      item => item.structure === 'secret_enc'
+    );
+    const restoreKey = hasSecret
+      ? process.env.BLUEBIRD_BACKUP_KEY
+        ? deriveKey(process.env.BLUEBIRD_BACKUP_KEY)
+        : null
+      : null;
+
+    if (hasSecret && !restoreKey) {
+      return {
+        ok: false,
+        stage: 'restore',
+        durationMs: Date.now() - startedAt,
+        problems: [
+          {
+            code: 'restore_missing_key',
+            message: '快照含加密密钥，但恢复时缺少 BLUEBIRD_BACKUP_KEY',
+          },
+        ],
+        restored: 0,
+        bytes: 0,
+        targetDir,
+      };
+    }
+
     for (const item of verification.manifest.files) {
       const src = path.join(snapshotDir, item.path);
+
+      if (item.structure === 'secret_enc') {
+        const enc = JSON.parse(fs.readFileSync(src, 'utf8'));
+        const plain = decryptBuffer(enc, restoreKey);
+        const dest = path.join(targetDir, item.originalPath);
+
+        ensureDir(path.dirname(dest));
+        fs.writeFileSync(dest, plain);
+        try {
+          fs.chmodSync(dest, 0o600);
+        } catch (_) {
+          /* best-effort */
+        }
+
+        continue;
+      }
+
       const dest = path.join(targetDir, item.path);
 
       ensureDir(path.dirname(dest));
       fs.copyFileSync(src, dest);
     }
 
-    // 恢复后再核一遍：复制过程本身也可能出错（磁盘满、权限）。
-    // 目标目录里刻意没有 MANIFEST（数据目录不该被清单污染），故复用源清单。
-    const recheck = verifyAgainstManifest(targetDir, verification.manifest);
+    // 恢复后再核一遍：复制/解密过程本身也可能出错（磁盘满、权限、口令错）。
+    // 目标目录里刻意没有 MANIFEST（数据目录不该被清单污染），故复用源清单；
+    // 加密条目翻译为「明文 originalPath + 明文 sha」再校验。
+    const recheckManifest = {
+      ...verification.manifest,
+      files: verification.manifest.files.map(item => {
+        if (item.structure === 'secret_enc') {
+          const src = path.join(snapshotDir, item.path);
+          const enc = JSON.parse(fs.readFileSync(src, 'utf8'));
+          const plain = decryptBuffer(enc, restoreKey);
+
+          return {
+            ...item,
+            path: item.originalPath,
+            bytes: plain.length,
+            sha256: item.plainSha256,
+            structure: 'json_object',
+          };
+        }
+
+        return item;
+      }),
+    };
+    const recheck = verifyAgainstManifest(targetDir, recheckManifest);
 
     if (!recheck.ok) {
       return {
@@ -1047,6 +1267,10 @@ module.exports = {
   DRILL_LOG_NAME,
   STATE_DIR_NAME,
   isRuntimeArtifact,
+  isSecretFile,
+  deriveKey,
+  encryptBuffer,
+  decryptBuffer,
   resolveDataDir,
   resolveOutRoot,
   collectEntries,

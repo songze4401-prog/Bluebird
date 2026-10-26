@@ -14,7 +14,7 @@
  */
 
 const assert = require('node:assert');
-const { spawnSync } = require('node:child_process');
+const { spawnSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -669,5 +669,327 @@ describe('恢复演练 CLI（端到端）', { concurrency: 1 }, () => {
     const record = JSON.parse(out.stdout);
 
     assert.ok(record.problems.some(p => p.code === 'no_snapshot'));
+  });
+});
+
+describe('密钥备份策略（默认排除，可选加密）', { concurrency: 1 }, () => {
+  function withSecret(name) {
+    const { dataDir, outRoot } = makeFixture({ name });
+
+    writeFile(
+      path.join(dataDir, 'api-keys.json'),
+      JSON.stringify({ providers: { deepseek: { apiKey: 'SUPER_SECRET_VALUE' } } })
+    );
+
+    return { dataDir, outRoot };
+  }
+
+  test('默认排除 api-keys.json：不进快照、不进恢复、明文不出现', () => {
+    const { dataDir, outRoot } = withSecret('secret-excl');
+
+    const result = backup.createBackup({ dataDir, outRoot });
+
+    assert.strictEqual(result.ok, true, JSON.stringify(result.error));
+
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(result.snapshotDir, 'MANIFEST.json'), 'utf8')
+    );
+    const paths = manifest.files.map(item => item.path);
+
+    assert.ok(!paths.includes('api-keys.json'), '密钥不得进快照');
+    assert.ok(
+      manifest.skippedSecrets.includes('api-keys.json'),
+      '密钥应记入 skippedSecrets'
+    );
+
+    const target = path.join(TMP_ROOT, 'secret-restore');
+    const restored = backup.restoreSnapshot(result.snapshotDir, target);
+
+    assert.strictEqual(restored.ok, true, JSON.stringify(restored.problems));
+    assert.ok(
+      !fs.existsSync(path.join(target, 'api-keys.json')),
+      '恢复不得产生密钥文件'
+    );
+
+    const manifestDump = fs.readFileSync(
+      path.join(result.snapshotDir, 'MANIFEST.json'),
+      'utf8'
+    );
+
+    assert.ok(
+      !manifestDump.includes('SUPER_SECRET_VALUE'),
+      '密钥明文不得进入备份清单'
+    );
+  });
+
+  test('encryptSecrets：密钥加密入库，恢复能解密回原文，明文不出现', () => {
+    const { dataDir, outRoot } = withSecret('secret-enc');
+    const KEY = 'a-very-strong-passphrase-at-least-32-bytes-long!!';
+
+    const result = backup.createBackup({
+      dataDir,
+      outRoot,
+      encryptSecrets: true,
+      backupKey: KEY,
+    });
+
+    assert.strictEqual(result.ok, true, JSON.stringify(result.error));
+
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(result.snapshotDir, 'MANIFEST.json'), 'utf8')
+    );
+    const encEntry = manifest.files.find(item => item.structure === 'secret_enc');
+
+    assert.ok(encEntry, '应有加密密钥条目');
+    assert.strictEqual(encEntry.originalPath, 'api-keys.json');
+    assert.ok(
+      !manifest.files.some(item => item.path === 'api-keys.json'),
+      '明文密钥不得直接入库'
+    );
+
+    const manifestDump = fs.readFileSync(
+      path.join(result.snapshotDir, 'MANIFEST.json'),
+      'utf8'
+    );
+
+    assert.ok(
+      !manifestDump.includes('SUPER_SECRET_VALUE'),
+      '密钥明文不得进入清单'
+    );
+
+    const target = path.join(TMP_ROOT, 'secret-enc-restore');
+
+    process.env.BLUEBIRD_BACKUP_KEY = KEY;
+    const restored = backup.restoreSnapshot(result.snapshotDir, target);
+    delete process.env.BLUEBIRD_BACKUP_KEY;
+
+    assert.strictEqual(restored.ok, true, JSON.stringify(restored.problems));
+
+    const got = fs.readFileSync(path.join(target, 'api-keys.json'), 'utf8');
+
+    assert.strictEqual(
+      got,
+      JSON.stringify({ providers: { deepseek: { apiKey: 'SUPER_SECRET_VALUE' } } }),
+      '恢复出的密钥应与原文一致'
+    );
+  });
+
+  test('encryptSecrets 但缺少 key → 失败（missing_backup_key）', () => {
+    const { dataDir, outRoot } = withSecret('secret-nokey');
+
+    const result = backup.createBackup({ dataDir, outRoot, encryptSecrets: true });
+
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.error.code, 'missing_backup_key');
+  });
+
+  test('恢复含加密密钥的快照但无 key → restore_missing_key', () => {
+    const { dataDir, outRoot } = withSecret('secret-restore-nokey');
+
+    const made = backup.createBackup({
+      dataDir,
+      outRoot,
+      encryptSecrets: true,
+      backupKey: 'some-key',
+    });
+
+    assert.strictEqual(made.ok, true, JSON.stringify(made.error));
+
+    delete process.env.BLUEBIRD_BACKUP_KEY;
+
+    const target = path.join(TMP_ROOT, 'sr-nk');
+    const restored = backup.restoreSnapshot(made.snapshotDir, target);
+
+    assert.strictEqual(restored.ok, false);
+    assert.strictEqual(restored.problems[0].code, 'restore_missing_key');
+  });
+});
+
+describe('看门狗告警链路', { concurrency: 1 }, () => {
+  const runWatchdog = args =>
+    spawnSync(
+      process.execPath,
+      [path.join(REPO_ROOT, 'scripts', args[0]), ...args.slice(1)],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: { ...process.env, DEEPSEEK_API_KEY: '' },
+      }
+    );
+
+  test('check 未通过（无状态文件）→ 退出码 2，且 alerts.jsonl 记录告警', () => {
+    const outRoot = path.join(TMP_ROOT, 'watchdog-empty');
+
+    const out = runWatchdog([
+      'bluebird-backup-check-alert.js',
+      '--out-dir',
+      outRoot,
+      '--json',
+    ]);
+
+    assert.strictEqual(out.status, 2, out.stdout + out.stderr);
+
+    const record = JSON.parse(out.stdout);
+
+    assert.strictEqual(record.exitCode, 2);
+    assert.strictEqual(record.kind, 'backup_status_unhealthy');
+
+    const alerts = readJsonLines(
+      path.join(backup.stateDirOf(outRoot), 'alerts.jsonl')
+    );
+
+    assert.strictEqual(alerts.length, 1);
+    assert.strictEqual(alerts[0].exitCode, 2);
+    assert.strictEqual(alerts[0].kind, 'backup_status_unhealthy');
+  });
+
+  test('BLUEBIRD_ALERT_CMD 被触发（命令钩子端到端）', () => {
+    const outRoot = path.join(TMP_ROOT, 'watchdog-cmd');
+    const marker = path.join(TMP_ROOT, 'alert-marker.txt');
+    const markerScript = path.join(TMP_ROOT, 'alert-hook.js');
+
+    writeFile(
+      markerScript,
+      `const fs=require('fs');fs.writeFileSync(${JSON.stringify(
+        marker
+      )}, process.env.BLUEBIRD_ALERT_PAYLOAD || 'EMPTY');\n`
+    );
+
+    const out = spawnSync(
+      process.execPath,
+      [
+        path.join(REPO_ROOT, 'scripts', 'bluebird-backup-check-alert.js'),
+        '--out-dir',
+        outRoot,
+        '--json',
+      ],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          DEEPSEEK_API_KEY: '',
+          BLUEBIRD_ALERT_CMD: `${process.execPath} ${markerScript}`,
+        },
+      }
+    );
+
+    assert.strictEqual(out.status, 2, out.stdout + out.stderr);
+    assert.ok(fs.existsSync(marker), '外发命令应被触发并写标记');
+
+    const payload = JSON.parse(fs.readFileSync(marker, 'utf8'));
+
+    assert.strictEqual(payload.exitCode, 2);
+  });
+
+  test('check 正常 → 退出码 0，不写告警', () => {
+    const { dataDir, outRoot } = makeFixture({ name: 'watchdog-ok' });
+
+    backup.createBackup({ dataDir, outRoot });
+
+    const out = runWatchdog([
+      'bluebird-backup-check-alert.js',
+      '--out-dir',
+      outRoot,
+      '--json',
+    ]);
+
+    assert.strictEqual(out.status, 0, out.stdout + out.stderr);
+
+    const alertsPath = path.join(backup.stateDirOf(outRoot), 'alerts.jsonl');
+
+    assert.ok(!fs.existsSync(alertsPath), '正常时不应写告警');
+  });
+});
+
+describe('活跃写入期间的备份与恢复（真实并发）', { concurrency: 1 }, () => {
+  test('写入进程活跃改写文件时，一致性守卫生效，最终得到一致快照并恢复成功', () => {
+    const { dataDir, outRoot } = makeFixture({ name: 'active-write' });
+    const pauseFile = path.join(TMP_ROOT, 'active-pause.flag');
+    const writerScript = path.join(TMP_ROOT, 'writer.js');
+
+    writeFile(
+      writerScript,
+      `const fs=require('fs');
+const dataDir=process.argv[2];
+const pauseFile=process.argv[3];
+let n=0, running=true;
+process.on('SIGTERM',()=>{running=false;});
+process.on('SIGINT',()=>{running=false;});
+function tick(){
+  if(!running) return;
+  n++;
+  if(!fs.existsSync(pauseFile)){
+    fs.writeFileSync(dataDir+'/memory.json', JSON.stringify([{content:'msg '+n,type:'fact',keywords:['k'],confidence:0.9,createdAt:new Date().toISOString(),contributions:[]}]));
+  }
+  setTimeout(tick, 20);
+}
+tick();
+`
+    );
+
+    const writer = spawn(process.execPath, [writerScript, dataDir, pauseFile], {
+      stdio: 'ignore',
+    });
+
+    let okResult = null;
+    const outcomes = [];
+
+    try {
+      for (let attempt = 1; attempt <= 12; attempt += 1) {
+        // 前几轮任由写入进程持续改写；后半程暂停写入以稳定地拿到一致快照
+        if (!okResult && attempt > 6) writeFile(pauseFile, '');
+
+        const r = backup.createBackup({ dataDir, outRoot, keep: 50 });
+
+        outcomes.push({
+          attempt,
+          ok: r.ok,
+          consistent: r.consistent,
+          code: r.error && r.error.code,
+        });
+
+        if (r.ok) {
+          // 不变量：成功必须伴随一致
+          assert.strictEqual(r.consistent, true);
+          // 失败路径也必须真的重试过
+          if (!okResult) okResult = r;
+        } else if (r.error && r.error.code === 'source_changed_during_copy') {
+          assert.ok(r.attempts >= 2, '重试守卫生效');
+        }
+      }
+
+      assert.ok(
+        okResult,
+        `应在若干次尝试内取得一致快照; outcomes=${JSON.stringify(outcomes)}`
+      );
+
+      const target = path.join(TMP_ROOT, 'active-restore');
+      const restored = backup.restoreSnapshot(okResult.snapshotDir, target);
+
+      assert.strictEqual(restored.ok, true, JSON.stringify(restored.problems));
+
+      const arr = JSON.parse(
+        fs.readFileSync(path.join(target, 'memory.json'), 'utf8')
+      );
+
+      assert.ok(Array.isArray(arr) && arr.length === 1, '恢复出的数据为合法 JSON');
+    } finally {
+      try {
+        fs.rmSync(pauseFile, { force: true });
+      } catch (_) {
+        /* ignore */
+      }
+      try {
+        writer.kill('SIGTERM');
+      } catch (_) {
+        /* ignore */
+      }
+      try {
+        if (writer.exitCode === null) writer.kill('SIGKILL');
+      } catch (_) {
+        /* ignore */
+      }
+    }
   });
 });
