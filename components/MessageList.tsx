@@ -366,7 +366,7 @@ export function MessageList({
                 <Text style={styles.typingText}>Bluebird 正在输入…</Text>
               </View>
             </View>
-          ) : null
+          ) : undefined
         }
       />
 
