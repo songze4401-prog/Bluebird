@@ -12,17 +12,14 @@ import {
 } from 'react-native';
 
 import { type Theme } from '../theme';
-import { API_TOKEN } from '../lib/constants';
-import { readJsonResponse } from '../lib/utils';
+import { api } from '../lib/api/client';
 import { type ModelDefaults, type ModelProvider } from '../lib/types';
 
 // 模型与 API 管理：独立弹层，不新增路由。
 // 服务商配置与默认模型都在后端（/model-providers），前端不留副本。
 // 后端永不下发完整 API Key：编辑时留空即保留原密钥，界面只展示脱敏 keyHint。
 
-const API_BASE = process.env.EXPO_PUBLIC_API_URL;
-
-const AUTH_HEADERS = { Authorization: `Bearer ${API_TOKEN}` };
+// 网络层统一走 lib/api/client（baseUrl / token / 超时 / 错误归一）
 
 type FormState = {
   id: string | null; // null = 新增
@@ -593,26 +590,14 @@ async function requestJson(
   path: string,
   options: { method?: string; body?: unknown } = {}
 ): Promise<any> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    method: options.method ?? 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      ...AUTH_HEADERS,
-    },
-    ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
-  });
+  const method = options.method ?? 'GET';
 
-  const data = await readJsonResponse(response);
+  if (method === 'POST') return api.post(path, options.body);
+  if (method === 'PUT') return api.put(path, options.body);
+  if (method === 'PATCH') return api.patch(path, options.body);
+  if (method === 'DELETE') return api.del(path);
 
-  if (!response.ok) {
-    throw new Error(
-      typeof data.error === 'string' && data.error
-        ? data.error
-        : `请求失败（HTTP ${response.status}）`
-    );
-  }
-
-  return data;
+  return api.get(path);
 }
 
 // 样式由主题派生：只包含本组件用到的键

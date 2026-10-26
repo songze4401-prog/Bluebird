@@ -12,8 +12,10 @@ import {
 } from 'react-native';
 
 import { type Theme } from '../theme';
-import { API_TOKEN } from '../lib/constants';
 import { type PersonaConfig } from '../lib/types';
+import { api } from '../lib/api/client';
+import { API_PATHS } from '../lib/api/endpoints';
+import { ApiError } from '../lib/api/errors';
 
 // Blue 人格控制面板：独立弹层，不挤占主聊天界面。
 // 配置读写都走后端 /persona（服务端 persona.json 是唯一数据源），
@@ -191,14 +193,9 @@ export function ControlPanelScreen({
       setNotice(null);
 
       try {
-        const response = await fetch(
-          `${process.env.EXPO_PUBLIC_API_URL}/persona`,
-          { headers: { Authorization: `Bearer ${API_TOKEN}` } }
+        const data = await api.get<{ config: PersonaConfig }>(
+          API_PATHS.persona
         );
-
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-        const data = await response.json();
 
         if (!cancelled) setConfig(data.config);
       } catch {
@@ -224,26 +221,21 @@ export function ControlPanelScreen({
   };
 
   const putConfig = async (body: object): Promise<boolean> => {
-    const response = await fetch(`${process.env.EXPO_PUBLIC_API_URL}/persona`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${API_TOKEN}`,
-      },
-      body: JSON.stringify(body),
-    });
+    try {
+      const data = await api.put<{ config: PersonaConfig }>(
+        API_PATHS.persona,
+        body
+      );
 
-    if (response.status === 409) {
-      setNotice('配置文件已损坏，服务端已原地保护，拒绝写入');
-      return false;
+      setConfig(data.config);
+      return true;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        setNotice('配置文件已损坏，服务端已原地保护，拒绝写入');
+        return false;
+      }
+      throw error;
     }
-
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-    const data = await response.json();
-
-    setConfig(data.config);
-    return true;
   };
 
   const handleSave = async () => {

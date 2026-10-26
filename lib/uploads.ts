@@ -3,8 +3,9 @@
 // 上传、读取全部经过服务端鉴权路由，API 密钥只存在于这些请求头里。
 
 import { API_TOKEN } from './constants';
-import { readJsonResponse } from './utils';
 import type { Attachment } from './types';
+import { api } from './api/client';
+import { API_PATHS, TIMEOUTS } from './api/endpoints';
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL;
 
@@ -23,24 +24,16 @@ export async function uploadImage(
   kind: 'image' | 'sticker',
   name?: string
 ): Promise<Attachment> {
-  const response = await fetch(`${API_URL}/uploads/image`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${API_TOKEN}`,
-    },
-    body: JSON.stringify({ image: dataUrl, kind, name }),
-  });
-
-  const data = await readJsonResponse(response);
-
-  if (!response.ok) {
-    throw new Error(
-      typeof data.error === 'string' && data.error
-        ? data.error
-        : '图片上传失败，请稍后再试。'
-    );
-  }
+  const data = await api.post<{
+    id: string;
+    kind: Attachment['kind'];
+    mime: string;
+    name?: string;
+  }>(
+    API_PATHS.uploadsImage,
+    { image: dataUrl, kind, name },
+    { timeoutMs: TIMEOUTS.upload }
+  );
 
   return { id: data.id, kind: data.kind, mime: data.mime, name: data.name };
 }
@@ -48,13 +41,9 @@ export async function uploadImage(
 // 表情包仓库列表（GET /sticker-repo）：加号面板的表情包选择器用。
 // 响应 { stickers, total }，这里只取面板需要的字段。
 export async function listStickerRepo(): Promise<Attachment[]> {
-  const response = await fetch(`${API_URL}/sticker-repo`, {
-    headers: { Authorization: `Bearer ${API_TOKEN}` },
-  });
+  const data = await api.get<{ stickers?: Attachment[] }>(API_PATHS.stickerRepo);
 
-  const data = await readJsonResponse(response);
-
-  if (!response.ok || !Array.isArray(data.stickers)) {
+  if (!Array.isArray(data.stickers)) {
     throw new Error('读取表情包仓库失败');
   }
 
@@ -77,24 +66,13 @@ export async function addSticker(
   dataUrl: string,
   name?: string
 ): Promise<Attachment> {
-  const response = await fetch(`${API_URL}/sticker-repo`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${API_TOKEN}`,
-    },
-    body: JSON.stringify({ image: dataUrl, name }),
-  });
-
-  const data = await readJsonResponse(response);
-
-  if (!response.ok) {
-    throw new Error(
-      typeof data.error === 'string' && data.error
-        ? data.error
-        : '表情包添加失败，请稍后再试。'
-    );
-  }
+  const data = await api.post<{
+    sticker: { id: string; mime: string; name?: string };
+  }>(
+    API_PATHS.stickerRepo,
+    { image: dataUrl, name },
+    { timeoutMs: TIMEOUTS.upload }
+  );
 
   const sticker = data.sticker;
   return {

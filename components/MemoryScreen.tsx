@@ -12,8 +12,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { Theme } from '../theme';
-import { API_TOKEN } from '../lib/constants';
-import { readJsonResponse } from '../lib/utils';
+import { api } from '../lib/api/client';
+import { API_PATHS } from '../lib/api/endpoints';
 
 // 长期记忆条目（与服务端 memory.json 的结构一致，无 id 字段）
 type MemoryItem = {
@@ -105,20 +105,7 @@ export function MemoryScreen({
     setMemoryError('');
 
     try {
-      const response = await fetch(
-        `${process.env.EXPO_PUBLIC_API_URL}/memory`,
-        {
-          headers: {
-            Authorization: `Bearer ${API_TOKEN}`,
-          },
-        }
-      );
-
-      const data = await readJsonResponse(response);
-
-      if (!response.ok) {
-        throw new Error(data.error || '读取失败');
-      }
+      const data = await api.get<{ memories?: MemoryItem[] }>(API_PATHS.memory);
 
       setMemories(Array.isArray(data.memories) ? data.memories : []);
     } catch (error) {
@@ -161,26 +148,10 @@ export function MemoryScreen({
           setDeletingMemoryKey(key);
 
           try {
-            const response = await fetch(
-              `${process.env.EXPO_PUBLIC_API_URL}/memory/delete`,
-              {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${API_TOKEN}`,
-                },
-                body: JSON.stringify({
-                  createdAt: item.createdAt,
-                  content: item.content,
-                }),
-              }
-            );
-
-            const data = await readJsonResponse(response);
-
-            if (!response.ok) {
-              throw new Error(data.error || '删除失败');
-            }
+            await api.post(API_PATHS.memoryDelete, {
+              createdAt: item.createdAt,
+              content: item.content,
+            });
 
             // 后端确认删除成功后才更新 UI，不做乐观更新
             setMemories(prev =>
@@ -208,24 +179,10 @@ export function MemoryScreen({
           style: 'destructive',
           onPress: async () => {
             try {
-              const response = await fetch(
-                `${process.env.EXPO_PUBLIC_API_URL}/memory/clear`,
-                {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${API_TOKEN}`,
-                  },
-                  // 真实数据目录下服务端要求二次确认；此处已在 Alert 里确认过
-                  body: JSON.stringify({ confirm: true }),
-                }
-              );
-
-              const data = await readJsonResponse(response);
-
-              if (!response.ok) {
-                throw new Error(data.error || '清空失败');
-              }
+              await api.post(API_PATHS.memoryClear, {
+                // 真实数据目录下服务端要求二次确认；此处已在 Alert 里确认过
+                confirm: true,
+              });
 
               setMemories([]);
               Alert.alert('完成', '长期记忆已经清空。');

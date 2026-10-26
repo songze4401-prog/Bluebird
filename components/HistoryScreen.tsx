@@ -13,8 +13,9 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { Theme } from '../theme';
 import type { SessionMeta } from '../lib/types';
-import { API_TOKEN } from '../lib/constants';
-import { formatMessageTime, readJsonResponse } from '../lib/utils';
+import { api } from '../lib/api/client';
+import { API_PATHS } from '../lib/api/endpoints';
+import { formatMessageTime } from '../lib/utils';
 
 // 历史聊天（自治）：状态、加载、选择逻辑全部内聚在此。
 // 父级只保留打开开关（visible）与回调；打开即加载。
@@ -46,22 +47,15 @@ export function HistoryScreen({
     setSessionsError('');
 
     try {
-      const response = await fetch(
-        `${process.env.EXPO_PUBLIC_API_URL}/sessions`,
-        {
-          headers: {
-            Authorization: `Bearer ${API_TOKEN}`,
-          },
-        }
+      const data = await api.get<{ sessions?: SessionMeta[]; error?: string }>(
+        API_PATHS.sessions
       );
 
-      const data = await readJsonResponse(response);
-
-      if (!response.ok || !Array.isArray(data.sessions)) {
+      if (!Array.isArray(data.sessions)) {
         throw new Error(data.error || '读取失败');
       }
 
-      setSessions(data.sessions as SessionMeta[]);
+      setSessions(data.sessions);
     } catch (error) {
       console.error('Load sessions error:', error);
       setSessionsError('读取会话列表失败，请稍后再试。');

@@ -25,12 +25,14 @@ import {
   ReplySegment,
   SessionMeta,
 } from './lib/types';
-import { API_TOKEN, DEFAULT_SESSION_ID } from './lib/constants';
+import { DEFAULT_SESSION_ID } from './lib/constants';
 import {
   makeLocalId,
-  readJsonResponse,
   parseStickerMarkers,
 } from './lib/utils';
+import { api } from './lib/api/client';
+import { API_PATHS, TIMEOUTS } from './lib/api/endpoints';
+import { ApiError } from './lib/api/errors';
 import { streamChatRequest } from './lib/stream';
 import {
   buildStreamingBubbles,
@@ -121,17 +123,7 @@ function buildModelNote(route?: ModelRoute): string | undefined {
 
 // 服务端明确错误（无效模型 / 无视觉模型 / 缺 Key 等）：把后端给出的原因原样
 // 展示给用户，而不是统一成「连接失败」。网络类错误仍用统一文案。
-type ServerError = Error & { fromServer?: true };
-
-function serverError(message: string): ServerError {
-  const error = new Error(message) as ServerError;
-  error.fromServer = true;
-  return error;
-}
-
-function isServerError(error: unknown): error is ServerError {
-  return error instanceof Error && (error as ServerError).fromServer === true;
-}
+// 服务端错误统一由 lib/api 的 ApiError 表达：status>0 时 message 即后端原因。
 
 // 数据层切分：assistant 消息进入 state 时就把 [sticker:ID] 解析成片段，
 // 渲染层只拿可直接渲染的结构，不再对原始字符串跑正则。
@@ -290,14 +282,11 @@ export default function App() {
 
   const refreshModelSelection = useCallback(async () => {
     try {
-      const response = await fetch(
-        `${process.env.EXPO_PUBLIC_API_URL}/model-providers`,
-        { headers: { Authorization: `Bearer ${API_TOKEN}` } }
+      const data = await api.get<{ defaults?: ModelDefaults }>(
+        API_PATHS.modelProviders
       );
 
-      const data = await readJsonResponse(response);
-
-      if (!response.ok || !data || !data.defaults) return;
+      if (!data || !data.defaults) return;
 
       const { providerId, modelId } = data.defaults;
 
@@ -338,21 +327,20 @@ export default function App() {
     sessionId: string
   ): Promise<{ ok: boolean; status: number }> => {
     try {
-      const response = await fetch(
-        `${process.env.EXPO_PUBLIC_API_URL}/history?sessionId=${encodeURIComponent(
-          sessionId
-        )}&limit=200`,
-        {
-          headers: {
-            Authorization: `Bearer ${API_TOKEN}`,
-          },
-        }
+      const data = await api.get<{
+        history?: Array<{
+          id?: string;
+          role: 'user' | 'assistant';
+          content: string;
+          createdAt?: string;
+          attachments?: Attachment[];
+        }>;
+      }>(
+        `${API_PATHS.history}?sessionId=${encodeURIComponent(sessionId)}&limit=200`
       );
 
-      const data = await readJsonResponse(response);
-
-      if (!response.ok || !Array.isArray(data.history)) {
-        return { ok: false, status: response.status };
+      if (!Array.isArray(data.history)) {
+        return { ok: false, status: 200 };
       }
 
       setMessages(
@@ -381,10 +369,13 @@ export default function App() {
             )
       );
 
-      return { ok: true, status: response.status };
+      return { ok: true, status: 200 };
     } catch (error) {
       console.error('History load error:', error);
-      return { ok: false, status: 0 };
+      return {
+        ok: false,
+        status: error instanceof ApiError ? error.status : 0,
+      };
     }
   };
 
@@ -395,22 +386,15 @@ export default function App() {
 
     const loadSessions = async (): Promise<SessionMeta[] | null> => {
       try {
-        const response = await fetch(
-          `${process.env.EXPO_PUBLIC_API_URL}/sessions`,
-          {
-            headers: {
-              Authorization: `Bearer ${API_TOKEN}`,
-            },
-          }
+        const data = await api.get<{ sessions?: SessionMeta[] }>(
+          API_PATHS.sessions
         );
 
-        const data = await readJsonResponse(response);
-
-        if (!response.ok || !Array.isArray(data.sessions)) {
+        if (!Array.isArray(data.sessions)) {
           throw new Error('读取会话列表失败');
         }
 
-        return data.sessions as SessionMeta[];
+        return data.sessions;
       } catch (error) {
         // 失败不抛出：退回默认会话，保证单历史模式仍完整可用
         console.error('Sessions load error:', error);
@@ -445,18 +429,9 @@ export default function App() {
 
     const loadEmotion = async () => {
       try {
-        const response = await fetch(
-          `${process.env.EXPO_PUBLIC_API_URL}/emotion`,
-          {
-            headers: {
-              Authorization: `Bearer ${API_TOKEN}`,
-            },
-          }
-        );
+        const data = await api.get<{ emotion?: string }>(API_PATHS.emotion);
 
-        const data = await readJsonResponse(response);
-
-        if (cancelled || !response.ok) return;
+        if (cancelled) return;
 
         if (typeof data.emotion === 'string') setMood(data.emotion);
       } catch (error) {
@@ -561,27 +536,11 @@ export default function App() {
           style: 'destructive',
           onPress: async () => {
             try {
-              const response = await fetch(
-                `${process.env.EXPO_PUBLIC_API_URL}/history/clear`,
-                {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${API_TOKEN}`,
-                  },
-                  body: JSON.stringify({
-                    sessionId: currentSessionId,
-                    // 真实数据目录下服务端要求二次确认；此处已在 Alert 里确认过
-                    confirm: true,
-                  }),
-                }
-              );
-
-              const data = await readJsonResponse(response);
-
-              if (!response.ok) {
-                throw new Error(data.error || '清理失败');
-              }
+              await api.post(API_PATHS.historyClear, {
+                sessionId: currentSessionId,
+                // 真实数据目录下服务端要求二次确认；此处已在 Alert 里确认过
+                confirm: true,
+              });
 
               setMessages([]);
               setMenuOpen(false);
@@ -627,26 +586,13 @@ export default function App() {
         style: 'destructive',
         onPress: async () => {
           try {
-            const response = await fetch(
-              `${process.env.EXPO_PUBLIC_API_URL}/history/recall`,
+            const data = await api.post<{ removedIds?: string[] }>(
+              API_PATHS.historyRecall,
               {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${API_TOKEN}`,
-                },
-                body: JSON.stringify({
-                  sessionId: currentSessionId,
-                  messageId: message.id,
-                }),
+                sessionId: currentSessionId,
+                messageId: message.id,
               }
             );
-
-            const data = await readJsonResponse(response);
-
-            if (!response.ok) {
-              throw new Error(data.error || '撤回失败');
-            }
 
             // 服务端返回真实删除的 id 列表（含配对的 AI 回复），按它移除
             const removedIds: string[] = Array.isArray(data.removedIds)
@@ -836,8 +782,7 @@ export default function App() {
       if (!extras?.attachments) setPendingAttachments([]);
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000);
+    // 超时由 lib/api client 统一处理（TIMEOUTS.chat = 60s）
 
     // 附件按存储位置分流：表情包引用仓库 ID（stickerIds），
     // 聊天图片引用 uploads 临时附件（attachmentIds）。重试时同样按 kind 路由。
@@ -971,29 +916,9 @@ export default function App() {
       // ---- 非流式 /chat 路径（开关关闭，或流式回退）----
       // 一次性写入全部气泡（不做假分条动画），与流式 done 同源切分；
       // 用户已切走会话则不追加（消息已落盘，切回时历史完整恢复）
-      const response = await fetch(
-        `${process.env.EXPO_PUBLIC_API_URL}/chat`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${API_TOKEN}`,
-          },
-          signal: controller.signal,
-          body: JSON.stringify(payload),
-        }
-      );
-
-      const data = await readJsonResponse(response);
-
-      if (!response.ok) {
-        // 会话被清理/只读保护时给出明确的下一步指引
-        if (response.status === 404) {
-          Alert.alert('会话已失效', '返回主页后请重新选择会话。');
-        }
-
-        throw serverError(data.error || '请求失败');
-      }
+      const data = await api.post<any>(API_PATHS.chat, payload, {
+        timeoutMs: TIMEOUTS.chat,
+      });
 
       const segments = normalizeSegments(data);
 
@@ -1027,12 +952,19 @@ export default function App() {
     } catch (error) {
       console.error(error);
 
+      if (error instanceof ApiError && error.status === 404) {
+        // 会话被清理/只读保护时给出明确的下一步指引
+        Alert.alert('会话已失效', '返回主页后请重新选择会话。');
+      }
+
       const errorMessage =
-        error instanceof Error && error.name === 'AbortError'
-          ? '连接Bluebird超时了，再试一次。'
-          : isServerError(error) && error.message
-            ? error.message
-            : '连接Bluebird失败了，再试一次。';
+        error instanceof ApiError
+          ? error.isTimeout
+            ? '连接Bluebird超时了，再试一次。'
+            : error.status > 0 && error.message
+              ? error.message
+              : '连接Bluebird失败了，再试一次。'
+          : '连接Bluebird失败了，再试一次。';
 
       setMessages(prev => [
         ...prev,
@@ -1046,7 +978,6 @@ export default function App() {
         },
       ]);
     } finally {
-      clearTimeout(timeout);
       setSending(false);
     }
   };
@@ -1073,8 +1004,7 @@ export default function App() {
 
     setContinuing(true);
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000);
+    // 超时由 lib/api client 统一处理（TIMEOUTS.chat = 60s）
 
     const payload = {
       mode: 'continue',
@@ -1160,24 +1090,9 @@ export default function App() {
       // ---- 非流式 /chat 路径（开关关闭，或流式回退）----
       // 一次性写入全部气泡（不做假分条动画），与流式 done 同源切分；
       // 用户已切走会话则不追加（消息已落盘，切回时历史完整恢复）
-      const response = await fetch(
-        `${process.env.EXPO_PUBLIC_API_URL}/chat`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${API_TOKEN}`,
-          },
-          signal: controller.signal,
-          body: JSON.stringify(payload),
-        }
-      );
-
-      const data = await readJsonResponse(response);
-
-      if (!response.ok) {
-        throw serverError(data.error || '请求失败');
-      }
+      const data = await api.post<any>(API_PATHS.chat, payload, {
+        timeoutMs: TIMEOUTS.chat,
+      });
 
       const segments = normalizeSegments(data);
 
@@ -1196,12 +1111,11 @@ export default function App() {
 
       Alert.alert(
         '失败',
-        isServerError(error) && error.message
+        error instanceof ApiError && error.status > 0 && error.message
           ? error.message
           : '继续说失败了，请稍后再试。'
       );
     } finally {
-      clearTimeout(timeout);
       setContinuing(false);
     }
   };
@@ -1217,21 +1131,12 @@ export default function App() {
     setCreatingSession(true);
 
     try {
-      const response = await fetch(
-        `${process.env.EXPO_PUBLIC_API_URL}/sessions`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${API_TOKEN}`,
-          },
-          body: JSON.stringify({}),
-        }
-      );
+      const data = await api.post<{
+        session?: { id?: string };
+        error?: string;
+      }>(API_PATHS.sessions, {});
 
-      const data = await readJsonResponse(response);
-
-      if (!response.ok || !data.session?.id) {
+      if (!data.session?.id) {
         throw new Error(data.error || '新建会话失败');
       }
 
@@ -1284,21 +1189,7 @@ export default function App() {
     sessionId: string
   ): Promise<boolean> => {
     try {
-      const response = await fetch(
-        `${process.env.EXPO_PUBLIC_API_URL}/sessions/${encodeURIComponent(sessionId)}`,
-        {
-          method: 'DELETE',
-          headers: {
-            Authorization: `Bearer ${API_TOKEN}`,
-          },
-        }
-      );
-
-      const data = await readJsonResponse(response);
-
-      if (!response.ok) {
-        throw new Error(data.error || '删除失败');
-      }
+      await api.del(API_PATHS.session(sessionId));
 
       if (sessionId === currentSessionId) {
         setCurrentSessionId(DEFAULT_SESSION_ID);
