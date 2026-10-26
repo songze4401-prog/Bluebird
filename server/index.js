@@ -169,6 +169,38 @@ const { splitReplyIntoSegments } = require('./split-reply');
 // 情绪标签剥离：全量（/chat）与增量（/chat/stream）共用同一套规则。
 const { stripMoodTags, createMoodTagStripper } = require('./stream-strip');
 
+// Context Engine（v2.3 规则基线）：可选接入层，负责检索信息的
+// 可裁决选取、降级、拒绝与预算裁剪。开关 BLUEBIRD_CONTEXT_ENGINE=1 启用
+// （默认关闭——关闭时上下文组装与改造前逐字节一致，兼容既有行为）。
+// 关闭时本模块零加载、零读取：引擎与 server/context/config.json 均延迟到
+// 首次真正启用时才 require/读取，避免引擎配置缺失或损坏影响正常启动。
+// require 自带模块缓存，这里不额外缓存（保持可测试：清 require.cache 即重新加载）。
+function getContextEngine() {
+  return require('./context/engine');
+}
+
+function contextEngineEnabled() {
+  return process.env.BLUEBIRD_CONTEXT_ENGINE === '1';
+}
+
+let lastContextEngineState = contextEngineEnabled();
+
+if (lastContextEngineState) {
+  console.log(
+    '[context] BLUEBIRD_CONTEXT_ENGINE=1：Context Engine 已启用（每请求重新判断，进程内改环境变量即时生效）'
+  );
+}
+
+function noteContextEngineObservation() {
+  const now = contextEngineEnabled();
+  if (now !== lastContextEngineState) {
+    console.warn(
+      `[context] 引擎开关状态变化：${lastContextEngineState ? '开' : '关'} -> ${now ? '开' : '关'}`
+    );
+    lastContextEngineState = now;
+  }
+}
+
 // 多模态图片模块：上传校验 / 存储 / 读取 / 表情包索引
 const {
   UploadError,
@@ -1616,7 +1648,7 @@ app.post('/memory/delete', requireAuth, async (req, res) => {
 // 前置：解析参数 + 校验 + 组装 systemPrompt。
 // 校验失败返回 { error: [status, body] }，路由直接回 JSON（此时未切 SSE）；
 // 成功返回 { ctx }。
-function prepareChatRequest(req) {
+async function prepareChatRequest(req) {
   const { message, history = [], mode, attachmentIds, stickerIds } = req.body;
   const sessionId = resolveSessionId(req, 'body');
 
@@ -1803,7 +1835,14 @@ function prepareChatRequest(req) {
       ).content || ''
     : userText;
 
-  const memoryContext = buildMemoryContext(memoryQuery);
+  // Context Engine 开启时，记忆/上下文检索由引擎接管（引擎内部复用
+  // memory.js 的检索，并做三维裁决与预算裁剪）；关闭时维持原路径。
+  // 引擎抛错或返回 ok=false 时回退到原 buildMemoryContext 路径，绝不因此 500。
+  const contextEngineOn = contextEngineEnabled();
+  let memoryContext = '';
+  let engineBlocks = [];
+  let untrustedContext = null;
+  let contextTrace = null;
   const timeContext = getTimeContext(req.body.timeZone || 'Asia/Shanghai');
   const gapContext = buildTimeGapContext(
     req.body.timeZone || 'Asia/Shanghai',
@@ -1854,11 +1893,81 @@ function prepareChatRequest(req) {
     );
   }
 
+  // ---- Context Engine（可选）：检索信息的可裁决选取、降级、拒绝与预算裁剪 ----
+  // 开启时替换"buildMemoryContext 全局注入"：引擎并行检索（memory/user/外部源），
+  // 按 v2.3 顺序裁决、按信息类型设单条上限、按相关度裁剪。
+  // 外部不可信内容（doc/web）不进入系统指令区：引擎单独返回，
+  // 由下方以独立的 user 消息（带显式边界标记）注入，与 system 指令结构隔离。
+  // 引擎抛错或 ok=false 时回退 buildMemoryContext：宁可用旧路径，也不让聊天 500。
+  if (contextEngineOn) {
+    noteContextEngineObservation();
+
+    try {
+      const engine = getContextEngine();
+      const engineOut = await engine.runContextEngine({
+        task: memoryQuery,
+        sessionId,
+        history: promptHistory,
+        // 保底系统指令：引擎的预算裁剪绝不碰这些必要指令（冻结基线第 5 节）
+        systemPrompt: [
+          BLUEBIRD_SYSTEM_PROMPT,
+          timeContext,
+          gapContext.promptText,
+          emotionContext,
+          personaContext,
+          isContinue ? CONTINUE_INSTRUCTION : '',
+          ...visionInstructions,
+        ]
+          .filter(Boolean)
+          .join('\n\n'),
+        injectedTask: userText,
+      });
+
+      if (engineOut.ok) {
+        contextTrace = engineOut.traceApi;
+        engineBlocks = engine.renderContextBlocks(engineOut);
+        untrustedContext = engine.renderUntrustedContextBlock(engineOut);
+      } else {
+        // 无法安全组装：显式记录降级原因，并回退旧路径（记忆仍然可用）
+        memoryContext = buildMemoryContext(memoryQuery);
+        console.error(
+          `[context] engine 组装失败/降级，回退 buildMemoryContext session=${sessionId} error=${engineOut.error}`
+        );
+      }
+
+      console.log(
+        `[context] engine session=${sessionId} ok=${engineOut.ok}` +
+          ` route=${engineOut.route.decision}` +
+          ` selected=${engineOut.decisions.selected.length}` +
+          ` demoted=${engineOut.decisions.demoted.length}` +
+          ` conflicts=${engineOut.decisions.conflicts.length}` +
+          ` expired=${engineOut.decisions.expired.length}` +
+          ` sources=${engineOut.enabledSources.join(',')}`
+      );
+    } catch (error) {
+      // 引擎内部异常：绝不向上抛（否则整个聊天请求失败），回退旧路径
+      contextTrace = null;
+      engineBlocks = [];
+      untrustedContext = null;
+      memoryContext = buildMemoryContext(memoryQuery);
+      console.error(
+        `[context] engine 异常，回退 buildMemoryContext session=${sessionId}` +
+          ` error=${error && error.message ? error.message : error}`
+      );
+    }
+  } else {
+    memoryContext = buildMemoryContext(memoryQuery);
+  }
+
   const systemPrompt = [
       BLUEBIRD_SYSTEM_PROMPT,
       timeContext,
       gapContext.promptText,
-      memoryContext,
+      ...(engineBlocks.length
+        ? engineBlocks
+        : memoryContext
+          ? [memoryContext]
+          : []),
       emotionContext,
       personaContext,
       isContinue ? CONTINUE_INSTRUCTION : '',
@@ -1866,6 +1975,13 @@ function prepareChatRequest(req) {
   ]
       .filter(Boolean)
       .join('\n\n');
+
+  // 外部不可信内容（doc/web）具有独立的结构边界：作为单独一条 user 消息
+  // 附在历史末尾（带显式边界标记），绝不并入 systemPrompt 指令区。
+  // 用副本承载，绝不改动 storedHistory / 客户端回退历史。
+  const modelHistory = untrustedContext
+    ? [...promptHistory, { role: 'user', content: untrustedContext }]
+    : promptHistory;
 
   // 当前用户消息：带附件时转成 content blocks（文本 + 图片 dataURL）。
   // 图片从服务端磁盘读取，不信任客户端传来的任何图片字节。
@@ -1893,9 +2009,10 @@ function prepareChatRequest(req) {
       attachments,
       useVision,
       userContent,
-      promptHistory,
+      promptHistory: modelHistory,
       systemPrompt,
       personaConfig,
+      contextTrace,
       providerId: modelTarget.providerId,
       providerName: modelTarget.provider.name,
       modelId: modelTarget.modelId,
@@ -2095,7 +2212,7 @@ app.post('/chat', requireAuth, async (req, res) => {
   const userMessageReceivedAt = Date.now();
 
   try {
-    const prepared = prepareChatRequest(req);
+    const prepared = await prepareChatRequest(req);
 
     if (prepared.error) {
       const [status, body] = prepared.error;
@@ -2133,6 +2250,7 @@ app.post('/chat', requireAuth, async (req, res) => {
     let completion;
     let rawReply;
     let toolSteps = null;
+    let contextTraceEmitted = false;
 
     if (agentOn) {
       const outcome = await runAgentTurn({
@@ -2166,6 +2284,23 @@ app.post('/chat', requireAuth, async (req, res) => {
         `[agent] finished session=${ctx.sessionId} rounds=${outcome.rounds}` +
           ` tools=${outcome.toolSteps.length}`
       );
+
+      // Context Engine trace 收尾：把真实工具调用结果写入 trace（结构化、可测试验证）
+      if (ctx.contextTrace) {
+        for (const step of outcome.toolSteps) {
+          ctx.contextTrace.recordTool({
+            name: step.name,
+            ok: step.ok,
+            code: step.code,
+            summary: step.summary,
+            durationMs: step.durationMs,
+          });
+        }
+        console.error(
+          `[context-trace] ${JSON.stringify(ctx.contextTrace.toJSON())}`
+        );
+        contextTraceEmitted = true;
+      }
 
       if (!completion) {
         // 客户端在首轮模型调用前就已断开：没有任何可收尾内容
@@ -2207,6 +2342,13 @@ app.post('/chat', requireAuth, async (req, res) => {
       userMessageReceivedAt,
       ...(toolSteps ? { toolSteps } : {}),
     });
+
+    // 非 Agent 路径的 trace 收尾（无工具调用，同样输出结构化 trace）
+    if (ctx.contextTrace && !contextTraceEmitted) {
+      console.error(
+        `[context-trace] ${JSON.stringify(ctx.contextTrace.toJSON())}`
+      );
+    }
 
     res.json({
       ...result,
@@ -2271,7 +2413,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   let prepared;
 
   try {
-    prepared = prepareChatRequest(req);
+    prepared = await prepareChatRequest(req);
   } catch (error) {
     console.error('AI API Error:', error);
     return res.status(500).json({ error: 'AI 请求失败' });
@@ -2328,6 +2470,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   const model = ctx.modelId;
   let upstreamModel = null;
   let toolSteps = null;
+  let contextTraceEmitted = false;
   const stripper = createMoodTagStripper();
   let streamError = null;
 
@@ -2389,6 +2532,23 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
           `[agent] finished (stream) session=${ctx.sessionId}` +
             ` rounds=${outcome.rounds} tools=${outcome.toolSteps.length}`
         );
+
+        // Context Engine trace 收尾（stream 路由）：写入真实工具调用结果
+        if (ctx.contextTrace) {
+          for (const step of outcome.toolSteps) {
+            ctx.contextTrace.recordTool({
+              name: step.name,
+              ok: step.ok,
+              code: step.code,
+              summary: step.summary,
+              durationMs: step.durationMs,
+            });
+          }
+          console.error(
+            `[context-trace] ${JSON.stringify(ctx.contextTrace.toJSON())}`
+          );
+          contextTraceEmitted = true;
+        }
 
         // 最终文本经同一套情绪标签剥离后以 delta 发出
         const emit = stripper.push(rawReply);
@@ -2504,6 +2664,13 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
     sendEvent({ type: 'error', error: 'AI 请求失败' });
     res.end();
     return;
+  }
+
+  // 非 Agent 路径的 trace 收尾（无工具调用，同样输出结构化 trace）
+  if (ctx.contextTrace && !contextTraceEmitted) {
+    console.error(
+      `[context-trace] ${JSON.stringify(ctx.contextTrace.toJSON())}`
+    );
   }
 
   sendEvent({ type: 'done', ...result, model, providerId: ctx.providerId, upstreamModel, modelRoute: ctx.modelRoute, sessionId: ctx.sessionId });
