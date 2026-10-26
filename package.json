@@ -7,20 +7,22 @@
     "@react-native-async-storage/async-storage": "2.2.0",
     "cors": "^2.8.6",
     "dotenv": "^18.0.4",
-    "expo": "~57.0.25",
-    "expo-image": "~57.0.5",
-    "expo-image-picker": "~57.0.20",
-    "expo-status-bar": "~57.0.1",
+    "expo": "~58.0.19",
+    "expo-image": "~58.0.17",
+    "expo-image-picker": "~58.0.10",
+    "expo-status-bar": "~58.0.4",
     "express": "^5.2.1",
     "openai": "^7.23.0",
-    "react": "19.2.3",
-    "react-dom": "19.2.3",
-    "react-native": "0.86.3",
-    "react-native-safe-area-context": "~5.7.0",
-    "react-native-web": "^0.21.2"
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-native": "0.88.0",
+    "react-native-safe-area-context": "~5.10.1",
+    "react-native-web": "^0.21.4"
   },
   "devDependencies": {
-    "@types/react": "~19.2.2",
+    "@types/react": "~19.3.0",
+    "eslint": "^9.39.5",
+    "eslint-config-expo": "~58.0.4",
     "typescript": "~6.0.3"
   },
   "scripts": {
