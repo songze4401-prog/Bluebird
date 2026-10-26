@@ -9,7 +9,9 @@
  *   B. /chat 与 /chat/stream 的 [context-trace] stderr 结构化输出（可解析 JSON，
  *      字段完整：route/planner/retrieval/adjudication/build/tools/verification）；
  *   C. 开关关闭时行为与改造前一致（不输出 trace、响应结构相同）；
- *   D. 工具调用结果进入 trace（Agent 路径，剧本含 tool_call → 结果回传）。
+ *   D. 工具调用结果进入 trace（Agent 路径，剧本含 tool_call → 结果回传）；
+ *   F. 引擎抛错时回退旧路径（200，不 500，不输出 trace）；
+ *   G. 引擎关闭时零加载（不加载 context 模块、不读取 config.json）。
  *
  * 隔离：BLUEBIRD_DATA_DIR 指向临时目录（require 前设置）；openai 桩零网络；
  * 记忆提取调用固定返回 {}（不消耗剧本）；PORT=0 动态端口。
@@ -190,6 +192,54 @@ async function main() {
     return session && session.id ? session.id : null;
   }
 
+  // ============ F. 引擎异常：安全回退旧路径（不 500） ============
+  // 必须放在 A 之前：引擎开关为 1 但尚未真正加载引擎模块，
+  // 这里向 require.cache 注入一个必定抛错的假引擎，验证集成层回退。
+  ORIG_LOG('\n[E2E-F] 引擎异常回退旧路径');
+  logLines.length = 0;
+  errorLines.length = 0;
+  scripted.length = 0;
+  callIndex = 0;
+  stubCalls.length = 0;
+  scripted.push({ content: '[calm] 引擎异常时的回退回复' });
+
+  const engineTarget = require.resolve(path.join(SERVER, 'context', 'engine.js'));
+  require.cache[engineTarget] = {
+    id: engineTarget,
+    filename: engineTarget,
+    loaded: true,
+    exports: {
+      runContextEngine: async () => {
+        throw new Error('stub engine boom');
+      },
+      renderContextBlocks: () => [],
+      renderUntrustedContextBlock: () => null,
+    },
+  };
+
+  const sessionF = await newSession();
+  const resF = await post('/chat', { message: '你好', sessionId: sessionF });
+  check('F1: 引擎抛错时 /chat 仍返回 200', resF.status === 200, `status=${resF.status}`);
+  check('F2: 回退路径仍返回 reply', !!resF.json && typeof resF.json.reply === 'string');
+  const traceLinesF = errorLines.filter(l => l.includes('[context-trace]'));
+  check('F3: 引擎抛错时不输出 trace', traceLinesF.length === 0, `got ${traceLinesF.length}`);
+  check(
+    'F4: 显式记录回退原因',
+    errorLines.some(l => l.includes('engine 异常，回退'))
+  );
+  const lastCallF = stubCalls[stubCalls.length - 1];
+  const sysPromptF =
+    lastCallF && Array.isArray(lastCallF.messages) && lastCallF.messages[0]
+      ? String(lastCallF.messages[0].content || '')
+      : '';
+  check(
+    'F5: 回退后 systemPrompt 不含引擎块',
+    !!sysPromptF && !sysPromptF.includes('【引擎提供的相关上下文】')
+  );
+
+  // 删除假模块，后续组恢复真实引擎
+  delete require.cache[engineTarget];
+
   // ============ A. /chat 普通路径：引擎开启注入引擎块 ============
   ORIG_LOG('\n[E2E-A] /chat 普通路径（引擎开启）');
   logLines.length = 0;
@@ -224,6 +274,10 @@ async function main() {
   check('A5: trace 是合法 JSON', !!traceA);
   check('A6: trace 包含完整阶段字段', !!traceA && traceA.route && traceA.planner && traceA.retrieval && traceA.adjudication && traceA.build && traceA.verification && Array.isArray(traceA.tools));
   check('A7: trace 记录来源检索状态', !!traceA && traceA.retrieval.sources.length > 0);
+  check(
+    'A8: trace 只含元数据（无 task 正文，taskLength 为数字）',
+    !!traceA && !('task' in traceA) && typeof traceA.taskLength === 'number'
+  );
 
   // ============ B. /chat/stream 引擎开启 ============
   ORIG_LOG('\n[E2E-B] /chat/stream 普通路径（引擎开启）');
@@ -344,12 +398,62 @@ async function main() {
 
   await closeServer(server);
 
+  // ============ G. 引擎关闭：不加载引擎模块、不读取引擎配置 ============
+  // 子进程把 context/config.json 的读取改成抛错，再以关闭状态 require 服务：
+  // 旧实现会在启动时加载引擎→读配置→直接启动失败；修复后应正常退出。
+  ORIG_LOG('\n[E2E-G] 引擎关闭时零加载（子进程验证）');
+  const { spawnSync } = require('child_process');
+  const gData = path.join(TMP_ROOT, 'data-g');
+  fs.mkdirSync(gData, { recursive: true });
+
+  const childScript = [
+    "const fs = require('fs');",
+    "const path = require('path');",
+    "const original = fs.readFileSync;",
+    "fs.readFileSync = function (p, ...args) {",
+    "  if (String(p).endsWith(path.join('context', 'config.json'))) {",
+    "    throw new Error('CONTEXT_CONFIG_READ_BLOCKED');",
+    "  }",
+    "  return original.call(this, p, ...args);",
+    "};",
+    "require(path.join(process.cwd(), 'server', 'index.js'));",
+    "const loaded = Object.keys(require.cache).some(k => k.includes(path.join('server', 'context')));",
+    "process.stdout.write('CTX_LOADED=' + loaded + '\\n', function () { process.exit(0); });",
+  ].join('\n');
+
+  const envG = { ...process.env, BLUEBIRD_DATA_DIR: gData, PORT: '0' };
+  delete envG.BLUEBIRD_CONTEXT_ENGINE;
+
+  const child = spawnSync(process.execPath, ['-e', childScript], {
+    cwd: path.join(__dirname, '..'),
+    env: envG,
+    encoding: 'utf8',
+    timeout: 30000,
+  });
+
+  check(
+    'G1: 引擎关闭时不读引擎配置（子进程正常退出）',
+    child.status === 0,
+    `status=${child.status} stderr=${String(child.stderr || '').slice(0, 200)}`
+  );
+  check(
+    'G2: 引擎关闭时不加载 context 模块',
+    String(child.stdout || '').includes('CTX_LOADED=false'),
+    `stdout=${String(child.stdout || '').slice(0, 200)}`
+  );
+
+  fs.rmSync(gData, { recursive: true, force: true });
+
   ORIG_LOG(`\ncontext-engine-e2e: ${passed} passed, ${failed} failed`);
   if (failed) {
     ORIG_LOG('Failures:');
     for (const f of failures) ORIG_LOG('  - ' + f);
     process.exit(1);
   }
+
+  // 与其他自定义 runner 一致：显式退出。本进程可能残留定时器/句柄，
+  // 不显式 exit 会让 npm test / CI 永远挂在这一步（Windows 已复现）。
+  process.exit(0);
 }
 
 main().catch(error => {

@@ -172,8 +172,12 @@ const { stripMoodTags, createMoodTagStripper } = require('./stream-strip');
 // Context Engine（v2.3 规则基线）：可选接入层，负责检索信息的
 // 可裁决选取、降级、拒绝与预算裁剪。开关 BLUEBIRD_CONTEXT_ENGINE=1 启用
 // （默认关闭——关闭时上下文组装与改造前逐字节一致，兼容既有行为）。
-// 未开启时本模块零调用、零影响。
-const contextEngine = require('./context/engine');
+// 关闭时本模块零加载、零读取：引擎与 server/context/config.json 均延迟到
+// 首次真正启用时才 require/读取，避免引擎配置缺失或损坏影响正常启动。
+// require 自带模块缓存，这里不额外缓存（保持可测试：清 require.cache 即重新加载）。
+function getContextEngine() {
+  return require('./context/engine');
+}
 
 function contextEngineEnabled() {
   return process.env.BLUEBIRD_CONTEXT_ENGINE === '1';
@@ -1833,8 +1837,12 @@ async function prepareChatRequest(req) {
 
   // Context Engine 开启时，记忆/上下文检索由引擎接管（引擎内部复用
   // memory.js 的检索，并做三维裁决与预算裁剪）；关闭时维持原路径。
+  // 引擎抛错或返回 ok=false 时回退到原 buildMemoryContext 路径，绝不因此 500。
   const contextEngineOn = contextEngineEnabled();
-  const memoryContext = contextEngineOn ? '' : buildMemoryContext(memoryQuery);
+  let memoryContext = '';
+  let engineBlocks = [];
+  let untrustedContext = null;
+  let contextTrace = null;
   const timeContext = getTimeContext(req.body.timeZone || 'Asia/Shanghai');
   const gapContext = buildTimeGapContext(
     req.body.timeZone || 'Asia/Shanghai',
@@ -1887,53 +1895,68 @@ async function prepareChatRequest(req) {
 
   // ---- Context Engine（可选）：检索信息的可裁决选取、降级、拒绝与预算裁剪 ----
   // 开启时替换"buildMemoryContext 全局注入"：引擎并行检索（memory/user/外部源），
-  // 按 v2.3 顺序裁决、按信息类型设单条上限、按相关度裁剪；
-  // 外部不可信内容（doc/web）单独分组，绝不升级为系统指令。
-  // 关闭时（默认）零调用、零影响，与改造前逐字节一致。
-  let engineBlocks = [];
-  let contextTrace = null;
-
+  // 按 v2.3 顺序裁决、按信息类型设单条上限、按相关度裁剪。
+  // 外部不可信内容（doc/web）不进入系统指令区：引擎单独返回，
+  // 由下方以独立的 user 消息（带显式边界标记）注入，与 system 指令结构隔离。
+  // 引擎抛错或 ok=false 时回退 buildMemoryContext：宁可用旧路径，也不让聊天 500。
   if (contextEngineOn) {
     noteContextEngineObservation();
 
-    const engineOut = await contextEngine.runContextEngine({
-      task: memoryQuery,
-      sessionId,
-      history: promptHistory,
-      // 保底系统指令：引擎的预算裁剪绝不碰这些必要指令（冻结基线第 5 节）
-      systemPrompt: [
-        BLUEBIRD_SYSTEM_PROMPT,
-        timeContext,
-        gapContext.promptText,
-        emotionContext,
-        personaContext,
-        isContinue ? CONTINUE_INSTRUCTION : '',
-        ...visionInstructions,
-      ]
-        .filter(Boolean)
-        .join('\n\n'),
-      injectedTask: userText,
-    });
+    try {
+      const engine = getContextEngine();
+      const engineOut = await engine.runContextEngine({
+        task: memoryQuery,
+        sessionId,
+        history: promptHistory,
+        // 保底系统指令：引擎的预算裁剪绝不碰这些必要指令（冻结基线第 5 节）
+        systemPrompt: [
+          BLUEBIRD_SYSTEM_PROMPT,
+          timeContext,
+          gapContext.promptText,
+          emotionContext,
+          personaContext,
+          isContinue ? CONTINUE_INSTRUCTION : '',
+          ...visionInstructions,
+        ]
+          .filter(Boolean)
+          .join('\n\n'),
+        injectedTask: userText,
+      });
 
-    contextTrace = engineOut.traceApi;
-    engineBlocks = contextEngine.renderContextBlocks(engineOut);
+      if (engineOut.ok) {
+        contextTrace = engineOut.traceApi;
+        engineBlocks = engine.renderContextBlocks(engineOut);
+        untrustedContext = engine.renderUntrustedContextBlock(engineOut);
+      } else {
+        // 无法安全组装：显式记录降级原因，并回退旧路径（记忆仍然可用）
+        memoryContext = buildMemoryContext(memoryQuery);
+        console.error(
+          `[context] engine 组装失败/降级，回退 buildMemoryContext session=${sessionId} error=${engineOut.error}`
+        );
+      }
 
-    console.log(
-      `[context] engine session=${sessionId} ok=${engineOut.ok}` +
-        ` route=${engineOut.route.decision}` +
-        ` selected=${engineOut.decisions.selected.length}` +
-        ` demoted=${engineOut.decisions.demoted.length}` +
-        ` conflicts=${engineOut.decisions.conflicts.length}` +
-        ` expired=${engineOut.decisions.expired.length}` +
-        ` sources=${engineOut.enabledSources.join(',')}`
-    );
-
-    if (!engineOut.ok) {
-      // 无法安全组装：显式记录降级原因（不静默吞掉），路由层仍用保底系统指令
+      console.log(
+        `[context] engine session=${sessionId} ok=${engineOut.ok}` +
+          ` route=${engineOut.route.decision}` +
+          ` selected=${engineOut.decisions.selected.length}` +
+          ` demoted=${engineOut.decisions.demoted.length}` +
+          ` conflicts=${engineOut.decisions.conflicts.length}` +
+          ` expired=${engineOut.decisions.expired.length}` +
+          ` sources=${engineOut.enabledSources.join(',')}`
+      );
+    } catch (error) {
+      // 引擎内部异常：绝不向上抛（否则整个聊天请求失败），回退旧路径
+      contextTrace = null;
+      engineBlocks = [];
+      untrustedContext = null;
+      memoryContext = buildMemoryContext(memoryQuery);
       console.error(
-        `[context] engine 组装失败/降级 session=${sessionId} error=${engineOut.error}`
+        `[context] engine 异常，回退 buildMemoryContext session=${sessionId}` +
+          ` error=${error && error.message ? error.message : error}`
       );
     }
+  } else {
+    memoryContext = buildMemoryContext(memoryQuery);
   }
 
   const systemPrompt = [
@@ -1952,6 +1975,13 @@ async function prepareChatRequest(req) {
   ]
       .filter(Boolean)
       .join('\n\n');
+
+  // 外部不可信内容（doc/web）具有独立的结构边界：作为单独一条 user 消息
+  // 附在历史末尾（带显式边界标记），绝不并入 systemPrompt 指令区。
+  // 用副本承载，绝不改动 storedHistory / 客户端回退历史。
+  const modelHistory = untrustedContext
+    ? [...promptHistory, { role: 'user', content: untrustedContext }]
+    : promptHistory;
 
   // 当前用户消息：带附件时转成 content blocks（文本 + 图片 dataURL）。
   // 图片从服务端磁盘读取，不信任客户端传来的任何图片字节。
@@ -1979,7 +2009,7 @@ async function prepareChatRequest(req) {
       attachments,
       useVision,
       userContent,
-      promptHistory,
+      promptHistory: modelHistory,
       systemPrompt,
       personaConfig,
       contextTrace,
