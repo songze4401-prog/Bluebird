@@ -40,10 +40,14 @@ export function ModelScreen({
   theme,
   visible,
   onClose,
+  onDefaultsChanged,
 }: {
   theme: Theme;
   visible: boolean;
   onClose: () => void;
+  // 默认模型变化后通知父级刷新镜像（唯一数据源仍是服务端 defaults）。
+  // 重构前靠「关闭本页时父级再拉一次」兜底，现在改成显式通知。
+  onDefaultsChanged?: () => void;
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);
 
@@ -114,6 +118,8 @@ export function ModelScreen({
         body: { providerId, modelId },
       });
       await refresh();
+      // 服务端默认模型已变：通知父级同步聊天请求携带的 providerId/modelId
+      onDefaultsChanged?.();
       setNotice(`已切换到 ${modelId}，下一轮聊天生效`);
     } catch (error) {
       setNotice(
