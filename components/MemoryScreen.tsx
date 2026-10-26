@@ -12,7 +12,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import type { Theme } from '../theme';
-import { API_TOKEN } from '../lib/constants';
+import { apiFetch } from '../lib/api/client';
 import { readJsonResponse } from '../lib/utils';
 
 // 长期记忆条目（与服务端 memory.json 的结构一致，无 id 字段）
@@ -105,14 +105,7 @@ export function MemoryScreen({
     setMemoryError('');
 
     try {
-      const response = await fetch(
-        `${process.env.EXPO_PUBLIC_API_URL}/memory`,
-        {
-          headers: {
-            Authorization: `Bearer ${API_TOKEN}`,
-          },
-        }
-      );
+      const response = await apiFetch('/memory');
 
       const data = await readJsonResponse(response);
 
@@ -161,20 +154,13 @@ export function MemoryScreen({
           setDeletingMemoryKey(key);
 
           try {
-            const response = await fetch(
-              `${process.env.EXPO_PUBLIC_API_URL}/memory/delete`,
-              {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${API_TOKEN}`,
-                },
-                body: JSON.stringify({
-                  createdAt: item.createdAt,
-                  content: item.content,
-                }),
-              }
-            );
+            const response = await apiFetch('/memory/delete', {
+              method: 'POST',
+              body: JSON.stringify({
+                createdAt: item.createdAt,
+                content: item.content,
+              }),
+            });
 
             const data = await readJsonResponse(response);
 
@@ -208,18 +194,11 @@ export function MemoryScreen({
           style: 'destructive',
           onPress: async () => {
             try {
-              const response = await fetch(
-                `${process.env.EXPO_PUBLIC_API_URL}/memory/clear`,
-                {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${API_TOKEN}`,
-                  },
-                  // 真实数据目录下服务端要求二次确认；此处已在 Alert 里确认过
-                  body: JSON.stringify({ confirm: true }),
-                }
-              );
+              const response = await apiFetch('/memory/clear', {
+                method: 'POST',
+                // 真实数据目录下服务端要求二次确认；此处已在 Alert 里确认过
+                body: JSON.stringify({ confirm: true }),
+              });
 
               const data = await readJsonResponse(response);
 
