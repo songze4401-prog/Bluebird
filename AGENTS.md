@@ -59,25 +59,43 @@ Everything the user owns lives in one directory: `server/data/`, or `BLUEBIRD_DA
 
 ### Backup
 
+There is exactly **one** implementation: `server/backup.js` (logic) driven by `scripts/bluebird-backup.js` (CLI). `scripts/blue-backup.sh` / `scripts/blue-backup.ps1` are thin wrappers that forward to it — do not reimplement the flow in a shell script.
+
+**Why the wrappers exist:** the pre-2026-10 shell/PowerShell versions copied only *top-level files* (`for src in "$DATA_DIR"/*` filtered by `-f`), so `uploads/` (chat images) and `sticker-repo/` (sticker library) were skipped **silently** — the run printed `✓ 备份完成` while a restore would lose every image and the whole sticker library. The Node implementation walks the tree recursively; that gap is the reason both old entry points now delegate instead of staying independent.
+
 ```bash
-bash scripts/blue-backup.sh               # -> $HOME/bluebird-backups/data-<ts>/
-bash scripts/blue-backup.sh /mnt/usb      # explicit destination root
+node scripts/bluebird-backup.js                     # -> $HOME/bluebird-backups/data-<ts>/
+node scripts/bluebird-backup.js --out-dir /mnt/usb  # another disk = a different failure domain
+node scripts/bluebird-backup.js --keep 14
+node scripts/bluebird-backup.js --check             # status only; exit 2 when stale or last run failed
+node scripts/bluebird-restore-drill.js              # isolated restore rehearsal (see below)
+
+bash scripts/blue-backup.sh /mnt/usb                # wrapper, positional arg = backup root
+pwsh scripts/blue-backup.ps1 -OutDir 'E:\backups'   # wrapper (ASCII-only on purpose, see below)
 ```
 
-```powershell
-pwsh scripts/blue-backup.ps1
-pwsh scripts/blue-backup.ps1 -DataDir 'D:\...\Bluebird\server\data' -OutDir 'E:\backups'
-```
+What a run guarantees:
 
-Both scripts are the same tool. They enumerate every data file in the directory (dotfiles included), skip runtime artifacts (`.bluebird.lock`, `*.tmp.*` — restoring a lock would make the server refuse to start, believing another instance is alive), copy each file into a timestamped sub-directory with one retry, write a `MANIFEST.txt` recording size and SHA-256 per file plus the skipped names, re-hash every copy and fail loudly on any mismatch, never write to or delete from the source, and never overwrite an existing backup directory. The source defaults to `BLUEBIRD_DATA_DIR` (else `<repo>/server/data`) and the destination to `BLUEBIRD_BACKUP_DIR` (else `$HOME/bluebird-backups`), so they back up the directory the server actually uses. Backing up while the server runs is safe per file — every module persists by writing a temp file and renaming it into place (`sessions.json` also `fsync`s), so a reader always sees one complete previous version — but a cross-file consistent snapshot (memory / sessions / emotion at the same instant) needs the server stopped.
+- **Scope** — recursive over the whole data directory, dotfiles included; runtime artifacts (`.bluebird.lock`, `*.tmp.*` / `*.tmp-*`) are skipped and reported, because restoring a lock makes the server refuse to start, believing another instance is alive. `.corrupt-<ts>` / `.bak-<ts>` files *are* included (forensic value, tiny).
+- **Integrity** — every file must be non-empty, parse as JSON (with a shape rule for the store-critical ones: `sessions.sessions` must be an **array** and `sessions.messages` an **object**), and match its copy's SHA-256. `MANIFEST.json` records `path / bytes / sha256 / structure` per file.
+- **Consistency** — each module persists via temp file + `fsync` + atomic rename, so a single file is always self-consistent; there is no cross-file transaction. The run therefore re-stats every source file after copying and retries once if any changed, and **fails** (`source_changed_during_copy`) rather than shipping a possibly-skewed snapshot.
+- **Traceable run log** — `<backup root>/_state/runs.jsonl` gets one appended JSON line per run: `ts`, `ok`, `snapshotDir`, `durationMs`, `files`, `bytes`, `manifestSha256`, `error`. `<backup root>/_state/last-status.json` holds `lastRunOk`, `lastSuccessAt`, `lastSuccessSnapshot`, `consecutiveFailures`, `lastError`, `disasterRecoveryGrade`.
+- **Staleness is detectable, not assumed** — `--check` exits `2` when there is no status file, no successful run, the last success is older than `--stale-hours` (default 24), or the last run failed. Exit `0` means "the status is healthy", **not** "a scheduler is running".
+- **Retention** — `--keep N` (default 7) prunes only snapshots this tool wrote (`data-*` containing `MANIFEST.json` with a matching `formatVersion`). Legacy `MANIFEST.txt`-only directories are never deleted.
+- **Failure domain** — a backup root inside the data directory is refused (`out_root_inside_data`). When the backup root sits on the same volume as the data, the run still succeeds but records `sameVolumeAsSource: true` and prints a warning: that copy survives accidental deletion and corruption, **not** a dead disk or a dead machine.
 
-`scripts/blue-backup.ps1` must keep its UTF-8 **BOM** (PowerShell 5 decodes a BOM-less file with the system ANSI codepage, which garbles the Chinese text and fails to parse); `scripts/blue-backup.sh` must not have one (a BOM breaks the shebang).
+**Scheduling is not configured by this repo.** Nothing in the repository installs a cron job, systemd timer, or Windows scheduled task, and the tests do not simulate one. The deployment must wire it explicitly (for example `0 * * * * cd <repo> && node scripts/bluebird-backup.js --keep 7`, plus a `--check` probe as the alert hook). A manual run is **not** evidence that scheduled backups work.
+
+`scripts/blue-backup.ps1` is intentionally **ASCII-only** so it no longer depends on the UTF-8 BOM (PowerShell 5 decodes a BOM-less file with the system ANSI codepage). If you ever re-add non-ASCII text to it, the BOM becomes mandatory again. `scripts/blue-backup.sh` must not have a BOM (it breaks the shebang).
 
 ### Restore
 
-1. Stop the server and confirm no instance holds `<DATA_DIR>/.bluebird.lock`.
-2. Replace the contents of `<DATA_DIR>` with the backup directory's contents — keep the old directory aside instead of deleting it.
-3. Start the server: the JSON is loaded as-is, and sessions, memories, and emotion come back exactly as they were at backup time.
+1. **Rehearse first.** `node scripts/bluebird-restore-drill.js` restores the latest snapshot into an isolated `mkdtemp` directory, re-verifies every hash and structure, loads the restored data through the real `server/` modules (`sessions.listSessions`, `sessions.getAllMessages`, `memory.getMemories`, `emotion.getEmotion`, `persona.getConfig`), cross-checks the counts the modules report against the counts in the files, and proves the production directory's tree digest is unchanged. It never writes to the production data directory, never starts the server, and never calls a model. Records land in `<backup root>/_state/drills.jsonl`.
+2. Stop the server and confirm no instance holds `<DATA_DIR>/.bluebird.lock`.
+3. Replace the contents of `<DATA_DIR>` with the backup directory's contents — keep the old directory aside instead of deleting it.
+4. Start the server: the JSON is loaded as-is, and sessions, memories, and emotion come back exactly as they were at backup time.
+
+A drill note: `sessions.js` enforces "the default session always exists", so a restored store that lacks it gets one created on first load. The drill tolerates `sessions >= file count` for that reason and treats a *shortfall* as the failure signal.
 
 Reviving the **legacy** history out of `chat-history.json.pre-multisession.bak` is a separate manual path, because that file is a `chat-history.json` and not a `sessions.json`:
 
@@ -106,10 +124,10 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-Twenty-three files, 861 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
+Twenty-four files, 886 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
-node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js   # node:test suites (96)
+node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js   # node:test suites (121)
 node tests/api.test.js                    # 26 — HTTP/auth/rate-limit, custom runner
 node tests/atomic-write.test.js           # 16 — temp+fsync+rename atomic writes, incl. a SIGKILL crash simulation
 node tests/chat-persist.test.js           # 23

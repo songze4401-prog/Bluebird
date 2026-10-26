@@ -1,6 +1,6 @@
 name: CI
 
-# 回归兜底：后端 23 个测试文件（861 项）+ 前端 tsc --noEmit。
+# 回归兜底：后端 24 个测试文件（886 项）+ 前端 tsc --noEmit。
 # 触发范围：main 与 workbuddy/** 分支的 push、针对 main 的 PR、手动触发。
 # 测试命令与 AGENTS.md「Tests」小节保持一致——新增测试文件时同步更新本文件，
 # 否则新文件不会被运行（静默漏测）。
@@ -44,8 +44,8 @@ jobs:
             exit 1
           fi
 
-      - name: node:test 四套（memory + emotion + sticker-markers + streaming-segments，共 96 项）
-        run: node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js
+      - name: node:test 五套（memory + emotion + sticker-markers + streaming-segments + backup，共 121 项）
+        run: node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js
 
       # 逐文件单独跑（AGENTS.md 约定）。某个套件失败也跑完其余套件，
       # 最后统一以非零退出码结束，方便一次看全失败面。
