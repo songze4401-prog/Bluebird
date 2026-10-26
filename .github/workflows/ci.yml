@@ -76,5 +76,5 @@ jobs:
       # 前端单元测试：jest-expo preset + @testing-library/react-native 的 renderHook。
       # 只跑 tests/unit/**（jest.config 的 testMatch 已限定），不会误收上面的
       # node:test 文件 tests/*.test.js——两套 runner 的分工必须保持不变。
-      - name: 前端单元测试（jest，5 套 / 57 项）
+      - name: 前端单元测试（jest，5 套 / 59 项）
         run: npm run test:unit -- --ci
