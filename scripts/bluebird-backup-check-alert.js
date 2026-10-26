@@ -66,6 +66,13 @@ function usage() {
   );
 }
 
+// 外发命令的错误只记录操作型信息（如 ENOENT / 退出异常），绝不夹带密钥或告警载荷内容
+function sanitizeAlertError(err) {
+  if (!err) return null;
+  if (err.code) return `spawn_error:${String(err.code)}`;
+  return `spawn_error:${String(err.message || err).slice(0, 200)}`;
+}
+
 function appendAlert(outRoot, record) {
   const dir = backup.stateDirOf(outRoot);
 
@@ -120,7 +127,19 @@ function main() {
     return 0;
   }
 
-  // 异常：触发告警
+  // 异常：触发告警。
+  // 设计要点（修复「commandFired 永远为 false」的审计缺陷）：
+  //   1. 先执行外发命令，拿到真实结果（是否尝试 / 退出码 / 异常），再写最终记录。
+  //      alerts.jsonl 为追加写；本设计「一次性写入最终结论」，不依赖事后改写原记录，
+  //      因此每条记录都是可追溯的最终结果，不会出现「命令已触发但记录显示未触发」的矛盾。
+  //   2. 明确区分两个概念，绝不混为一谈：
+  //        attempted  = 是否「已尝试执行」外发命令（命令已配置且确实调用了 spawnSync）
+  //        success   = 命令成功 = error 为 null 且 exitCode 为 0
+  //      命令「已执行但退出非 0」≠ 成功；命令「因找不到/无法启动而抛异常」由 error 记录。
+  //   3. 不记录任何密钥或敏感载荷：record 仅含状态字段（lastError 只携带 {code,message}，
+  //      不含文件内容或密钥）；外发命令通过 BLUEBIRD_ALERT_PAYLOAD 收到的是同一份 record。
+  const alertCmd = process.env.BLUEBIRD_ALERT_CMD || '';
+
   const record = {
     ts: new Date().toISOString(),
     kind: exitCode === 2 ? 'backup_status_unhealthy' : 'backup_check_error',
@@ -128,24 +147,39 @@ function main() {
     outRoot,
     reason: check ? check.reason : 'check_stdout_unparseable',
     ageHours: check ? check.ageHours : null,
+    // lastError 只携带操作型 {code,message}（如 invalid_data_file:empty_file），不含任何文件内容或密钥
     lastError: check && check.status ? check.status.lastError : null,
-    commandFired: false,
+    alert: {
+      commandConfigured: Boolean(alertCmd),
+      attempted: false,
+      exitCode: null,
+      error: null,
+      firedAt: null,
+    },
   };
 
-  appendAlert(outRoot, record);
-
-  const alertCmd = process.env.BLUEBIRD_ALERT_CMD;
-
   if (alertCmd) {
+    record.alert.attempted = true;
+    record.alert.firedAt = new Date().toISOString();
+
     try {
       process.env.BLUEBIRD_ALERT_PAYLOAD = JSON.stringify(record);
       const fired = spawnSync(alertCmd, { shell: true, encoding: 'utf8' });
 
-      record.commandFired = fired.status === 0;
-    } catch (_) {
-      record.commandFired = false;
+      // 命令确实启动并结束：成功 = 退出码 0 且无异常对象
+      if (fired.error) {
+        record.alert.error = sanitizeAlertError(fired.error);
+      } else {
+        record.alert.exitCode = fired.status === null ? null : fired.status;
+      }
+    } catch (err) {
+      // spawnSync 抛异常（如命令不可执行）：记录错误，但不吞掉告警、不让进程崩
+      record.alert.error = sanitizeAlertError(err);
     }
   }
+
+  // 最终记录：在外发命令执行完毕后一次性写入，保证可追溯的最终结论（不事后改写）
+  appendAlert(outRoot, record);
 
   if (args.json) {
     console.log(JSON.stringify(record, null, 2));
@@ -153,12 +187,14 @@ function main() {
     console.log('✗ 备份状态异常，已记录告警');
     console.log(`  原因: ${record.reason}`);
     console.log(`  告警日志: ${path.join(backup.stateDirOf(outRoot), 'alerts.jsonl')}`);
-    if (record.commandFired) {
-      console.log('  外发命令: 已触发');
-    } else if (alertCmd) {
-      console.log('  外发命令: 触发但返回非 0');
-    } else {
+    if (!record.alert.commandConfigured) {
       console.log('  外发命令: 未配置（设置 BLUEBIRD_ALERT_CMD 可外发）');
+    } else if (record.alert.error) {
+      console.log(`  外发命令: 已尝试但执行异常（${record.alert.error}）`);
+    } else if (record.alert.exitCode === 0) {
+      console.log('  外发命令: 已触发并成功（退出码 0）');
+    } else {
+      console.log(`  外发命令: 已触发但返回非 0（退出码 ${record.alert.exitCode}）`);
     }
   }
 

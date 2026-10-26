@@ -931,9 +931,14 @@ describe('看门狗告警链路', { concurrency: 1 }, () => {
     assert.strictEqual(alerts.length, 1);
     assert.strictEqual(alerts[0].exitCode, 2);
     assert.strictEqual(alerts[0].kind, 'backup_status_unhealthy');
+    // 命令未配置：明确记录「未配置 / 未尝试」，不能含糊记为已触发
+    assert.strictEqual(alerts[0].alert.commandConfigured, false);
+    assert.strictEqual(alerts[0].alert.attempted, false);
+    assert.strictEqual(alerts[0].alert.exitCode, null);
+    assert.strictEqual(alerts[0].alert.error, null);
   });
 
-  test('BLUEBIRD_ALERT_CMD 被触发（命令钩子端到端）', () => {
+  test('BLUEBIRD_ALERT_CMD 配置且命令成功（退出 0）→ 记录 attempted 成功且不误报', () => {
     const outRoot = path.join(TMP_ROOT, 'watchdog-cmd');
     const marker = path.join(TMP_ROOT, 'alert-marker.txt');
     const markerScript = path.join(TMP_ROOT, 'alert-hook.js');
@@ -967,9 +972,111 @@ describe('看门狗告警链路', { concurrency: 1 }, () => {
     assert.strictEqual(out.status, 2, out.stdout + out.stderr);
     assert.ok(fs.existsSync(marker), '外发命令应被触发并写标记');
 
+    const record = JSON.parse(out.stdout);
+
+    // 命令已配置、已尝试、成功（退出码 0、无异常）—— 明确区分「尝试」与「成功」
+    assert.strictEqual(record.alert.commandConfigured, true);
+    assert.strictEqual(record.alert.attempted, true);
+    assert.strictEqual(record.alert.exitCode, 0, '命令成功退出码应为 0');
+    assert.strictEqual(record.alert.error, null, '成功不应有 error');
+
     const payload = JSON.parse(fs.readFileSync(marker, 'utf8'));
 
     assert.strictEqual(payload.exitCode, 2);
+    assert.strictEqual(payload.alert.commandConfigured, true);
+  });
+
+  test('BLUEBIRD_ALERT_CMD 配置但命令退出非 0 → 记录 attempted 且不误报成功', () => {
+    const outRoot = path.join(TMP_ROOT, 'watchdog-cmd-fail');
+    const failScript = path.join(TMP_ROOT, 'alert-hook-fail.js');
+
+    // 故意非零退出，且不写任何标记文件
+    writeFile(failScript, 'process.exit(3);\n');
+
+    const out = spawnSync(
+      process.execPath,
+      [
+        path.join(REPO_ROOT, 'scripts', 'bluebird-backup-check-alert.js'),
+        '--out-dir',
+        outRoot,
+        '--json',
+      ],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          DEEPSEEK_API_KEY: '',
+          BLUEBIRD_ALERT_CMD: `${process.execPath} ${failScript}`,
+        },
+      }
+    );
+
+    assert.strictEqual(out.status, 2, out.stdout + out.stderr);
+
+    const record = JSON.parse(out.stdout);
+
+    assert.strictEqual(record.alert.commandConfigured, true);
+    assert.strictEqual(record.alert.attempted, true);
+    assert.strictEqual(record.alert.exitCode, 3, '应如实记录非零退出码');
+    assert.strictEqual(record.alert.error, null, '命令已执行完成（只是非 0），无 spawn 异常');
+  });
+
+  test('BLUEBIRD_ALERT_CMD 执行抛异常（spawnSync 抛错）→ 记录 error 且不误报成功', () => {
+    const cp = require('node:child_process');
+    const origSpawn = cp.spawnSync;
+    const outRoot = path.join(TMP_ROOT, 'wd-cmd-throw');
+
+    // 区分 check 子进程与告警外发命令：外发命令没有 --check 参数
+    cp.spawnSync = (cmd, args) => {
+      if (Array.isArray(args) && args.includes('--check')) {
+        return {
+          status: 2,
+          stdout: JSON.stringify({ ok: false, reason: 'no_status_file' }),
+          stderr: '',
+        };
+      }
+
+      // 告警外发命令：模拟 spawnSync 抛异常（如命令不可执行）
+      throw Object.assign(new Error('spawnSync failed'), { code: 'ENOENT' });
+    };
+
+    const prevArgv = process.argv;
+
+    try {
+      process.env.BLUEBIRD_ALERT_CMD = 'dummy-unreachable-cmd';
+      // 必须在首次 require 看门狗前注入 mock（看门狗在模块加载时即解构 spawnSync）
+      const watchdog = require('../scripts/bluebird-backup-check-alert.js');
+
+      process.argv = ['node', 'watchdog', '--out-dir', outRoot, '--json'];
+
+      const code = watchdog.main();
+
+      assert.strictEqual(code, 2, '看门狗应透传 check 的退出码 2');
+
+      const alerts = readJsonLines(
+        path.join(backup.stateDirOf(outRoot), 'alerts.jsonl')
+      );
+
+      assert.strictEqual(alerts.length, 1, '异常路径必须写一条告警');
+      assert.strictEqual(alerts[0].exitCode, 2);
+      assert.strictEqual(alerts[0].alert.commandConfigured, true);
+      assert.strictEqual(alerts[0].alert.attempted, true);
+      assert.ok(alerts[0].alert.error, '应记录执行异常，不得为空');
+      assert.strictEqual(
+        alerts[0].alert.error.includes('ENOENT'),
+        true,
+        '异常内容应被脱敏且不夹带密钥'
+      );
+      assert.strictEqual(alerts[0].alert.exitCode, null, '抛异常时无退出码');
+    } finally {
+      delete process.env.BLUEBIRD_ALERT_CMD;
+      cp.spawnSync = origSpawn;
+      process.argv = prevArgv;
+      delete require.cache[
+        require.resolve('../scripts/bluebird-backup-check-alert.js')
+      ];
+    }
   });
 
   test('check 正常 → 退出码 0，不写告警', () => {
