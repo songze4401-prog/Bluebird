@@ -1,5 +1,9 @@
 // 跨模块共享的类型定义
 
+// 分条模式：服务端 persona 配置、SSE meta 事件、前端流式分段共用同一套取值。
+// 阶段 5 起在这里唯一定义（此前 StreamMode / messageMode 各写一份字面量联合）。
+export type ReplyMode = 'single' | 'auto' | 'frequent';
+
 // 图片/表情包附件（与服务端 sessions.js sanitizeAttachments 的落库形状一致）
 export type Attachment = {
   id: string; // 服务端 uploads / sticker-repo 模块分配的 UUID

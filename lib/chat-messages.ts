@@ -3,16 +3,18 @@
 // 数据变换，不依赖 React、不发请求。抽出的目的是让 App 只做组合，
 // 同时让这些规则可以被单独验证（不再埋在 1400 行组件里）。
 
-import { Message, ModelRoute, ReplySegment } from './types';
-import { makeLocalId, parseStickerMarkers } from './utils';
+import { Message, ModelRoute, ReplyMode, ReplySegment } from './types';
+import { makeLocalId } from './utils';
 import {
   buildStreamingBubbles,
   isStreamingBubble,
+  parseStickerMarkers,
   replaceStreamingBlock,
-} from './streaming-segments';
+} from './text-rules';
 
-// 服务端下发的分条模式（meta 事件与 persona 配置同源）
-export type StreamMode = 'single' | 'auto' | 'frequent';
+// 服务端下发的分条模式（meta 事件与 persona 配置同源）。
+// 取值定义见 lib/types 的 ReplyMode，这里保留别名避免调用方大改。
+export type StreamMode = ReplyMode;
 
 // /chat 响应归一化为分条数组：优先服务端 replies[]（连续消息模式），
 // 字段缺失时回退为单条 reply —— 新旧服务端双向兼容
@@ -97,7 +99,7 @@ export function applyStreamingText(
     buildStreamingBubbles(text, mode, {
       idPrefix: tempId,
       createdAt,
-    }) as Message[]
+    })
   );
 }
 
@@ -109,7 +111,7 @@ export function reconcileStreamDone(
   tempId: string,
   bubbles: Message[]
 ): Message[] {
-  return replaceStreamingBlock(prev, tempId, bubbles) as Message[];
+  return replaceStreamingBlock(prev, tempId, bubbles);
 }
 
 // 移除流式临时气泡（失败且不展示错误气泡的场景，如「继续说」失败）。
