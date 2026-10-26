@@ -194,12 +194,12 @@ export function useChatSession({
 
       return { ok: true, status: response.status };
     } catch (error) {
-      console.error('History load error:', error);
-
-      // 被更新的请求取消：不是错误，交给新请求收场
+      // 被更新的请求取消：不是错误，交给新请求收场（也不打日志，避免刷屏）
       if (!historyGate.isCurrent(ticket.id)) {
         return { ok: false, status: 0, stale: true };
       }
+
+      console.error('History load error:', error);
 
       return { ok: false, status: 0 };
     }
