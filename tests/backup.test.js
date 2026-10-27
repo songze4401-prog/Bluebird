@@ -427,20 +427,34 @@ describe('采集期一致性：源文件内容 SHA-256 复核', { concurrency: 1
   }
 
   /**
-   * 把时间戳钉到整毫秒并返回钉完后的 {size, mtimeMs}。
-   * 文件系统给的是亚毫秒时间戳，钉到整毫秒后，「同尺寸 + 同 mtimeMs」的改写
-   * 才能在真实文件系统上稳定复现（否则改写会把小数位也一起改掉，mtime 就漏不掉了）。
+   * 把时间戳钉死，并返回钉完后读回的 {size, mtimeMs, stamp}。
+   * 文件系统给的是亚毫秒时间戳，不钉死的话，改写会把小数位一起改掉，
+   * 「同尺寸 + 同 mtimeMs」这类场景就没法稳定复现。
+   *
+   * 基准取「读回值」而不是「我请求的整数毫秒」：ms → {sec,nsec} 的换算精度
+   * 因文件系统而异（NTFS 读回正好整数，ext4 读回 ...486.999），断言等于请求值
+   * 等于在赌平台。真正需要的前提只有一条——同一个 stamp 复钉两次读回同一个值，
+   * 所以下面把它钉完再复钉一次来验证，调用方一律复用返回的 stamp 复钉。
    */
   function pinTimestamp(filePath) {
-    const ms = Math.floor(fs.statSync(filePath).mtimeMs);
+    const stamp = new Date(Math.floor(fs.statSync(filePath).mtimeMs));
 
-    fs.utimesSync(filePath, new Date(ms), new Date(ms));
+    fs.utimesSync(filePath, stamp, stamp);
 
     const pinned = fs.statSync(filePath);
 
-    assert.strictEqual(pinned.mtimeMs, ms, '时间戳应能钉到整毫秒');
+    fs.utimesSync(filePath, stamp, stamp);
 
-    return { size: pinned.size, mtimeMs: pinned.mtimeMs };
+    const reprobed = fs.statSync(filePath);
+
+    assert.strictEqual(
+      reprobed.mtimeMs,
+      pinned.mtimeMs,
+      '同一个 stamp 复钉必须读回同一个 mtimeMs，否则「同时间戳改写」的构造不成立'
+    );
+    assert.strictEqual(reprobed.size, pinned.size, '钉时间戳不该改动文件大小');
+
+    return { size: pinned.size, mtimeMs: pinned.mtimeMs, stamp };
   }
 
   /** 在副本落盘后插入一个动作，跑完务必还原 fs.copyFileSync。 */
@@ -515,7 +529,7 @@ describe('采集期一致性：源文件内容 SHA-256 复核', { concurrency: 1
 
       // 同字节数改写 + 时间戳钉回原值：size / mtimeMs 两项对它完全失明
       fs.writeFileSync(src, sameLengthJsonArray(pinned.size, 1));
-      fs.utimesSync(src, new Date(pinned.mtimeMs), new Date(pinned.mtimeMs));
+      fs.utimesSync(src, pinned.stamp, pinned.stamp);
       statAfterTamper.push(fs.statSync(src));
       tampered += 1;
     }, () => backup.createBackup({ dataDir, outRoot }));
@@ -560,7 +574,7 @@ describe('采集期一致性：源文件内容 SHA-256 复核', { concurrency: 1
       rounds += 1;
 
       fs.writeFileSync(src, sameLengthJsonArray(pinned.size, rounds));
-      fs.utimesSync(src, new Date(pinned.mtimeMs), new Date(pinned.mtimeMs));
+      fs.utimesSync(src, pinned.stamp, pinned.stamp);
       statPerRound.push(fs.statSync(src));
     }, () => backup.createBackup({ dataDir, outRoot }));
 
@@ -626,17 +640,27 @@ describe('采集期一致性：源文件内容 SHA-256 复核', { concurrency: 1
     const { dataDir, outRoot } = makeFixture({ name: 'mtime-only' });
     const src = path.join(dataDir, 'memory.json');
     const pinned = pinTimestamp(src);
+    const bumpedStamp = new Date(Math.floor(pinned.mtimeMs) + 1000);
+    const statAfterBump = [];
     let bumped = 0;
 
     const result = withCopyHook((from, to) => {
       if (path.resolve(from) !== src || !to.includes('data-')) return;
       if (bumped >= 1) return;
 
-      fs.utimesSync(src, new Date(pinned.mtimeMs + 1000), new Date(pinned.mtimeMs + 1000));
+      fs.utimesSync(src, bumpedStamp, bumpedStamp);
+      statAfterBump.push(fs.statSync(src));
       bumped += 1;
     }, () => backup.createBackup({ dataDir, outRoot }));
 
     assert.strictEqual(bumped, 1);
+    // 先确认这确实是「只动了时间戳」：内容、字节数不变，mtime 真的变了
+    assert.strictEqual(statAfterBump[0].size, pinned.size, '前提：size 未变');
+    assert.notStrictEqual(
+      statAfterBump[0].mtimeMs,
+      pinned.mtimeMs,
+      '前提：mtimeMs 已改变'
+    );
     assert.strictEqual(result.attempts, backup.MAX_COPY_ATTEMPTS, 'mtime 快速通道仍生效');
     assert.strictEqual(result.ok, true, JSON.stringify(result.error));
     assert.strictEqual(
