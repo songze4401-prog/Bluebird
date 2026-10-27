@@ -80,6 +80,52 @@ function writeFileAtomicSync(target, data) {
   fsyncParentDirSync(path.dirname(target));
 }
 
+/**
+ * 排他创建：目标已存在时返回 false，绝不覆盖已有文件。
+ * 用于首次初始化空文件；打开时用 'wx'（O_CREAT|O_EXCL），并发下只有一个进程能创建成功。
+ */
+function writeFileExclusiveSync(target, data) {
+  const dir = path.dirname(target);
+
+  fs.mkdirSync(dir, { recursive: true });
+
+  let fd = null;
+
+  try {
+    fd = fs.openSync(target, 'wx');
+  } catch (error) {
+    if (error && error.code === 'EEXIST') return false;
+    throw error;
+  }
+
+  try {
+    fs.writeFileSync(fd, data, 'utf8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+  } catch (error) {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch (_) {
+        // ignore
+      }
+    }
+
+    try {
+      fs.unlinkSync(target);
+    } catch (_) {
+      // 目标可能已被外部移除，忽略
+    }
+
+    throw error;
+  }
+
+  fsyncParentDirSync(dir);
+
+  return true;
+}
+
 /** 异步原子写。失败时 reject（与原先 fs.promises 的错误语义一致，不静默）。 */
 async function writeFileAtomic(target, data) {
   const tmpPath = tempPathFor(target);
@@ -113,4 +159,4 @@ async function writeFileAtomic(target, data) {
   fsyncParentDirSync(path.dirname(target));
 }
 
-module.exports = { writeFileAtomic, writeFileAtomicSync };
+module.exports = { writeFileAtomic, writeFileAtomicSync, writeFileExclusiveSync };

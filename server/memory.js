@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { logDataEvent } = require('./data-events');
-const { writeFileAtomic, writeFileAtomicSync } = require('./atomic-write');
+const { writeFileAtomic, writeFileExclusiveSync } = require('./atomic-write');
 const { registerCorruptionHandler, handleCorruption } = require('./corruption');
 const { textLength, truncateText } = require('./text-utils');
 
@@ -530,9 +530,12 @@ function hydrateEntries(parsed) {
 
 function loadMemories() {
   if (!fs.existsSync(MEMORY_FILE)) {
+    let created = false;
+
     try {
-      fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true });
-      writeFileAtomicSync(MEMORY_FILE, '[]\n');
+      // 排他创建：并发启动时只有一个进程能创建空库。
+      // 另一个进程得到 false（EEXIST）后必须继续读取现存文件，不能把内存设成空库。
+      created = writeFileExclusiveSync(MEMORY_FILE, '[]\n');
     } catch (error) {
       // 初始化写盘失败：与旧实现一致地走损坏兜底（隔离 + 回退空库），不向上抛。
       handleCorruption(
@@ -540,10 +543,14 @@ function loadMemories() {
         { text: null, error, reason: 'io_error' },
         { file: MEMORY_FILE }
       );
+      memories = [];
+      return;
     }
 
-    memories = [];
-    return;
+    if (created) {
+      memories = [];
+      return;
+    }
   }
 
   let text = null;
