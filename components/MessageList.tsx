@@ -475,4 +475,4 @@ const createStyles = (theme: Theme) =>
       fontSize: CHAT_TYPE.meta,
       marginTop: 8,
     },
-  });
+  });
