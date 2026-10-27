@@ -156,6 +156,13 @@ function snapshotDirs(outRoot) {
     .sort();
 }
 
+/** 备份根下是否还留着「带 MANIFEST.json 的完整快照」——失败轮次必须没有。 */
+function hasCompleteSnapshot(outRoot) {
+  return snapshotDirs(outRoot).some(name =>
+    fs.existsSync(path.join(outRoot, name, 'MANIFEST.json'))
+  );
+}
+
 describe('备份：正常路径', { concurrency: 1 }, () => {
   test('递归备份含 uploads/ 与 sticker-repo/，且排除运行期产物', () => {
     const { dataDir, outRoot } = makeFixture({ name: 'happy' });
@@ -395,6 +402,297 @@ describe('备份：坏数据必须失败，不能伪报成功', { concurrency: 1
     assert.strictEqual(status.lastSuccessAt, successAt, '失败不该抹掉上次成功时间');
     assert.strictEqual(status.consecutiveFailures, 1);
     assert.strictEqual(status.lastRunOk, false);
+  });
+});
+
+describe('采集期一致性：源文件内容 SHA-256 复核', { concurrency: 1 }, () => {
+  /**
+   * 造一份与 targetBytes **字节数完全相同**、但内容不同的合法 JSON 数组。
+   * memory.json 的形状规则是 json_array，改写后仍要能通过结构校验，
+   * 否则测的就是一致性以外的东西了。
+   */
+  function sameLengthJsonArray(targetBytes, marker) {
+    const head = '[{"content":"';
+    const tail = '"}]';
+    const suffix = `#${marker}`;
+    // 骨架全 ASCII，字符数即字节数；填充也只用水字符 x
+    const skeleton = `${head}${suffix}${tail}`.length;
+
+    assert.ok(
+      targetBytes >= skeleton,
+      `目标 ${targetBytes} 字节放不下 ${skeleton} 字节骨架，换更长的 fixture 内容`
+    );
+
+    return `${head}${'x'.repeat(targetBytes - skeleton)}${suffix}${tail}`;
+  }
+
+  /**
+   * 把时间戳钉到整毫秒并返回钉完后的 {size, mtimeMs}。
+   * 文件系统给的是亚毫秒时间戳，钉到整毫秒后，「同尺寸 + 同 mtimeMs」的改写
+   * 才能在真实文件系统上稳定复现（否则改写会把小数位也一起改掉，mtime 就漏不掉了）。
+   */
+  function pinTimestamp(filePath) {
+    const ms = Math.floor(fs.statSync(filePath).mtimeMs);
+
+    fs.utimesSync(filePath, new Date(ms), new Date(ms));
+
+    const pinned = fs.statSync(filePath);
+
+    assert.strictEqual(pinned.mtimeMs, ms, '时间戳应能钉到整毫秒');
+
+    return { size: pinned.size, mtimeMs: pinned.mtimeMs };
+  }
+
+  /** 在副本落盘后插入一个动作，跑完务必还原 fs.copyFileSync。 */
+  function withCopyHook(afterCopy, run) {
+    const original = fs.copyFileSync;
+
+    fs.copyFileSync = (from, to, ...rest) => {
+      const out = original(from, to, ...rest);
+
+      afterCopy(String(from), String(to));
+
+      return out;
+    };
+
+    try {
+      return run();
+    } finally {
+      fs.copyFileSync = original;
+    }
+  }
+
+  test('指纹含内容哈希；size / mtimeMs / sha256 任一不符即判为变化', () => {
+    const dir = path.join(TMP_ROOT, 'fingerprint-unit');
+
+    fs.mkdirSync(dir, { recursive: true });
+
+    const file = path.join(dir, 'a.json');
+
+    fs.writeFileSync(file, '[{"v":1}]');
+
+    const fp = backup.sourceFingerprint(file);
+
+    assert.strictEqual(fp.sha256, backup.sha256File(file), '指纹必须带内容哈希');
+    assert.strictEqual(fp.size, fs.statSync(file).size);
+    assert.strictEqual(typeof fp.mtimeMs, 'number');
+    assert.strictEqual(backup.isSameFingerprint(fp, backup.sourceFingerprint(file)), true);
+
+    // 同尺寸 + 同时间戳、只有内容不同：这正是不许漏检的那一类
+    assert.strictEqual(
+      backup.isSameFingerprint(
+        { size: 10, mtimeMs: 100, sha256: 'A' },
+        { size: 10, mtimeMs: 100, sha256: 'B' }
+      ),
+      false
+    );
+    assert.strictEqual(
+      backup.isSameFingerprint(
+        { size: 10, mtimeMs: 100, sha256: 'A' },
+        { size: 11, mtimeMs: 100, sha256: 'A' }
+      ),
+      false
+    );
+    assert.strictEqual(
+      backup.isSameFingerprint(
+        { size: 10, mtimeMs: 100, sha256: 'A' },
+        { size: 10, mtimeMs: 101, sha256: 'A' }
+      ),
+      false
+    );
+  });
+
+  test('内容变了但 size 与 mtimeMs 都不变 → 仍能检出并重试到一致快照', () => {
+    const { dataDir, outRoot } = makeFixture({ name: 'same-size-once' });
+    const src = path.join(dataDir, 'memory.json');
+    const pinned = pinTimestamp(src);
+    const statAfterTamper = [];
+    let tampered = 0;
+
+    const result = withCopyHook((from, to) => {
+      if (path.resolve(from) !== src || !to.includes('data-')) return;
+      if (tampered >= 1) return;
+
+      // 同字节数改写 + 时间戳钉回原值：size / mtimeMs 两项对它完全失明
+      fs.writeFileSync(src, sameLengthJsonArray(pinned.size, 1));
+      fs.utimesSync(src, new Date(pinned.mtimeMs), new Date(pinned.mtimeMs));
+      statAfterTamper.push(fs.statSync(src));
+      tampered += 1;
+    }, () => backup.createBackup({ dataDir, outRoot }));
+
+    // 先确认场景真的构造出来了，否则这条用例什么都没测
+    assert.strictEqual(tampered, 1, '改写钩子应且只应触发一次');
+    assert.strictEqual(statAfterTamper[0].size, pinned.size, '前提：size 未变');
+    assert.strictEqual(
+      statAfterTamper[0].mtimeMs,
+      pinned.mtimeMs,
+      '前提：mtimeMs 未变'
+    );
+
+    // 变化只能靠内容哈希发现；发现后必须重试，而不是拿旧版快照冒充成功
+    assert.strictEqual(
+      result.attempts,
+      backup.MAX_COPY_ATTEMPTS,
+      '未检出变化就只会拷一轮，这里必须是重试后的轮次'
+    );
+    assert.strictEqual(result.ok, true, JSON.stringify(result.error));
+    assert.strictEqual(result.consistent, true);
+
+    const copied = fs.readFileSync(
+      path.join(result.snapshotDir, 'memory.json'),
+      'utf8'
+    );
+
+    assert.strictEqual(copied, fs.readFileSync(src, 'utf8'), '快照须对齐改写后的源版本');
+    assert.strictEqual(backup.verifySnapshot(result.snapshotDir).ok, true);
+  });
+
+  test('持续的同尺寸同时间戳改写 → source_changed_during_copy，不标记成功', () => {
+    const { dataDir, outRoot } = makeFixture({ name: 'same-size-churn' });
+    const src = path.join(dataDir, 'memory.json');
+    const pinned = pinTimestamp(src);
+    const statPerRound = [];
+    let rounds = 0;
+
+    const result = withCopyHook((from, to) => {
+      if (path.resolve(from) !== src || !to.includes('data-')) return;
+
+      rounds += 1;
+
+      fs.writeFileSync(src, sameLengthJsonArray(pinned.size, rounds));
+      fs.utimesSync(src, new Date(pinned.mtimeMs), new Date(pinned.mtimeMs));
+      statPerRound.push(fs.statSync(src));
+    }, () => backup.createBackup({ dataDir, outRoot }));
+
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.error.code, 'source_changed_during_copy');
+    assert.strictEqual(
+      result.attempts,
+      backup.MAX_COPY_ATTEMPTS,
+      '超过重试上限才允许判失败'
+    );
+    assert.strictEqual(result.consistent, false);
+    assert.ok(result.snapshotDir.endsWith('.incomplete'), '不稳定快照不得留成完整目录');
+    assert.strictEqual(rounds, backup.MAX_COPY_ATTEMPTS, '每轮都真的改写了源文件');
+
+    for (const st of statPerRound) {
+      assert.strictEqual(st.size, pinned.size, '前提：每轮 size 都未变');
+      assert.strictEqual(st.mtimeMs, pinned.mtimeMs, '前提：每轮 mtimeMs 都未变');
+    }
+
+    // 运行日志与状态仍如实记录这次失败
+    const runs = readJsonLines(backup.runLogPath(outRoot));
+
+    assert.strictEqual(runs.length, 1);
+    assert.strictEqual(runs[0].ok, false);
+    assert.strictEqual(runs[0].error.code, 'source_changed_during_copy');
+
+    const status = backup.readStatus(outRoot);
+
+    assert.strictEqual(status.lastRunOk, false);
+    assert.strictEqual(status.consecutiveFailures, 1);
+    assert.strictEqual(status.lastSuccessAt, null);
+    assert.strictEqual(
+      hasCompleteSnapshot(outRoot),
+      false,
+      '失败后不得留下可被恢复工具认领的完整快照'
+    );
+  });
+
+  test('副本被同尺寸写坏（源未变）→ copy_checksum_mismatch，不伪装成源变化', () => {
+    const { dataDir, outRoot } = makeFixture({ name: 'same-size-copy-corrupt' });
+    const src = path.join(dataDir, 'memory.json');
+    const pinned = pinTimestamp(src);
+    let corrupted = 0;
+
+    const result = withCopyHook((from, to) => {
+      if (path.resolve(from) !== src || !to.includes('data-')) return;
+      if (corrupted >= 1) return;
+
+      // 只写坏副本，源文件一动不动：这必须是副本问题，不是采集期变化
+      fs.writeFileSync(to, sameLengthJsonArray(pinned.size, 9));
+      corrupted += 1;
+    }, () => backup.createBackup({ dataDir, outRoot }));
+
+    assert.strictEqual(corrupted, 1);
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.error.code, 'copy_checksum_mismatch');
+    assert.strictEqual(result.attempts, 1, '源没变，不该被误判成采集期变化而重试');
+    assert.ok(result.snapshotDir.endsWith('.incomplete'));
+    assert.strictEqual(fs.statSync(src).size, pinned.size, '源文件不应被备份流程改动');
+  });
+
+  test('内容未变、仅 mtimeMs 变化 → 仍按变化重试并最终成功', () => {
+    const { dataDir, outRoot } = makeFixture({ name: 'mtime-only' });
+    const src = path.join(dataDir, 'memory.json');
+    const pinned = pinTimestamp(src);
+    let bumped = 0;
+
+    const result = withCopyHook((from, to) => {
+      if (path.resolve(from) !== src || !to.includes('data-')) return;
+      if (bumped >= 1) return;
+
+      fs.utimesSync(src, new Date(pinned.mtimeMs + 1000), new Date(pinned.mtimeMs + 1000));
+      bumped += 1;
+    }, () => backup.createBackup({ dataDir, outRoot }));
+
+    assert.strictEqual(bumped, 1);
+    assert.strictEqual(result.attempts, backup.MAX_COPY_ATTEMPTS, 'mtime 快速通道仍生效');
+    assert.strictEqual(result.ok, true, JSON.stringify(result.error));
+    assert.strictEqual(
+      fs.readFileSync(path.join(result.snapshotDir, 'memory.json'), 'utf8'),
+      fs.readFileSync(src, 'utf8')
+    );
+  });
+
+  test('加密密钥副本被改写 → secret_decrypt_failed，加密通道完整性不变', () => {
+    const { dataDir, outRoot } = makeFixture({ name: 'secret-enc-corrupt' });
+    const KEY = 'a-very-strong-passphrase-at-least-32-bytes-long!!';
+
+    writeFile(
+      path.join(dataDir, 'api-keys.json'),
+      JSON.stringify({ providers: { deepseek: { apiKey: 'SUPER_SECRET_VALUE' } } })
+    );
+
+    const originalWrite = fs.writeFileSync;
+    let corrupted = 0;
+
+    fs.writeFileSync = (target, data, ...rest) => {
+      const out = originalWrite(target, data, ...rest);
+
+      if (String(target).endsWith('api-keys.json.enc') && corrupted === 0) {
+        const payload = JSON.parse(fs.readFileSync(target, 'utf8'));
+
+        // 翻转密文 base64 中间一个字符：解码长度不变、JSON 仍合法，但内容已不是
+        // 原密文，GCM 认证标签校验必然失败
+        const i = 5;
+        const alt = payload.ct[i] === 'A' ? 'B' : 'A';
+
+        payload.ct = `${payload.ct.slice(0, i)}${alt}${payload.ct.slice(i + 1)}`;
+        originalWrite(target, `${JSON.stringify(payload)}\n`, 'utf8');
+        corrupted += 1;
+      }
+
+      return out;
+    };
+
+    let result = null;
+
+    try {
+      result = backup.createBackup({
+        dataDir,
+        outRoot,
+        encryptSecrets: true,
+        backupKey: KEY,
+      });
+    } finally {
+      fs.writeFileSync = originalWrite;
+    }
+
+    assert.strictEqual(corrupted, 1, '加密副本写入钩子应触发一次');
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.error.code, 'secret_decrypt_failed');
+    assert.ok(result.snapshotDir.endsWith('.incomplete'));
   });
 });
 
