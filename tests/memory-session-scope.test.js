@@ -107,7 +107,7 @@ async function main() {
   seed([entry('s-a'), entry('s-b')]);
   let removed = await memory.recallMemoryBySourceQuote(QUOTE, now, 's-a');
   let left = memory.getMemories();
-  check('同内容双会话：A 撤回只删除 1 条', removed === 1, `removed=${removed}`);
+  check('同内容双会话：A 撤回只删除 1 条', removed.removedEntries === 1 && removed.removedContributions === 1, `removed=${JSON.stringify(removed)}`);
   check(
     'B 会话的记忆完整保留',
     left.length === 1 && scopesOf(left[0]).join('|') === 's-b',
@@ -120,7 +120,7 @@ async function main() {
   left = memory.getMemories();
   check(
     '反向：B 撤回只删除 B 的条目',
-    removed === 1 &&
+    removed.removedEntries === 1 &&
       left.length === 1 &&
       scopesOf(left[0]).join('|') === 's-a'
   );
@@ -130,7 +130,7 @@ async function main() {
   removed = await memory.recallMemoryBySourceQuote(QUOTE, now, 's-new');
   check(
     '旧条目（无 sessionId）在本会话无匹配时被回退撤回',
-    removed === 1 && memory.getMemories().length === 0
+    removed.removedEntries === 1 && memory.getMemories().length === 0
   );
 
   // 4) 只有别的会话的条目：撤回不得跨会话误删（旧实现的漏洞）
@@ -138,7 +138,7 @@ async function main() {
   removed = await memory.recallMemoryBySourceQuote(QUOTE, now, 's-a');
   check(
     '绝不删除其他会话的条目（removed=0）',
-    removed === 0 && memory.getMemories().length === 1
+    removed.removedEntries === 0 && memory.getMemories().length === 1
   );
 
   // 5) 同会话有匹配时，无归属旧条目保持不动（保守，不做连坐删除）
@@ -147,7 +147,7 @@ async function main() {
   left = memory.getMemories();
   check(
     '同会话优先：只删本会话条目，旧条目不动',
-    removed === 1 &&
+    removed.removedEntries === 1 &&
       left.length === 1 &&
       scopesOf(left[0]).join('|') === '',
     JSON.stringify(left)
@@ -158,7 +158,7 @@ async function main() {
   removed = await memory.recallMemoryBySourceQuote(QUOTE, now, 's-a');
   check(
     '超出时间窗的条目不被撤回',
-    removed === 0 && memory.getMemories().length === 1
+    removed.removedEntries === 0 && memory.getMemories().length === 1
   );
 
   // 7) processMemory 写入的条目带会话归属，且落盘不再平铺 sourceQuote
@@ -196,7 +196,7 @@ async function main() {
   );
   check(
     'null 归属条目仍可被回退撤回',
-    removed === 1 && memory.getMemories().length === 0
+    removed.removedEntries === 1 && memory.getMemories().length === 0
   );
 
   // 9) 同会话重复提取仍走去重合并（内容相似 >= 0.8），且贡献不重复堆积
@@ -219,12 +219,12 @@ async function main() {
   seed([entry('s-a')]);
   check(
     '空 source 直接返回 0',
-    (await memory.recallMemoryBySourceQuote('', now, 's-a')) === 0
+    JSON.stringify(await memory.recallMemoryBySourceQuote('', now, 's-a')) === JSON.stringify({ removedEntries: 0, removedContributions: 0 })
   );
   removed = await memory.recallMemoryBySourceQuote(QUOTE, now, null);
   check(
     '不带 sessionId 的撤回只匹配无归属条目（此处为 0）',
-    removed === 0 && memory.getMemories().length === 1
+    removed.removedEntries === 0 && memory.getMemories().length === 1
   );
 
   // 11) 跨会话重述：合并只追加贡献，不再把归属改判给后说的会话
@@ -245,10 +245,11 @@ async function main() {
   saved = readFile();
   check(
     'A 撤回只摘掉自己的贡献，记忆仍保留给 B',
-    removed === 0 &&
+    removed.removedEntries === 0 &&
+      removed.removedContributions === 1 &&
       saved.length === 1 &&
       scopesOf(saved[0]).join('|') === 's-b',
-    JSON.stringify(saved)
+    JSON.stringify({ removed, saved })
   );
 
   // 13) 归属漂移已消除：B 先重述也不能夺走 A 的撤回能力
@@ -259,17 +260,18 @@ async function main() {
   saved = readFile();
   check(
     '后说的会话不会夺走原会话的撤回能力',
-    removed === 0 &&
+    removed.removedEntries === 0 &&
+      removed.removedContributions === 1 &&
       saved.length === 1 &&
       scopesOf(saved[0]).join('|') === 's-b',
-    JSON.stringify(saved)
+    JSON.stringify({ removed, saved })
   );
 
   // 14) 最后一条贡献也被撤回时，记忆整条删除
   removed = await memory.recallMemoryBySourceQuote(QUOTE, now, 's-b');
   check(
     '贡献被摘空的记忆整条删除',
-    removed === 1 && memory.getMemories().length === 0,
+    removed.removedEntries === 1 && memory.getMemories().length === 0,
     JSON.stringify(readFile())
   );
 }

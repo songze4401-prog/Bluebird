@@ -208,7 +208,8 @@ describe('deleteMemory 单条删除', SERIAL, () => {
   test('目标不存在时返回 not-found', async () => {
     seed([{ content: '用户叫宋泽', createdAt: '2026-01-01T00:00:00.000Z' }]);
     const r = await memory.deleteMemory({ content: '不存在的内容', createdAt: '2026-01-01T00:00:00.000Z' });
-    assert.deepEqual(r, { removed: 0, reason: 'not-found' });
+    assert.equal(r.removed, 0);
+    assert.equal(r.reason, 'not-found');
   });
 
   test('命中时删除该条并落盘', async () => {
@@ -217,7 +218,8 @@ describe('deleteMemory 单条删除', SERIAL, () => {
       { content: '用户住在杭州', createdAt: '2026-01-02T00:00:00.000Z' },
     ]);
     const r = await memory.deleteMemory({ content: '用户叫宋泽', createdAt: '2026-01-01T00:00:00.000Z' });
-    assert.deepEqual(r, { removed: 1, reason: 'ok' });
+    assert.equal(r.removed, 1);
+    assert.equal(r.reason, 'ok');
 
     const left = memory.getMemories();
     assert.equal(left.length, 1);
@@ -240,27 +242,27 @@ describe('recallMemoryBySourceQuote 撤回联动', SERIAL, () => {
 
   test('精确匹配 sourceQuote 时删除对应记忆', async () => {
     seed([{ content: '用户叫宋泽', sourceQuote: '我叫宋泽', createdAt: now }]);
-    const removed = await memory.recallMemoryBySourceQuote('我叫宋泽', now);
-    assert.equal(removed, 1);
+    const r = await memory.recallMemoryBySourceQuote('我叫宋泽', now);
+    assert.deepEqual(r, { removedEntries: 1, removedContributions: 1 });
     assert.deepEqual(memory.getMemories(), []);
   });
 
   test('长引用被原文包含时匹配删除', async () => {
     seed([{ content: '用户喜欢美式', sourceQuote: '我喜欢喝美式咖啡', createdAt: now }]);
-    const removed = await memory.recallMemoryBySourceQuote('对了，我喜欢喝美式咖啡来着', now);
-    assert.equal(removed, 1);
+    const r = await memory.recallMemoryBySourceQuote('对了，我喜欢喝美式咖啡来着', now);
+    assert.equal(r.removedEntries, 1);
   });
 
   test('高相似度(>=0.7)匹配删除', async () => {
     seed([{ content: '用户叫宋泽', sourceQuote: '我叫宋泽', createdAt: now }]);
-    const removed = await memory.recallMemoryBySourceQuote('我叫宋泽呀', now);
-    assert.equal(removed, 1);
+    const r = await memory.recallMemoryBySourceQuote('我叫宋泽呀', now);
+    assert.equal(r.removedEntries, 1);
   });
 
   test('完全无关的文本不会误删', async () => {
     seed([{ content: '用户叫宋泽', sourceQuote: '我叫宋泽', createdAt: now }]);
-    const removed = await memory.recallMemoryBySourceQuote('今天天气真不错', now);
-    assert.equal(removed, 0);
+    const r = await memory.recallMemoryBySourceQuote('今天天气真不错', now);
+    assert.deepEqual(r, { removedEntries: 0, removedContributions: 0 });
     assert.equal(memory.getMemories().length, 1);
   });
 
@@ -268,22 +270,28 @@ describe('recallMemoryBySourceQuote 撤回联动', SERIAL, () => {
     const memoryTime = new Date('2026-06-01T11:50:00.000Z').toISOString(); // 早 10 分钟
     const sourceTime = new Date('2026-06-01T12:00:00.000Z').toISOString();
     seed([{ content: '用户叫宋泽', sourceQuote: '我叫宋泽', createdAt: memoryTime }]);
-    const removed = await memory.recallMemoryBySourceQuote('我叫宋泽', sourceTime);
-    assert.equal(removed, 0, '时间窗外的记忆不应被误删');
+    const r = await memory.recallMemoryBySourceQuote('我叫宋泽', sourceTime);
+    assert.equal(r.removedEntries, 0, '时间窗外的记忆不应被误删');
   });
 
   test('记忆时间晚于消息 2 小时以上时不匹配', async () => {
     const memoryTime = new Date('2026-06-01T15:00:00.000Z').toISOString(); // 晚 3 小时
     const sourceTime = new Date('2026-06-01T12:00:00.000Z').toISOString();
     seed([{ content: '用户叫宋泽', sourceQuote: '我叫宋泽', createdAt: memoryTime }]);
-    const removed = await memory.recallMemoryBySourceQuote('我叫宋泽', sourceTime);
-    assert.equal(removed, 0);
+    const r = await memory.recallMemoryBySourceQuote('我叫宋泽', sourceTime);
+    assert.equal(r.removedEntries, 0);
   });
 
-  test('空来源文本直接返回 0', async () => {
+  test('空来源文本直接返回两个 0', async () => {
     seed([{ content: '用户叫宋泽', sourceQuote: '我叫宋泽', createdAt: now }]);
-    assert.equal(await memory.recallMemoryBySourceQuote('', now), 0);
-    assert.equal(await memory.recallMemoryBySourceQuote(null, now), 0);
+    assert.deepEqual(await memory.recallMemoryBySourceQuote('', now), {
+      removedEntries: 0,
+      removedContributions: 0,
+    });
+    assert.deepEqual(await memory.recallMemoryBySourceQuote(null, now), {
+      removedEntries: 0,
+      removedContributions: 0,
+    });
   });
 });
 

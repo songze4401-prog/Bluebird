@@ -666,14 +666,25 @@ export function useChatSession({
 
             const data = (await readJsonResponse(response)) as RecallResponse;
 
-            if (!response.ok) {
-              throw apiErrorFromPayload(data, response.status, '撤回失败');
-            }
-
             // 服务端返回真实删除的 id 列表（含配对的 AI 回复），按它移除
             const removedIds: string[] = Array.isArray(data.removedIds)
               ? data.removedIds
               : [message.id];
+
+            if (!response.ok) {
+              // partial：聊天消息已在服务端删除，只有记忆撤回失败。
+              // 此时本地列表必须跟着删掉，否则界面继续显示一条服务端已不存在的消息。
+              if (data.messagesRecalled) {
+                setMessages(prev => prev.filter(m => !removedIds.includes(m.id)));
+                Alert.alert(
+                  '部分撤回失败',
+                  data.error || '消息已撤回，但长期记忆撤回失败，请稍后重试。'
+                );
+                return;
+              }
+
+              throw apiErrorFromPayload(data, response.status, '撤回失败');
+            }
 
             setMessages(prev => prev.filter(m => !removedIds.includes(m.id)));
           } catch (error) {

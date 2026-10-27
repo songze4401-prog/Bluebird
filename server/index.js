@@ -115,10 +115,15 @@ const {
   buildMemoryContext,
   processMemory,
   clearMemories,
+  clearSessionMemories,
   recallMemoryBySourceQuote,
   getMemories,
   deleteMemory,
+  verifyStoreConsistency,
+  getWriteOutcomes,
 } = require('./memory');
+
+const { logDataEvent } = require('./data-events');
 
 const {
   getEmotion,
@@ -975,7 +980,7 @@ app.post('/history/clear', requireAuth, (req, res) => {
   }
 });
 
-app.post('/history/recall', requireAuth, (req, res) => {
+app.post('/history/recall', requireAuth, async (req, res) => {
   try {
     const { messageId } = req.body;
     const sessionId = resolveSessionId(req, 'body');
@@ -1010,7 +1015,7 @@ app.post('/history/recall', requireAuth, (req, res) => {
       removed.push(m);
     }
 
-    const removedIds = new Set(removed.map(m => m.id));
+    const removedIds = new Set(removed.map(item => item.id));
     const saved = replaceMessages(
       sessionId,
       history.filter(m => m && !removedIds.has(m.id))
@@ -1026,15 +1031,6 @@ app.post('/history/recall', requireAuth, (req, res) => {
     // 回收被删消息的图片附件（确认无其他消息引用后删文件）
     releaseOrphanAttachments(removed.map(item => item.attachments));
 
-    // 异步撤回由这条用户消息产生的长期记忆（sourceQuote 匹配，优先同会话）
-    recallMemoryBySourceQuote(
-      removed[0].content,
-      removed[0].createdAt,
-      sessionId
-    ).catch(error => {
-      console.error('Memory recall error:', error.message);
-    });
-
     // 撤回可能移除了最后一条 Blue 消息，等待计时一并归零，避免残留
     try {
       resetSessionWait(sessionId);
@@ -1042,11 +1038,72 @@ app.post('/history/recall', requireAuth, (req, res) => {
       console.error('Presence reset error:', error);
     }
 
+    // 撤回由这条用户消息产生的长期记忆（sourceQuote 匹配，只摘本会话的贡献）。
+    // 必须 await 并自检落盘：消息删了但记忆没删成时，响应不能写成成功，
+    // 否则客户端以为两边都干净，事实仍留在记忆里。
+    const removedMessageIds = removed.map(m => m.id);
+
+    let memoryRecall;
+    try {
+      const counts = await recallMemoryBySourceQuote(
+        removed[0].content,
+        removed[0].createdAt,
+        sessionId
+      );
+
+      const consistency = verifyStoreConsistency();
+
+      memoryRecall = { ...counts, ...consistency };
+    } catch (error) {
+      logDataEvent({
+        module: 'memory',
+        event: 'memory_recall_failed',
+        level: 'error',
+        error,
+        action: 'recall',
+        extra: { sessionId, removedMessageIds },
+      });
+
+      // 消息已经删干净了：如实告诉调用方「消息成功、记忆失败」的半完成状态，
+      // 让它按 removedIds 收敛本地列表，而不是把这条消息继续显示出来。
+      return res.status(503).json({
+        error: '聊天记录已撤回，但长期记忆撤回失败，请重试或到记忆库手动删除',
+        partial: true,
+        messagesRecalled: true,
+        sessionId,
+        removedCount: removed.length,
+        removedIds: removedMessageIds,
+        memory: { status: 'failed' },
+      });
+    }
+
+    // 落盘与内存不一致（磁盘写成功但内容对不上）同样不能算成功。
+    if (memoryRecall.consistent === false) {
+      logDataEvent({
+        module: 'memory',
+        event: 'memory_recall_inconsistent',
+        level: 'error',
+        action: 'recall',
+        extra: { sessionId, reason: memoryRecall.reason },
+      });
+
+      return res.status(503).json({
+        error: '聊天记录已撤回，但长期记忆的落盘校验未通过，请重试',
+        partial: true,
+        messagesRecalled: true,
+        sessionId,
+        removedCount: removed.length,
+        removedIds: removedMessageIds,
+        memory: memoryRecall,
+      });
+    }
+
     res.json({
       ok: true,
       sessionId,
       removedCount: removed.length,
-      removedIds: removed.map(m => m.id),
+        removedIds: removedMessageIds,
+      memory: memoryRecall,
     });
   } catch (error) {
     console.error('History recall error:', error);
@@ -1480,11 +1537,109 @@ app.post('/memory/clear', requireAuth, async (req, res) => {
   }
 
   try {
-    await clearMemories();
-    res.json({ ok: true, message: '长期记忆已清理' });
+    const result = await clearMemories();
+
+    const consistency = verifyStoreConsistency();
+
+    if (consistency.consistent === false) {
+      logDataEvent({
+        module: 'memory',
+        event: 'memory_clear_inconsistent',
+        level: 'error',
+        action: 'clear',
+        extra: { reason: consistency.reason },
+      });
+
+      return res.status(503).json({
+        error: '记忆已清空，但落盘校验未通过，请重试',
+        partial: true,
+        reason: consistency.reason,
+      });
+    }
+
+    res.json({
+      ok: true,
+      message: '长期记忆已清理',
+      removedEntries: result.removedEntries,
+    });
   } catch (error) {
     console.error('Memory clear error:', error);
     res.status(500).json({ error: '清理长期记忆失败' });
+  }
+});
+
+// 按会话清理长期记忆：只摘掉登记在该会话名下的贡献，
+// 同一事实若还被别的会话说过的，条目留着（不会跨会话连坐删除）。
+// 与 /history/clear（清聊天记录）是两回事：这里动的是长期记忆库。
+app.post('/memory/clear-session', requireAuth, async (req, res) => {
+  const guard = clearGuardError(req);
+
+  if (guard) {
+    return res.status(403).json({ error: guard, requireConfirm: true });
+  }
+
+  const sessionId = typeof (req.body || {}).sessionId === 'string'
+    ? req.body.sessionId.trim()
+    : '';
+
+  if (!sessionId) {
+    return res.status(400).json({ error: '缺少 sessionId' });
+  }
+
+  try {
+    const result = await clearSessionMemories(sessionId);
+
+    if (result.reason === 'invalid') {
+      return res.status(400).json({ error: 'sessionId 无效' });
+    }
+
+    if (result.reason === 'no-match') {
+      return res.json({
+        ok: true,
+        sessionId,
+        removedEntries: 0,
+        removedContributions: 0,
+        remaining: result.remaining,
+        message: '该会话没有登记在记忆库中的贡献',
+      });
+    }
+
+    const consistency = verifyStoreConsistency();
+
+    if (consistency.consistent === false) {
+      logDataEvent({
+        module: 'memory',
+        event: 'memory_clear_session_inconsistent',
+        level: 'error',
+        action: 'clear_session',
+        extra: { sessionId, reason: consistency.reason },
+      });
+
+      return res.status(503).json({
+        error: '会话记忆已清理，但落盘校验未通过，请重试',
+        partial: true,
+        sessionId,
+        reason: consistency.reason,
+      });
+    }
+
+    res.json({
+      ok: true,
+      sessionId,
+      removedEntries: result.removedEntries,
+      removedContributions: result.removedContributions,
+      remaining: result.remaining,
+    });
+  } catch (error) {
+    logDataEvent({
+      module: 'memory',
+      event: 'memory_clear_session_failed',
+      level: 'error',
+      error,
+      action: 'clear_session',
+      extra: { sessionId },
+    });
+    res.status(500).json({ error: '清理该会话的长期记忆失败' });
   }
 });
 
@@ -1495,6 +1650,17 @@ app.get('/memory', requireAuth, (req, res) => {
   } catch (error) {
     console.error('Memory API Error:', error);
     res.status(500).json({ error: '读取长期记忆失败' });
+  }
+});
+
+// 最近若干次「尝试写长期记忆」的结论（含被哪道闸门拒）。
+// 只含短码、会话 id 与条目 id，不含任何记忆正文或用户原话。
+app.get('/memory/write-attempts', requireAuth, (req, res) => {
+  try {
+    res.json({ attempts: getWriteOutcomes() });
+  } catch (error) {
+    console.error('Memory attempts error:', error);
+    res.status(500).json({ error: '读取记忆写入记录失败' });
   }
 });
 
@@ -1619,22 +1785,49 @@ app.put('/persona', requireAuth, (req, res) => {
   res.json({ config: saved });
 });
 
-// 记忆库：按 createdAt + content 删除单条记忆
+// 记忆库：删除单条记忆。优先用稳定 id，旧的 createdAt + content 定位继续支持。
 app.post('/memory/delete', requireAuth, async (req, res) => {
   try {
-    const { createdAt, content } = req.body || {};
+    const { id, createdAt, content } = req.body || {};
 
-    if (typeof createdAt !== 'string' || typeof content !== 'string') {
-      return res.status(400).json({ error: '缺少 createdAt 或 content' });
+    const hasId = typeof id === 'string' && id.trim();
+    const hasLegacy =
+      typeof createdAt === 'string' && typeof content === 'string';
+
+    if (!hasId && !hasLegacy) {
+      return res
+        .status(400)
+        .json({ error: '缺少 id，或缺少 createdAt + content' });
     }
 
-    const result = await deleteMemory({ createdAt, content });
+    const result = await deleteMemory(
+      hasId ? { id } : { createdAt, content }
+    );
+
+    const consistency = verifyStoreConsistency();
+
+    // 删除成功但磁盘与内存对不上：不能回 ok，否则前端把这条划掉、下次启动又冒出来
+    if (result.removed && consistency.consistent === false) {
+      logDataEvent({
+        module: 'memory',
+        event: 'memory_delete_inconsistent',
+        level: 'error',
+        action: 'delete',
+        extra: { reason: consistency.reason },
+      });
+
+      return res.status(503).json({
+        error: '记忆已删除，但落盘校验未通过，请重试',
+        partial: true,
+        reason: consistency.reason,
+      });
+    }
 
     if (!result.removed) {
       return res.status(404).json({ error: '记忆不存在' });
     }
 
-    res.json({ ok: true, removed: result.removed });
+    res.json({ ok: true, removed: result.removed, id: result.id });
   } catch (error) {
     console.error('Memory delete error:', error);
     res.status(500).json({ error: '删除记忆失败' });
@@ -1929,7 +2122,7 @@ async function prepareChatRequest(req) {
         untrustedContext = engine.renderUntrustedContextBlock(engineOut);
       } else {
         // 无法安全组装：显式记录降级原因，并回退旧路径（记忆仍然可用）
-        memoryContext = buildMemoryContext(memoryQuery);
+        memoryContext = buildMemoryContext(memoryQuery, sessionId);
         console.error(
           `[context] engine 组装失败/降级，回退 buildMemoryContext session=${sessionId} error=${engineOut.error}`
         );
@@ -1949,14 +2142,14 @@ async function prepareChatRequest(req) {
       contextTrace = null;
       engineBlocks = [];
       untrustedContext = null;
-      memoryContext = buildMemoryContext(memoryQuery);
+      memoryContext = buildMemoryContext(memoryQuery, sessionId);
       console.error(
         `[context] engine 异常，回退 buildMemoryContext session=${sessionId}` +
           ` error=${error && error.message ? error.message : error}`
       );
     }
   } else {
-    memoryContext = buildMemoryContext(memoryQuery);
+    memoryContext = buildMemoryContext(memoryQuery, sessionId);
   }
 
   const systemPrompt = [
@@ -2185,12 +2378,39 @@ function scheduleMemoryExtraction(isContinue, userText, sessionId, attachments =
             attachments[0].kind === KIND_STICKER ? '表情包' : '图片'
           }）`
         : userText);
+    // 提取是响应完成后的后台动作，返回值没人接就变成黑洞：
+    // 这里把结论（写入/合并/更正/拒写短码）落成结构化事件，
+    // 具体原因短码由 memory.js 的 reportSkip 与 writeOutcomes 记录。
     processMemory(memoryClient, memoryText, sessionId)
+      .then(outcome => {
+        if (!outcome) return;
+        if (outcome.reason === 'not_triggered') return; // 普通闲聊，不值得记
+
+        logDataEvent({
+          module: 'memory',
+          event: outcome.written
+            ? 'memory_write_applied'
+            : 'memory_write_skipped',
+          level: 'info',
+          action: outcome.action || 'none',
+          reason: outcome.written ? null : outcome.reason,
+          extra: {
+            sessionId,
+            written: outcome.written === true,
+            id: outcome.id || null,
+            supersededId: outcome.supersededId || null,
+          },
+        });
+      })
       .catch(error => {
-        console.error(
-          'Memory processing error:',
-          error.message
-        );
+        logDataEvent({
+          module: 'memory',
+          event: 'memory_extract_failed',
+          level: 'error',
+          error,
+          action: 'extract',
+          extra: { sessionId },
+        });
       });
   });
 }

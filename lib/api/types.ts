@@ -60,11 +60,27 @@ export type ClearHistoryResponse = {
   message: string;
 };
 
+// 撤回响应：消息撤回与记忆撤回是分开的两件事。
+// 服务端只有在两边都干净时才回 ok:true；
+// 消息删成、记忆没删成时回 503 + partial:true + messagesRecalled:true，
+// 客户端必须按 removedIds 收敛本地列表，再单独提示记忆失败。
+export type RecallMemoryResult = {
+  removedEntries?: number;
+  removedContributions?: number;
+  consistent?: boolean;
+  reason?: string;
+  status?: 'failed';
+};
+
 export type RecallResponse = {
-  ok: true;
+  ok?: boolean;
   sessionId: string;
   removedCount: number;
   removedIds: string[];
+  memory?: RecallMemoryResult;
+  partial?: boolean;
+  messagesRecalled?: boolean;
+  error?: string;
 };
 
 // ---- 情绪 ----
@@ -85,10 +101,16 @@ export type PersonaSaveResponse = { config: PersonaConfig };
 
 // ---- 记忆 ----
 export type MemoryItem = {
+  // 稳定 id：更正/删除优先用它定位（旧的 createdAt + content 定位仍受支持）
+  id?: string;
   content: string;
   type?: string;
   keywords?: string[];
   confidence?: number;
+  status?: 'active' | 'superseded';
+  validFrom?: string;
+  validTo?: string | null;
+  supersededBy?: string | null;
   sourceQuote?: string;
   createdAt?: string;
   updatedAt?: string;

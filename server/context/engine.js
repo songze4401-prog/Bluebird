@@ -251,13 +251,19 @@ function rankInGroup(group, config) {
     item.freshness && item.freshness.fetched_at
       ? new Date(item.freshness.fetched_at).getTime() || 0
       : 0;
+  // 检索相关度：来源自带（记忆检索会给出），不提供时一律按 0，
+  // 于是比较结果与加入本字段之前完全一致，不会改变既有裁决。
+  const relevanceOf = item =>
+    Number.isFinite(item.relevance) ? item.relevance : 0;
 
   const sorted = group.slice().sort((a, b) => {
     const vd = vRank(b) - vRank(a);
     if (vd !== 0) return vd;
     const sd = sRank(a) - sRank(b);
     if (sd !== 0) return sd;
-    return fetchedTime(b) - fetchedTime(a);
+    const ft = fetchedTime(b) - fetchedTime(a);
+    if (ft !== 0) return ft;
+    return relevanceOf(b) - relevanceOf(a);
   });
 
   const best = sorted[0];
@@ -267,7 +273,8 @@ function rankInGroup(group, config) {
     return (
       vRank(item) === vRank(best) &&
       sRank(item) === sRank(best) &&
-      fetchedTime(item) === fetchedTime(best)
+      fetchedTime(item) === fetchedTime(best) &&
+      relevanceOf(item) === relevanceOf(best)
     );
   });
 
@@ -279,6 +286,21 @@ function rankInGroup(group, config) {
       .filter(item => item !== best)
       .map(item => `${item.source}:${item.verification.status}`);
     reasonParts.push(`压过 ${others.join(', ')}`);
+
+    const bestRelevance = relevanceOf(best);
+
+    if (
+      bestRelevance > 0 &&
+      group.some(
+        item =>
+          item !== best &&
+          vRank(item) === vRank(best) &&
+          sRank(item) === sRank(best) &&
+          fetchedTime(item) === fetchedTime(best)
+      )
+    ) {
+      reasonParts.push(`相关度 ${bestRelevance.toFixed(4)} 决胜`);
+    }
   }
 
   return [{ item: best, uniqueWinner: true, reason: reasonParts.join('；') }];
