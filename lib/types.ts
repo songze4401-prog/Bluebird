@@ -31,6 +31,38 @@ export type StickerSegment = {
 };
 export type ContentSegment = TextSegment | StickerSegment;
 
+// Agent 工具执行摘要（服务端 sessions.js sanitizeToolSteps 的形状为准）。
+// 刻意只有元数据：不含调用参数、不含记忆原文、不含模型推理，
+// 所以可以直接渲染给用户。挂在一条 assistant 消息上（本轮最后一格）。
+export type ToolStep = {
+  name: string;
+  ok: boolean;
+  summary: string;
+  durationMs: number;
+};
+
+// 渲染用形状：落盘的 ToolStep 与流式期 tool_start / tool_end 现场拼出来的
+// 半成品统一收敛到这一个视图模型，pill 组件只认它。
+// running=true 表示只收到了 tool_start、还没收到 tool_end（此时 ok 无意义）。
+export type ToolStepView = {
+  name: string;
+  ok: boolean;
+  summary: string;
+  running: boolean;
+};
+
+// SSE 的工具进度事件（服务端 agent-runtime.js 的 onToolEvent 载荷）。
+// callId 是同一次调用的配对键：tool_end 靠它找到自己的 tool_start。
+export type ToolStreamEvent =
+  | { type: 'tool_start'; name: string; callId: string }
+  | {
+      type: 'tool_end';
+      name: string;
+      callId: string;
+      ok: boolean;
+      summary?: string;
+    };
+
 export type Message = {
   id: string;
   role: 'user' | 'assistant';
@@ -46,6 +78,8 @@ export type Message = {
   // 模型路由提示（仅 assistant）：后端 modelRoute.auto 为真时展示
   // 「所选模型不支持图片输入，实际由哪个模型处理」，不落盘
   modelNote?: string;
+  // Agent 工具调用摘要（仅 assistant）：设计图里的「调用工具」pill
+  toolSteps?: ToolStepView[];
 };
 
 // 会话元数据（与 GET /sessions 返回结构一致）
@@ -122,4 +156,6 @@ export type ReplySegment = {
   createdAt?: string;
   // AI 回复带出的图片/表情包附件（服务端约定挂在最后一格气泡上）
   attachments?: Attachment[];
+  // Agent 工具执行摘要（服务端同样只挂在最后一格）
+  toolSteps?: ToolStep[];
 };

@@ -51,3 +51,18 @@ export const REPLY_PACING = {
   perCharMs: 45,
   maxMs: 1600,
 };
+
+// Agent 工具名的中文显示名（设计图的工具 pill 用中文短句）。
+// 只登记确实存在的工具：目前后端注册的仅 memory_search 一个。
+// 未登记的名字一律原样显示——宁可露出英文内部名，也不给没跑过的工具编一个中文名。
+export const TOOL_LABEL: Record<string, string> = {
+  memory_search: '检索记忆',
+};
+
+export function toolLabel(name: string): string {
+  return TOOL_LABEL[name] ?? name;
+}
+
+// 设置抽屉里的版本标识。与 package.json / app.json 的 version 手工保持一致：
+// 前端不引入 expo-constants，也不把 package.json 打进 bundle。
+export const APP_VERSION = '0.4.1';

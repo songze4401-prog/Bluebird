@@ -6,6 +6,7 @@
 
 import {
   applyStreamingText,
+  applyToolEvent,
   buildModelNote,
   buildReplyBubbles,
   buildWelcomeMessages,
@@ -15,7 +16,9 @@ import {
   normalizeSegments,
   reconcileStreamDone,
   removeStreamBubble,
+  toToolStepViews,
 } from '../../lib/chat-messages';
+import type { LiveToolStep } from '../../lib/chat-messages';
 import type { Message } from '../../lib/types';
 
 const CREATED_AT = '2026-01-01T00:00:00.000Z';
@@ -284,5 +287,169 @@ describe('流式块：增量替换 / 权威替换 / 整块移除', () => {
     );
 
     expect(done.map(m => m.id)).toEqual(['a', 'srv']);
+  });
+});
+
+// Agent 工具调用：pill 显示的是服务端真实执行记录，不是占位内容。
+// 三条链路都要覆盖——历史（/history 的 toolSteps）、done 权威摘要（顶层与分条）、
+// 流式期进度（tool_start / tool_end）。
+describe('toToolStepViews', () => {
+  it('空与非数组都返回 undefined（渲染层据此不占高度）', () => {
+    expect(toToolStepViews(undefined)).toBeUndefined();
+    expect(toToolStepViews([])).toBeUndefined();
+    expect(toToolStepViews(undefined as never)).toBeUndefined();
+  });
+
+  it('缺字段时归一：ok 只认真 true，summary 缺省空串，running 恒为 false', () => {
+    const views = toToolStepViews([
+      { name: 'memory_search' },
+      { name: 'x', ok: 1 as never, summary: 2 as never },
+    ] as never);
+
+    expect(views).toEqual([
+      { name: 'memory_search', ok: false, summary: '', running: false },
+      { name: 'x', ok: false, summary: '', running: false },
+    ]);
+  });
+
+  it('保留 summary 供详情展示', () => {
+    const views = toToolStepViews([
+      { name: 'memory_search', ok: true, summary: '命中 3 条', durationMs: 12 },
+    ] as never);
+
+    expect(views?.[0]).toMatchObject({ ok: true, summary: '命中 3 条' });
+  });
+});
+
+describe('applyToolEvent', () => {
+  const START = { type: 'tool_start', name: 'memory_search', callId: 'c1' } as const;
+
+  it('tool_start 立一条 running 记录', () => {
+    const next = applyToolEvent([], START);
+
+    expect(next).toEqual([
+      { callId: 'c1', name: 'memory_search', ok: false, summary: '', running: true },
+    ]);
+  });
+
+  it('重复的同一 callId 不叠加（事件重发只有一条 pill）', () => {
+    const once = applyToolEvent([], START);
+    const twice = applyToolEvent(once, START);
+
+    expect(twice).toHaveLength(1);
+    expect(twice).toBe(once);
+  });
+
+  it('tool_end 按 callId 配回自己的 start', () => {
+    const running = applyToolEvent([], START);
+    const done = applyToolEvent(running, {
+      type: 'tool_end',
+      name: 'memory_search',
+      callId: 'c1',
+      ok: true,
+      summary: '命中 2 条',
+    });
+
+    expect(done).toHaveLength(1);
+    expect(done[0]).toMatchObject({ ok: true, summary: '命中 2 条', running: false });
+  });
+
+  it('同名并行调用不串位：各自配对自己的 callId', () => {
+    let steps: LiveToolStep[] = applyToolEvent(applyToolEvent([], START), {
+      ...START,
+      callId: 'c2',
+    });
+
+    steps = applyToolEvent(steps, {
+      type: 'tool_end',
+      name: 'memory_search',
+      callId: 'c2',
+      ok: true,
+      summary: 'second',
+    });
+
+    expect(steps[0].running).toBe(true);
+    expect(steps[0].callId).toBe('c1');
+    expect(steps[1]).toMatchObject({ callId: 'c2', ok: true, running: false });
+  });
+
+  it('丢帧（只有 tool_end）时补一条已完成记录，不静默吞掉真实执行', () => {
+    const next = applyToolEvent([], {
+      type: 'tool_end',
+      name: 'memory_search',
+      callId: 'c9',
+      ok: false,
+    });
+
+    expect(next).toHaveLength(1);
+    expect(next[0]).toMatchObject({ callId: 'c9', ok: false, running: false });
+  });
+
+  it('end 缺 summary 时保留 start 已有的文案', () => {
+    const running = applyToolEvent([], START);
+    const done = applyToolEvent(
+      running.map(step => ({ ...step, summary: '进行中' })),
+      { type: 'tool_end', name: 'memory_search', callId: 'c1', ok: true }
+    );
+
+    expect(done[0].summary).toBe('进行中');
+  });
+});
+
+describe('工具摘要挂载位置', () => {
+  it('buildReplyBubbles 只给最后一格挂 toolSteps', () => {
+    const { bubbles } = buildReplyBubbles(
+      { toolSteps: [{ name: 'memory_search', ok: true, summary: 'x' }] } as never,
+      [
+        { id: 'x1', content: '一' },
+        { id: 'x2', content: '二' },
+      ]
+    );
+
+    expect(bubbles[0].toolSteps).toBeUndefined();
+    expect(bubbles[1].toolSteps).toHaveLength(1);
+    expect(bubbles[1].toolSteps?.[0]).toMatchObject({ running: false });
+  });
+
+  it('分条响应里 seg.toolSteps 优先于顶层（服务端把摘要放在最后一格）', () => {
+    const { bubbles } = buildReplyBubbles(
+      { toolSteps: [{ name: 'stale_top', ok: true }] } as never,
+      [
+        { id: 'x1', content: '一' },
+        { id: 'x2', content: '二', toolSteps: [{ name: 'real_seg', ok: true }] },
+      ] as never
+    );
+
+    expect(bubbles[1].toolSteps?.[0].name).toBe('real_seg');
+  });
+
+  it('无工具调用的响应不新增字段（旧消息渲染零变化）', () => {
+    const { bubbles } = buildReplyBubbles({}, [{ id: 'x1', content: '一' }]);
+
+    expect('toolSteps' in bubbles[0]).toBe(false);
+  });
+
+  it('mapHistoryItem 透传历史里的真实执行记录', () => {
+    const message = mapHistoryItem(
+      {
+        role: 'assistant',
+        content: '查过了',
+        toolSteps: [{ name: 'memory_search', ok: true, summary: '命中 1 条' }],
+      } as never,
+      0
+    );
+
+    expect(message.toolSteps).toHaveLength(1);
+    expect(message.toolSteps?.[0]).toMatchObject({
+      name: 'memory_search',
+      ok: true,
+      running: false,
+    });
+  });
+
+  it('历史条目没有 toolSteps 时不挂字段', () => {
+    expect(
+      mapHistoryItem({ role: 'assistant', content: 'x' }, 0).toolSteps
+    ).toBeUndefined();
   });
 });

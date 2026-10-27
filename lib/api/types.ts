@@ -12,6 +12,7 @@ import type {
   PersonaConfig,
   ReplySegment,
   SessionMeta,
+  ToolStep,
 } from '../types';
 
 // ---- 通用错误体 ----
@@ -36,13 +37,16 @@ export type DeleteSessionResponse = {
 };
 
 // ---- 历史 ----
-// 服务端 /history 返回的条目：id 可选（旧数据可能没有），附件原样透传
+// 服务端 /history 返回的条目：id 可选（旧数据可能没有），附件原样透传，
+// toolSteps 为 Agent 工具执行摘要（仅 assistant、仅本轮最后一格，server
+// sessions.js sanitizeToolSteps 产出）
 export type HistoryMessage = {
   id?: string;
   role: 'user' | 'assistant';
   content: string;
   createdAt?: string;
   attachments?: Attachment[];
+  toolSteps?: ToolStep[];
 };
 
 export type HistoryResponse = {
@@ -149,6 +153,9 @@ export type ChatResponse = {
   assistantMessageId?: string;
   createdAt?: string;
   persisted?: boolean;
+  // Agent 工具执行摘要：有则同时出现在顶层与 replies 最后一格，
+  // 无则整个字段不出现（旧响应零变化）
+  toolSteps?: ToolStep[];
 };
 
 // ---- 在线状态 ----

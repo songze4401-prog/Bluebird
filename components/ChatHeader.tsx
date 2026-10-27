@@ -1,278 +1,138 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import React, { useMemo } from 'react';
+import { Text, TouchableOpacity, View, StyleSheet } from 'react-native';
 
-import { MODE_OPTIONS, type Theme, type ThemeMode } from '../theme';
-import { moodEmoji } from '../lib/utils';
-import { MOOD_LABEL } from '../lib/constants';
-import { SharedTime } from './SharedTime';
+import type { Theme } from '../theme';
+import { CHAT_LAYOUT, CHAT_TYPE } from '../lib/design';
 
-// 顶部栏 + 下拉菜单。
-// 注意：必须用 Fragment 返回两个兄弟节点 —— menu 是绝对定位（top: 62），
-// 定位基准是 KeyboardAvoidingView；若在此多包一层 View，菜单会错位。
-// menuOpen 由 App 持有：清理聊天记录等动作的关闭时机在异步回调里，
-// 属于 App 的业务逻辑，组件只负责渲染与回调。
+// 顶部栏（设计图 .topbar）：☰ + Bluebird | ＋ ⌕ ，无描边、无头像、无在线状态。
+// 与重构前的差别：心情 Emoji 移到每条助手的 who-line（设计图如此），
+// 「● 在线」与共享时钟移进设置抽屉，原来的 160px 绝对定位下拉换成抽屉。
+//
+// 四个入口的语义（设计图未标注，按下述约定实现，已在交付说明里标为假设）：
+//   ☰ → 设置抽屉（用户明确要求：三个杠打开是设置 + 历史对话）
+//   ＋ → 新建对话
+//   ⌕ → 历史对话
+//   ⋮ → 设置抽屉（「更多」的备用入口，与 ☰ 同一目的地）
 export function ChatHeader({
   theme,
-  mood,
-  menuOpen,
-  onToggleMenu,
-  onOpenMemory,
-  onSelectMode,
-  onOpenThemePicker,
-  onOpenControlPanel,
-  onOpenModels,
-  onClearHistory,
+  onOpenDrawer,
+  onNewChat,
+  onOpenHistory,
+  creatingChat,
 }: {
   theme: Theme;
-  mood: string;
-  menuOpen: boolean;
-  onToggleMenu: () => void;
-  onOpenMemory: () => void;
-  onSelectMode: (mode: ThemeMode) => void;
-  onOpenThemePicker: () => void;
-  onOpenControlPanel: () => void;
-  onOpenModels: () => void;
-  onClearHistory: () => void;
+  onOpenDrawer: () => void;
+  onNewChat: () => void;
+  onOpenHistory: () => void;
+  // 新建会话请求进行中：禁用入口防连点，避免创建出多余的空会话
+  creatingChat?: boolean;
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);
 
-  // 心情气泡：点表情显示/再点收起，2.5s 后自动消失。纯 UI 状态，不外抛
-  const [moodTipVisible, setMoodTipVisible] = useState(false);
-  const moodTipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const toggleMoodTip = () => {
-    if (moodTipTimer.current) {
-      clearTimeout(moodTipTimer.current);
-      moodTipTimer.current = null;
-    }
-
-    setMoodTipVisible(prev => {
-      const next = !prev;
-      if (next) {
-        moodTipTimer.current = setTimeout(() => {
-          setMoodTipVisible(false);
-          moodTipTimer.current = null;
-        }, 2500);
-      }
-      return next;
-    });
-  };
-
-  useEffect(
-    () => () => {
-      if (moodTipTimer.current) clearTimeout(moodTipTimer.current);
-    },
-    []
-  );
-
   return (
-    <>
-      <View style={styles.header}>
-        <View style={styles.headerLeft}>
-          <View style={styles.moodWrap}>
-            <TouchableOpacity
-              onPress={toggleMoodTip}
-              activeOpacity={0.7}
-              accessibilityLabel="查看当前心情"
-            >
-              <Text style={styles.headerMood}>{moodEmoji(mood)}</Text>
-            </TouchableOpacity>
-
-            {moodTipVisible && (
-              <View style={styles.moodTip}>
-                <Text style={styles.moodTipText}>
-                  {MOOD_LABEL[mood] ?? mood}
-                </Text>
-              </View>
-            )}
+    <View style={styles.bar}>
+      <View style={styles.left}>
+        <TouchableOpacity
+          onPress={onOpenDrawer}
+          activeOpacity={0.6}
+          hitSlop={8}
+          accessibilityLabel="打开设置"
+        >
+          {/* ☰ 用三条 View 画：字形 ☰ 在不同字体下粗细不一，画出来才稳定 */}
+          <View style={styles.burger}>
+            <View style={styles.burgerLine} />
+            <View style={styles.burgerLine} />
+            <View style={styles.burgerLine} />
           </View>
-          <View style={styles.headerTitle}>
-            <Text style={styles.title} numberOfLines={1}>
-              Bluebird
-            </Text>
-            <Text style={styles.status}>● 在线</Text>
-          </View>
-        </View>
+        </TouchableOpacity>
 
-        <View style={styles.headerRight}>
-          <SharedTime theme={theme} />
-
-          <TouchableOpacity style={styles.menuButton} onPress={onToggleMenu}>
-            <Text style={styles.menuIcon}>☰</Text>
-          </TouchableOpacity>
-        </View>
+        <Text style={styles.name} numberOfLines={1}>
+          Bluebird
+        </Text>
       </View>
 
-      {menuOpen && (
-        <View style={styles.menu}>
-          <TouchableOpacity style={styles.menuItem} onPress={onOpenMemory}>
-            <Text style={styles.menuItemText}>记忆库</Text>
-          </TouchableOpacity>
+      <View style={styles.right}>
+        <TouchableOpacity
+          style={styles.iconButton}
+          onPress={onNewChat}
+          disabled={creatingChat}
+          activeOpacity={0.6}
+          accessibilityLabel="新建对话"
+        >
+          <Text style={[styles.icon, creatingChat && styles.iconDim]}>＋</Text>
+        </TouchableOpacity>
 
-          {MODE_OPTIONS.map(option => {
-            const active = theme.mode === option.id;
+        <TouchableOpacity
+          style={styles.iconButton}
+          onPress={onOpenHistory}
+          activeOpacity={0.6}
+          accessibilityLabel="历史对话"
+        >
+          <Text style={styles.icon}>⌕</Text>
+        </TouchableOpacity>
 
-            return (
-              <TouchableOpacity
-                key={option.id}
-                style={styles.menuItem}
-                onPress={() => onSelectMode(option.id)}
-              >
-                <Text
-                  style={[
-                    styles.menuItemText,
-                    active && { color: theme.accent },
-                  ]}
-                >
-                  {option.label}
-                  {active ? '  ✓' : ''}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-
-          <TouchableOpacity style={styles.menuItem} onPress={onOpenThemePicker}>
-            <Text style={styles.menuItemText}>主题色</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.menuItem}
-            onPress={onOpenControlPanel}
-          >
-            <Text style={styles.menuItemText}>控制面板</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.menuItem} onPress={onOpenModels}>
-            <Text style={styles.menuItemText}>模型</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.menuItem} onPress={onClearHistory}>
-            <Text style={styles.menuItemText}>清理当前会话</Text>
-          </TouchableOpacity>
-
-          <View style={styles.menuVersion}>
-            <Text style={styles.version}>V0.3</Text>
-          </View>
-        </View>
-      )}
-    </>
+        <TouchableOpacity
+          style={styles.iconButton}
+          onPress={onOpenDrawer}
+          activeOpacity={0.6}
+          accessibilityLabel="更多设置"
+        >
+          <Text style={styles.icon}>⋮</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
   );
 }
 
 // 样式由主题派生：只包含本组件用到的键
 const createStyles = (theme: Theme) =>
   StyleSheet.create({
-    header: {
-      height: 72,
-      paddingHorizontal: 20,
+    bar: {
+      height: CHAT_LAYOUT.topBarHeight,
+      paddingHorizontal: CHAT_LAYOUT.gutter,
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
-      borderBottomWidth: 1,
-      borderBottomColor: theme.border,
+      // 实测：设计图顶栏下方没有任何分隔线
+      backgroundColor: 'transparent',
     },
-    title: {
-      color: theme.textPrimary,
-      fontSize: 24,
-      fontWeight: '700',
+    left: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      flexShrink: 1,
     },
-    status: {
-      color: theme.online,
-      fontSize: 12,
-      marginTop: 3,
-    },
-    version: {
-      color: theme.textMuted,
-      fontSize: 12,
-    },
-    headerRight: {
+    right: {
       flexDirection: 'row',
       alignItems: 'center',
       flexShrink: 0,
     },
-
-    menuButton: {
-      marginLeft: 14,
-      padding: 6,
+    burger: {
+      width: 18,
+      marginRight: 14,
+      gap: 4,
     },
-
-    menuIcon: {
-      color: theme.textPrimary,
-      fontSize: 22,
+    burgerLine: {
+      height: 2,
+      borderRadius: 1,
+      backgroundColor: theme.chatText,
     },
-
-    menu: {
-      position: 'absolute',
-      top: 62,
-      right: 16,
-      zIndex: 100,
-      width: 160,
-      backgroundColor: theme.surface,
-      borderRadius: 12,
+    name: {
+      color: theme.chatText,
+      fontSize: CHAT_TYPE.title,
+      fontWeight: '700',
+      letterSpacing: 0.2,
+    },
+    iconButton: {
+      marginLeft: 16,
+      paddingHorizontal: 4,
       paddingVertical: 6,
-      borderWidth: 1,
-      borderColor: theme.borderStrong,
     },
-
-    menuItem: {
-      paddingHorizontal: 16,
-      paddingVertical: 13,
+    icon: {
+      color: theme.chatText,
+      fontSize: 20,
+      lineHeight: 24,
     },
-
-    menuItemText: {
-      color: theme.textPrimary,
-      fontSize: 15,
-    },
-
-    menuVersion: {
-      alignItems: 'center',
-      marginTop: 4,
-      paddingTop: 9,
-      paddingBottom: 5,
-      borderTopWidth: 1,
-      borderTopColor: theme.border,
-    },
-
-    headerLeft: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      flexShrink: 1,
-    },
-
-    headerTitle: {
-      flexShrink: 1,
-    },
-
-    headerMood: {
-      fontSize: 26,
-    },
-
-    // 表情 + 心情气泡的锚点：气泡相对它绝对定位
-    moodWrap: {
-      marginRight: 10,
-    },
-
-    // 心情小气泡：浮在表情正下方，不挤压标题布局
-    moodTip: {
-      position: 'absolute',
-      top: 34,
-      left: -4,
-      zIndex: 60,
-      backgroundColor: theme.surface,
-      borderWidth: 1,
-      borderColor: theme.borderStrong,
-      borderRadius: 8,
-      paddingHorizontal: 9,
-      paddingVertical: 4,
-      shadowColor: '#000',
-      shadowOpacity: 0.18,
-      shadowRadius: 6,
-      shadowOffset: { width: 0, height: 2 },
-      elevation: 4,
-    },
-
-    moodTipText: {
-      color: theme.textPrimary,
-      fontSize: 12,
+    iconDim: {
+      color: theme.chatMuted,
     },
   });

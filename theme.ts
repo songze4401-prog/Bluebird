@@ -33,6 +33,15 @@ export type ModePalette = {
   danger: string; // 危险操作（语义红，不随主题变）
   dangerBorder: string;
   scrim: string; // 遮罩
+  // ---- 聊天页专用（UI 还原基准：设计图 ui6 白底版）----
+  // 与上面的 background / surface 分开是刻意的：聊天页改版不连带改记忆库、
+  // 模型、控制面板等页面在用的那套卡片配色，避免一次视觉改动波及五个页面。
+  chatBg: string; // 聊天页底色
+  pill: string; // 工具 pill / 模型 pill / 输入胶囊底
+  pillText: string; // pill 内文字（比正文弱，比时间戳强）
+  hairline: string; // 标签栏顶部分隔线
+  chatText: string; // 聊天正文
+  chatMuted: string; // 时间戳 / placeholder
 };
 
 export const MODE_PALETTES: Record<ThemeMode, ModePalette> = {
@@ -54,6 +63,13 @@ export const MODE_PALETTES: Record<ThemeMode, ModePalette> = {
     danger: '#e08a8a',
     dangerBorder: 'rgba(224,138,138,0.5)',
     scrim: 'rgba(0,0,0,0.55)',
+    // 深色模式没有设计图，按既有深色材质就近取值，保证两套模式同源
+    chatBg: '#0b0d12',
+    pill: '#181c25',
+    pillText: '#a8b0be',
+    hairline: '#20242d',
+    chatText: '#eeeeee',
+    chatMuted: '#8b93a3',
   },
   light: {
     background: '#f4f5f7',
@@ -73,6 +89,13 @@ export const MODE_PALETTES: Record<ThemeMode, ModePalette> = {
     danger: '#c0392b',
     dangerBorder: 'rgba(192,57,43,0.45)',
     scrim: 'rgba(0,0,0,0.3)',
+    // 以下六项全部取自设计图实测像素值（1080px 截图 ÷ 2.66 缩放）
+    chatBg: '#ffffff',
+    pill: '#f2f3f5',
+    pillText: '#61656b',
+    hairline: '#eeeeee',
+    chatText: '#17181a',
+    chatMuted: '#9b9ea3',
   },
 };
 
@@ -118,10 +141,12 @@ export const THEMES: AccentTheme[] = [
       sendButton: '#2f5b86',
     },
     light: {
-      accent: '#2f6bb0',
-      accentBorder: 'rgba(47,107,176,0.28)',
+      // 按设计图实测：Bluebird 名字 #5884C5、发送按钮与选中标签 #8AB2E3。
+      // 只重调蓝色一档，其余六套强调色保持原值（设计图仅给了蓝色浅色一套）。
+      accent: '#5884c5',
+      accentBorder: 'rgba(88,132,197,0.28)',
       bubble: '#2f6bb0',
-      sendButton: '#3a79c2',
+      sendButton: '#8ab2e3',
     },
   },
   {
@@ -213,7 +238,10 @@ export type Theme = ModePalette &
     accentLabel: string;
   };
 
-export const DEFAULT_THEME_ID: ThemeId = 'black';
+// 默认强调色改为蓝色：设计图（ui6 白底版）是蓝色一档的浅色渲染，
+// 首启视觉需要直接对上设计图。已保存过主题偏好的用户不受影响
+// （useThemePreference 读到的本地值优先）。
+export const DEFAULT_THEME_ID: ThemeId = 'blue';
 export const DEFAULT_THEME_MODE: ThemeMode = 'light';
 
 /** 强调色的本地持久化键（沿用历史键名，不破坏已保存的偏好） */

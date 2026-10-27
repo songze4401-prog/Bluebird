@@ -34,6 +34,7 @@ import { makeLocalId, readJsonResponse } from '../lib/utils';
 import { streamChatRequest } from '../lib/stream';
 import {
   applyStreamingText,
+  applyToolEvent,
   buildReplyBubbles,
   buildWelcomeMessages,
   ensureSegmentsAll,
@@ -41,6 +42,7 @@ import {
   normalizeSegments,
   reconcileStreamDone,
   removeStreamBubble,
+  type LiveToolStep,
   type StreamMode,
 } from '../lib/chat-messages';
 import type {
@@ -55,6 +57,9 @@ const HISTORY_LIMIT = 200;
 
 // 进入模型上下文的最大历史条数
 const HISTORY_CONTEXT_LIMIT = 20;
+
+// 空的工具列表常量：反复返回同一个引用，不会让下游 memo 每帧失效
+const EMPTY_TOOL_STEPS: LiveToolStep[] = [];
 
 // 统一的失败文案：超时 / 服务端明确原因（带 code 时补下一步提示）/ 通用连接失败
 function toErrorMessage(error: unknown): string {
@@ -96,6 +101,8 @@ export type ChatSessionApi = {
   sending: boolean;
   continuing: boolean;
   mood: string;
+  // 本轮在途的 Agent 工具调用（当前会话、流式期间才有值；其余时候是空数组）
+  liveToolSteps: LiveToolStep[];
   sendMessage: (
     retryText?: string,
     retryAttachments?: Attachment[],
@@ -130,6 +137,19 @@ export function useChatSession({
   const [sending, setSending] = useState(false);
   const [continuing, setContinuing] = useState(false);
   const [mood, setMood] = useState('calm');
+
+  // 本轮在途的 Agent 工具调用（仅流式、仅 sending 期间有值）。
+  // 刻意不进 messages：工具轮在 delta 之前跑完，此时还没有对应的 assistant
+  // 消息可挂；done 之后服务端权威 toolSteps 会落到最后一条气泡上，这里清零。
+  // 带上发起时的 sessionId：切走会话时不显示别的会话的工具 pill
+  // （不做「effect 里 setState 复位」，避免级联渲染）
+  const [liveToolSteps, setLiveToolSteps] = useState<{
+    requestSessionId: string;
+    steps: LiveToolStep[];
+  }>({ requestSessionId: '', steps: EMPTY_TOOL_STEPS });
+
+  const activeToolSteps =
+    liveToolSteps.requestSessionId === sessionId ? liveToolSteps.steps : EMPTY_TOOL_STEPS;
 
   // 所有消息统一从数据层入口过一遍：assistant 正文在进入 state 前就切好片段，
   // 渲染层（ChatBubble）只消费 segments，不再解析原始标记。
@@ -275,6 +295,18 @@ export function useChatSession({
               streamMode = meta.messageMode;
             }
           },
+          onToolEvent: event => {
+            // 用户已切走会话：不再记录（本轮真实结果仍会落盘，切回时由历史带出）
+            if (sessionIdRef.current !== requestSessionId) return;
+
+            setLiveToolSteps(prev => ({
+              requestSessionId,
+              steps: applyToolEvent(
+                prev.requestSessionId === requestSessionId ? prev.steps : [],
+                event
+              ),
+            }));
+          },
           onDelta: delta => {
             // 用户已切走会话：停止渲染（服务端照常落盘，切回时历史完整恢复）
             if (sessionIdRef.current !== requestSessionId) return;
@@ -366,6 +398,14 @@ export function useChatSession({
     } catch (error) {
       console.error(error);
       options.onError(toErrorMessage(error));
+    } finally {
+      // 本轮结束：实时工具 pill 收起。done 分支里服务端权威 toolSteps 已挂到
+      // 最后一条 assistant 消息上，继续显示会造成「同一件事出现两次」。
+      setLiveToolSteps(prev =>
+        prev.requestSessionId === requestSessionId
+          ? { requestSessionId: '', steps: EMPTY_TOOL_STEPS }
+          : prev
+      );
     }
   };
 
@@ -651,6 +691,7 @@ export function useChatSession({
     sending,
     continuing,
     mood,
+    liveToolSteps: activeToolSteps,
     sendMessage,
     sendContinuation,
     loadHistory,

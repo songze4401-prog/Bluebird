@@ -14,12 +14,12 @@ import {
 } from 'react-native';
 
 import type { Theme } from '../theme';
-import type { Attachment, Message } from '../lib/types';
+import type { Attachment, Message, ToolStepView } from '../lib/types';
 import { AT_BOTTOM_DISTANCE, FOLLOW_RESUME_DISTANCE } from '../lib/constants';
-import { withAlpha } from '../lib/utils';
+import { CHAT_LAYOUT, CHAT_TYPE } from '../lib/design';
 
-import { BlueAvatar } from './BlueAvatar';
 import { ChatBubble } from './ChatBubble';
+import { ToolCallPillRow } from './ToolCallPill';
 
 // 自动跟随的三态状态机（放在 ref 里：只影响「要不要滚」，不参与渲染）。
 // - follow：贴底跟随，新消息到达即滚到底
@@ -58,6 +58,7 @@ export function MessageList({
   loadingHistory,
   sending,
   continuing,
+  liveToolSteps,
   onRecall,
   onRetry,
   onContinue,
@@ -70,6 +71,8 @@ export function MessageList({
   loadingHistory: boolean;
   sending: boolean;
   continuing: boolean;
+  /** 本轮在途的 Agent 工具调用（tool_start 已到、done 未到）：footer 里的实时 pill */
+  liveToolSteps: ToolStepView[];
   onRecall: (message: Message) => void;
   onRetry: (text?: string, attachments?: Attachment[]) => void;
   onContinue: () => void;
@@ -329,7 +332,7 @@ export function MessageList({
     pendingNewCount > 99 ? '99+ 条新消息' : `${pendingNewCount} 条新消息`;
 
   return (
-    <>
+    <View style={styles.host}>
       <FlatList
         ref={flatListRef}
         data={messages}
@@ -360,11 +363,11 @@ export function MessageList({
         )}
         ListFooterComponent={
           sending ? (
-            <View style={styles.typingRow}>
-              <BlueAvatar theme={theme} />
-              <View style={styles.typingBubble}>
-                <Text style={styles.typingText}>Bluebird 正在输入…</Text>
-              </View>
+            <View style={styles.footer}>
+              {/* 在途工具 pill：tool_start 到达即出现，done 后由消息上的权威 toolSteps 接手 */}
+              <ToolCallPillRow theme={theme} steps={liveToolSteps} />
+
+              <Text style={styles.typingText}>Bluebird 正在输入…</Text>
             </View>
           ) : undefined
         }
@@ -408,24 +411,29 @@ export function MessageList({
           </Text>
         </TouchableOpacity>
       )}
-    </>
+    </View>
   );
 }
 
 // 样式由主题派生：只包含本组件用到的键
 const createStyles = (theme: Theme) =>
   StyleSheet.create({
+    // 悬浮按钮的定位基准：列表 + 覆盖层包在同一容器里，
+    // 绝对定位才不会落到 KeyboardAvoidingView 的底边（会被标签栏盖住）
+    host: {
+      flex: 1,
+    },
     messages: {
-      padding: 16,
-      // 让最后一条消息能滚出悬浮胶囊之外：胶囊高度 56 + 底部间距 8 + 余量 16
-      paddingBottom: 80,
+      paddingHorizontal: CHAT_LAYOUT.gutter,
+      paddingTop: CHAT_LAYOUT.threadTopPad,
+      // 首条消息自带 turnGap，这里减掉，避免顶部空档翻倍
+      paddingBottom: 20,
     },
     // ---- 「返回底部」悬浮按钮 ----
     scrollToBottom: {
       position: 'absolute',
-      right: 16,
-      // 输入区高度约 71，这里让按钮浮在它正上方，不遮挡输入框
-      bottom: 84,
+      right: CHAT_LAYOUT.gutter,
+      bottom: 16,
       width: 40,
       height: 40,
       borderRadius: 20,
@@ -443,8 +451,8 @@ const createStyles = (theme: Theme) =>
     // ---- 「N 条新消息」提示：与箭头同一行，排在箭头左侧，不重叠 ----
     newMessagesPill: {
       position: 'absolute',
-      right: 64,
-      bottom: 84,
+      right: CHAT_LAYOUT.gutter + 48,
+      bottom: 16,
       height: 40,
       paddingHorizontal: 14,
       borderRadius: 20,
@@ -458,31 +466,13 @@ const createStyles = (theme: Theme) =>
       fontSize: 13,
       fontWeight: '600',
     },
-    typingRow: {
-      flexDirection: 'row',
-      alignItems: 'flex-end',
-      marginBottom: 12,
-    },
-    typingBubble: {
-      paddingHorizontal: 14,
-      paddingVertical: 10,
-      borderRadius: 18,
-      borderBottomLeftRadius: 6,
-      // 与 Bluebird 气泡同一材质，避免"正在输入"时出现一块实底造成割裂
-      backgroundColor: withAlpha(
-        theme.bubbleIncoming,
-        theme.mode === 'dark' ? 0.74 : 0.84
-      ),
-      borderWidth: 1,
-      borderColor: theme.bubbleIncomingBorder,
-      shadowColor: theme.accent,
-      shadowOpacity: theme.mode === 'dark' ? 0.2 : 0.14,
-      shadowRadius: 10,
-      shadowOffset: { width: 0, height: 2 },
-      elevation: 2,
+    // ---- 流式 footer：在途工具 pill + 「正在输入」，无头像无气泡 ----
+    footer: {
+      marginTop: CHAT_LAYOUT.turnGap,
     },
     typingText: {
-      color: theme.textMuted,
-      fontSize: 14,
+      color: theme.chatMuted,
+      fontSize: CHAT_TYPE.meta,
+      marginTop: 8,
     },
-  });
+  });

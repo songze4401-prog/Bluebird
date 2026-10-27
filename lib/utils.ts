@@ -44,7 +44,9 @@ export function withAlpha(color: string, alpha: number): string {
   return `rgba(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255}, ${alpha})`;
 }
 
-export function formatMessageTime(iso: string): string {
+// 消息时间戳。设计图的聊天页精确到秒（23:38:07），会话列表仍用分（默认 false），
+// 所以秒数是可选开关而不是全局改动——避免 HistoryScreen 跟着变样。
+export function formatMessageTime(iso: string, withSeconds = false): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return '';
 
@@ -53,19 +55,23 @@ export function formatMessageTime(iso: string): string {
     date.getMinutes()
   ).padStart(2, '0')}`;
 
+  const clock = withSeconds
+    ? `${hm}:${String(date.getSeconds()).padStart(2, '0')}`
+    : hm;
+
   const startOfDay = (d: Date) =>
     new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   const dayDiff = Math.round(
     (startOfDay(now) - startOfDay(date)) / 86400000
   );
 
-  if (dayDiff <= 0) return hm; // 今天：只显示时间
-  if (dayDiff === 1) return `昨天 ${hm}`;
-  if (dayDiff < 7) return `周${WEEKDAYS[date.getDay()]} ${hm}`;
+  if (dayDiff <= 0) return clock; // 今天：只显示时间
+  if (dayDiff === 1) return `昨天 ${clock}`;
+  if (dayDiff < 7) return `周${WEEKDAYS[date.getDay()]} ${clock}`;
   if (date.getFullYear() === now.getFullYear()) {
-    return `${date.getMonth() + 1}月${date.getDate()}日 ${hm}`;
+    return `${date.getMonth() + 1}月${date.getDate()}日 ${clock}`;
   }
-  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${hm}`;
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日 ${clock}`;
 }
 
 export function shouldShowMessageTime(

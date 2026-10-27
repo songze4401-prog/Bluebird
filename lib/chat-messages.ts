@@ -3,7 +3,15 @@
 // 数据变换，不依赖 React、不发请求。抽出的目的是让 App 只做组合，
 // 同时让这些规则可以被单独验证（不再埋在 1400 行组件里）。
 
-import { Message, ModelRoute, ReplyMode, ReplySegment } from './types';
+import {
+  Message,
+  ModelRoute,
+  ReplyMode,
+  ReplySegment,
+  ToolStep,
+  ToolStepView,
+  ToolStreamEvent,
+} from './types';
 import { makeLocalId } from './utils';
 import {
   buildStreamingBubbles,
@@ -65,6 +73,74 @@ export function buildModelNote(route?: ModelRoute): string | undefined {
   return requested
     ? `所选模型 ${requested} 不支持图片输入，本条由 ${actual} 处理`
     : `所选模型不支持图片输入，本条由 ${actual} 处理`;
+}
+
+// ---- Agent 工具调用 ----
+// 落盘的摘要（服务端 sessions.js 的形状）→ 渲染用视图。running 恒为 false：
+// 历史条目与 done 里的都是已完成的事实，只有流式期的现场态才是 running=true。
+export function toToolStepViews(
+  steps?: ToolStep[]
+): ToolStepView[] | undefined {
+  if (!Array.isArray(steps) || steps.length === 0) return undefined;
+
+  return steps.map(step => ({
+    name: step.name,
+    ok: step.ok === true,
+    summary: typeof step.summary === 'string' ? step.summary : '',
+    running: false,
+  }));
+}
+
+// 流式期的实时态：比视图模型多带一个 callId，用来把 tool_end 配对回
+// 发起它的那条 tool_start（同名并行调用不会串位）。多出的字段不影响
+// 它作为 ToolStepView 被渲染。
+export type LiveToolStep = ToolStepView & { callId: string };
+
+// 增量维护实时工具列表（纯函数，可直接单测）。
+// tool_end 找不到对应的 start（事件乱序或丢帧）时补一条已完成记录：
+// 工具确实跑过时屏幕上必须留下痕迹，不能因为缺一帧就静默消失。
+export function applyToolEvent(
+  prev: LiveToolStep[],
+  event: ToolStreamEvent
+): LiveToolStep[] {
+  const index = prev.findIndex(step => step.callId === event.callId);
+
+  if (event.type === 'tool_start') {
+    if (index >= 0) return prev;
+
+    return [
+      ...prev,
+      {
+        callId: event.callId,
+        name: event.name,
+        ok: false,
+        summary: '',
+        running: true,
+      },
+    ];
+  }
+
+  const summary =
+    typeof event.summary === 'string' ? event.summary : '';
+
+  if (index < 0) {
+    return [
+      ...prev,
+      {
+        callId: event.callId,
+        name: event.name,
+        ok: event.ok,
+        summary,
+        running: false,
+      },
+    ];
+  }
+
+  return prev.map((step, i) =>
+    i === index
+      ? { ...step, ok: event.ok, summary: summary || step.summary, running: false }
+      : step
+  );
 }
 
 // 数据层切分：assistant 消息进入 state 时就把 [sticker:ID] 解析成片段，
@@ -132,23 +208,36 @@ export function buildReplyBubbles(
     mood?: string;
     createdAt?: string;
     modelRoute?: ModelRoute;
+    // 顶层 toolSteps（旧响应/单条回复形态）；分条响应里挂在最后一格 seg.toolSteps
+    toolSteps?: ToolStep[];
   },
   segments: ReplySegment[]
 ): { bubbles: Message[]; replyMood: string } {
   const replyMood = typeof data.mood === 'string' ? data.mood : 'calm';
   const modelNote = buildModelNote(data.modelRoute);
+  const lastIndex = segments.length - 1;
 
-  const bubbles: Message[] = segments.map((seg, index) => ({
-    id: seg.id || `${makeLocalId()}-ai`,
-    role: 'assistant',
-    content: seg.content,
-    mood: replyMood,
-    createdAt: seg.createdAt ?? data.createdAt ?? new Date().toISOString(),
-    // AI 回复的图片/表情包附件（服务端约定挂在最后一格气泡）
-    ...(seg.attachments?.length ? { attachments: seg.attachments } : {}),
-    // 自动视觉路由提示只挂在最后一格，避免整轮重复
-    ...(index === segments.length - 1 && modelNote ? { modelNote } : {}),
-  }));
+  const bubbles: Message[] = segments.map((seg, index) => {
+    // 服务端把工具摘要只挂在最后一格；顶层字段是同一次执行的同一份数据，
+    // 两处都读兼容新旧响应，取到哪个都是真实执行结果
+    const toolSteps =
+      index === lastIndex
+        ? toToolStepViews(seg.toolSteps ?? data.toolSteps)
+        : undefined;
+
+    return {
+      id: seg.id || `${makeLocalId()}-ai`,
+      role: 'assistant',
+      content: seg.content,
+      mood: replyMood,
+      createdAt: seg.createdAt ?? data.createdAt ?? new Date().toISOString(),
+      // AI 回复的图片/表情包附件（服务端约定挂在最后一格气泡）
+      ...(seg.attachments?.length ? { attachments: seg.attachments } : {}),
+      ...(toolSteps ? { toolSteps } : {}),
+      // 自动视觉路由提示只挂在最后一格，避免整轮重复
+      ...(index === lastIndex && modelNote ? { modelNote } : {}),
+    };
+  });
 
   return { bubbles, replyMood };
 }
@@ -172,9 +261,12 @@ export function mapHistoryItem(
     content: string;
     createdAt?: string;
     attachments?: Message['attachments'];
+    toolSteps?: ToolStep[];
   },
   index: number
 ): Message {
+  const toolSteps = toToolStepViews(item.toolSteps);
+
   return {
     id: item.id ?? `history-${index}`,
     role: item.role,
@@ -184,5 +276,7 @@ export function mapHistoryItem(
     ...(Array.isArray(item.attachments) && item.attachments.length
       ? { attachments: item.attachments }
       : {}),
+    // 历史里的工具摘要同样是真实执行记录，重进会话后 pill 仍然显示
+    ...(toolSteps ? { toolSteps } : {}),
   };
 }
