@@ -596,8 +596,10 @@ const QUESTIONS = [
     query: '我的猫叫什么名字',
     expect: ['N09'],
     forbid: ['M09'],
-    residueOf: 'M09',
-    note: '新事实写在 s-main 名下；旧 M09 属 s-private，scoped 检索本就看不到（泄漏检查用注入路径）',
+    // M09 属于 s-private；s-main 的更正不得把它当作可跨会话修正的旧事实。
+    // 因此它不构成本会话的“更正残留”，只能在 forbid 里证明 s-main 读不到它。
+    residueOf: null,
+    note: '新事实写在 s-main 名下；旧 M09 属 s-private，跨会话不可修正也不可读取',
   },
   {
     id: 'Q22',

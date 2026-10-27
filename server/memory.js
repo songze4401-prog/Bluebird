@@ -6,6 +6,21 @@ const { logDataEvent } = require('./data-events');
 const { writeFileAtomic, writeFileExclusiveSync } = require('./atomic-write');
 const { registerCorruptionHandler, handleCorruption } = require('./corruption');
 const { textLength, truncateText } = require('./text-utils');
+const {
+  STATUS_ACTIVE,
+  STATUS_PENDING,
+  STATUS_SUPERSEDED,
+  STATUS_ARCHIVED,
+  isActiveStatus,
+  isPending,
+  isEffectiveAt,
+  isHistoricalAt,
+  canTransition,
+} = require('./memory-lifecycle');
+const {
+  DECISION,
+  decide,
+} = require('./memory-decision');
 
 // 数据目录可通过 BLUEBIRD_DATA_DIR 覆盖：测试用临时目录，避免碰到真实数据。
 // 未设置时与 sessions.js / emotion.js 保持一致，落在 server/data/。
@@ -17,6 +32,9 @@ const MEMORY_FILE = path.join(DATA_DIR, 'memory.json');
 const MEMORY_LIMIT = 100;
 // 被更正的旧条目不立刻删除（审计与回滚要看得见的），但只留最近的这么多条。
 const SUPERSEDED_HISTORY = 20;
+// 待确认与已归档条目也属于历史留档，必须有显式上限，避免无限堆积。
+const PENDING_LIMIT = 20;
+const ARCHIVED_HISTORY = 20;
 // identity 类记忆的显式配额：超过就淘汰最旧的，不再假装「identity 永不淘汰」。
 const IDENTITY_QUOTA = 20;
 // 记忆总量不超过该值时，上下文直接全量注入、跳过相关性过滤。
@@ -49,24 +67,15 @@ const ALLOWED_TYPES = new Set([
   'relationship',
 ]);
 
+const SOURCE_TYPES = new Set(['user', 'agent', 'tool', 'model', 'import']);
+
 // ---- 条目身份与时效 ----
 // 稳定 id 是更正 / 撤回 / 审计 / 回滚的地基：在这之前定位一条记忆只能靠
 // createdAt + content 猜。旧数据没有 id，由下面的确定性推导补齐。
 const ID_PREFIX_DERIVED = 'legacy-';
 const ID_PREFIX_ISSUED = 'mem-';
 
-const STATUS_ACTIVE = 'active';
-const STATUS_SUPERSEDED = 'superseded';
-
-// 写入时的相似度分档：
-//   >= DUPLICATE_MIN              同一事实的重述 → 就地更新那条（保留 id 与全部贡献）
-//   [CONFLICT_MIN, DUPLICATE_MIN) 同一话题的不同说法（更正）→ 旧的标 superseded、新的接管
-//   < CONFLICT_MIN                不同话题 → 并存
-// CONFLICT_MIN 由评测基线定标：22 条种子里最接近的一对非冲突记忆
-// （「喝咖啡只喝拿铁」vs「不爱喝茶只喝咖啡」）相似度 0.250，
-// 两道更正题的新旧对都是 0.333，界取在两者之间。
-const DUPLICATE_MIN = 0.8;
-const CONFLICT_MIN = 0.3;
+// 相似度分档与临时状态规则在 memory-decision.js 中定义并测试。
 
 // 置信度权重：只调节次序，不推翻相关性。落库闸门保证 confidence ≥ 0.85，
 // 权重区间因此只有 [0.94, 1.0] —— 够拆掉近似平局，不够让强相关的低置信
@@ -115,13 +124,8 @@ function stampIdentity(item) {
   };
 }
 
-// 状态过滤是硬闸：未知状态一律按「不生效」处理（fail-closed），
-// 只有缺省（迁移前的旧对象）才当作 active。
-function isActive(item) {
-  const status = item && item.status;
-
-  return status === undefined || status === null || status === STATUS_ACTIVE;
-}
+// pending / archived 均不属于“当前有效事实”；只有 active 且时间窗口命中才注入。
+const isActive = isActiveStatus;
 
 function confidenceWeight(item) {
   const value = Number(item && item.confidence);
@@ -205,6 +209,18 @@ const MEMORY_SKIP_REASONS = [
   'sensitive_output',
   'quote_not_grounded',
   'ungrounded_content',
+  'temporary_state',
+  'ambiguous_conflict',
+  'ambiguous_duplicate',
+  'target_not_found',
+  'unauthorized_target',
+  'invalid_confidence',
+  'invalid_valid_to',
+  'invalid_event_at',
+  'condition_too_long',
+  'ungrounded_source',
+  'unsupported_source',
+  'sensitive_content',
   // 提取全过了但落盘失败（磁盘不可写等）：与「模型没提取」是两回事。
   'write_failed',
 ];
@@ -265,7 +281,7 @@ function normalizeContribution(raw) {
 
   if (!sourceQuote) return null;
 
-  return {
+  const contribution = {
     sessionId:
       typeof raw.sessionId === 'string' && raw.sessionId.trim()
         ? raw.sessionId.trim()
@@ -276,6 +292,17 @@ function normalizeContribution(raw) {
         ? raw.createdAt
         : null,
   };
+
+  // 新贡献可携带来源定位与来源类型；旧贡献保持原形状，避免读盘迁移改写历史对象。
+  const messageId = cleanText(raw.messageId);
+  if (messageId) contribution.messageId = messageId;
+
+  const sourceType = cleanText(raw.sourceType);
+  if (sourceType && SOURCE_TYPES.has(sourceType)) {
+    contribution.sourceType = sourceType;
+  }
+
+  return contribution;
 }
 
 // 旧数据（引入贡献列表之前）把归属与撤回锚点平铺成 sourceQuote + 可选 sessionId；
@@ -333,30 +360,25 @@ function mergeContributions(existing, incoming) {
   const merged = Array.isArray(existing) ? existing.slice() : [];
 
   for (const contribution of Array.isArray(incoming) ? incoming : []) {
-    const duplicated = merged.some(
-      item =>
-        item.sessionId === contribution.sessionId &&
-        item.sourceQuote === contribution.sourceQuote
-    );
+    const duplicated = merged.some(item => {
+      if (item.sessionId !== contribution.sessionId) return false;
+
+      // 有 messageId 时按来源消息去重；只有双方都没有定位信息时才退回原话去重，
+      // 这样同文重复消息不会互相吞掉来源。
+      if (item.messageId || contribution.messageId) {
+        return (
+          Boolean(item.messageId) &&
+          item.messageId === contribution.messageId
+        );
+      }
+
+      return item.sourceQuote === contribution.sourceQuote;
+    });
 
     if (!duplicated) merged.push(contribution);
   }
 
   return merged;
-}
-
-// 写入口的候选/条目都可能是"活"的或"已被更正"的：只在仍生效的条目里找归属，
-// 否则一条早已作废的旧条目会把新事实吸进就地合并里。
-function findMatchIndex(list, candidate, predicate) {
-  for (let index = 0; index < list.length; index += 1) {
-    const item = list[index];
-
-    if (!isActive(item)) continue;
-
-    if (predicate(item, index)) return index;
-  }
-
-  return -1;
 }
 
 function cloneEntry(item) {
@@ -376,17 +398,164 @@ function shareKeyword(a, b) {
   return listA.some(item => item && listB.has(item));
 }
 
-// 更正判定（保守）：同类型 + 至少一个关键词逐字相同 + 正文相似度落在更正带内。
-// 三个条件缺一不可 —— 只按相似度会误伤「同话题的两条独立事实」，
-// 只按关键词会把「同一类别的其它偏好」整条作废。
-function conflictsWith(existing, candidate) {
-  if (existing.type !== candidate.type) return false;
+// ---- 统一候选与决策执行 ----
 
-  if (!shareKeyword(existing.keywords, candidate.keywords)) return false;
+function normalizeCandidate(raw, options = {}) {
+  const now = new Date().toISOString();
+  const source = raw && typeof raw === 'object' ? raw : {};
+  const rawContributions = Array.isArray(source.contributions)
+    ? source.contributions.map(normalizeContribution).filter(Boolean)
+    : [];
+  const firstContribution = rawContributions[0] || null;
+  const content =
+    typeof source.content === 'string'
+      ? source.content.replace(/\s+/g, ' ').trim()
+      : '';
+  const sourceQuote =
+    typeof source.sourceQuote === 'string'
+      ? source.sourceQuote.trim()
+      : firstContribution
+        ? firstContribution.sourceQuote
+        : '';
+  const sessionId =
+    cleanText(options.sessionId) ||
+    (firstContribution && firstContribution.sessionId) ||
+    cleanText(source.sessionId);
+  const messageId =
+    cleanText(options.messageId) ||
+    (firstContribution && firstContribution.messageId) ||
+    cleanText(source.messageId);
+  const sourceTypeCandidate =
+    cleanText(options.sourceType) ||
+    cleanText(source.sourceType) ||
+    (firstContribution && firstContribution.sourceType) ||
+    'user';
+  const sourceType = SOURCE_TYPES.has(sourceTypeCandidate)
+    ? sourceTypeCandidate
+    : 'user';
+  const keywords = Array.isArray(source.keywords)
+    ? source.keywords
+        .filter(item => typeof item === 'string')
+        .map(item => item.trim())
+        .filter(Boolean)
+        .slice(0, 5)
+    : [];
 
-  const score = similarity(existing.content, candidate.content);
+  const contributions = rawContributions.length
+    ? rawContributions
+    : [
+        {
+          sessionId: sessionId || null,
+          sourceQuote,
+          createdAt: now,
+          sourceType,
+          ...(messageId ? { messageId } : {}),
+        },
+      ];
 
-  return score >= CONFLICT_MIN && score < DUPLICATE_MIN;
+  return {
+    id: cleanText(source.id) || issuedId(),
+    status: STATUS_ACTIVE,
+    content,
+    type: source.type,
+    keywords,
+    confidence: Number(source.confidence),
+    validFrom: cleanText(source.validFrom) || now,
+    validTo: cleanText(source.validTo),
+    supersededBy: null,
+    contributions,
+    createdAt: cleanText(source.createdAt) || now,
+    updatedAt: now,
+    sourceType,
+    intent: cleanText(options.intent) || cleanText(source.intent) || 'auto',
+    targetId: cleanText(options.targetId) || cleanText(source.targetId),
+    eventAt: cleanText(source.eventAt),
+    condition: cleanText(source.condition),
+    requiresConfirmation:
+      options.requiresConfirmation === true ||
+      source.requiresConfirmation === true,
+    confirmationReason: cleanText(source.confirmationReason),
+  };
+}
+
+function candidateValidationError(candidate, options = {}) {
+  if (!candidate.content) return 'no_content';
+  if (candidate.content.length > 100) return 'content_too_long';
+  if (!candidate.type || !ALLOWED_TYPES.has(candidate.type)) {
+    return 'type_not_allowed';
+  }
+  if (
+    !Number.isFinite(candidate.confidence) ||
+    candidate.confidence < 0 ||
+    candidate.confidence > 1
+  ) {
+    return 'invalid_confidence';
+  }
+  if (!Number.isFinite(Date.parse(candidate.validTo || ''))) {
+    if (candidate.validTo) return 'invalid_valid_to';
+  }
+  if (candidate.eventAt && !Number.isFinite(Date.parse(candidate.eventAt))) {
+    return 'invalid_event_at';
+  }
+  if (candidate.condition && candidate.condition.length > 80) {
+    return 'condition_too_long';
+  }
+  const quote =
+    candidate.contributions[0] && candidate.contributions[0].sourceQuote;
+  if (!quote || quote.length < 2) return 'quote_too_short';
+  if (isSensitive(candidate.content) || isSensitive(quote)) {
+    return 'sensitive_content';
+  }
+  if (
+    candidate.sourceType === 'model' ||
+    candidate.sourceType === 'tool'
+  ) {
+    return 'unsupported_source';
+  }
+
+  if (options.requireUserGrounding) {
+    const userText = normalize(options.userText || '');
+    const normalizedQuote = normalize(quote);
+
+    if (!userText || !normalizedQuote || !userText.includes(normalizedQuote)) {
+      return 'ungrounded_source';
+    }
+
+    const anchorScore = similarity(candidate.content, quote);
+    const grounding = keywordGrounding(candidate.keywords, userText);
+
+    if (
+      anchorScore < ANCHOR_MIN &&
+      !(anchorScore >= ANCHOR_FALLBACK_MIN && grounding.covered)
+    ) {
+      return 'ungrounded_content';
+    }
+  }
+
+  return null;
+}
+
+function decisionRecord(action, reason, candidate, actor, at) {
+  return {
+    action,
+    reason,
+    at,
+    actor: actor || 'system',
+    sourceType: candidate.sourceType || 'user',
+  };
+}
+
+function storedCandidate(candidate, extra = {}) {
+  const {
+    targetId,
+    requiresConfirmation,
+    confirmationReason,
+    intent,
+    sourceType,
+    ...stored
+  } = candidate;
+
+  return { ...stored, ...extra };
 }
 
 // 容量控制。旧实现只在"全部是 identity"时 next.shift()，等于把
@@ -413,6 +582,26 @@ function trimToCapacity(list) {
 
     if (superseded.length > SUPERSEDED_HISTORY) {
       list.splice(superseded[0].index, 1);
+
+      continue;
+    }
+
+    const archived = tagged
+      .filter(({ item }) => item.status === STATUS_ARCHIVED)
+      .sort(byOldest);
+
+    if (archived.length > ARCHIVED_HISTORY) {
+      list.splice(archived[0].index, 1);
+
+      continue;
+    }
+
+    const pending = tagged
+      .filter(({ item }) => item.status === STATUS_PENDING)
+      .sort(byOldest);
+
+    if (pending.length > PENDING_LIMIT) {
+      list.splice(pending[0].index, 1);
 
       continue;
     }
@@ -630,7 +819,7 @@ function parseModelJson(text) {
   }
 }
 
-async function extractMemory(client, message, force = false, sessionId = null) {
+async function extractMemory(client, message, force = false, sessionId = null, options = {}) {
   try {
     // force=true 表示上一条留下了待记忆意图，本条即使没有触发词也要尝试提取
     if (!force && !shouldProcessMemory(message)) {
@@ -776,6 +965,7 @@ sourceQuote 必须来自用户原话。
     }
 
     const now = new Date().toISOString();
+    const messageId = cleanText(options.messageId);
 
     return {
       entry: {
@@ -786,8 +976,8 @@ sourceQuote 必须来自用户原话。
         type,
         keywords,
         confidence,
-        validFrom: now,
-        validTo: null,
+        validFrom: cleanText(options.validFrom) || now,
+        validTo: cleanText(options.validTo),
         supersededBy: null,
         // 归属 + 撤回锚点合成一条贡献。不再平铺 sourceQuote/sessionId，
         // 合并时才能只追加贡献、不覆盖原会话的归属与原话锚点。
@@ -796,10 +986,18 @@ sourceQuote 必须来自用户原话。
             sessionId: cleanText(sessionId),
             sourceQuote,
             createdAt: now,
+            sourceType: 'user',
+            ...(messageId ? { messageId } : {}),
           },
         ],
         createdAt: now,
         updatedAt: now,
+        sourceType: 'user',
+        intent: options.intent || 'auto',
+        targetId: cleanText(options.targetId),
+        eventAt: cleanText(options.eventAt),
+        condition: cleanText(options.condition),
+        requiresConfirmation: options.requiresConfirmation === true,
       },
       reason: null,
       anchorScore,
@@ -815,13 +1013,237 @@ sourceQuote 必须来自用户原话。
   }
 }
 
-async function attemptMemoryWrite(client, message, sessionId = null) {
+async function applyCandidate(raw, options = {}) {
+  const candidate = normalizeCandidate(raw, options);
+  const base = {
+    written: false,
+    action: 'none',
+    reason: null,
+    id: null,
+    supersededId: null,
+    targetId: null,
+    decision: null,
+    status: null,
+    durable: false,
+  };
+
+  if (!MEMORY_ENABLED) {
+    return { ...base, reason: 'memory_disabled', decision: DECISION.REJECT };
+  }
+
+  const invalid = candidateValidationError(candidate, options);
+
+  if (invalid) {
+    return { ...base, reason: invalid, decision: DECISION.REJECT };
+  }
+
+  const sessionId = cleanText(options.sessionId);
+
+  return enqueueWrite(async () => {
+    const current = Array.isArray(memories) ? memories : [];
+    const next = current.map(cloneEntry);
+    const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
+    const effective = next.filter(item => isEffectiveAt(item, nowMs));
+
+    let target = null;
+
+    if (candidate.targetId) {
+      target = effective.find(item => item.id === candidate.targetId) || null;
+
+      if (!target) {
+        return {
+          ...base,
+          reason: 'target_not_found',
+          decision: DECISION.REJECT,
+        };
+      }
+
+      if (scopeOf(target, sessionId) === 'excluded') {
+        return {
+          ...base,
+          reason: 'unauthorized_target',
+          decision: DECISION.REJECT,
+        };
+      }
+    }
+
+    const matches = effective.map(item => ({
+      item,
+      similarity: similarity(item.content, candidate.content),
+      sameType: item.type === candidate.type,
+      sharedKeyword: shareKeyword(item.keywords, candidate.keywords),
+      visible: scopeOf(item, sessionId) !== 'excluded',
+      contextConflict:
+        (() => {
+          const currentEvent = Date.parse(candidate.eventAt || '');
+          const existingEvent = Date.parse(item.eventAt || '');
+
+          if (
+            Number.isFinite(currentEvent) &&
+            Number.isFinite(existingEvent) &&
+            currentEvent !== existingEvent
+          ) {
+            return true;
+          }
+
+          return Boolean(
+            candidate.condition &&
+              item.condition &&
+              candidate.condition !== item.condition
+          );
+        })(),
+    }));
+
+    const decision = decide({ candidate, matches, target });
+    const record = (action, reason) =>
+      decisionRecord(action, reason, candidate, options.actor, nowIso);
+
+    if (decision.decision === DECISION.REJECT) {
+      return {
+        ...base,
+        reason: decision.reason,
+        decision: decision.decision,
+      };
+    }
+
+    if (decision.decision === DECISION.NEEDS_CONFIRMATION) {
+      const pending = storedCandidate(candidate, {
+        status: STATUS_PENDING,
+        pendingReason: decision.reason,
+        pendingAt: nowIso,
+        pendingTargetId: candidate.targetId || null,
+        lastDecision: record('needs_confirmation', decision.reason),
+      });
+
+      next.push(pending);
+      trimToCapacity(next);
+      await saveMemories(next);
+      memories = next;
+
+      return {
+        written: false,
+        action: 'pending',
+        reason: decision.reason,
+        id: pending.id,
+        supersededId: null,
+        targetId: target ? target.id : null,
+        decision: decision.decision,
+        status: STATUS_PENDING,
+        durable: true,
+      };
+    }
+
+    if (
+      decision.decision === DECISION.MERGE ||
+      decision.decision === DECISION.UPDATE
+    ) {
+      const index = next.findIndex(item => item.id === decision.target.id);
+      const existing = next[index];
+      const updated = storedCandidate(candidate, {
+        id: existing.id,
+        status: STATUS_ACTIVE,
+        createdAt: existing.createdAt || candidate.createdAt,
+        validFrom: existing.validFrom || candidate.validFrom,
+        validTo: null,
+        supersededBy: null,
+        contributions: mergeContributions(
+          existing.contributions,
+          candidate.contributions
+        ),
+        updatedAt: nowIso,
+        lastDecision: record(decision.decision, decision.reason),
+      });
+
+      next[index] = updated;
+      trimToCapacity(next);
+      await saveMemories(next);
+      memories = next;
+
+      return {
+        written: true,
+        action: decision.decision === DECISION.MERGE ? 'merged' : 'updated',
+        reason: null,
+        id: updated.id,
+        supersededId: null,
+        targetId: updated.id,
+        decision: decision.decision,
+        status: STATUS_ACTIVE,
+        durable: true,
+      };
+    }
+
+    if (decision.decision === DECISION.SUPERSEDE) {
+      const index = next.findIndex(item => item.id === decision.target.id);
+      const outdated = next[index];
+
+      next[index] = {
+        ...outdated,
+        status: STATUS_SUPERSEDED,
+        validTo: nowIso,
+        supersededBy: candidate.id,
+        updatedAt: nowIso,
+        lastDecision: record(DECISION.SUPERSEDE, decision.reason),
+      };
+
+      const replacement = storedCandidate(candidate, {
+        status: STATUS_ACTIVE,
+        supersedes: outdated.id,
+        lastDecision: record(DECISION.CREATE, 'supersedes_existing'),
+      });
+
+      next.push(replacement);
+      trimToCapacity(next);
+      await saveMemories(next);
+      memories = next;
+
+      return {
+        written: true,
+        action: 'superseded',
+        reason: null,
+        id: replacement.id,
+        supersededId: outdated.id,
+        targetId: outdated.id,
+        decision: decision.decision,
+        status: STATUS_ACTIVE,
+        durable: true,
+      };
+    }
+
+    const created = storedCandidate(candidate, {
+      status: STATUS_ACTIVE,
+      lastDecision: record(DECISION.CREATE, decision.reason),
+    });
+
+    next.push(created);
+    trimToCapacity(next);
+    await saveMemories(next);
+    memories = next;
+
+    return {
+      written: true,
+      action: 'inserted',
+      reason: null,
+      id: created.id,
+      supersededId: null,
+      targetId: null,
+      decision: DECISION.CREATE,
+      status: STATUS_ACTIVE,
+      durable: true,
+    };
+  });
+}
+
+async function attemptMemoryWrite(client, message, sessionId = null, options = {}) {
   const outcome = {
     written: false,
     action: 'none',
     reason: null,
     id: null,
     supersededId: null,
+    targetId: null,
+    decision: null,
+    status: null,
   };
 
   if (!MEMORY_ENABLED) {
@@ -843,7 +1265,7 @@ async function attemptMemoryWrite(client, message, sessionId = null) {
     return outcome;
   }
 
-  const extracted = await extractMemory(client, text, true, sessionId);
+  const extracted = await extractMemory(client, text, true, sessionId, options);
 
   if (!extracted.entry) {
     outcome.reason = extracted.reason;
@@ -861,93 +1283,39 @@ async function attemptMemoryWrite(client, message, sessionId = null) {
     return outcome;
   }
 
-  const candidate = extracted.entry;
-
-  await enqueueWrite(async () => {
-    const current = Array.isArray(memories)
-      ? memories
-      : [];
-
-    // 深拷贝一层：contributions 数组必须独立，否则调用方改内存就等于改库。
-    const next = current.map(cloneEntry);
-
-    const now = new Date().toISOString();
-
-    const duplicateIndex = findMatchIndex(
-      next,
-      candidate,
-      item => similarity(item.content, candidate.content) >= DUPLICATE_MIN
-    );
-
-    if (duplicateIndex >= 0) {
-      const existing = next[duplicateIndex];
-
-      // 同一事实的重述：就地更新，保留 id / createdAt / 全部历史贡献。
-      next[duplicateIndex] = {
-        ...existing,
-        ...candidate,
-        id: existing.id,
-        status: STATUS_ACTIVE,
-        createdAt: existing.createdAt || candidate.createdAt,
-        // 重述不改变这条事实何时生效：validFrom 只在被更正时才改写。
-        validFrom: existing.validFrom || candidate.validFrom,
-        validTo: null,
-        supersededBy: null,
-        // 归属与原话锚点不在覆盖范围内：本次提取只追加成一条贡献，
-        // 原会话的贡献（含它的 sourceQuote）原样保留。
-        contributions: mergeContributions(
-          existing.contributions,
-          candidate.contributions
-        ),
-        updatedAt: now,
-      };
-
-      outcome.action = 'merged';
-      outcome.id = existing.id;
-    } else {
-      // 更正：同一话题、不同说法。旧条目不再"共存"，改标 superseded 让新事实接管，
-      // 但条目本身留在库里（validTo + supersededBy 指向新 id）供审计与回滚。
-      // 只动元数据、不动正文、不搬运其它会话的贡献，因此不构成跨会话读取。
-      const conflictIndex = findMatchIndex(next, candidate, item =>
-        conflictsWith(item, candidate)
-      );
-
-      if (conflictIndex >= 0) {
-        const outdated = next[conflictIndex];
-
-        next[conflictIndex] = {
-          ...outdated,
-          status: STATUS_SUPERSEDED,
-          validTo: now,
-          supersededBy: candidate.id,
-          updatedAt: now,
-        };
-
-        outcome.supersededId = outdated.id;
-      }
-
-      next.push(candidate);
-
-      outcome.action = conflictIndex >= 0 ? 'superseded' : 'inserted';
-      outcome.id = candidate.id;
-    }
-
-    trimToCapacity(next);
-
-    // 顺序：先落盘、后换内存。落盘失败时内存仍是旧库，两边一致；
-    // 反过来（先换内存）会在磁盘写不上时出现"内存已改、磁盘没改"的分叉。
-    await saveMemories(next);
-
-    memories = next;
-
-    outcome.written = true;
-
-    console.log(
-      'Memory saved:',
-      candidate.type,
-      outcome.action
-    );
+  const result = await applyCandidate(extracted.entry, {
+    ...options,
+    sessionId,
+    userText: text,
+    requireUserGrounding: false,
   });
+
+  Object.assign(outcome, {
+    written: result.written,
+    action: result.action,
+    reason: result.reason,
+    id: result.id,
+    supersededId: result.supersededId,
+    targetId: result.targetId,
+    decision: result.decision,
+    status: result.status,
+  });
+
+  if (!result.written) {
+    if (result.decision === DECISION.NEEDS_CONFIRMATION) {
+      logDataEvent({
+        module: 'memory',
+        file: MEMORY_FILE,
+        event: 'memory_write_pending',
+        level: 'info',
+        reason: result.reason,
+        action: 'pending',
+        extra: { sessionId, id: result.id },
+      });
+    } else {
+      reportSkip(result.reason, null);
+    }
+  }
 
   return outcome;
 }
@@ -969,6 +1337,9 @@ function recordWriteOutcome(sessionId, outcome, error) {
     reason: error ? 'write_failed' : outcome.reason || null,
     id: outcome.id || null,
     supersededId: outcome.supersededId || null,
+    ...(outcome.decision ? { decision: outcome.decision } : {}),
+    ...(outcome.status ? { status: outcome.status } : {}),
+    ...(outcome.targetId ? { targetId: outcome.targetId } : {}),
     ...(error && error.code ? { errorCode: String(error.code) } : {}),
   });
 
@@ -987,12 +1358,12 @@ function getWriteOutcomes(limit = WRITE_OUTCOME_LOG_MAX) {
 }
 
 // 对外入口：包一层记录，再把结果/异常原样交回，不改变调用方看到的语义。
-async function processMemory(client, message, sessionId = null) {
+async function processMemory(client, message, sessionId = null, options = {}) {
   const target = cleanText(sessionId);
 
   let outcome;
   try {
-    outcome = await attemptMemoryWrite(client, message, target);
+    outcome = await attemptMemoryWrite(client, message, target, options);
   } catch (error) {
     // 落盘失败也留痕：内存与磁盘都还是旧库，但调用方需要知道这次尝试没成。
     recordWriteOutcome(target, { written: false, action: 'none' }, error);
@@ -1152,15 +1523,35 @@ function scopeOf(item, targetSessionId) {
   return 'excluded';
 }
 
-// 当前会话可用的候选池：先按状态过滤（被更正的旧条目不再对外生效），
-// 再按作用域过滤（本会话名下的优先，本会话一条都没有才回退无归属旧数据）。
+// 当前会话可用的候选池：先按状态与时间窗口过滤（被更正、归档、过期、
+// 未到生效时间的旧条目不再对外生效），再按作用域过滤。
 function visiblePool(targetSessionId, list = memories) {
   const valid = list.filter(
     item =>
       item &&
       typeof item.content === 'string' &&
       item.content.trim() &&
-      isActive(item)
+      isEffectiveAt(item)
+  );
+
+  const primary = valid.filter(
+    item => scopeOf(item, targetSessionId) === 'primary'
+  );
+
+  if (primary.length) return primary;
+
+  return valid.filter(item => scopeOf(item, targetSessionId) === 'legacy');
+}
+
+// 历史视图：只保留 asOf 时点有效（或当时有效、后来被取代/归档）的条目；
+// pending 永远不是历史事实。
+function historyPool(targetSessionId, at, list = memories) {
+  const valid = list.filter(
+    item =>
+      item &&
+      typeof item.content === 'string' &&
+      item.content.trim() &&
+      isHistoricalAt(item, at)
   );
 
   const primary = valid.filter(
@@ -1233,8 +1624,12 @@ function buildMemoryContext(message, sessionId = null) {
 // 已被更正（status=superseded）的条目在这里就被剔掉：更正之后旧事实不再参与排序。
 // 返回 [{item, relevance, score, keywordHits, weight}]：把算分一并带出，
 // 引擎侧才拿得到「同组内谁更相关」这个决胜信号，而不必退回时间戳平局 → 判冲突弃权。
-function rankMemories(validMemories, current, cap = 10) {
-  const candidates = validMemories.filter(isActive);
+function rankMemories(validMemories, current, cap = 10, options = {}) {
+  const candidateFilter =
+    typeof options.candidateFilter === 'function'
+      ? options.candidateFilter
+      : item => isEffectiveAt(item);
+  const candidates = validMemories.filter(candidateFilter);
 
   const identity = candidates
     .filter(item => item.type === 'identity')
@@ -1327,7 +1722,14 @@ function rankMemories(validMemories, current, cap = 10) {
 // 「这条记忆当前会话能不能看」给出不同答案。
 // 三类硬上限（调用方传入，工具层再兜底）：条数 / 单条长度 / 总预算，
 // 长度一律按 text-utils 的码点规则计算并截断。
-function searchMemories({ query, sessionId, limits = {} } = {}) {
+function searchMemories({
+  query,
+  sessionId,
+  limits = {},
+  mode = 'current',
+  asOf = null,
+} = {}) {
+  const history = mode === 'history';
   const maxItems =
     Number.isFinite(limits.maxItems) && limits.maxItems > 0
       ? Math.min(Math.floor(limits.maxItems), 50)
@@ -1345,6 +1747,7 @@ function searchMemories({ query, sessionId, limits = {} } = {}) {
     results: [],
     total: 0,
     truncated: false,
+    mode,
     ...(reason ? { reason } : {}),
   });
 
@@ -1355,13 +1758,29 @@ function searchMemories({ query, sessionId, limits = {} } = {}) {
 
   const targetSessionId = cleanText(sessionId);
 
-  const pool = visiblePool(targetSessionId);
+  let asOfMs = Date.now();
+
+  if (history) {
+    const parsed = Date.parse(String(asOf || ''));
+
+    if (!Number.isFinite(parsed)) {
+      return emptyResult('invalid_as_of');
+    }
+
+    asOfMs = parsed;
+  }
+
+  const pool = history
+    ? historyPool(targetSessionId, asOfMs)
+    : visiblePool(targetSessionId);
 
   if (!pool.length) return emptyResult('empty_store');
 
   // 多取 10 条余量：rankMemories 自身有上限，直接按 maxItems 取会分不清
   // "本来就不多"和"被裁过"，导致截断标记不诚实。
-  const ranked = rankMemories(pool, current, maxItems + 10);
+  const ranked = rankMemories(pool, current, maxItems + 10, {
+    candidateFilter: history ? () => true : item => isEffectiveAt(item),
+  });
 
   const results = [];
   let total = 0;
@@ -1400,8 +1819,11 @@ function searchMemories({ query, sessionId, limits = {} } = {}) {
       // 时效元数据：引擎侧据此填 fetchedAt，不再对记忆写 null；
       // 置信度让调用方也能自己判断该不该采信。
       id: item.id,
+      status: item.status || STATUS_ACTIVE,
       confidence: item.confidence,
       validFrom: item.validFrom,
+      validTo: item.validTo || null,
+      supersededBy: item.supersededBy || null,
       updatedAt: item.updatedAt || null,
       // 相关度信号：引擎组内裁决用它决胜，避免同源同时间戳被判成平局弃权。
       relevance: +entry.relevance.toFixed(6),
@@ -1412,7 +1834,7 @@ function searchMemories({ query, sessionId, limits = {} } = {}) {
     if (cost < textLength(item.content)) truncated = true;
   }
 
-  return { results, total, truncated };
+  return { results, total, truncated, mode };
 }
 
 loadMemories();
@@ -1521,7 +1943,12 @@ async function clearSessionMemories(sessionId) {
 //   4) 贡献被摘空的记忆整条删除；还有别的会话贡献撑着时，记忆保留。
 // 返回两个计数：摘掉的贡献数 + 删除的条目数。只返回条目数时，
 // 「摘掉一条贡献、条目还在」和「什么都没匹配上」在调用方眼里都是 0。
-async function recallMemoryBySourceQuote(sourceText, sourceCreatedAt, sessionId = null) {
+async function recallMemoryBySourceQuote(
+  sourceText,
+  sourceCreatedAt,
+  sessionId = null,
+  sourceMessageId = null
+) {
   const empty = { removedEntries: 0, removedContributions: 0 };
 
   if (!MEMORY_ENABLED) return empty;
@@ -1532,13 +1959,17 @@ async function recallMemoryBySourceQuote(sourceText, sourceCreatedAt, sessionId 
   const sourceTime = sourceCreatedAt
     ? new Date(sourceCreatedAt).getTime()
     : null;
+  const targetMessageId = cleanText(sourceMessageId);
 
   const targetSessionId = cleanText(sessionId);
 
   // 单条贡献是否与本条被撤回消息匹配（文本 + 时间窗）。
-  // 时间窗用贡献自身的时间，而不是整条记忆的 createdAt —— 合并后的记忆里
-  // 每个会话的贡献各有各的产生时间。
+  // 有 messageId 时优先按来源消息精确定位；旧贡献没有 messageId，才退回文本+时间窗。
   const isMatch = contribution => {
+    if (targetMessageId && contribution && contribution.messageId) {
+      return contribution.messageId === targetMessageId;
+    }
+
     const quote = normalize(contribution && contribution.sourceQuote);
 
     if (!quote) return false;
@@ -1632,11 +2063,14 @@ async function recallMemoryBySourceQuote(sourceText, sourceCreatedAt, sessionId 
 // 落盘格式里归属与锚点按"贡献"存；这里额外补一个展示用的 sourceQuote
 // （最早一条贡献的原话），前端记忆库仍按单条 sourceQuote 渲染。
 function getMemories(options = {}) {
-  const includeSuperseded = options.includeSuperseded === true;
+  const includeHistory =
+    options.includeSuperseded === true ||
+    options.includeArchived === true ||
+    options.includePending === true;
   const current = Array.isArray(memories) ? memories : [];
 
   return current
-    .filter(item => includeSuperseded || isActive(item))
+    .filter(item => includeHistory || isEffectiveAt(item))
     .map(item => {
       const contributions = Array.isArray(item.contributions)
         ? item.contributions
@@ -1702,6 +2136,179 @@ async function deleteMemory({ id, createdAt, content } = {}) {
   });
 }
 
+// ---- 生命周期操作：pending 确认/拒绝、归档 ----
+
+function getPendingMemories() {
+  return (Array.isArray(memories) ? memories : [])
+    .filter(isPending)
+    .map(item => ({
+      ...item,
+      contributions: (item.contributions || []).map(contribution => ({
+        ...contribution,
+      })),
+      sourceQuote:
+        item.contributions && item.contributions[0]
+          ? item.contributions[0].sourceQuote
+          : '',
+    }));
+}
+
+async function confirmPending(id) {
+  const targetId = cleanText(id);
+
+  if (!targetId) return { updated: 0, reason: 'invalid' };
+
+  return enqueueWrite(async () => {
+    const current = Array.isArray(memories) ? memories : [];
+    const index = current.findIndex(item => item && item.id === targetId);
+
+    if (index < 0) return { updated: 0, reason: 'not-found' };
+
+    const item = current[index];
+
+    if (!isPending(item) || !canTransition(STATUS_PENDING, STATUS_ACTIVE)) {
+      return { updated: 0, reason: 'not-pending' };
+    }
+
+    const { pendingReason, pendingAt, pendingTargetId, ...rest } = item;
+    const now = new Date().toISOString();
+    const next = current.slice();
+    const targetIndex = pendingTargetId
+      ? current.findIndex(
+          candidate =>
+            candidate &&
+            candidate.id === pendingTargetId &&
+            isEffectiveAt(candidate)
+        )
+      : -1;
+
+    if (targetIndex >= 0) {
+      const target = current[targetIndex];
+
+      next[targetIndex] = {
+        ...target,
+        content: item.content,
+        type: item.type,
+        keywords: item.keywords,
+        confidence: item.confidence,
+        validTo: item.validTo || null,
+        supersededBy: null,
+        contributions: mergeContributions(
+          target.contributions,
+          item.contributions
+        ),
+        updatedAt: now,
+        lastDecision: {
+          action: 'confirm',
+          reason: 'user_confirmed_update',
+          at: now,
+          actor: 'user',
+          sourceType: 'user',
+        },
+      };
+      next.splice(index, 1);
+
+      await saveMemories(next);
+      memories = next;
+
+      return {
+        updated: 1,
+        reason: 'ok',
+        id: target.id,
+        status: STATUS_ACTIVE,
+      };
+    }
+
+    next[index] = {
+      ...rest,
+      status: STATUS_ACTIVE,
+      validFrom: now,
+      validTo: item.validTo || null,
+      supersededBy: null,
+      updatedAt: now,
+      lastDecision: {
+        action: 'confirm',
+        reason: 'user_confirmed',
+        at: now,
+        actor: 'user',
+        sourceType: 'user',
+      },
+    };
+
+    await saveMemories(next);
+    memories = next;
+
+    return { updated: 1, reason: 'ok', id: targetId, status: STATUS_ACTIVE };
+  });
+}
+
+async function rejectPending(id) {
+  const targetId = cleanText(id);
+
+  if (!targetId) return { removed: 0, reason: 'invalid' };
+
+  return enqueueWrite(async () => {
+    const current = Array.isArray(memories) ? memories : [];
+    const index = current.findIndex(item => item && item.id === targetId);
+
+    if (index < 0) return { removed: 0, reason: 'not-found' };
+
+    if (!isPending(current[index]) || !canTransition(STATUS_PENDING, 'deleted')) {
+      return { removed: 0, reason: 'not-pending' };
+    }
+
+    const next = current.slice();
+    next.splice(index, 1);
+
+    await saveMemories(next);
+    memories = next;
+
+    return { removed: 1, reason: 'ok', id: targetId };
+  });
+}
+
+async function archiveMemory(id) {
+  const targetId = cleanText(id);
+
+  if (!targetId) return { updated: 0, reason: 'invalid' };
+
+  return enqueueWrite(async () => {
+    const current = Array.isArray(memories) ? memories : [];
+    const index = current.findIndex(item => item && item.id === targetId);
+
+    if (index < 0) return { updated: 0, reason: 'not-found' };
+
+    const item = current[index];
+    const status = item.status || STATUS_ACTIVE;
+
+    if (!canTransition(status, STATUS_ARCHIVED)) {
+      return { updated: 0, reason: 'invalid-state' };
+    }
+
+    const now = new Date().toISOString();
+    const next = current.slice();
+
+    next[index] = {
+      ...item,
+      status: STATUS_ARCHIVED,
+      validTo: item.validTo || now,
+      updatedAt: now,
+      lastDecision: {
+        action: 'archive',
+        reason: 'user_archived',
+        at: now,
+        actor: 'user',
+        sourceType: 'user',
+      },
+    };
+
+    await saveMemories(next);
+    memories = next;
+
+    return { updated: 1, reason: 'ok', id: targetId, status: STATUS_ARCHIVED };
+  });
+}
+
 // 写后自检：把磁盘上的记忆库重新读一遍，与内存做「定位字段」指纹比较。
 // 只比较 id / status / validFrom / 每条贡献的会话归属，不比较正文——
 // 正文只影响展示，定位字段才决定「这条记忆属于谁、还能不能被撤回/更正」。
@@ -1715,12 +2322,15 @@ function storeFingerprint(list) {
         (item && item.id) || null,
         (item && item.status) || null,
         (item && item.validFrom) || null,
+        (item && item.validTo) || null,
         (item && item.supersededBy) || null,
         (Array.isArray(item && item.contributions) ? item.contributions : []).map(
           c => [
             (c && c.sessionId) || null,
             (c && c.createdAt) || null,
             (c && c.sourceQuote) || null,
+            (c && c.messageId) || null,
+            (c && c.sourceType) || null,
           ]
         ),
       ])
@@ -1792,13 +2402,20 @@ module.exports = {
   MEMORY_ENABLED,
   MEMORY_SKIP_REASONS,
   STATUS_ACTIVE,
+  STATUS_PENDING,
   STATUS_SUPERSEDED,
+  STATUS_ARCHIVED,
   loadMemories,
   getMemories,
+  getPendingMemories,
+  confirmPending,
+  rejectPending,
+  archiveMemory,
   deleteMemory,
   buildMemoryContext,
   searchMemories,
   processMemory,
+  applyCandidate,
   clearMemories,
   clearSessionMemories,
   recallMemoryBySourceQuote,

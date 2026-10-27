@@ -118,6 +118,10 @@ const {
   clearSessionMemories,
   recallMemoryBySourceQuote,
   getMemories,
+  getPendingMemories,
+  confirmPending,
+  rejectPending,
+  archiveMemory,
   deleteMemory,
   verifyStoreConsistency,
   getWriteOutcomes,
@@ -1048,7 +1052,8 @@ app.post('/history/recall', requireAuth, async (req, res) => {
       const counts = await recallMemoryBySourceQuote(
         removed[0].content,
         removed[0].createdAt,
-        sessionId
+        sessionId,
+        removed[0].id
       );
 
       const consistency = verifyStoreConsistency();
@@ -1652,6 +1657,79 @@ app.get('/memory', requireAuth, (req, res) => {
     res.status(500).json({ error: '读取长期记忆失败' });
   }
 });
+
+// 待确认候选：不进入普通检索/注入，需用户明确确认后才转为 active。
+app.get('/memory/pending', requireAuth, (req, res) => {
+  try {
+    res.json({ memories: getPendingMemories() });
+  } catch (error) {
+    console.error('Memory pending error:', error);
+    res.status(500).json({ error: '读取待确认记忆失败' });
+  }
+});
+
+async function lifecycleWriteResponse(req, res, action, okStatus, failStatus) {
+  const id = typeof (req.body || {}).id === 'string' ? req.body.id.trim() : '';
+
+  if (!id) return res.status(400).json({ error: '缺少 id' });
+
+  try {
+    const result = await action(id);
+
+    if (result.reason === 'not-found') {
+      return res.status(404).json({ error: '记忆不存在', reason: result.reason });
+    }
+
+    if (result.reason === 'not-pending' || result.reason === 'invalid-state') {
+      return res.status(failStatus).json({
+        error: '当前状态不允许该操作',
+        reason: result.reason,
+      });
+    }
+
+    const consistency = verifyStoreConsistency();
+
+    if (consistency.consistent === false) {
+      logDataEvent({
+        module: 'memory',
+        event: 'memory_lifecycle_inconsistent',
+        level: 'error',
+        action: okStatus,
+        extra: { id, reason: consistency.reason },
+      });
+
+      return res.status(503).json({
+        error: '操作已执行，但落盘校验未通过，请重试',
+        partial: true,
+        reason: consistency.reason,
+      });
+    }
+
+    return res.json({ ok: true, id, ...result });
+  } catch (error) {
+    logDataEvent({
+      module: 'memory',
+      event: 'memory_lifecycle_failed',
+      level: 'error',
+      error,
+      action: okStatus,
+      extra: { id },
+    });
+    return res.status(500).json({ error: '记忆状态操作失败' });
+  }
+}
+
+app.post('/memory/confirm', requireAuth, async (req, res) =>
+  lifecycleWriteResponse(req, res, confirmPending, 'confirm', 409)
+);
+
+app.post('/memory/reject', requireAuth, async (req, res) =>
+  lifecycleWriteResponse(req, res, rejectPending, 'reject', 409)
+);
+
+app.post('/memory/archive', requireAuth, async (req, res) =>
+  lifecycleWriteResponse(req, res, archiveMemory, 'archive', 409)
+);
 
 // 最近若干次「尝试写长期记忆」的结论（含被哪道闸门拒）。
 // 只含短码、会话 id 与条目 id，不含任何记忆正文或用户原话。
@@ -2365,7 +2443,13 @@ function completeChatTurn({
 // 长期记忆提取：响应完成后异步进行，失败只记日志。
 // client 取自适配层：固定内置 DeepSeek（extractMemory 内部硬编码
 // deepseek-chat，与改造前逐字节一致）；没有任何可用服务商时跳过。
-function scheduleMemoryExtraction(isContinue, userText, sessionId, attachments = []) {
+function scheduleMemoryExtraction(
+  isContinue,
+  userText,
+  sessionId,
+  attachments = [],
+  options = {}
+) {
   setImmediate(() => {
     const memoryClient = getMemoryClient();
     if (!memoryClient) return; // 未配置任何模型 key，跳过记忆提取
@@ -2381,7 +2465,9 @@ function scheduleMemoryExtraction(isContinue, userText, sessionId, attachments =
     // 提取是响应完成后的后台动作，返回值没人接就变成黑洞：
     // 这里把结论（写入/合并/更正/拒写短码）落成结构化事件，
     // 具体原因短码由 memory.js 的 reportSkip 与 writeOutcomes 记录。
-    processMemory(memoryClient, memoryText, sessionId)
+    processMemory(memoryClient, memoryText, sessionId, {
+      messageId: options.messageId || null,
+    })
       .then(outcome => {
         if (!outcome) return;
         if (outcome.reason === 'not_triggered') return; // 普通闲聊，不值得记
@@ -2477,6 +2563,7 @@ app.post('/chat', requireAuth, async (req, res) => {
         providerId: ctx.providerId,
         modelId: ctx.modelId,
         sessionId: ctx.sessionId,
+        userText: ctx.userText,
         temperature: 0.8,
         maxTokens: 1200,
         timeout: 90000,
@@ -2583,7 +2670,9 @@ app.post('/chat', requireAuth, async (req, res) => {
       sessionId: ctx.sessionId,
     });
 
-    scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments);
+    scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments, {
+      messageId: result.userMessageId || null,
+    });
   } catch (error) {
     // 模型调用类错误：按 kind 映射 HTTP 状态，返回结构化错误（已脱敏）；
     // 其余（内部 bug）保持原有 500 语义不变。
@@ -2717,6 +2806,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         providerId: ctx.providerId,
         modelId: ctx.modelId,
         sessionId: ctx.sessionId,
+        userText: ctx.userText,
         temperature: 0.8,
         maxTokens: 1200,
         timeout: 90000,
@@ -2896,7 +2986,9 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   sendEvent({ type: 'done', ...result, model, providerId: ctx.providerId, upstreamModel, modelRoute: ctx.modelRoute, sessionId: ctx.sessionId });
   res.end();
 
-  scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId);
+  scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, [], {
+    messageId: result && result.userMessageId ? result.userMessageId : null,
+  });
 });
 
 // 先抢占数据目录锁：已有实例在跑就直接退出，绝不带病启动造成静默覆盖

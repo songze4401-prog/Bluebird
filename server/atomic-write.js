@@ -82,27 +82,32 @@ function writeFileAtomicSync(target, data) {
 
 /**
  * 排他创建：目标已存在时返回 false，绝不覆盖已有文件。
- * 用于首次初始化空文件；打开时用 'wx'（O_CREAT|O_EXCL），并发下只有一个进程能创建成功。
+ * 先把内容写进同目录临时文件并 fsync，再用 link() 原子发布为目标：
+ * - link 不覆盖已有目标，EEXIST 表示其他进程已创建；
+ * - 目标从出现的第一刻起就是完整内容，不会被另一个进程读成 0 字节。
  */
 function writeFileExclusiveSync(target, data) {
   const dir = path.dirname(target);
+  const tmpPath = tempPathFor(target);
+  let fd = null;
 
   fs.mkdirSync(dir, { recursive: true });
 
-  let fd = null;
-
   try {
-    fd = fs.openSync(target, 'wx');
-  } catch (error) {
-    if (error && error.code === 'EEXIST') return false;
-    throw error;
-  }
-
-  try {
+    fd = fs.openSync(tmpPath, 'wx');
     fs.writeFileSync(fd, data, 'utf8');
     fs.fsyncSync(fd);
     fs.closeSync(fd);
     fd = null;
+
+    try {
+      fs.linkSync(tmpPath, target);
+    } catch (error) {
+      if (error && error.code === 'EEXIST') return false;
+      throw error;
+    }
+
+    return true;
   } catch (error) {
     if (fd !== null) {
       try {
@@ -112,18 +117,15 @@ function writeFileExclusiveSync(target, data) {
       }
     }
 
-    try {
-      fs.unlinkSync(target);
-    } catch (_) {
-      // 目标可能已被外部移除，忽略
-    }
-
     throw error;
+  } finally {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch (_) {
+      // 临时文件可能还没建出来，忽略
+    }
+    fsyncParentDirSync(dir);
   }
-
-  fsyncParentDirSync(dir);
-
-  return true;
 }
 
 /** 异步原子写。失败时 reject（与原先 fs.promises 的错误语义一致，不静默）。 */

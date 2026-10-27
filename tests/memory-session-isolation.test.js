@@ -37,7 +37,8 @@ const MINUTE = 60 * 1000;
 const BASE = Math.floor(Date.now() / 1000) * 1000;
 
 function at(minutesAgo) {
-  return new Date(BASE - minutesAgo * MINUTE).toISOString();
+  // 负偏移表示过去；历史用例传 at(-N) 是有意的“N 分钟前”。
+  return new Date(BASE + minutesAgo * MINUTE).toISOString();
 }
 
 function seed(items) {

@@ -107,16 +107,37 @@ export type MemoryItem = {
   type?: string;
   keywords?: string[];
   confidence?: number;
-  status?: 'active' | 'superseded';
+  status?: 'active' | 'pending' | 'superseded' | 'archived';
   validFrom?: string;
   validTo?: string | null;
   supersededBy?: string | null;
+  supersedes?: string | null;
   sourceQuote?: string;
+  pendingReason?: string;
+  pendingTargetId?: string | null;
+  eventAt?: string | null;
+  condition?: string | null;
+  lastDecision?: {
+    action?: string;
+    reason?: string;
+    at?: string;
+    actor?: string;
+    sourceType?: string;
+  };
   createdAt?: string;
   updatedAt?: string;
 };
 
 export type MemoryListResponse = { memories: MemoryItem[] };
+
+export type MemoryLifecycleResponse = {
+  ok: true;
+  id: string;
+  removed?: number;
+  updated?: number;
+  reason?: string;
+  status?: string;
+};
 
 export type MemoryDeleteResponse = { ok: true; removed: boolean };
 

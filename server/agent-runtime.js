@@ -27,6 +27,7 @@ const crypto = require('crypto');
 
 const { createChatCompletion } = require('./model-adapter');
 const memorySearchTool = require('./tool-memory-search');
+const memoryRememberTool = require('./tool-memory-remember');
 const { truncateText } = require('./text-utils');
 
 // ---- 可调参数（环境变量，加载时读取；开关除外——开关每请求重读） ----
@@ -146,8 +147,9 @@ function listToolSpecs() {
   }));
 }
 
-// 启动即注册 V1 唯一工具。
+// 启动即注册记忆只读检索与受控写入工具。
 registerTool(memorySearchTool.definition);
+registerTool(memoryRememberTool.definition);
 
 // ---- 工具执行 ----
 
@@ -178,7 +180,8 @@ function buildToolSummary(result) {
  * 执行单个工具调用。rawArgs 为模型给的原始 arguments（已 JSON.parse，
  * parse 失败时传 null）。返回结构化结果，绝不抛出。
  *
- * context: { sessionId, cache, abortSignal? }
+ * context: { sessionId, userText, userMessageId, cache, abortSignal? }
+ *   userText/userMessageId 供受控记忆写入工具校验来源；
  *   abortSignal 为外部中止信号（客户端断连）：尽力早停；
  *   超时（timeoutMs）仍是硬边界，两者都通过同一个 AbortController
  *   通知 handler——handler 必须在可等待点检查 signal。
@@ -237,6 +240,8 @@ async function executeToolCall(name, rawArgs, context) {
     .then(() =>
       def.handler(validated.args, {
         sessionId: context.sessionId,
+        userText: context.userText,
+        userMessageId: context.userMessageId,
         signal: controller.signal,
       })
     )
@@ -326,6 +331,8 @@ async function runAgentTurn({
   modelId,
   messages,
   sessionId,
+  userText = '',
+  userMessageId = null,
   temperature = 0.8,
   maxTokens = 1200,
   timeout = 90000,
@@ -423,6 +430,8 @@ async function runAgentTurn({
 
       const result = await executeToolCall(normalized.function.name, rawArgs, {
         sessionId,
+        userText,
+        userMessageId,
         cache,
         abortSignal,
       });
@@ -455,7 +464,7 @@ async function runAgentTurn({
       });
     }
 
-    // 已执行完成的只读工具不回滚，但断连后不再消耗下一轮模型调用
+    // 已执行完成的工具不回滚，但断连后不再消耗下一轮模型调用
     if (typeof isClientGone === 'function' && isClientGone()) break;
   }
 

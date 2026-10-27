@@ -35,7 +35,8 @@ const MINUTE = 60 * 1000;
 const BASE = Math.floor(Date.now() / 1000) * 1000;
 
 function at(minutesAgo) {
-  return new Date(BASE - minutesAgo * MINUTE).toISOString();
+  // 负偏移表示过去；历史用例传 at(-N) 是有意的“N 分钟前”。
+  return new Date(BASE + minutesAgo * MINUTE).toISOString();
 }
 
 function seed(items) {
@@ -494,8 +495,8 @@ describe('identity 配额：把「永不被淘汰」改成显式规则', { concu
           keywords: [`身份${index}`],
           sourceQuote: `我的身份${index}`,
           sessionId: null,
-          createdAt: at(-(index + 200)),
-          updatedAt: at(-(index + 200)),
+          createdAt: at(index - 300),
+          updatedAt: at(index - 300),
         })
       );
     }
