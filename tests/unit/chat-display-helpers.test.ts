@@ -54,10 +54,13 @@ describe('formatMessageTime 秒位开关', () => {
 });
 
 describe('APP_VERSION', () => {
-  it('与 package.json 的 version 保持一致（抽屉底部的手动同步点）', () => {
+  it('与 package.json / app.json 的 version 保持一致', () => {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const pkg = require('../../package.json');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const app = require('../../app.json');
 
-    expect(APP_VERSION).toBe(pkg.version);
+    expect(pkg.version).toBe(APP_VERSION);
+    expect(app.expo.version).toBe(APP_VERSION);
   });
 });

@@ -52,6 +52,10 @@ const TMP_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-stream-'));
 const DATA_DIR = path.join(TMP_ROOT, 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
+// 真实 1x1 PNG：用于验证“纯图片流式请求”会走完整的 HTTP 上传与 /chat/stream。
+const PNG_B64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
 const ORIG_LOG = console.log;
 const ORIG_ERR = console.error;
 
@@ -75,6 +79,7 @@ function check(name, cond, extra = '') {
 
 // ---- 桩模块：模型（stream:true 返回假流）/ 记忆 ----
 const capturedParams = [];
+const memoryCalls = [];
 let stubReply = '[mood:calm] 非流式回复';
 let stubChunks = [];
 let stubErrorAt = -1; // >=0 时在第 N 个 chunk 处抛错
@@ -139,7 +144,10 @@ require.cache[openaiTarget] = {
     loaded: true,
     exports: {
       buildMemoryContext: () => '',
-      processMemory: async () => null,
+      processMemory: async (...args) => {
+        memoryCalls.push(args);
+        return null;
+      },
       clearMemories: () => {},
       recallMemoryBySourceQuote: async () => ({}),
 
@@ -202,6 +210,17 @@ async function readSSE(response) {
   }
 
   return { text, events };
+}
+
+async function waitFor(predicate, timeoutMs = 1000) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) return true;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+
+  return predicate();
 }
 
 async function main() {
@@ -522,6 +541,60 @@ async function main() {
       body6.persisted === true &&
       Array.isArray(body6.replies)
   );
+
+  // ---- 纯图片流式请求：异步记忆提取必须拿到附件占位文本 ----
+  ORIG_LOG('\nG. 纯图片流式请求的记忆提取');
+
+  const uploadRes = await fetch(BASE + '/uploads/image', {
+    method: 'POST',
+    headers: JSON_AUTH,
+    body: JSON.stringify({
+      image: `data:image/png;base64,${PNG_B64}`,
+      kind: 'image',
+      name: 'pixel.png',
+    }),
+  });
+  const upload = await uploadRes.json();
+
+  check(
+    '纯图片测试：上传成功',
+    uploadRes.status === 200 && typeof upload.id === 'string',
+    JSON.stringify(upload)
+  );
+
+  if (upload.id) {
+    const beforeImageMemoryCalls = memoryCalls.length;
+    stubChunks = ['[mood:calm] 收到图片'];
+    stubErrorAt = -1;
+
+    const resImage = await postStream({
+      message: '',
+      attachmentIds: [upload.id],
+    });
+    const sseImage = await readSSE(resImage);
+    const doneImage = sseImage.events.find(e => e.type === 'done');
+
+    check(
+      '纯图片测试：/chat/stream 正常完成',
+      resImage.status === 200 && !!doneImage && doneImage.persisted === true
+    );
+
+    const imageCall = await waitFor(() =>
+      memoryCalls
+        .slice(beforeImageMemoryCalls)
+        .some(args => args[1] === '（发送了1张图片）' && args[2] === 'default')
+    );
+
+    check(
+      '纯图片测试：记忆提取收到附件占位文本',
+      imageCall,
+      JSON.stringify(
+        memoryCalls
+          .slice(beforeImageMemoryCalls)
+          .map(args => ({ text: args[1], sessionId: args[2] }))
+      )
+    );
+  }
 
   await finish();
 }

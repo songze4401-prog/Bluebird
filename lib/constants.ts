@@ -63,6 +63,7 @@ export function toolLabel(name: string): string {
   return TOOL_LABEL[name] ?? name;
 }
 
-// 设置抽屉里的版本标识。与 package.json / app.json 的 version 手工保持一致：
-// 前端不引入 expo-constants，也不把 package.json 打进 bundle。
+// 设置抽屉里的版本标识。必须与 package.json / app.json 的 version 一致：
+// 三处都由 tests/unit/chat-display-helpers.test.ts 的 APP_VERSION 用例断言，
+// 手工改版本时不会只改一处而静默漂移。
 export const APP_VERSION = '0.4.1';
