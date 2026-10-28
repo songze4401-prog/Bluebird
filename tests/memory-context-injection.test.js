@@ -30,7 +30,7 @@ process.env.BLUEBIRD_DATA_DIR = TMP;
 
 const MEMORY_FILE = path.join(TMP, 'memory.json');
 const memory = require(path.join(__dirname, '..', 'server', 'memory.js'));
-const { retrieve } = require(path.join(__dirname, '..', 'server', 'context', 'retriever.js'));
+const { retrieveMemory } = require(path.join(__dirname, '..', 'server', 'context', 'retriever.js'));
 const { textLength } = require(path.join(__dirname, '..', 'server', 'text-utils.js'));
 
 const chr = code => String.fromCharCode(code);
@@ -315,17 +315,15 @@ describe('工具检索与引擎检索享受同一套结构处理', { concurrency
     }
   });
 
-  test('引擎检索（Context Engine 用的那条）返回的 item 也已是单行净化文本', async () => {
-    const result = await retrieve({
+  test('引擎检索（Context Runtime 用的那条）返回的 item 也已是单行净化文本', async () => {
+    const result = await retrieveMemory({
       task: '我的偏好是什么',
       sessionId: SESSION,
-      history: [],
-      enabledSources: ['memory'],
     });
 
     const items = result.items.filter(item => item.source === 'memory');
 
-    assert.ok(items.length > 0, `引擎拿不到记忆：${JSON.stringify(result.sources)}`);
+    assert.ok(items.length > 0, `引擎拿不到记忆：${result.status} ${result.error || ''}`);
 
     for (const item of items) {
       assert.ok(!item.content.includes('<<<'), item.content);

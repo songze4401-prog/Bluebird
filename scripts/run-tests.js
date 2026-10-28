@@ -34,6 +34,8 @@ const env = {
   BLUEBIRD_DATA_DIR: dataDir,
   // 空串而非 delete：dotenv 只会回填"不存在"的变量，空串才能真正禁用真实调用。
   DEEPSEEK_API_KEY: '',
+  // 开发者本地 .env 可能打开 Agent 开关；测试必须从确定的默认态开始。
+  BLUEBIRD_AGENT_TOOLS: '',
 };
 
 const failed = [];

@@ -8,7 +8,7 @@
  * 三条读路径都走生产代码，一条都不绕过：
  *   1. 注入        buildMemoryContext(query, sessionId)      —— /chat 线上路径
  *   2. 工具搜索    searchMemories({query, sessionId, limits}) —— Agent 工具
- *   3. 引擎检索    retriever.retrieve({task, sessionId})      —— Context Engine
+ *   3. 引擎检索    retriever.retrieveMemory({task, sessionId})  —— Context Runtime
  * 写入侧另验三件事：贡献归属登记、撤回只摘本会话、按会话清理不误伤他人。
  *
  * 运行：node tests/memory-session-isolation.test.js（也在 npm test 范围内）
@@ -27,7 +27,7 @@ process.env.BLUEBIRD_DATA_DIR = TMP;
 
 const MEMORY_FILE = path.join(TMP, 'memory.json');
 const memory = require(path.join(__dirname, '..', 'server', 'memory.js'));
-const { retrieve } = require(path.join(__dirname, '..', 'server', 'context', 'retriever.js'));
+const { retrieveMemory } = require(path.join(__dirname, '..', 'server', 'context', 'retriever.js'));
 
 const SESSION_A = 's-coffee-a';
 const SESSION_B = 's-coffee-b';
@@ -121,7 +121,7 @@ async function allThreePaths(query, sessionId) {
       limits: { maxItems: 10, perItemMax: 300, totalMax: 2000 },
     })
     .results.map(item => item.content);
-  const engineResult = await retrieve({ task: query, sessionId, history: [] });
+  const engineResult = await retrieveMemory({ task: query, sessionId });
   const engine = engineResult.items
     .filter(item => item.source === 'memory')
     .map(item => item.content);

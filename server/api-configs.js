@@ -71,14 +71,20 @@ function builtinProvider() {
         enabled: true,
         // 能力声明只写代码确实依赖且确实存在的：视觉能力（flash 原生多模态）、
         // 工具调用（Agent V1 用 deepseek-chat 的 Function Calling）。
-        // 上下文长度本项目未使用，不声明——不虚报。
+        // deepseek-chat 不在 provider /models 返回列表中，上下文长度保持未声明；
+        // Context Runtime 会把未知窗口标注为 unknown_guard，不编造数值。
         capabilities: { vision: false, tools: true },
       },
       {
         id: BUILTIN_VISION_MODEL,
         name: 'DeepSeek Flash（视觉）',
         enabled: true,
-        // 视觉模型不参与工具循环：Agent 走纯文本路由
+        // 视觉模型不参与工具循环：Agent 走纯文本路由。
+        // contextWindow 来自 provider GET /models 的真实元数据
+        // （2026-10-29 实测：deepseek-flash context_window=1048576,
+        //  max_output_tokens=393216, input_modalities=[text,image]）。
+        // 仅声明提供方明确返回的值；deepseek-chat 未返回，故不声明。
+        contextWindow: 1048576,
         capabilities: { vision: true, tools: false },
       },
     ],

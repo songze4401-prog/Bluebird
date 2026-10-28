@@ -1,5 +1,10 @@
 # Bluebird 记忆系统 · 阶段 0 只读审计与基线冻结（§1–§13）＋ 阶段 1 实施记录（§14）
 
+> **历史快照说明（2026-10-29）**：本文记录的是 Context Engine v2.3 时期的只读审计与行号证据。
+> 当前代码已升级为 Context Runtime v3：`BLUEBIRD_CONTEXT_ENGINE` 开关、softTarget/perTypeMax/固定保底预算、
+> doc/web/tool 检索源与 `runContextEngine` 均已删除或替换。文中涉及这些对象的行号、开关与预算描述
+> 仅用于历史对照，不是当前实现说明；当前规则以 `server/context/RULES.md` 为准。
+
 - 审计日期：2026-10-27
 - 代码基线：分支 `qoder/agentmian`，HEAD `d24e80e`（工作区 `git status --porcelain` 除本次新增的 `docs/memory-audit.md`、`tests/memory-eval/` 外为空）
 - 运行环境：Node `v24.18.0`，Windows 10.0.26100 x64
