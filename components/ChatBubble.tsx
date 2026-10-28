@@ -231,6 +231,11 @@ export function ChatBubble({
             <Text style={styles.modelNote}>{item.modelNote}</Text>
           )}
 
+          {/* 新图触发了 Agent 工具互斥：提示用户本次工具不可用 */}
+          {!!item.agentNotice && (
+            <Text style={styles.modelNote}>{item.agentNotice}</Text>
+          )}
+
           {!!item.retryText && (
             <TouchableOpacity
               style={styles.retryButton}

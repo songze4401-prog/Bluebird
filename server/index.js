@@ -210,6 +210,27 @@ function noteContextEngineObservation() {
   }
 }
 
+const AGENT_NEW_IMAGE_NOTICE = '本次带图，已切换到视觉模型，工具暂不可用';
+
+// Agent 门控的唯一判定入口：reason 只用于诊断和用户提示，不改变互斥规则。
+// 优先级：总开关关闭 > 本次新图 > 模型不支持 tools > 放行。
+function evaluateAgentGate({ switchOn, toolsSupported, hasNewImage }) {
+  if (!switchOn) {
+    return { allowed: false, reason: 'switchOff', notice: null };
+  }
+  if (hasNewImage) {
+    return {
+      allowed: false,
+      reason: 'newImage',
+      notice: AGENT_NEW_IMAGE_NOTICE,
+    };
+  }
+  if (!toolsSupported) {
+    return { allowed: false, reason: 'noToolsCapability', notice: null };
+  }
+  return { allowed: true, reason: 'allowed', notice: null };
+}
+
 // 多模态图片模块：上传校验 / 存储 / 读取 / 表情包索引
 const {
   UploadError,
@@ -285,6 +306,15 @@ const {
 // 说明：DeepSeek 视觉图片仅允许出现在 user 消息，历史里 AI 的图片
 // 消息必须以文本占位形式下发，不能原样回传（会被 API 400 拒绝）。
 const MAX_ATTACHMENTS = 4;
+
+// 历史附件和当前附件都只把 image/* 视为图片；PDF / txt 等不参与视觉判断。
+function isImageAttachment(attachment) {
+  return Boolean(
+    attachment &&
+      typeof attachment.mime === 'string' &&
+      attachment.mime.startsWith('image/')
+  );
+}
 
 // 单实例守卫：必须在 listen 之前、且必须在路由注册之后调用，
 // 这样被测试 require 时不会先抢锁再崩，而是走到 listen 拦截那里正常起来。
@@ -401,6 +431,20 @@ function historyToModelMessages(items, { includeImages = true } = {}) {
   }
 
   return out;
+}
+
+// Context Engine 只消费历史消息的 role/content/createdAt（见 retriever.userSource）：
+// 显式投影，避免把附件、工具步骤等字段带进引擎；模型消息契约保持不变。
+function projectHistoryForContext(items, { limit = 20 } = {}) {
+  return (Array.isArray(items) ? items : [])
+    .filter(item => item && (item.role === 'user' || item.role === 'assistant'))
+    .slice(-limit)
+    .map(item => ({
+      id: typeof item.id === 'string' ? item.id : null,
+      role: item.role,
+      content: typeof item.content === 'string' ? item.content : '',
+      createdAt: typeof item.createdAt === 'string' ? item.createdAt : null,
+    }));
 }
 
 // 解析 AI 回复里的图片声明：
@@ -2015,7 +2059,7 @@ async function prepareChatRequest(req) {
       item &&
       item.role === 'user' &&
       Array.isArray(item.attachments) &&
-      item.attachments.length
+      item.attachments.some(isImageAttachment)
   );
 
   // 模型目标解析（多服务商）：
@@ -2067,12 +2111,16 @@ async function prepareChatRequest(req) {
     }
   }
 
+  // 本次请求新上传的图片。Agent 工具互斥只看这个变量；
+  // 历史图片不再单独关闭 Agent。
+  const hasNewImage = attachments.some(isImageAttachment);
+
   // 历史图片只在目标模型声明视觉能力时才随上下文上行；否则降级为文本占位，
   // 保证「选哪个模型就用哪个模型」，不因历史图片被迫换模型。
   const includeHistoryImages =
     historyHasUserImages && modelTarget.model.capabilities?.vision === true;
 
-  const useVision = attachments.length > 0 || includeHistoryImages;
+  const useVision = hasNewImage || includeHistoryImages;
 
   const storedHistory = historyToModelMessages(storedItems, {
     includeImages: includeHistoryImages,
@@ -2092,6 +2140,17 @@ async function prepareChatRequest(req) {
     storedHistory.length || sessionId !== DEFAULT_SESSION_ID
       ? storedHistory
       : clientHistory;
+
+  // Context Engine 与模型消息共用同一来源与窗口（服务端存储优先，
+  // 默认会话空存储时沿用旧客户端回退），但只传显式投影：
+  // 保留 id/createdAt 供追溯与时效判断，不带附件/工具步骤等字段。
+  const engineHistory = projectHistoryForContext(
+    storedHistory.length || sessionId !== DEFAULT_SESSION_ID
+      ? storedItems
+      : Array.isArray(history)
+        ? history
+        : []
+  );
 
   // 续写没有新的用户消息，用最近一条用户消息作为记忆检索的查询，
   // 保证续写仍然复用现有 Memory System，而不是绕过它。
@@ -2178,7 +2237,7 @@ async function prepareChatRequest(req) {
       const engineOut = await engine.runContextEngine({
         task: memoryQuery,
         sessionId,
-        history: promptHistory,
+        history: engineHistory,
         // 保底系统指令：引擎的预算裁剪绝不碰这些必要指令（冻结基线第 5 节）
         systemPrompt: [
           BLUEBIRD_SYSTEM_PROMPT,
@@ -2278,6 +2337,8 @@ async function prepareChatRequest(req) {
       isContinue,
       userText,
       attachments,
+      hasNewImage,
+      includeHistoryImages,
       useVision,
       userContent,
       promptHistory: modelHistory,
@@ -2541,10 +2602,23 @@ app.post('/chat', requireAuth, async (req, res) => {
     // ③ 非带图请求——带图（useVision）后端强制无工具，不依赖前端。
     // 任一不满足都走下方原路径，行为与改造前逐字节一致。
     noteSwitchObservation();
-    const agentOn =
-      agentToolsEnabled() &&
-      !ctx.useVision &&
-      supportsTools(ctx.providerId, ctx.modelId);
+    const agentSwitchOn = agentToolsEnabled();
+    const agentToolsSupported = supportsTools(ctx.providerId, ctx.modelId);
+    const agentGate = evaluateAgentGate({
+      switchOn: agentSwitchOn,
+      toolsSupported: agentToolsSupported,
+      hasNewImage: ctx.hasNewImage,
+    });
+    const agentOn = agentGate.allowed;
+
+    // 只记录判定元数据：模型、开关、能力、新图/历史图、原因、是否放行。
+    // 不记录用户消息、附件内容、工具参数或记忆正文。
+    console.log(
+      `[agent-gate] path=chat provider=${ctx.providerId} model=${ctx.modelId}` +
+        ` switch=${agentSwitchOn} toolsCapability=${agentToolsSupported}` +
+        ` hasNewImage=${ctx.hasNewImage} includeHistoryImages=${ctx.includeHistoryImages}` +
+        ` hasImage=${ctx.useVision} reason=${agentGate.reason} allowed=${agentOn}`
+    );
 
     if (agentOn) {
       console.log(
@@ -2668,6 +2742,8 @@ app.post('/chat', requireAuth, async (req, res) => {
       // 结构化路由结果：requested / actual / auto / reason，与流式 done 语义一致
       modelRoute: ctx.modelRoute,
       sessionId: ctx.sessionId,
+      // 新图触发了 Agent 工具互斥时给用户的提示（不落盘、不进历史）
+      ...(agentGate.notice ? { agentNotice: agentGate.notice } : {}),
     });
 
     scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments, {
@@ -2788,10 +2864,23 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   // 事件向客户端反馈进度；最终文本仍走 stripper → delta → done，
   // 不新增也不改变既有事件格式（旧客户端忽略新 type 即可）。
   noteSwitchObservation();
-  const agentOn =
-    agentToolsEnabled() &&
-    !ctx.useVision &&
-    supportsTools(ctx.providerId, ctx.modelId);
+  const agentSwitchOn = agentToolsEnabled();
+  const agentToolsSupported = supportsTools(ctx.providerId, ctx.modelId);
+  const agentGate = evaluateAgentGate({
+    switchOn: agentSwitchOn,
+    toolsSupported: agentToolsSupported,
+    hasNewImage: ctx.hasNewImage,
+  });
+  const agentOn = agentGate.allowed;
+
+  // 只记录判定元数据：模型、开关、能力、新图/历史图、原因、是否放行。
+  // 不记录用户消息、附件内容、工具参数或记忆正文。
+  console.log(
+    `[agent-gate] path=stream provider=${ctx.providerId} model=${ctx.modelId}` +
+      ` switch=${agentSwitchOn} toolsCapability=${agentToolsSupported}` +
+      ` hasNewImage=${ctx.hasNewImage} includeHistoryImages=${ctx.includeHistoryImages}` +
+      ` hasImage=${ctx.useVision} reason=${agentGate.reason} allowed=${agentOn}`
+  );
 
   if (agentOn) {
     console.log(
@@ -2983,7 +3072,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
     );
   }
 
-  sendEvent({ type: 'done', ...result, model, providerId: ctx.providerId, upstreamModel, modelRoute: ctx.modelRoute, sessionId: ctx.sessionId });
+  sendEvent({ type: 'done', ...result, ...(agentGate.notice ? { agentNotice: agentGate.notice } : {}), model, providerId: ctx.providerId, upstreamModel, modelRoute: ctx.modelRoute, sessionId: ctx.sessionId });
   res.end();
 
   scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments, {

@@ -1,12 +1,12 @@
 {
   "version": 1,
   "updateRule": "新增/删除 tests/*.test.js 或改变用例数时，必须在同一变更中更新 files、backendTotal、nodeTestSuiteTotal、runnerTotal、frontend；不得只改总数或删除条目。nodeTestSuiteFiles 只包含由 node --test 六套命令执行的文件；runnerFiles 包含 CI 自定义 runner 逐文件执行的 33 个条目（其中 6 个仍使用 node:test 但按单文件退出码执行）。CI 清单必须覆盖所有 files 条目，verify-test-coverage.js 会检查。",
-  "backendTotal": 1310,
-  "nodeTestSuiteTotal": 197,
-  "runnerTotal": 1113,
+  "backendTotal": 1325,
+  "nodeTestSuiteTotal": 200,
+  "runnerTotal": 1125,
   "frontend": {
     "suites": 7,
-    "tests": 106
+    "tests": 108
   },
   "nodeTestSuiteFiles": [
     "memory",
@@ -70,10 +70,10 @@
     "sticker-repo": { "format": "custom", "count": 58, "runner": true },
     "model-providers": { "format": "custom", "count": 113, "runner": true },
     "model-routing": { "format": "custom", "count": 21, "runner": true },
-    "agent-tools": { "format": "custom", "count": 119, "runner": true },
-    "context-engine-e2e": { "format": "custom", "count": 30, "runner": true },
+    "agent-tools": { "format": "custom", "count": 127, "runner": true },
+    "context-engine-e2e": { "format": "custom", "count": 32, "runner": true },
     "delete-semantics": { "format": "custom", "count": 34, "runner": true },
-    "memory-agent-write": { "format": "custom", "count": 8, "runner": true },
+    "memory-agent-write": { "format": "custom", "count": 10, "runner": true },
     "memory-api-recall": { "format": "custom", "count": 39, "runner": true },
     "memory-context-injection": { "format": "node", "count": 11, "runner": true },
     "memory-eval-baseline": { "format": "node", "count": 22, "runner": true },
@@ -90,6 +90,6 @@
     "sticker-markers": { "format": "node", "count": 12, "runner": false },
     "streaming-segments": { "format": "node", "count": 10, "runner": false },
     "backup": { "format": "node", "count": 50, "runner": false },
-    "context-engine": { "format": "node", "count": 51, "runner": false }
+    "context-engine": { "format": "node", "count": 54, "runner": false }
   }
 }

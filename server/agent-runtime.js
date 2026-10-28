@@ -103,7 +103,15 @@ function registerTool(definition) {
     throw new TypeError('[agent] 工具定义必须是对象');
   }
 
-  const { name, description, parameters, validate, handler, timeoutMs } = definition;
+  const {
+    name,
+    description,
+    parameters,
+    validate,
+    handler,
+    timeoutMs,
+    readOnly,
+  } = definition;
 
   if (!TOOL_NAME_RE.test(name || '')) {
     throw new TypeError(`[agent] 非法工具名：${name}`);
@@ -122,6 +130,9 @@ function registerTool(definition) {
   }
   if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
     throw new TypeError(`[agent] 工具 timeoutMs 非法：${name}`);
+  }
+  if (readOnly !== undefined && typeof readOnly !== 'boolean') {
+    throw new TypeError(`[agent] 工具 readOnly 必须是布尔值：${name}`);
   }
 
   tools.set(name, definition);
@@ -191,6 +202,16 @@ async function executeToolCall(name, rawArgs, context) {
 
   if (!def) {
     return { ok: false, code: 'unknown_tool', error: `未注册的工具：${name}` };
+  }
+
+  // 显式区分只读工具与有副作用的写入工具：写入工具必须在运行层拿到
+  // 当前会话与用户原话，不能只依赖模型参数或 handler 内部兜底。
+  if (def.readOnly === false && (!context || !context.sessionId || !context.userText)) {
+    return {
+      ok: false,
+      code: 'unauthorized_write',
+      error: '写入工具缺少当前会话或用户原话，已拒绝执行',
+    };
   }
 
   if (rawArgs === null || rawArgs === undefined) {
@@ -359,6 +380,17 @@ async function runAgentTurn({
 
     rounds = round;
     const isFinalRound = round === MAX_ROUNDS;
+    const requestToolCount = isFinalRound ? 0 : specs.length;
+    const requestToolNames = isFinalRound
+      ? ''
+      : specs.map(spec => spec.function.name).join(',');
+
+    // 记录实际请求元数据：不记录 messages、工具参数或用户内容。
+    console.log(
+      `[agent-request] round=${round}/${MAX_ROUNDS} provider=${providerId}` +
+        ` model=${modelId} toolCount=${requestToolCount}` +
+        ` toolNames=${requestToolNames || 'none'}`
+    );
 
     completion = await createChatCompletion({
       providerId,
@@ -379,6 +411,19 @@ async function runAgentTurn({
 
     const toolCalls =
       message && Array.isArray(message.tool_calls) ? message.tool_calls : [];
+    const finishReason =
+      completion &&
+      completion.choices &&
+      completion.choices[0] &&
+      completion.choices[0].finish_reason
+        ? completion.choices[0].finish_reason
+        : null;
+
+    // 只记录 finish_reason 与工具调用数量；不记录模型正文或参数。
+    console.log(
+      `[agent-response] round=${round} provider=${providerId} model=${modelId}` +
+        ` finishReason=${finishReason || 'null'} toolCalls=${toolCalls.length}`
+    );
 
     // F3 修复：message 可能为 undefined（服务商返回空 choices / 缺 message
     // 等畸形响应）。与普通路径的 completion.choices?.[0]?.message?.content
@@ -428,6 +473,10 @@ async function runAgentTurn({
         rawArgs = null;
       }
 
+      console.log(
+        `[agent-dispatch] round=${round} name=${normalized.function.name} dispatched=true`
+      );
+
       const result = await executeToolCall(normalized.function.name, rawArgs, {
         sessionId,
         userText,
@@ -437,6 +486,12 @@ async function runAgentTurn({
       });
 
       const summary = buildToolSummary(result);
+
+      console.log(
+        `[agent-tool] round=${round} name=${normalized.function.name}` +
+          ` ok=${result.ok === true} code=${result.code || 'none'}` +
+          ` deduped=${result.deduped === true} durationMs=${Date.now() - startedAt}`
+      );
 
       if (typeof onToolEvent === 'function') {
         onToolEvent({
@@ -462,6 +517,10 @@ async function runAgentTurn({
         tool_call_id: normalized.id,
         content: truncateText(JSON.stringify(result), TOOL_RESULT_MAX),
       });
+
+      console.log(
+        `[agent-result] round=${round} name=${normalized.function.name} forwarded=true`
+      );
     }
 
     // 已执行完成的工具不回滚，但断连后不再消耗下一轮模型调用

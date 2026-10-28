@@ -122,6 +122,19 @@ describe('buildReplyBubbles', () => {
     expect(replyMood).toBe('calm');
   });
 
+  it('agentNotice 只挂最后一格', () => {
+    const { bubbles } = buildReplyBubbles(
+      { agentNotice: '本次带图，已切换到视觉模型，工具暂不可用' } as never,
+      [
+        { id: 'n1', content: '一' },
+        { id: 'n2', content: '二' },
+      ]
+    );
+
+    expect(bubbles[0].agentNotice).toBeUndefined();
+    expect(bubbles[1].agentNotice).toContain('工具暂不可用');
+  });
+
   it('附件挂在对应分段上', () => {
     const { bubbles } = buildReplyBubbles({}, [
       {

@@ -381,6 +381,7 @@ const memoryModule = require(path.join(SERVER, 'memory.js'));
 const memoryTool = require(path.join(SERVER, 'tool-memory-search.js'));
 const textUtils = require(path.join(SERVER, 'text-utils.js'));
 const configs = require(path.join(SERVER, 'api-configs.js'));
+const sessions = require(path.join(SERVER, 'sessions.js'));
 
 // 本地 mock 服务商（H3 组）：真实 SDK 路径，记录请求体
 const mockChatRequests = [];
@@ -706,6 +707,11 @@ async function main() {
       return Array.isArray(last.content) && last.content.some(b => b.type === 'image_url');
     })()
   );
+  check(
+    'H2 新图触发 Agent 互斥并返回用户提示',
+    withImage.json.agentNotice === '本次带图，已切换到视觉模型，工具暂不可用',
+    JSON.stringify(withImage.json.agentNotice)
+  );
 
   // H3 带图门控的独立验证：内置 flash 靠 tools:false 挡住（能力门控），
   // 这里用一个"视觉+工具双声明"的自定义模型——只有 !useVision 门控能挡住。
@@ -730,6 +736,10 @@ async function main() {
       mockChatRequests[0].body.tools === undefined,
     JSON.stringify(mockChatRequests[0] && mockChatRequests[0].body).slice(0, 120)
   );
+  check(
+    'H3 双声明模型的新图也返回工具互斥提示',
+    imageOnDual.json.agentNotice === '本次带图，已切换到视觉模型，工具暂不可用'
+  );
 
   const h3TextSessionRes = await req('/sessions', { method: 'POST', body: {} });
   const h3TextSessionId = h3TextSessionRes.json && h3TextSessionRes.json.session.id;
@@ -748,6 +758,121 @@ async function main() {
     textOnDual.status === 200 &&
       mockChatRequests[0] &&
       Array.isArray(mockChatRequests[0].body.tools)
+  );
+
+  // H4 历史图片不再关闭 Agent：会话已有用户图片，但本次请求不带新图，
+  // 视觉+工具双声明模型应继续拿到 tools，并保留历史图片上行能力。
+  mockChatRequests.length = 0;
+  const historyImageText = await req('/chat', {
+    method: 'POST',
+    body: {
+      message: '你好',
+      sessionId: freshSessionId,
+      providerId: visionToolsProvider.id,
+      modelId: 'vision-tools',
+    },
+  });
+  const h4Body = mockChatRequests[0] && mockChatRequests[0].body;
+  const h4HasImageBlock =
+    !!h4Body &&
+    Array.isArray(h4Body.messages) &&
+    h4Body.messages.some(
+      message =>
+        Array.isArray(message.content) &&
+        message.content.some(block => block.type === 'image_url')
+    );
+
+  check(
+    'H4 历史图片不再关闭 Agent（纯文本请求带 tools）',
+    historyImageText.status === 200 &&
+      h4Body &&
+      Array.isArray(h4Body.tools),
+    JSON.stringify({
+      status: historyImageText.status,
+      text: historyImageText.text.slice(0, 300),
+      mockRequests: mockChatRequests.length,
+    })
+  );
+  check(
+    'H4 历史图片仍随视觉工具模型上行',
+    h4HasImageBlock,
+    JSON.stringify(h4Body && h4Body.messages ? h4Body.messages.map(m => m.content) : null).slice(0, 400)
+  );
+  check(
+    'H4 历史图片不产生新图互斥提示',
+    !!historyImageText.json && historyImageText.json.agentNotice === undefined,
+    JSON.stringify(historyImageText.json)
+  );
+
+  // H5 历史 PDF/txt 不算图片：不会触发历史视觉上行，也不会关闭 Agent。
+  const pdfSessionRes = await req('/sessions', { method: 'POST', body: {} });
+  const pdfSessionId =
+    pdfSessionRes.json && pdfSessionRes.json.session && pdfSessionRes.json.session.id;
+  sessions.appendMessages(pdfSessionId, [
+    {
+      id: 'pdf-user-1',
+      role: 'user',
+      content: '这里是一份文档',
+      createdAt: new Date().toISOString(),
+      attachments: [
+        {
+          id: 'pdf-attachment-1',
+          kind: 'image',
+          mime: 'application/pdf',
+          name: 'doc.pdf',
+        },
+      ],
+    },
+  ]);
+  mockChatRequests.length = 0;
+  const pdfText = await req('/chat', {
+    method: 'POST',
+    body: {
+      message: '你好',
+      sessionId: pdfSessionId,
+      providerId: visionToolsProvider.id,
+      modelId: 'vision-tools',
+    },
+  });
+  const h5Body = mockChatRequests[0] && mockChatRequests[0].body;
+  const h5HasImageBlock =
+    !!h5Body &&
+    Array.isArray(h5Body.messages) &&
+    h5Body.messages.some(
+      message =>
+        Array.isArray(message.content) &&
+        message.content.some(block => block.type === 'image_url')
+    );
+
+  check(
+    'H5 历史 PDF/txt 不算图片，Agent 仍放行',
+    pdfText.status === 200 &&
+      h5Body &&
+      Array.isArray(h5Body.tools)
+  );
+  check('H5 历史 PDF/txt 不产生 image_url 上行', !h5HasImageBlock);
+
+  // H6 流式新图互斥：设备实际走 /chat/stream，done 必须带同样的用户提示。
+  const streamNoticeSessionRes = await req('/sessions', {
+    method: 'POST',
+    body: {},
+  });
+  const streamNoticeSessionId =
+    streamNoticeSessionRes.json &&
+    streamNoticeSessionRes.json.session &&
+    streamNoticeSessionRes.json.session.id;
+  const streamNotice = await readSse('/chat/stream', {
+    message: '这是什么',
+    sessionId: streamNoticeSessionId,
+    attachmentIds: [imageId],
+  });
+  const streamNoticeDone = streamNotice.events.find(e => e.type === 'done');
+  check(
+    'H6 流式新图在 done 中返回工具互斥提示',
+    streamNotice.status === 200 &&
+      !!streamNoticeDone &&
+      streamNoticeDone.agentNotice ===
+        '本次带图，已切换到视觉模型，工具暂不可用'
   );
 
   // ================= I. 并行 tool_calls =================

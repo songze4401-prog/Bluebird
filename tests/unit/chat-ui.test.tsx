@@ -268,8 +268,27 @@ describe('工具 pill 显示真实执行结果', () => {
         steps={[toolStep({ name: 'weather_lookup' })]}
       />
     );
-
     expect(screen.getByText('调用工具 · weather_lookup')).toBeTruthy();
+  });
+});
+
+describe('Agent 新图互斥提示', () => {
+  it('在助手消息下方显示工具暂不可用提示', async () => {
+    await render(
+      <ChatBubble
+        {...bubbleProps({
+          id: 'a-notice',
+          role: 'assistant',
+          content: '图片我看到了。',
+          createdAt,
+          agentNotice: '本次带图，已切换到视觉模型，工具暂不可用',
+        })}
+      />
+    );
+
+    expect(
+      screen.getByText('本次带图，已切换到视觉模型，工具暂不可用')
+    ).toBeTruthy();
   });
 });
 

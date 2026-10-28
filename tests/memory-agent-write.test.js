@@ -255,6 +255,50 @@ function check(name, cond, extra = '') {
 
   console.log('\n4) 低置信 Agent 候选进入 pending，可由 HTTP 确认');
   const agent = require(path.join(SERVER, 'agent-runtime.js'));
+
+  const unauthorizedWrite = await agent.executeToolCall(
+    'memory_remember',
+    {
+      content: '用户常用编辑器是 Vim',
+      type: 'preference',
+      sourceQuote: '我用 Vim 写代码',
+      confidence: 0.9,
+    },
+    { sessionId: 's-agent-no-text', cache: new Map() }
+  );
+
+  check(
+    '无当前用户原话 → 运行层拒绝写入工具',
+    unauthorizedWrite.ok === false &&
+      unauthorizedWrite.code === 'unauthorized_write',
+    JSON.stringify(unauthorizedWrite)
+  );
+
+  const abortController = new AbortController();
+  abortController.abort();
+  const abortedWrite = await agent.executeToolCall(
+    'memory_remember',
+    {
+      content: '用户常用编辑器是 Emacs',
+      type: 'preference',
+      sourceQuote: '我用 Emacs 写代码',
+      confidence: 0.9,
+    },
+    {
+      sessionId: 's-agent-aborted',
+      userText: '我用 Emacs 写代码',
+      cache: new Map(),
+      abortSignal: abortController.signal,
+    }
+  );
+
+  check(
+    '已中止的写入请求不落盘',
+    abortedWrite.ok === false &&
+      !diskMemory().some(item => item.content === '用户常用编辑器是 Emacs'),
+    JSON.stringify(abortedWrite)
+  );
+
   const pendingResult = await agent.executeToolCall(
     'memory_remember',
     {
