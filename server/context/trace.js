@@ -37,6 +37,19 @@ function sanitizeText(value) {
   return maskSensitive(truncated);
 }
 
+// 标识/时间只做长度与格式限制，不记录任何正文。
+function sanitizeId(value) {
+  return typeof value === 'string' && value.length <= 80 ? value : null;
+}
+
+function sanitizeTimestamp(value) {
+  return typeof value === 'string' &&
+    value.length <= 40 &&
+    Number.isFinite(Date.parse(value))
+    ? value
+    : null;
+}
+
 function createTrace({ task, sessionId, ts } = {}) {
   const startedAt = ts || new Date().toISOString();
 
@@ -63,7 +76,10 @@ function createTrace({ task, sessionId, ts } = {}) {
     build: {
       ok: null, // 最终组装是否成功（false 时上层必须显式降级/报错）
       error: null,
-      inputItems: 0,
+      inputItems: 0, // 进入组装器的已选中条目数，不等于实际注入数
+      injectedItems: 0, // 实际写入 systemContexts / untrustedContexts 的条目数
+      // 已选中但按规则跳过的历史条目：只记录标识/原因，不记录正文
+      skippedHistory: [],
       trimmed: 0,
       totalTokens: 0,
       perTypeSummary: {}, // { type: { kept, trimmed, tokens } }
@@ -128,10 +144,22 @@ function createTrace({ task, sessionId, ts } = {}) {
         summary.guaranteed && typeof summary.guaranteed === 'object'
           ? summary.guaranteed
           : { system: summary.guaranteedSystem, task: summary.guaranteedTask };
+      const skippedHistory = Array.isArray(summary.skippedHistoryItems)
+        ? summary.skippedHistoryItems.map(item => ({
+            id: sanitizeId(item && item.id),
+            messageId: sanitizeId(item && item.messageId),
+            source: sanitizeId(item && item.source),
+            type: sanitizeId(item && item.type),
+            reason: sanitizeText(item && item.reason ? item.reason : ''),
+            fetchedAt: sanitizeTimestamp(item && item.fetchedAt),
+          }))
+        : [];
       trace.build = {
         ok: summary.ok === true,
         error: summary.error ? sanitizeText(summary.error) : null,
         inputItems: summary.inputItems || 0,
+        injectedItems: Number(summary.injectedItems) || 0,
+        skippedHistory,
         trimmed: summary.trimmed || 0,
         totalTokens: summary.totalTokens || 0,
         perTypeSummary: summary.perTypeSummary || {},

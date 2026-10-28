@@ -369,6 +369,47 @@ async function main() {
     })
   );
 
+  const traceLinesH = errorLines.filter(l => l.includes('[context-trace]'));
+  let traceH = null;
+  if (traceLinesH.length) {
+    try {
+      traceH = JSON.parse(
+        traceLinesH[traceLinesH.length - 1].replace('[context-trace] ', '')
+      );
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  const skippedH =
+    traceH && Array.isArray(traceH.build.skippedHistory)
+      ? traceH.build.skippedHistory
+      : [];
+  const skippedFirstH = skippedH.find(
+    entry => entry.messageId === (firstH.json && firstH.json.userMessageId)
+  );
+  check(
+    'H2: trace 记录历史条目的消息标识、跳过原因与实际注入数',
+    !!firstH.json &&
+      !!traceH &&
+      !!skippedFirstH &&
+      skippedFirstH.reason.includes('历史消息') &&
+      skippedFirstH.fetchedAt === firstH.json.createdAt &&
+      traceH.build.injectedItems === 0 &&
+      traceH.build.inputItems ===
+        traceH.build.injectedItems + skippedH.length + traceH.build.trimmed,
+    JSON.stringify({
+      userMessageId: firstH.json && firstH.json.userMessageId,
+      skipped: skippedH.map(entry => ({
+        messageId: entry.messageId,
+        fetchedAt: entry.fetchedAt,
+        reason: entry.reason,
+      })),
+      injectedItems: traceH && traceH.build.injectedItems,
+      inputItems: traceH && traceH.build.inputItems,
+      trimmed: traceH && traceH.build.trimmed,
+    })
+  );
+
   // ============ D. Agent 路径：工具调用进入 trace ============
   ORIG_LOG('\n[E2E-D] Agent 工具路径（引擎 + 工具双开）');
   process.env.BLUEBIRD_CONTEXT_ENGINE = '1';

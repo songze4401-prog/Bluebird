@@ -153,10 +153,10 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-Thirty-nine files, 1321 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
+Thirty-nine files, 1325 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
-node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js   # node:test suites (197)
+node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js   # node:test suites (200)
 node tests/api.test.js                    # 26 — HTTP/auth/rate-limit, custom runner
 node tests/atomic-write.test.js           # 16 — temp+fsync+rename atomic writes, incl. a SIGKILL crash simulation
 node tests/chat-persist.test.js           # 23
@@ -175,7 +175,7 @@ node tests/sticker-repo.test.js           # 58 — sticker repo: sha256 dedupe, 
 node tests/model-providers.test.js        # 113 — multi-provider layer: config CRUD/enable-disable/defaults, key masking & leak scans, connection test (auth/429/500/404/timeout/oversize), stream & non-stream calls, error classification, model switching & vision capability, legacy DeepSeek compatibility, SSRF (loopback/private/link-local/metadata/credentials/protocol), persistence & restart, corruption protection
 node tests/model-routing.test.js          # 21 — request-level provider/model selection (A→A, B→B, no-ids default fallback, never writes the global default, invalid model = error + zero upstream calls), image vision routing (direct / auto-routed with modelRoute, no-vision provider = capability error), SSE done routing parity
 node tests/time-gap.test.js               # 29 — chat time-gap context: minute/hour/day gaps, user-vs-Blue gap split, session isolation, missing-time honesty
-node tests/context-engine-e2e.test.js     # 31 — Context Engine real HTTP integration: engine-error fallback to legacy path, off-switch zero-load, switch-gated engine blocks, history no-duplicate injection, metadata-only [context-trace] stderr, tools-in-trace on agent path, off-switch byte-compat baseline
+node tests/context-engine-e2e.test.js     # 32 — Context Engine real HTTP integration: engine-error fallback to legacy path, off-switch zero-load, switch-gated engine blocks, history no-duplicate injection, metadata-only [context-trace] stderr, tools-in-trace on agent path, off-switch byte-compat baseline
 node tests/agent-tools.test.js            # 127 — agent tool calling V1: three gates (switch / capability / no-new-image), history-image and MIME boundary, 3-round cap, per-session memory scope, tool timeout & abort, late-result handling, toolSteps persistence & read-back, SSE tool_start/tool_end, model semantics on downgrade
 node tests/delete-semantics.test.js       # 34
 node tests/memory-agent-write.test.js     # 10

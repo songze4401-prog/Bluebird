@@ -433,6 +433,20 @@ function historyToModelMessages(items, { includeImages = true } = {}) {
   return out;
 }
 
+// Context Engine 只消费历史消息的 role/content/createdAt（见 retriever.userSource）：
+// 显式投影，避免把附件、工具步骤等字段带进引擎；模型消息契约保持不变。
+function projectHistoryForContext(items, { limit = 20 } = {}) {
+  return (Array.isArray(items) ? items : [])
+    .filter(item => item && (item.role === 'user' || item.role === 'assistant'))
+    .slice(-limit)
+    .map(item => ({
+      id: typeof item.id === 'string' ? item.id : null,
+      role: item.role,
+      content: typeof item.content === 'string' ? item.content : '',
+      createdAt: typeof item.createdAt === 'string' ? item.createdAt : null,
+    }));
+}
+
 // 解析 AI 回复里的图片声明：
 // - [sticker:仓库ID]：必须在表情包仓库真实存在（防编造的第一道闸）；
 // - [sticker:关键词]：兼容旧语法，走仓库检索兜底；
@@ -2127,6 +2141,17 @@ async function prepareChatRequest(req) {
       ? storedHistory
       : clientHistory;
 
+  // Context Engine 与模型消息共用同一来源与窗口（服务端存储优先，
+  // 默认会话空存储时沿用旧客户端回退），但只传显式投影：
+  // 保留 id/createdAt 供追溯与时效判断，不带附件/工具步骤等字段。
+  const engineHistory = projectHistoryForContext(
+    storedHistory.length || sessionId !== DEFAULT_SESSION_ID
+      ? storedItems
+      : Array.isArray(history)
+        ? history
+        : []
+  );
+
   // 续写没有新的用户消息，用最近一条用户消息作为记忆检索的查询，
   // 保证续写仍然复用现有 Memory System，而不是绕过它。
   // 图片消息的 content 是 blocks 数组，不能当查询词，跳过取最近一条文本。
@@ -2212,7 +2237,7 @@ async function prepareChatRequest(req) {
       const engineOut = await engine.runContextEngine({
         task: memoryQuery,
         sessionId,
-        history: promptHistory,
+        history: engineHistory,
         // 保底系统指令：引擎的预算裁剪绝不碰这些必要指令（冻结基线第 5 节）
         systemPrompt: [
           BLUEBIRD_SYSTEM_PROMPT,

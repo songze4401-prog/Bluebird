@@ -50,6 +50,9 @@ function buildContext({
         ok: false,
         error: 'budget_guaranteed_exceeded',
         inputItems: items.length,
+        injectedItems: 0,
+        skippedHistory: 0,
+        skippedHistoryItems: [],
         trimmed: items.length,
         totalTokens: systemTokens + taskTokens,
         guaranteed,
@@ -59,8 +62,22 @@ function buildContext({
 
   // 历史用户消息已经在对话消息数组里；它参与裁决，但不再进入上下文预算，
   // 否则同一句话既占 systemPrompt token，又与历史消息重复。
+  // 跳过明细只记录标识与原因，不记录正文（trace 隐私约束）。
+  const skippedHistoryItems = items
+    .filter(item => item.fromHistory === true)
+    .map(item => ({
+      id: item.id || null,
+      messageId: item.historyMessageId || null,
+      source: item.source || null,
+      type: item.type || null,
+      reason: '历史消息已在模型消息数组中，避免重复注入',
+      fetchedAt:
+        item.freshness && item.freshness.fetched_at
+          ? item.freshness.fetched_at
+          : null,
+    }));
   const visibleItems = items.filter(item => item.fromHistory !== true);
-  const skippedHistory = items.length - visibleItems.length;
+  const skippedHistory = skippedHistoryItems.length;
 
   // ---- 分类型预算：单条上限按信息类型 ----
   const perTypeMax = budget.perTypeMax || {};
@@ -74,7 +91,9 @@ function buildContext({
       summary: {
         ok: true,
         inputItems: items.length,
+        injectedItems: 0,
         skippedHistory,
+        skippedHistoryItems,
         trimmed: visibleItems.length,
         totalTokens: systemTokens + taskTokens,
         guaranteed,
@@ -133,7 +152,9 @@ function buildContext({
     summary: {
       ok: true,
       inputItems: items.length,
+      injectedItems: systemContexts.length + untrustedContexts.length,
       skippedHistory,
+      skippedHistoryItems,
       trimmed,
       totalTokens: systemTokens + taskTokens + used,
       guaranteed,

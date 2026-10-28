@@ -829,6 +829,85 @@ test('I5: trace 记录最终验证结果与失败原因', () => {
   assert.match(json.verification.reason, /budget_within_hard_cap/);
 });
 
+test('I6: trace 记录选中但未注入的历史条目，注入数与实际构建一致', () => {
+  const historyItem = {
+    id: 'ctx-user-1',
+    historyMessageId: 'msg-history-1',
+    content: '历史消息正文-SENTINEL-4a2b',
+    source: 'user',
+    type: 'user',
+    verification: { status: 'user_confirmed', checked_items: [] },
+    freshness: {
+      fetched_at: '2026-10-28T12:00:00.000Z',
+      ttl: null,
+      status: 'unknown',
+      label: '时效未知',
+    },
+    untrusted: false,
+    fromHistory: true,
+  };
+  const memoryItem = {
+    ...item({
+      content: '记忆正文',
+      source: 'memory',
+      type: 'project_fact',
+      fetchedAt: '2026-10-28T11:00:00.000Z',
+    }),
+    id: 'ctx-memory-1',
+    relevance: 1,
+  };
+
+  const build = buildContext({
+    items: [historyItem, memoryItem],
+    task: 't',
+    systemPrompt: 'sys',
+    injectedTask: 't',
+    config,
+  });
+
+  // 选中 2 条，实际只注入 1 条；历史条目应按规则跳过并留下可追溯明细
+  assert.strictEqual(build.summary.inputItems, 2);
+  assert.strictEqual(build.summary.injectedItems, 1);
+  assert.strictEqual(build.summary.skippedHistory, 1);
+  assert.strictEqual(build.summary.skippedHistoryItems.length, 1);
+  assert.strictEqual(
+    build.summary.skippedHistoryItems[0].messageId,
+    'msg-history-1'
+  );
+  assert.match(build.summary.skippedHistoryItems[0].reason, /历史消息已在模型消息数组中/);
+  assert.strictEqual(
+    build.summary.skippedHistoryItems[0].fetchedAt,
+    '2026-10-28T12:00:00.000Z'
+  );
+  assert.deepStrictEqual(
+    build.systemContexts.map(entry => entry.id),
+    ['ctx-memory-1']
+  );
+  assert.strictEqual(
+    build.summary.inputItems,
+    build.summary.injectedItems +
+      build.summary.skippedHistory +
+      build.summary.trimmed
+  );
+
+  const t = createTrace({ task: 't', sessionId: 's1' });
+  t.recordBuild(build.summary);
+  const json = t.toJSON();
+  // trace 必须反映实际构建结果，而不是把“选中”当成“已注入”
+  assert.strictEqual(json.build.injectedItems, 1);
+  assert.strictEqual(json.build.skippedHistory.length, 1);
+  assert.strictEqual(json.build.skippedHistory[0].messageId, 'msg-history-1');
+  assert.match(json.build.skippedHistory[0].reason, /历史消息/);
+  assert.strictEqual(
+    json.build.skippedHistory[0].fetchedAt,
+    '2026-10-28T12:00:00.000Z'
+  );
+  assert.ok(
+    !JSON.stringify(json).includes('SENTINEL-4a2b'),
+    'skippedHistory 明细不得包含正文'
+  );
+});
+
 // ============ J. 真实 Agent 集成路径 ============
 
 test('J1: runContextEngine 全链路可用（route→planner→retrieve→adjudicate→build→verify）', async () => {
@@ -902,6 +981,76 @@ test('J3: 兼容开关默认关闭——未开启时引擎零调用', async () =
       process.env.BLUEBIRD_CONTEXT_ENGINE = enabledBefore;
     }
   }
+});
+
+test('J4: 用户历史 createdAt 参与时效判断与组内裁决，trace 可追溯', async () => {
+  const older = '2026-10-28T09:00:00.000Z';
+  const newer = '2026-10-28T10:00:00.000Z';
+  const out = await engine.runContextEngine({
+    task: '我住在哪里',
+    sessionId: 's1',
+    history: [
+      {
+        id: 'msg-old',
+        role: 'user',
+        content: '我住在杭州市西湖区文三路',
+        createdAt: older,
+      },
+      {
+        id: 'msg-new',
+        role: 'user',
+        content: '我住在杭州市西湖区文三路附近',
+        createdAt: newer,
+      },
+      { id: 'msg-assistant', role: 'assistant', content: '好的', createdAt: newer },
+    ],
+    systemPrompt: 'sys',
+    injectedTask: '我住在哪里',
+    enabledSources: ['user'],
+  });
+
+  const selected = out.decisions.selected.filter(entry => entry.source === 'user');
+  assert.strictEqual(selected.length, 1);
+  // createdAt 已进入条目时效，组内按时间最新选出新消息
+  assert.strictEqual(selected[0].freshness.fetched_at, newer);
+  assert.strictEqual(selected[0].historyMessageId, 'msg-new');
+  // 选中的历史消息不再注入 systemPrompt，但 trace 必须如实记录
+  assert.strictEqual(out.systemContexts.length, 0);
+  assert.strictEqual(out.trace.build.injectedItems, 0);
+  assert.strictEqual(out.trace.build.skippedHistory.length, 1);
+  assert.strictEqual(out.trace.build.skippedHistory[0].messageId, 'msg-new');
+  assert.strictEqual(out.trace.build.skippedHistory[0].fetchedAt, newer);
+});
+
+test('J5: 历史消息的附件/工具字段不进入引擎条目（特殊字段兼容）', async () => {
+  const createdAt = '2026-10-28T08:00:00.000Z';
+  const out = await retrieve({
+    task: '我喜欢喝什么',
+    history: [
+      {
+        id: 'msg-special',
+        role: 'user',
+        content: '我喜欢喝美式',
+        createdAt,
+        attachments: [{ id: 'att-1', mime: 'image/png' }],
+        toolSteps: [{ name: 'memory_search', ok: true }],
+        agentNotice: '不应进入引擎',
+      },
+      { id: 'msg-assistant', role: 'assistant', content: '好的' },
+    ],
+    enabledSources: ['user'],
+    config,
+  });
+
+  assert.strictEqual(out.items.length, 1);
+  const userItem = out.items[0];
+  assert.strictEqual(userItem.content, '我喜欢喝美式');
+  assert.strictEqual(userItem.historyMessageId, 'msg-special');
+  assert.strictEqual(userItem.freshness.fetched_at, createdAt);
+  // 特殊字段不进入 Context Engine 条目，避免无意扩大引擎消费面
+  assert.ok(!('attachments' in userItem));
+  assert.ok(!('toolSteps' in userItem));
+  assert.ok(!('agentNotice' in userItem));
 });
 
 // ============ K. 统一配置与 schema 校验 ============
