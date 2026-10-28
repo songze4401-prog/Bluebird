@@ -2986,7 +2986,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   sendEvent({ type: 'done', ...result, model, providerId: ctx.providerId, upstreamModel, modelRoute: ctx.modelRoute, sessionId: ctx.sessionId });
   res.end();
 
-  scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, [], {
+  scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments, {
     messageId: result && result.userMessageId ? result.userMessageId : null,
   });
 });
