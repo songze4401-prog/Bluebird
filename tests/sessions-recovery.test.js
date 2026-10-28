@@ -297,7 +297,9 @@ async function main() {
 
   for (let i = 0; i < 100 && !ready; i++) {
     try {
-      ready = (await fetch(BASE + '/')).ok;
+      ready = (await fetch(BASE + '/', {
+        headers: { Connection: 'close' },
+      })).ok;
     } catch (_) {
       await new Promise(resolve => setTimeout(resolve, 50));
     }
@@ -312,6 +314,10 @@ async function main() {
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${TOKEN}`,
+          // 测试进程退出前必须让客户端连接关闭；全局 fetch（undici）默认
+          // keep-alive，残留的客户端 Socket 会在 Windows/Node 24 上
+          // 与 process.exit 竞争，触发 libuv UV_HANDLE_CLOSING 断言。
+          Connection: 'close',
         },
         body: body ? JSON.stringify(body) : undefined,
       });
@@ -451,7 +457,10 @@ async function main() {
     /* 清理失败不影响结果 */
   }
 
-  process.exit(failed === 0 ? 0 : 1);
+  // 不要用 process.exit 强制终止：Windows/Node 24 上服务端句柄仍在
+  // closing 状态时，process.exit 会触发 libuv UV_HANDLE_CLOSING 断言。
+  // 让事件循环自然收尾，并把结果写进退出码。
+  process.exitCode = failed === 0 ? 0 : 1;
 }
 
 main().catch(error => {
@@ -476,5 +485,5 @@ main().catch(error => {
     /* ignore */
   }
 
-  process.exit(1);
+  process.exitCode = 1;
 });
