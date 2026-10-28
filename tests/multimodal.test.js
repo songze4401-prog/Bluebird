@@ -150,6 +150,15 @@ async function main() {
 
   stubModule('memory.js', {
     buildMemoryContext: () => '',
+    // Context Runtime v3 走 searchMemories；桩返回空结果，保持零网络/零真实记忆。
+    searchMemories: () => ({
+      results: [],
+      total: 0,
+      estimatedTokens: 0,
+      truncated: false,
+      mode: 'current',
+      diagnostics: {},
+    }),
     processMemory: async (client, text, sessionId) => {
       memoryCalls.push({ text, sessionId });
       return null;
@@ -723,6 +732,41 @@ async function main() {
 
   const delGone = await req(`/uploads/image/${up2.json.id}`, { method: 'DELETE' });
   check('回收后的图片再删返回 404', delGone.status === 404, `status=${delGone.status}`);
+
+  // D5 达到 1000 条保留上限时，被裁消息的附件也要回收
+  const sessionsModule = require(path.join(SERVER, 'sessions.js'));
+  const trimUpload = await req('/uploads/image', {
+    method: 'POST',
+    body: { image: dataUrl(PNG_BUF, 'image/png'), kind: 'image' },
+  });
+  const trimImageId = trimUpload.json.id;
+  const filler = Array.from({ length: 999 }, (_, i) => ({
+    id: `trim-fill-${i}`,
+    role: 'user',
+    content: `裁剪填充 ${i}`,
+  }));
+  sessionsModule.appendMessages(sessionId, [
+    {
+      id: 'trim-image-message',
+      role: 'user',
+      content: '最早一条带图消息',
+      attachments: [{ id: trimImageId, kind: 'image', mime: 'image/png' }],
+    },
+    ...filler,
+  ]);
+  const beforeTrim = sessionsModule.getMessages(sessionId).length;
+  check('裁剪前会话达到 1000 条', beforeTrim === 1000, `实际 ${beforeTrim}`);
+  check('裁剪前图片文件存在', findUploadFile(trimImageId) !== null);
+
+  const trimChat = await req('/chat', {
+    method: 'POST',
+    body: { message: '触发保留上限裁剪', sessionId },
+  });
+  check('触发裁剪的聊天仍成功', trimChat.status === 200, `status=${trimChat.status}`);
+  check(
+    '被裁消息的图片文件已回收',
+    findUploadFile(trimImageId) === null
+  );
 
   // ---- 汇总 ----
   ORIG_LOG(

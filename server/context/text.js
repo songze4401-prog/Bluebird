@@ -19,9 +19,27 @@ function normalizeForMatch(value) {
     .replace(/\s+/g, '');
 }
 
+// 历史选择会对同一批旧消息逐请求重复分词；消息内容不可变，按原文做有界缓存。
+// 缓存只影响性能，不改变任何匹配结果；达到上限时淘汰最早条目。
+const MATCH_CACHE_MAX = 6000;
+const tokenCache = new Map();
+const entityCache = new Map();
+
+function remember(map, key, value) {
+  if (map.size >= MATCH_CACHE_MAX) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(key, value);
+  return value;
+}
+
 // 词元：CJK 二元组 + 拉丁/数字词。去重后用于集合匹配。
 function tokenSet(value) {
-  const text = normalizeForMatch(value);
+  const original = String(value || '');
+  if (tokenCache.has(original)) return tokenCache.get(original);
+
+  const text = normalizeForMatch(original);
   const tokens = new Set();
 
   for (const match of text.matchAll(LATIN_WORD_RE)) {
@@ -36,7 +54,12 @@ function tokenSet(value) {
     }
   }
 
-  return tokens;
+  return remember(tokenCache, original, tokens);
+}
+
+function clearMatchCaches() {
+  tokenCache.clear();
+  entityCache.clear();
 }
 
 // candidate 有多少内容出现在 context 中（0~1）。短文本要求更严格。
@@ -61,6 +84,8 @@ function jaccard(a, b) {
 
 function extractEntities(value) {
   const text = String(value || '');
+  if (entityCache.has(text)) return entityCache.get(text);
+
   const entities = new Set();
 
   for (const match of text.matchAll(ENTITY_RE)) {
@@ -73,7 +98,7 @@ function extractEntities(value) {
     if (word.length >= 3 && !/^\d+$/.test(word)) entities.add(word);
   }
 
-  return entities;
+  return remember(entityCache, text, entities);
 }
 
 function entityOverlap(query, text) {
@@ -186,6 +211,7 @@ module.exports = {
   overlapScore,
   valueSignature,
   valuesDiffer,
+  clearMatchCaches,
   neutralizeContextText,
   stripProtocolMarkers,
   describeMessageContent,

@@ -187,6 +187,55 @@ describe('历史加载的竞态防护', () => {
     expect(hook.result.current.messages[0].segments).toBeTruthy();
   });
 
+  it('向上翻页：用 before 游标请求旧页并前置，不重复已有消息', async () => {
+    mockApiFetch
+      .mockImplementationOnce(() =>
+        Promise.resolve(
+          jsonResponse({
+            sessionId: 'sess-A',
+            history: [{ id: 'newer', role: 'user', content: '新消息' }],
+            hasMore: true,
+            nextCursor: 'newer',
+          })
+        )
+      )
+      .mockImplementationOnce(() =>
+        Promise.resolve(
+          jsonResponse({
+            sessionId: 'sess-A',
+            history: [{ id: 'older', role: 'user', content: '旧消息' }],
+            hasMore: false,
+            nextCursor: null,
+          })
+        )
+      );
+
+    const hook = await setup();
+
+    await act(async () => {
+      await hook.result.current.loadHistory('sess-A');
+    });
+
+    expect(hook.result.current.hasMoreHistory).toBe(true);
+
+    await act(async () => {
+      hook.result.current.markHistoryLoaded();
+    });
+
+    await act(async () => {
+      await hook.result.current.loadOlderHistory();
+    });
+
+    expect(mockApiFetch.mock.calls[1][0]).toBe(
+      '/history?sessionId=sess-A&limit=50&before=newer'
+    );
+    expect(hook.result.current.messages.map(m => m.content)).toEqual([
+      '旧消息',
+      '新消息',
+    ]);
+    expect(hook.result.current.hasMoreHistory).toBe(false);
+  });
+
   it('空会话渲染欢迎语（不是空气泡列表）', async () => {
     mockApiFetch.mockImplementationOnce(() =>
       Promise.resolve(jsonResponse({ sessionId: 'empty', history: [] }))

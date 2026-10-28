@@ -16,6 +16,7 @@ import { StyleSheet } from 'react-native';
 import { fireEvent, render, screen } from '@testing-library/react-native';
 
 import { ChatBubble } from '../../components/ChatBubble';
+import { MessageList } from '../../components/MessageList';
 import { ChatHeader } from '../../components/ChatHeader';
 import { ChatInput } from '../../components/ChatInput';
 import { SettingsDrawer } from '../../components/SettingsDrawer';
@@ -302,6 +303,39 @@ describe('原有交互没被改版吃掉', () => {
     await fireEvent(screen.getByLabelText('长按撤回这条消息'), 'longPress');
 
     expect(onRecall).toHaveBeenCalledWith(item);
+  });
+
+  it('历史还有更早页时显示「加载更早消息」，点击触发翻页回调', async () => {
+    const onLoadOlder = jest.fn().mockResolvedValue({ ok: true, status: 200 });
+
+    await render(
+      <MessageList
+        theme={theme}
+        messages={[
+          {
+            id: 'm1',
+            role: 'user',
+            content: '当前页最早一条',
+            createdAt,
+          },
+        ]}
+        sessionId="s1"
+        loadingHistory={false}
+        loadingOlder={false}
+        hasMoreHistory
+        onLoadOlder={onLoadOlder}
+        sending={false}
+        continuing={false}
+        liveToolSteps={[]}
+        onRecall={noop}
+        onRetry={noop}
+        onContinue={noop}
+      />
+    );
+
+    await fireEvent.press(screen.getByLabelText('加载更早消息'));
+
+    expect(onLoadOlder).toHaveBeenCalledTimes(1);
   });
 
   it('最新一条助手回复有「继续说」，非最后一条没有', async () => {

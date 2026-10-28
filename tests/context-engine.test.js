@@ -755,6 +755,20 @@ test('F7: 输入保护裁剪发生在运行时，并记录 dropped 与注入 ID 
 
 // ============ G. Trace 阶段 ============
 
+test('F8: 1000 条历史仍能召回近期窗口之外的关键事实', async () => {
+  const items = longFiller(1000, 4);
+  items[5] = message('fact-1000', 'user', '我的保单号是 POL-1000-KEEP。', 5);
+  const out = await runRuntime({
+    items,
+    query: '我的保单号是什么？',
+  });
+  assert.strictEqual(out.ok, true);
+  assert.strictEqual(out.trace.history.totalMessages, 1000);
+  assert.ok(out.trace.history.recent > 20);
+  assert.ok(out.trace.history.recalled >= 1);
+  assert.ok(out.systemPrompt.includes('POL-1000-KEEP'));
+});
+
 test('G1: 新 trace 具备 candidate/selected/accepted/injected/sent 阶段与 consumed=null', async () => {
   const out = await runRuntime({ items: longFiller(10, 2) });
   const json = out.traceApi.toJSON();

@@ -1,12 +1,12 @@
 {
   "version": 1,
   "updateRule": "新增/删除 tests/*.test.js 或改变用例数时，必须在同一变更中更新 files、backendTotal、nodeTestSuiteTotal、runnerTotal、frontend；不得只改总数或删除条目。nodeTestSuiteFiles 只包含由 node --test 六套命令执行的文件；runnerFiles 包含 CI 自定义 runner 逐文件执行的 33 个条目（其中 6 个仍使用 node:test 但按单文件退出码执行）。CI 清单必须覆盖所有 files 条目，verify-test-coverage.js 会检查。",
-  "backendTotal": 1323,
-  "nodeTestSuiteTotal": 192,
-  "runnerTotal": 1131,
+  "backendTotal": 1344,
+  "nodeTestSuiteTotal": 193,
+  "runnerTotal": 1151,
   "frontend": {
     "suites": 7,
-    "tests": 108
+    "tests": 111
   },
   "nodeTestSuiteFiles": [
     "memory",
@@ -61,12 +61,12 @@
     "memory-session-scope": { "format": "custom", "count": 19, "runner": true },
     "session-scope-e2e": { "format": "custom", "count": 19, "runner": true },
     "sessions-recovery": { "format": "custom", "count": 36, "runner": true },
-    "sessions": { "format": "custom", "count": 39, "runner": true },
+    "sessions": { "format": "custom", "count": 55, "runner": true },
     "presence": { "format": "custom", "count": 52, "runner": true },
     "time-gap": { "format": "custom", "count": 29, "runner": true },
     "persona": { "format": "custom", "count": 38, "runner": true },
     "chat-stream": { "format": "custom", "count": 36, "runner": true },
-    "multimodal": { "format": "custom", "count": 54, "runner": true },
+    "multimodal": { "format": "custom", "count": 58, "runner": true },
     "sticker-repo": { "format": "custom", "count": 58, "runner": true },
     "model-providers": { "format": "custom", "count": 113, "runner": true },
     "model-routing": { "format": "custom", "count": 21, "runner": true },
@@ -90,6 +90,6 @@
     "sticker-markers": { "format": "node", "count": 12, "runner": false },
     "streaming-segments": { "format": "node", "count": 10, "runner": false },
     "backup": { "format": "node", "count": 50, "runner": false },
-    "context-engine": { "format": "node", "count": 46, "runner": false }
+    "context-engine": { "format": "node", "count": 47, "runner": false }
   }
 }

@@ -141,12 +141,14 @@ const crypto = require('crypto');
 // 全部收在 sessions.js，index.js 只负责路由与请求编排。
 const {
   DEFAULT_SESSION_ID,
-  SESSION_MESSAGE_MAX,
+  HISTORY_PAGE_MAX,
+  HISTORY_PAGE_DEFAULT,
+  getHistoryPage,
   listSessions,
   getSession,
   createSession,
   getMessages,
-  appendMessages,
+  appendMessagesDetailed,
   replaceMessages,
   getAllMessages,
   deleteSession,
@@ -870,12 +872,24 @@ app.get('/history', requireAuth, (req, res) => {
     }
 
     const limit = Math.min(
-      Math.max(parseInt(req.query.limit, 10) || 50, 1),
-      SESSION_MESSAGE_MAX
+      Math.max(parseInt(req.query.limit, 10) || HISTORY_PAGE_DEFAULT, 1),
+      HISTORY_PAGE_MAX
     );
+    const before =
+      typeof req.query.before === 'string' && req.query.before.trim()
+        ? req.query.before.trim()
+        : null;
 
-    // 表情包附件失效标注：仓库已物理删除时给前端明确的占位信号
-    const history = getMessages(sessionId, limit) || [];
+    // 表情包附件失效标注：仓库已物理删除时给前端明确的占位信号。
+    // page 返回副本，标注不会写回 sessions.json。
+    const page = getHistoryPage(sessionId, { limit, before });
+    if (!page) {
+      return res.status(404).json({ error: '会话不存在' });
+    }
+    if (page.invalidCursor) {
+      return res.status(400).json({ error: 'before 游标不存在' });
+    }
+    const history = page.items;
     for (const item of history) {
       if (!Array.isArray(item.attachments)) continue;
       for (const att of item.attachments) {
@@ -888,6 +902,9 @@ app.get('/history', requireAuth, (req, res) => {
     res.json({
       sessionId,
       history,
+      // 新增字段是向后兼容的：旧客户端忽略即可；新客户端据此向上翻页。
+      hasMore: page.hasMore,
+      nextCursor: page.nextCursor,
     });
   } catch (error) {
     console.error('History API Error:', error);
@@ -2341,7 +2358,7 @@ function completeChatTurn({
   // 边界拆成多条气泡。每条分条是独立的 assistant 消息，撤回会整轮删除。
   const segments = splitReplyIntoSegments(reply, personaConfig.messageMode);
 
-  // 同步生成稳定 id 并立即返回给前端（撤回需要）；appendMessages 会沿用已有 id。
+  // 同步生成稳定 id 并立即返回给前端（撤回需要）；appendMessagesDetailed 会沿用已有 id。
   const now = new Date().toISOString();
 
   // 回复带出的图片/表情包附件挂在最后一格气泡上：阅读顺序与
@@ -2381,10 +2398,13 @@ function completeChatTurn({
   // 竞争（Node 单线程下这段同步代码不可被打断）。
   // 客户端已断开时不落盘，避免回复成为"幽灵消息"（用户没收到却已入库）。
   let persisted = false;
+  let trimmedMessages = [];
 
   if (!isClientGone()) {
     try {
-      persisted = !!appendMessages(sessionId, stamped);
+      const appended = appendMessagesDetailed(sessionId, stamped);
+      persisted = !!appended.messages;
+      trimmedMessages = Array.isArray(appended.trimmed) ? appended.trimmed : [];
 
       if (!persisted) {
         console.error(
@@ -2396,6 +2416,22 @@ function completeChatTurn({
       }
     } catch (error) {
       console.error('History save error:', error);
+    }
+  }
+
+  // 达到保留上限后裁掉的旧消息：它们的图片/表情包引用可能已无人使用。
+  // 必须等落盘成功后再扫描全库；只删确认无引用的文件，清理失败不影响回复。
+  if (persisted && trimmedMessages.length) {
+    try {
+      const removed = releaseOrphanAttachments(
+        trimmedMessages.map(item => item && item.attachments)
+      );
+      console.log(
+        `[sessions] trimmed=${trimmedMessages.length}` +
+          ` session=${sessionId} releasedUploads=${removed.length}`
+      );
+    } catch (error) {
+      console.error('Trim orphan cleanup error:', error.message);
     }
   }
 

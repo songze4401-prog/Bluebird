@@ -22,6 +22,12 @@ describe('参数化路径与重构前字面量一致', () => {
     );
   });
 
+  it('history：before 游标编码并附加在 limit 之后', () => {
+    expect(API_PATHS.history(ID, 50, 'message/id')).toBe(
+      `/history?sessionId=${encodeURIComponent(ID)}&limit=50&before=${encodeURIComponent('message/id')}`
+    );
+  });
+
   it('session / modelProvider / modelProviderTest / modelProviderEnabled', () => {
     expect(API_PATHS.session(ID)).toBe(`/sessions/${encodeURIComponent(ID)}`);
     expect(API_PATHS.modelProvider(ID)).toBe(

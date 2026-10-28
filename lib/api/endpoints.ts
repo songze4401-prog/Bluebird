@@ -12,8 +12,9 @@ export const API_PATHS = {
   session: (id: string) => `/sessions/${encodeURIComponent(id)}`,
 
   // 历史
-  history: (sessionId: string, limit = 200) =>
-    `/history?sessionId=${encodeURIComponent(sessionId)}&limit=${limit}`,
+  history: (sessionId: string, limit = 200, before?: string | null) =>
+    `/history?sessionId=${encodeURIComponent(sessionId)}&limit=${limit}` +
+    (before ? `&before=${encodeURIComponent(before)}` : ''),
   historyClear: '/history/clear',
   historyRecall: '/history/recall',
 

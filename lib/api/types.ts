@@ -52,6 +52,9 @@ export type HistoryMessage = {
 export type HistoryResponse = {
   sessionId: string;
   history: HistoryMessage[];
+  // 分页字段为新增可选项：旧服务端不返回时前端按“没有更早消息”处理。
+  hasMore?: boolean;
+  nextCursor?: string | null;
 };
 
 export type ClearHistoryResponse = {
