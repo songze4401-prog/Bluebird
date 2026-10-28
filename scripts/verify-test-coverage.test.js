@@ -6,6 +6,8 @@ const {
   parseCustomOutput,
   parseBackendOutput,
   evaluateInventory,
+  extractCiTestNames,
+  evaluateCiCoverage,
 } = require('./verify-test-coverage');
 
 let passed = 0;
@@ -111,6 +113,51 @@ check('新增未登记文件失败', () => {
   });
   assert.equal(outcome.ok, false);
   assert.ok(outcome.errors.some(error => error.includes('未登记')));
+});
+
+console.log('\n3) CI runner 覆盖');
+check('显式路径与 for 循环清单都能提取', () => {
+  const names = extractCiTestNames(`
+    steps:
+      - run: node --test tests/node-case.test.js
+      - run: |
+          for f in custom-case; do
+            node "tests/$f.test.js"
+          done
+  `);
+  assert.deepEqual([...names].sort(), ['custom-case', 'node-case']);
+});
+check('CI 覆盖全部登记文件时通过', () => {
+  const outcome = evaluateCiCoverage(
+    baseline(),
+    'run: node --test tests/node-case.test.js\nfor f in custom-case; do node "tests/$f.test.js"; done'
+  );
+  assert.equal(outcome.ok, true, outcome.errors.join('\n'));
+});
+check('CI 漏掉一个登记文件时失败', () => {
+  const outcome = evaluateCiCoverage(
+    baseline(),
+    'run: node --test tests/node-case.test.js'
+  );
+  assert.equal(outcome.ok, false);
+  assert.ok(outcome.errors.some(error => error.includes('custom-case')));
+});
+check('注释里的 tests/xxx.test.js 不算 CI 覆盖', () => {
+  const outcome = evaluateCiCoverage(
+    baseline(),
+    '# tests/custom-case.test.js\nrun: node --test tests/node-case.test.js'
+  );
+  assert.equal(outcome.ok, false);
+  assert.ok(outcome.errors.some(error => error.includes('custom-case')));
+});
+check('CI 引用未登记测试文件时失败', () => {
+  const outcome = evaluateCiCoverage(
+    baseline(),
+    'run: node --test tests/node-case.test.js\n' +
+      'for f in custom-case ghost; do node "tests/$f.test.js"; done'
+  );
+  assert.equal(outcome.ok, false);
+  assert.ok(outcome.errors.some(error => error.includes('ghost')));
 });
 
 console.log(`\n通过 ${passed} 项，失败 ${failed} 项`);

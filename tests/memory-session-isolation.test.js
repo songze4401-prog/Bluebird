@@ -164,8 +164,7 @@ describe('三条读路径都不串读（两个会话保存相似但不同的事�
   test('会话 A：检索/引擎精确命中「美式」，注入含自己的记忆且绝不含「拿铁」', async () => {
     const paths = await allThreePaths(COFFEE_QUERY, SESSION_A);
 
-    // 注入路径对 ≤SMALL_MEMORY_LIMIT 的候选池是全量注入（按设计跳过相关性过滤），
-    // 所以它会把 A 自己的两条都带上；隔离看的是"不含别人的"。
+    // 注入路径也按相关性过滤；隔离看的是"不含别人的"，不是条数。
     assert.deepEqual(paths.scoped, ['用户喝咖啡只喝美式']);
     assert.deepEqual(paths.engine, ['用户喝咖啡只喝美式']);
     assert.ok(paths.injected.includes('用户喝咖啡只喝美式'), paths.injected.join('\n'));
@@ -197,10 +196,20 @@ describe('三条读路径都不串读（两个会话保存相似但不同的事�
     for (const missing of [null, undefined, '', '   ']) {
       const injected = extractContents(memory.buildMemoryContext(COFFEE_QUERY, missing));
 
+      // 相关性过滤后咖啡查询可能一条都不注入；隔离的判据是"绝不出现具名会话的条目"。
+      assert.ok(
+        injected.every(content => LEGACY_ONLY.includes(content)),
+        `P0 泄漏口子：sessionId=${JSON.stringify(missing)} 时咖啡类具名记忆一条都不许出现：${JSON.stringify(injected)}`
+      );
+
+      const cityInjected = extractContents(
+        memory.buildMemoryContext(CITY_QUERY, missing)
+      );
+
       assert.deepEqual(
-        injected,
+        cityInjected,
         LEGACY_ONLY,
-        `P0 泄漏口子：sessionId=${JSON.stringify(missing)} 时咖啡类具名记忆一条都不许出现`
+        `无归属旧数据在城市查询下应可见，sessionId=${JSON.stringify(missing)}`
       );
 
       const cityQuery = memory.searchMemories({
@@ -247,7 +256,7 @@ describe('三条读路径都不串读（两个会话保存相似但不同的事�
         const asSet = list => [...new Set(list)].sort().join('|');
 
         // 工具与引擎共用 searchMemories，结论必须逐字相同；
-        // 注入路径条数可以更多（小库全量注入），但只能落在同一个可见池内。
+        // 注入路径可以更少（独立的条数/token 预算），但只能落在同一个可见池内。
         assert.equal(
           asSet(paths.scoped),
           asSet(paths.engine),

@@ -1,6 +1,7 @@
 # Bluebird 第二轮：记忆写入决策引擎与生命周期管理
 
 基线：`0511e13`（第一轮启动竞态修复已提交并推送）。本文件记录阶段 A 的架构映射、阶段 B–D 的实现契约，以及阶段 E 的验收证据与剩余风险。
+本轮补充（2026-10-28）：在 `e78006e` 基线上追加记忆检索过滤/评分/预算能力、Agent 开关文档与 CI 覆盖守卫；以下第 4、6、7 节同步更新，历史基线保留用于追溯。
 
 ## 1. 模块边界
 
@@ -65,7 +66,16 @@
 
 ### 检索
 
-`searchMemories({ mode: 'current' | 'history', asOf })`；历史模式必须提供合法 `asOf`。当前模式只返回有效 `active` 条目；历史模式可返回当时有效的 `active/superseded/archived`，永不返回 `pending`。Context Engine 默认使用当前模式。
+`searchMemories({ query, sessionId, mode: 'current' | 'history', asOf, filters, limits })`；历史模式必须提供合法 `asOf`。当前模式只返回有效 `active` 条目；历史模式可返回当时有效的 `active/superseded/archived`，永不返回 `pending`。
+
+- `filters.sources`：`user`/`agent`/`tool`/`model`/`import`；条目贡献里没有 `sourceType` 时不算匹配。
+- `filters.statuses`：`active`/`superseded`/`archived`；`pending` 不是可检索事实。
+- `filters.timeFrom`/`timeTo`/`timeField`：`valid`（默认，按有效期区间相交）/`created`/`updated`；缺失该字段的条目不匹配。
+- 维度之间 AND，维度内 OR；过滤与排序先于条数/长度/字符/token 截断。
+- `limits`：`maxItems`、`perItemMax`（码点）、`totalMax`（码点）、`maxTokens`（近似 token）。
+- 返回 `results` 与 `diagnostics`：命中理由、分项评分、来源类型、ID、`contentTruncated`、排除计数、`limitTruncated`/`budgetTruncated`、`notReturned` 原因。
+- `bigramScore` 是字符二元组重合的词面近似，标记为 `semanticKind: 'lexical_bigram_only'`；仓库没有向量/模型 embedding 依赖，不宣称向量语义检索。
+- 小记忆库不再全量注入；`identity` 由类型保底规则保留，其余条目仍须命中查询。
 
 ## 5. 数据兼容与迁移
 
@@ -80,8 +90,9 @@
 |---|---|
 | `node tests/memory-lifecycle-decisions.test.js` | 16/16 |
 | `node tests/memory-agent-write.test.js` | 8/8 |
+| `node tests/memory-retrieval.test.js` | 47/47（过滤、排序、预算、可解释元数据、工具校验） |
 | `node tests/agent-tools.test.js` | 119/119（原有检索链路+新工具白名单） |
-| `npm test` | 37 个测试文件全部通过 |
+| `npm test` | 38 个测试文件全部通过 |
 | `npm run test:unit` | 106/106 |
 | `npx tsc --noEmit -p tsconfig.json` | 通过 |
 | `npm run lint` | 通过 |
@@ -93,8 +104,11 @@
 - 置信度是模型自报，不是事实真值；低置信只控制写入/待确认，不替代来源证据。
 - 自动提取没有事件发生时间/适用条件字段，只有 Agent 候选可显式提供；自动路径的“不同时间/条件”判断能力弱于受控接口。
 - 跨会话同内容重述仍按“同一事实多来源”合并贡献（保留既有共享语义）；跨会话冲突/更正不会跨私有权重裁。
+- 检索的“语义”部分是字符二元组词面近似（`lexical_bigram_only`），不是向量/embedding 检索；同义改写、跨语言召回归为已知限制。
+- token 预算是启发式估算（CJK≈1、ASCII≈0.25、其他≈0.5），不是模型分词器精确计数；预算只约束记忆正文/摘要，不包含固定提示词框架。
+- 当前模式的 `statuses` 过滤只能选 `active`；查看 `superseded`/`archived` 必须显式使用 `mode=history` 与 `asOf`。来源/时间过滤时，缺失对应字段的旧条目不匹配。
+- 备份脚本存在不等于已调度或已做恢复演练；本轮只运行了备份单元测试，生产调度与恢复演练仍未验证。
 - `archived` 当前作为持久状态保存，但尚无独立批量归档 UI；历史读取需显式 `mode=history`。
 - 初始化排他创建依赖同一目录内 `link()`；不支持硬链接的文件系统会让初始化进入既有损坏兜底。该平台兼容性未验证。
 - 自然并发下锁前窗口的触发频率未测；启动竞态修复已由故障注入回归覆盖。
 - 评测夹具 Q21 的旧事实 M09 属 `s-private`，`s-main` 的更正不得跨会话修改它；Q21 不再把 M09 记作 `s-main` 的更正残留，只用 `forbid` 验证它不可被 `s-main` 读取。相关测试里的负时间偏移也修正为真正的“过去”。
-- 跨会话同内容重述仍按“同一事实多来源”合并贡献；跨会话冲突/更正不会跨私有权重裁。

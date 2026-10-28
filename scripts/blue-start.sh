@@ -9,6 +9,12 @@ cd "$REPO_ROOT" || { echo "✗ 无法进入项目目录: $REPO_ROOT"; exit 1; }
 
 echo "Bluebird starting..."
 
+# 只展示开关状态，不打印 .env 内容或密钥；不设置/覆盖用户配置。
+AGENT_TOOLS_STATUS="$(
+  node -e "require('dotenv').config({ path: 'server/.env', quiet: true }); process.stdout.write(process.env.BLUEBIRD_AGENT_TOOLS === '1' ? 'enabled' : 'disabled')" 2>/dev/null
+)" || AGENT_TOOLS_STATUS="disabled"
+echo "Agent tools: ${AGENT_TOOLS_STATUS:-disabled}"
+
 # ---- 后端 API :3000 ----
 if curl -sf -o /dev/null --max-time 2 http://localhost:3000/; then
   echo "✓ API :3000 (已在运行)"

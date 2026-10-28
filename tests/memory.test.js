@@ -141,7 +141,7 @@ describe('buildMemoryContext 上下文注入', SERIAL, () => {
     assert.equal(memory.buildMemoryContext('   '), '');
   });
 
-  test('小记忆集(<=15)全量注入，不过滤', () => {
+  test('小记忆集也按相关性过滤，identity 仍保底注入', () => {
     seed([
       { content: '用户叫宋泽', type: 'identity' },
       { content: '用户喜欢喝美式咖啡', type: 'preference' },
@@ -149,7 +149,11 @@ describe('buildMemoryContext 上下文注入', SERIAL, () => {
     const ctx = memory.buildMemoryContext('今天天气怎么样');
     assert.match(ctx, /【关于用户的长期记忆】/);
     assert.match(ctx, /用户叫宋泽/);
-    assert.match(ctx, /用户喜欢喝美式咖啡/);
+    assert.doesNotMatch(
+      ctx,
+      /用户喜欢喝美式咖啡/,
+      '小库不得绕过相关性过滤无条件全量注入'
+    );
   });
 
   test('记忆摘要按类别优先级排序（identity 在前）', () => {
@@ -157,7 +161,7 @@ describe('buildMemoryContext 上下文注入', SERIAL, () => {
       { content: '用户住在杭州', type: 'fact' },
       { content: '用户叫宋泽', type: 'identity' },
     ]);
-    const ctx = memory.buildMemoryContext('你好');
+    const ctx = memory.buildMemoryContext('我住在哪里');
     const summaryLine = ctx.split('\n').find(l => l.startsWith('记忆摘要：'));
     assert.ok(summaryLine, '应包含记忆摘要行');
     assert.ok(

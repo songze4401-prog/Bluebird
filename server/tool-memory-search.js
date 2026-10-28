@@ -19,7 +19,41 @@ const LIMITS = Object.freeze({
   limitDefault: 5,
   perItemMax: 300, // 单条记忆内容上限（码点）
   totalMax: 2000, // 全部结果总字符预算（码点）
+  maxTokens: 1200, // 全部结果 content 的近似 token 预算
+  sourcesMax: 5,
+  statusesMax: 3,
 });
+
+const SOURCE_VALUES = Object.freeze(['user', 'agent', 'tool', 'model', 'import']);
+const STATUS_VALUES = Object.freeze(['active', 'superseded', 'archived']);
+const TIME_FIELDS = Object.freeze(['valid', 'created', 'updated']);
+
+function validateEnumList(value, allowed, label) {
+  if (!Array.isArray(value) || !value.length) {
+    return { ok: false, error: `${label} 必须是非空数组` };
+  }
+  if (value.length > allowed.length) {
+    return { ok: false, error: `${label} 元素过多` };
+  }
+  const result = [];
+  for (const item of value) {
+    if (typeof item !== 'string' || !allowed.includes(item)) {
+      return { ok: false, error: `${label} 包含非法值` };
+    }
+    if (!result.includes(item)) result.push(item);
+  }
+  return { ok: true, value: result };
+}
+
+function validateTime(value, label) {
+  if (typeof value !== 'string' || !value.trim()) {
+    return { ok: false, error: `${label} 必须是非空 ISO 时间` };
+  }
+  if (!Number.isFinite(Date.parse(value))) {
+    return { ok: false, error: `${label} 不是合法时间` };
+  }
+  return { ok: true, value };
+}
 
 const definition = Object.freeze({
   name: 'memory_search',
@@ -50,6 +84,34 @@ const definition = Object.freeze({
       asOf: Object.freeze({
         type: 'string',
         description: '历史查询的时间点（ISO 时间）；仅 mode=history 时必填',
+      }),
+      sources: Object.freeze({
+        type: 'array',
+        items: Object.freeze({ type: 'string', enum: SOURCE_VALUES }),
+        maxItems: LIMITS.sourcesMax,
+        description:
+          '可选：按来源类型过滤（user/agent/tool/model/import）；缺省不过滤，指定时缺少来源的旧条目不算匹配',
+      }),
+      statuses: Object.freeze({
+        type: 'array',
+        items: Object.freeze({ type: 'string', enum: STATUS_VALUES }),
+        maxItems: LIMITS.statusesMax,
+        description:
+          '可选：按状态过滤（active/superseded/archived）；pending 不属于可检索事实',
+      }),
+      timeFrom: Object.freeze({
+        type: 'string',
+        description: '可选：时间范围起点（ISO）',
+      }),
+      timeTo: Object.freeze({
+        type: 'string',
+        description: '可选：时间范围终点（ISO）',
+      }),
+      timeField: Object.freeze({
+        type: 'string',
+        enum: TIME_FIELDS,
+        description:
+          '时间范围作用字段：valid=有效期（默认）/created=创建时间/updated=更新时间',
       }),
     }),
     required: Object.freeze(['query']),
@@ -100,7 +162,70 @@ const definition = Object.freeze({
       asOf = args.asOf;
     }
 
-    return { ok: true, args: { query, limit, mode, asOf } };
+    const filters = {};
+
+    if (args.sources !== undefined) {
+      const sources = validateEnumList(args.sources, SOURCE_VALUES, 'sources');
+      if (!sources.ok) return sources;
+      filters.sources = sources.value;
+    }
+
+    if (args.statuses !== undefined) {
+      const statuses = validateEnumList(
+        args.statuses,
+        STATUS_VALUES,
+        'statuses'
+      );
+      if (!statuses.ok) return statuses;
+      filters.statuses = statuses.value;
+    }
+
+    const hasTimeFrom = args.timeFrom !== undefined;
+    const hasTimeTo = args.timeTo !== undefined;
+
+    if (hasTimeFrom || hasTimeTo) {
+      if (hasTimeFrom) {
+        const from = validateTime(args.timeFrom, 'timeFrom');
+        if (!from.ok) return from;
+        filters.timeFrom = from.value;
+      }
+      if (hasTimeTo) {
+        const to = validateTime(args.timeTo, 'timeTo');
+        if (!to.ok) return to;
+        filters.timeTo = to.value;
+      }
+      if (
+        filters.timeFrom &&
+        filters.timeTo &&
+        Date.parse(filters.timeFrom) > Date.parse(filters.timeTo)
+      ) {
+        return { ok: false, error: 'timeFrom 不能晚于 timeTo' };
+      }
+    }
+
+    if (args.timeField !== undefined) {
+      if (!TIME_FIELDS.includes(args.timeField)) {
+        return {
+          ok: false,
+          error: 'timeField 必须是 valid/created/updated',
+        };
+      }
+      if (!hasTimeFrom && !hasTimeTo) {
+        return { ok: false, error: 'timeField 必须与 timeFrom/timeTo 一起使用' };
+      }
+      filters.timeField = args.timeField;
+    }
+
+    return {
+      ok: true,
+      args: {
+        query,
+        limit,
+        mode,
+        asOf,
+        filters: Object.keys(filters).length ? filters : null,
+      },
+    };
   },
 
   /**
@@ -114,10 +239,12 @@ const definition = Object.freeze({
       sessionId: context && context.sessionId,
       mode: args.mode || 'current',
       asOf: args.asOf || null,
+      filters: args.filters || null,
       limits: {
         maxItems: LIMITS.limitMax,
         perItemMax: LIMITS.perItemMax,
         totalMax: LIMITS.totalMax,
+        maxTokens: LIMITS.maxTokens,
       },
     });
 
@@ -129,6 +256,12 @@ const definition = Object.freeze({
       validFrom: item.validFrom,
       validTo: item.validTo,
       confidence: item.confidence,
+      relevance: item.relevance,
+      score: item.score,
+      match: item.match,
+      sourceTypes: item.sourceTypes,
+      scope: item.scope,
+      contentTruncated: item.contentTruncated === true,
     }));
 
     return {
@@ -136,7 +269,24 @@ const definition = Object.freeze({
       mode: found.mode || args.mode || 'current',
       results,
       total: found.total,
+      estimatedTokens: found.estimatedTokens || 0,
       truncated: found.truncated === true,
+      truncatedItems: found.truncatedItems || 0,
+      budget: {
+        estimatedTokens: found.estimatedTokens || 0,
+        maxTokens: LIMITS.maxTokens,
+        estimator:
+          found.diagnostics && found.diagnostics.tokenEstimator
+            ? found.diagnostics.tokenEstimator
+            : null,
+        exceeded:
+          Boolean(found.diagnostics) &&
+          found.diagnostics.budgetTruncated === true,
+      },
+      excluded:
+        found.diagnostics && found.diagnostics.excluded
+          ? found.diagnostics.excluded
+          : null,
       ...(found.reason ? { reason: found.reason } : {}),
       summary:
         found.reason === 'memory_disabled'

@@ -18,6 +18,7 @@ const { spawnSync } = require('child_process');
 const ROOT = path.join(__dirname, '..');
 const TESTS_DIR = path.join(ROOT, 'tests');
 const BASELINE_FILE = path.join(__dirname, 'test-coverage-baseline.json');
+const CI_FILE = path.join(ROOT, '.github', 'workflows', 'ci.yml');
 
 function readBaseline(file = BASELINE_FILE) {
   return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -154,6 +155,55 @@ function discoverBackendFiles() {
     .filter(name => name.endsWith('.test.js'))
     .map(name => name.slice(0, -'.test.js'.length))
     .sort();
+}
+
+// CI 清单提取：既认显式 tests/<name>.test.js，也认
+// `for f in a b c; do node "tests/$f.test.js"` 这种循环写法。
+// 先剥掉 YAML/Shell 注释，避免“只在注释里出现”被误判为已覆盖。
+function extractCiTestNames(ciText) {
+  const text = String(ciText || '').replace(/#.*$/gm, '');
+  const names = new Set();
+  const explicit = /tests\/([a-z0-9_-]+)\.test\.js/g;
+  let match = explicit.exec(text);
+
+  while (match) {
+    names.add(match[1]);
+    match = explicit.exec(text);
+  }
+
+  const loops = /for\s+f\s+in\s+([^;]+);\s*do/g;
+  match = loops.exec(text);
+
+  while (match) {
+    for (const name of match[1].trim().split(/\s+/)) {
+      if (/^[a-z0-9_-]+$/.test(name)) names.add(name);
+    }
+    match = loops.exec(text);
+  }
+
+  return names;
+}
+
+function evaluateCiCoverage(baseline, ciText) {
+  const errors = [];
+  const ciNames = extractCiTestNames(ciText);
+  const expectedNames = Object.keys(baseline.files).sort();
+
+  const missing = expectedNames.filter(name => !ciNames.has(name));
+  const extra = [...ciNames].filter(name => !baseline.files[name]).sort();
+
+  if (missing.length) {
+    errors.push(`CI 未覆盖测试文件：${missing.join(', ')}`);
+  }
+  if (extra.length) {
+    errors.push(`CI 引用了未登记的测试文件：${extra.join(', ')}`);
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    ciFiles: [...ciNames].sort(),
+  };
 }
 
 function backendEnv(dataDir) {
@@ -295,6 +345,19 @@ function main() {
   const inventory = evaluateInventory(baseline, actualResults);
   const errors = [...inventory.errors];
 
+  try {
+    const ciCoverage = evaluateCiCoverage(
+      baseline,
+      fs.readFileSync(CI_FILE, 'utf8')
+    );
+    errors.push(...ciCoverage.errors);
+    console.log(
+      `CI runner 覆盖：${ciCoverage.ciFiles.length}/${Object.keys(baseline.files).length} 个测试文件`
+    );
+  } catch (error) {
+    errors.push(`无法读取 CI 清单：${error.message}`);
+  }
+
   if (runError) {
     errors.push(`首个执行失败：\n${runError.output}`);
   }
@@ -350,6 +413,8 @@ module.exports = {
   parseCustomOutput,
   parseBackendOutput,
   evaluateInventory,
+  extractCiTestNames,
+  evaluateCiCoverage,
   discoverBackendFiles,
   backendEnv,
   runBackendFile,
