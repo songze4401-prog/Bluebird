@@ -13,8 +13,12 @@
  *   供 `--check` 作为告警挂点（退出码 2）。它只判定状态，不代表已配置定时任务。
  * - **完整性**：非空 + JSON 结构 + SHA-256（源与副本双向比对）。
  * - **一致性**：因为每个数据文件都是「临时文件 + fsync + 原子 rename」落盘，单文件必然
- *   自洽；跨文件没有事务，故采集前后各读一次源文件的 size/mtime，发现变化就重拷一次，
- *   仍变化则判定 `consistent:false` 并整轮失败——不拿可能错位的快照冒充一致备份。
+ *   自洽；跨文件没有事务，故采集前后各取一次源文件指纹（内容 SHA-256 + size + mtime），
+ *   任一项不符即判定源文件在拷贝期间被改写，重拷一轮，仍不稳定则 `consistent:false`
+ *   并整轮失败——不拿可能错位的快照冒充一致备份。
+ *   只比 size/mtime 不够：同一时间戳刻度内的同尺寸改写在这两项上完全隐形，漏检会把
+ *   本应报 `source_changed_during_copy` 的不稳定快照降级成 `copy_checksum_mismatch`，
+ *   既掩盖了真实原因，也无法触发按 MAX_COPY_ATTEMPTS 的重试。
  * - **故障域**：备份根落在数据目录内直接拒绝；与数据目录同一卷则记录并告警，
  *   不把同盘副本当成灾难恢复备份（AGENTS.md 有对应说明）。
  */
@@ -89,6 +93,26 @@ function sha256File(filePath) {
 
 function sha256Text(text) {
   return crypto.createHash('sha256').update(text).digest('hex').toUpperCase();
+}
+
+/**
+ * 采集期源文件指纹：内容 SHA-256 + size + mtimeMs。
+ *
+ * 先读内容再 stat：数据文件都是原子 rename 落盘，一次读必然拿到完整的一个版本，
+ * 于是指纹里的哈希始终对应「较早那个版本」。若改写发生在读与 stat 之间，复核时重新
+ * 哈希就会与指纹不符，变化被检出。反过来先 stat 后读，在「同尺寸 + 同一时间戳刻度」
+ * 的改写场景下 size/mtime 都不变、哈希又取自新版，变化就会被漏检。
+ */
+function sourceFingerprint(absPath) {
+  const sha256 = sha256File(absPath);
+  const st = fs.statSync(absPath);
+
+  return { size: st.size, mtimeMs: st.mtimeMs, sha256 };
+}
+
+/** 两个源文件指纹是否代表同一个版本。 */
+function isSameFingerprint(a, b) {
+  return a.size === b.size && a.mtimeMs === b.mtimeMs && a.sha256 === b.sha256;
 }
 
 // ---------------------------------------------------------------- 密钥加密
@@ -586,15 +610,12 @@ function createBackup(options = {}) {
     ensureDir(snapshotDir);
     result.snapshotDir = snapshotDir;
 
-    // ---- 采集：先记源文件 size/mtime，再复制，最后复核源是否在拷贝期间变化
-    const sourceStats = new Map();
+    // ---- 采集：先取源文件指纹（内容 SHA-256 + size/mtime），再复制，最后复核源是否在拷贝期间变化
+    const sourceFingerprints = new Map();
     const entries = [];
 
     for (const rel of files) {
-      const abs = path.join(dataDir, rel);
-      const st = fs.statSync(abs);
-
-      sourceStats.set(rel, { size: st.size, mtimeMs: st.mtimeMs });
+      sourceFingerprints.set(rel, sourceFingerprint(path.join(dataDir, rel)));
     }
 
     const copyOne = rel => {
@@ -631,21 +652,20 @@ function createBackup(options = {}) {
     for (; attempt < MAX_COPY_ATTEMPTS; attempt += 1) {
       for (const rel of files) copyOne(rel);
 
-      // 复核：采集期源文件是否被改写
-      const changed = files.filter(rel => {
-        const before = sourceStats.get(rel);
-        const st = fs.statSync(path.join(dataDir, rel));
-
-        return st.size !== before.size || st.mtimeMs !== before.mtimeMs;
-      });
+      // 复核：采集期源文件是否被改写。内容哈希是判据，size/mtime 只是快速通道——
+      // 同尺寸改写在同一时间戳刻度内不会动这两项，只比它们会漏检。
+      const changed = files.filter(rel =>
+        !isSameFingerprint(
+          sourceFingerprints.get(rel),
+          sourceFingerprint(path.join(dataDir, rel))
+        )
+      );
 
       if (changed.length === 0) break;
 
       // 改写了就重来一轮：单文件原子落盘，重读到的是完整的新版本
       for (const rel of changed) {
-        const st = fs.statSync(path.join(dataDir, rel));
-
-        sourceStats.set(rel, { size: st.size, mtimeMs: st.mtimeMs });
+        sourceFingerprints.set(rel, sourceFingerprint(path.join(dataDir, rel)));
       }
 
       if (attempt === MAX_COPY_ATTEMPTS - 1) {
@@ -662,13 +682,15 @@ function createBackup(options = {}) {
 
     result.attempts = attempt + 1;
 
-    // ---- 逐文件：SHA-256 + 结构校验（源与副本必须一致）
+    // ---- 逐文件：SHA-256 + 结构校验（副本必须等于采集期确认过的那个源版本）
+    // 比对基准取采集期指纹而非此刻重读源文件：源若在复核之后又被改写，重读会把
+    // 「源持续变化」错报成「副本被写坏」；采集期指纹才是这一轮快照该对齐的版本。
     let bytes = 0;
 
     for (const rel of files) {
-      const srcAbs = path.join(dataDir, rel);
+      const src = sourceFingerprints.get(rel);
 
-      // 加密密钥：校验「能解密回明文且与原文件一致」，不校验 JSON 结构
+      // 加密密钥：校验「能解密回明文且与采集期源版本一致」，不校验 JSON 结构
       if (encryptSecrets && derivedKey && isSecretFile(rel)) {
         const destAbs = path.join(snapshotDir, `${rel}.enc`);
 
@@ -676,8 +698,8 @@ function createBackup(options = {}) {
           return fail('copy_missing', `加密副本缺失: ${rel}.enc`);
         }
 
-        const enc = JSON.parse(fs.readFileSync(destAbs, 'utf8'));
-        const plain = fs.readFileSync(srcAbs);
+        const encBuf = fs.readFileSync(destAbs);
+        const enc = JSON.parse(encBuf.toString('utf8'));
 
         let restored;
 
@@ -687,21 +709,19 @@ function createBackup(options = {}) {
           return fail('secret_decrypt_failed', `密钥解密失败: ${rel}`);
         }
 
-        if (restored.toString('utf8') !== plain.toString('utf8')) {
+        if (sha256Text(restored) !== src.sha256) {
           return fail(
             'secret_decrypt_mismatch',
-            `密钥解密后与原文不一致: ${rel}`
+            `密钥解密后与采集期源版本不一致: ${rel}`
           );
         }
-
-        const encBuf = fs.readFileSync(destAbs);
 
         entries.push({
           path: `${rel}.enc`,
           originalPath: rel,
           bytes: encBuf.length,
           sha256: sha256Text(encBuf),
-          plainSha256: sha256Text(plain),
+          plainSha256: src.sha256,
           structure: 'secret_enc',
         });
         bytes += encBuf.length;
@@ -715,7 +735,16 @@ function createBackup(options = {}) {
         return fail('copy_missing', `副本缺失: ${rel}`);
       }
 
-      const buf = fs.readFileSync(srcAbs);
+      const buf = fs.readFileSync(destAbs);
+
+      if (sha256Text(buf) !== src.sha256) {
+        return fail(
+          'copy_checksum_mismatch',
+          `SHA-256 与采集期源版本不一致: ${rel}`
+        );
+      }
+
+      // 副本与采集期源版本哈希一致，校验副本即校验那个版本，无需再读一次源
       const check = validateDataFile(rel, buf);
 
       if (!check.ok) {
@@ -727,17 +756,10 @@ function createBackup(options = {}) {
         );
       }
 
-      const srcHash = sha256Text(buf);
-      const destHash = sha256File(destAbs);
-
-      if (srcHash !== destHash) {
-        return fail('copy_checksum_mismatch', `SHA-256 不一致: ${rel}`);
-      }
-
       entries.push({
         path: rel,
         bytes: buf.length,
-        sha256: srcHash,
+        sha256: src.sha256,
         structure: check.structure,
       });
 
@@ -1270,6 +1292,7 @@ module.exports = {
   BACKUP_KIND,
   DEFAULT_KEEP,
   DEFAULT_STALE_HOURS,
+  MAX_COPY_ATTEMPTS,
   MANIFEST_JSON,
   MANIFEST_TXT,
   RUN_LOG_NAME,
@@ -1287,6 +1310,8 @@ module.exports = {
   validateDataFile,
   sha256File,
   sha256Text,
+  sourceFingerprint,
+  isSameFingerprint,
   isSameVolume,
   isInside,
   createBackup,
