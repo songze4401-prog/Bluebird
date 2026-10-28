@@ -24,11 +24,12 @@ function readBaseline(file = BASELINE_FILE) {
 }
 
 function parseNodeTestOutput(output) {
-  const tests = String(output || '').match(/^ℹ tests (\d+)$/m);
+  const text = String(output || '');
+  const tests = text.match(/^(?:ℹ tests|# tests) (\d+)$/m);
   if (!tests) return null;
 
-  const pass = String(output || '').match(/^ℹ pass (\d+)$/m);
-  const fail = String(output || '').match(/^ℹ fail (\d+)$/m);
+  const pass = text.match(/^(?:ℹ pass|# pass) (\d+)$/m);
+  const fail = text.match(/^(?:ℹ fail|# fail) (\d+)$/m);
 
   return {
     format: 'node',
@@ -169,7 +170,7 @@ function runBackendFile(name, dataDir, format = 'custom') {
   const file = path.join(TESTS_DIR, `${name}.test.js`);
   const args =
     format === 'node'
-      ? ['--test', '--test-concurrency=1', file]
+      ? ['--test', '--test-reporter=tap', '--test-concurrency=1', file]
       : [file];
 
   const result = spawnSync(process.execPath, args, {

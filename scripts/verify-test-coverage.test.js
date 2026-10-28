@@ -46,6 +46,10 @@ check('node:test 的 tests/pass/fail 被识别', () => {
   const parsed = parseNodeTestOutput('ℹ tests 3\nℹ pass 3\nℹ fail 0\n');
   assert.deepEqual(parsed, { format: 'node', count: 3, failed: 0, passed: 3 });
 });
+check('node:test 的 TAP 摘要也被识别', () => {
+  const parsed = parseNodeTestOutput('# tests 4\n# pass 4\n# fail 0\n');
+  assert.deepEqual(parsed, { format: 'node', count: 4, failed: 0, passed: 4 });
+});
 check('自定义 “通过 N 项” 被识别', () => {
   assert.deepEqual(parseCustomOutput('通过 2 项，失败 0 项'), {
     format: 'custom',
