@@ -196,6 +196,8 @@ export type ChatResponse = {
   assistantMessageId?: string;
   createdAt?: string;
   persisted?: boolean;
+  // 新图触发 Agent 工具互斥时的用户提示（仅本次响应，不落盘）
+  agentNotice?: string;
   // Agent 工具执行摘要：有则同时出现在顶层与 replies 最后一格，
   // 无则整个字段不出现（旧响应零变化）
   toolSteps?: ToolStep[];

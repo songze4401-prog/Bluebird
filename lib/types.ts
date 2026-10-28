@@ -78,6 +78,8 @@ export type Message = {
   // 模型路由提示（仅 assistant）：后端 modelRoute.auto 为真时展示
   // 「所选模型不支持图片输入，实际由哪个模型处理」，不落盘
   modelNote?: string;
+  // Agent 新图互斥提示（仅 assistant）：本次响应携带，不落盘
+  agentNotice?: string;
   // Agent 工具调用摘要（仅 assistant）：设计图里的「调用工具」pill
   toolSteps?: ToolStepView[];
 };

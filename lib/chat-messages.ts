@@ -210,6 +210,8 @@ export function buildReplyBubbles(
     modelRoute?: ModelRoute;
     // 顶层 toolSteps（旧响应/单条回复形态）；分条响应里挂在最后一格 seg.toolSteps
     toolSteps?: ToolStep[];
+    // 新图触发 Agent 工具互斥时的用户提示，只挂最后一格
+    agentNotice?: string;
   },
   segments: ReplySegment[]
 ): { bubbles: Message[]; replyMood: string } {
@@ -236,6 +238,10 @@ export function buildReplyBubbles(
       ...(toolSteps ? { toolSteps } : {}),
       // 自动视觉路由提示只挂在最后一格，避免整轮重复
       ...(index === lastIndex && modelNote ? { modelNote } : {}),
+      // Agent 新图互斥提示同样只挂最后一格
+      ...(index === lastIndex && data.agentNotice
+        ? { agentNotice: data.agentNotice }
+        : {}),
     };
   });
 
