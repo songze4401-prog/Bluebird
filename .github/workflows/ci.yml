@@ -78,3 +78,10 @@ jobs:
       # node:test 文件 tests/*.test.js——两套 runner 的分工必须保持不变。
       - name: 前端单元测试（jest，7 套 / 106 项）
         run: npm run test:unit -- --ci
+
+      # 先真实执行全部测试，再用运行时计数与基线对账；静态 test(/check( 计数不作为通过依据。
+      - name: 测试覆盖验证（自测）
+        run: node scripts/verify-test-coverage.test.js
+
+      - name: 测试覆盖验证（真实执行）
+        run: node scripts/verify-test-coverage.js
