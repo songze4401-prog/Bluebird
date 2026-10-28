@@ -91,7 +91,8 @@
 | `node tests/memory-lifecycle-decisions.test.js` | 16/16 |
 | `node tests/memory-agent-write.test.js` | 8/8 |
 | `node tests/memory-retrieval.test.js` | 47/47（过滤、排序、预算、可解释元数据、工具校验） |
-| `node tests/memory-semantic.test.js` | 36/36（同义/跨语言/混合排序/语义预算） |
+| `node tests/memory-semantic.test.js` | 54/54（同义/跨语言/混合排序/语义预算） |
+| `node tests/memory-semantic-eval.js --assert` | 22 查询固定集：Recall@5 0.9722 / Recall@10 1.0 / MRR 1.0 |
 | `node tests/agent-tools.test.js` | 119/119（原有检索链路+新工具白名单） |
 | `npm test` | 39 个测试文件全部通过 |
 | `npm run test:unit` | 106/106 |

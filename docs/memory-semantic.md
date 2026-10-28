@@ -26,13 +26,13 @@
 
 ### `server/memory-semantic.js`
 
-- 词典把文本映射到稳定 concept：`coffee`、`editor`、`city`、`cat`、`name`、`job`。
+- 词典把文本映射到稳定 concept（17 个）：`coffee`、`editor`、`city`、`cat`、`name`、`nickname`、`job`、`allergy`、`theme`、`project`、`birthday`、`exam`、`computer`、`spicy_food`、`travel`、`license_plate`、`dietary_restriction`。
 - 支持中文、英文、大小写与词边界；英文按词边界匹配，避免 `cat` 命中 `catalog`。
 - `semanticSimilarity(query, memoryText, keywords)` 返回：
   - `score = 0.7 * coverage + 0.3 * precision`
   - `coverage = 共享 concept 数 / query concept 数`
   - `precision = 共享 concept 数 / memory concept 数`
-  - `concepts`、`evidence`（双方命中的词典词）、`provider`、`kind`、`neural:false`、`limited:true`
+  - `concepts`、`evidence`（双方命中的词典词）、`provider`、`kind`、`neural:false`、`limited:true`；非 identity 候选还需达到最低混合相关度 0.04；没有关键词命中时，内容二元组重合至少 0.10 才入选，过滤英文常用二元组噪声
 - 没有命中共有 concept 时严格返回 0；纯字符重合不会产生语义分。
 
 ### 混合排序（`server/memory.js`）
@@ -60,7 +60,8 @@
 
 | 命令 | 结果 |
 |---|---|
-| `node tests/memory-semantic.test.js` | 36/36 |
+| `node tests/memory-semantic.test.js` | 54/54 |
+| `node tests/memory-semantic-eval.js --assert` | 22 个固定查询；扩展后 Recall@5 0.9722 / Recall@10 1.0 / MRR 1.0；详见 `docs/memory-semantic-eval.md` |
 | `node tests/memory-retrieval.test.js` | 47/47 |
 | `node tests/memory-eval-baseline.test.js` | 22/22 |
 | `node tests/agent-tools.test.js` | 119/119 |
