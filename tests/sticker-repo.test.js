@@ -205,7 +205,13 @@ async function main() {
       return null;
     },
     clearMemories: () => {},
-    recallMemoryBySourceQuote: async () => {},
+    recallMemoryBySourceQuote: async () => ({}),
+
+    clearSessionMemories: async () => ({ removedEntries: 0, removedContributions: 0, remaining: 0, reason: "no-match" }),
+
+    verifyStoreConsistency: () => ({ consistent: true, entries: 0, reason: "ok" }),
+
+    getWriteOutcomes: () => [],
     getMemories: () => [],
     deleteMemory: () => false,
   });

@@ -6,6 +6,7 @@
 import { API_TOKEN } from './constants';
 import { API_PATHS } from './api/endpoints';
 import type { ChatResponse } from './api/types';
+import type { ToolStreamEvent } from './types';
 
 // done 事件的载荷：字段与 POST /chat 的响应完全一致（同源契约，不再各写一份）
 export type StreamDonePayload = ChatResponse;
@@ -85,6 +86,9 @@ export function streamChatRequest(
     onDelta: (content: string) => void;
     // 服务端在首个 delta 前下发的元信息（当前用于分段模式）
     onMeta?: (meta: { messageMode?: 'single' | 'auto' | 'frequent' }) => void;
+    // Agent 工具调用的进度事件：tool_start 在跑工具前发，tool_end 带结果。
+    // 早于所有 delta 到达，所以客户端能先亮 pill 再逐字出正文。
+    onToolEvent?: (event: ToolStreamEvent) => void;
   }
 ): Promise<StreamOutcome> {
   return new Promise(resolve => {
@@ -115,6 +119,15 @@ export function streamChatRequest(
 
       if (event.type === 'done') {
         finish({ kind: 'done', data: event as StreamDonePayload });
+        return;
+      }
+
+      if (event.type === 'tool_start' || event.type === 'tool_end') {
+        // 工具轮不产生 delta，也不参与成败判定：只把进度转给上层渲染 pill。
+        // 旧客户端走到这里什么都不做（未知 type 被忽略），行为不变。
+        if (handlers.onToolEvent) {
+          handlers.onToolEvent(event);
+        }
         return;
       }
 

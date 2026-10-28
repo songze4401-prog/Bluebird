@@ -1,7 +1,7 @@
 /**
  * 云岫 Bluebird — Agent 工具：memory_search（只读记忆检索）
  *
- * Agent V1 唯一开放的工具。设计约束（任务书）：
+ * Agent V1 的只读检索工具；写入候选走 memory_remember。设计约束（任务书）：
  * - 只读：第一阶段禁止文件访问 / Shell / 写文件 / Git / 任意函数执行；
  * - 复用 memory.js 的检索算分与 scope 隔离规则，不绕过现有记忆权限；
  * - 三类硬上限在后端强制执行（条数 / 单条长度 / 总预算），
@@ -41,6 +41,16 @@ const definition = Object.freeze({
         maximum: LIMITS.limitMax,
         default: LIMITS.limitDefault,
       }),
+      mode: Object.freeze({
+        type: 'string',
+        enum: ['current', 'history'],
+        description:
+          'current=当前有效事实（默认）；history=按 asOf 读取历史事实，必须同时提供 asOf',
+      }),
+      asOf: Object.freeze({
+        type: 'string',
+        description: '历史查询的时间点（ISO 时间）；仅 mode=history 时必填',
+      }),
     }),
     required: Object.freeze(['query']),
   }),
@@ -75,7 +85,22 @@ const definition = Object.freeze({
       limit = args.limit;
     }
 
-    return { ok: true, args: { query, limit } };
+    const mode = args.mode === undefined ? 'current' : args.mode;
+
+    if (mode !== 'current' && mode !== 'history') {
+      return { ok: false, error: 'mode 必须是 current 或 history' };
+    }
+
+    let asOf = null;
+
+    if (mode === 'history') {
+      if (typeof args.asOf !== 'string' || !Number.isFinite(Date.parse(args.asOf))) {
+        return { ok: false, error: 'history 模式必须提供合法 asOf 时间' };
+      }
+      asOf = args.asOf;
+    }
+
+    return { ok: true, args: { query, limit, mode, asOf } };
   },
 
   /**
@@ -87,6 +112,8 @@ const definition = Object.freeze({
     const found = searchMemories({
       query: args.query,
       sessionId: context && context.sessionId,
+      mode: args.mode || 'current',
+      asOf: args.asOf || null,
       limits: {
         maxItems: LIMITS.limitMax,
         perItemMax: LIMITS.perItemMax,
@@ -94,15 +121,19 @@ const definition = Object.freeze({
       },
     });
 
-    const results = found.results
-      .slice(0, args.limit)
-      .map(item => ({
-        content: truncateText(item.content, LIMITS.perItemMax),
-        type: item.type,
-      }));
+    const results = found.results.slice(0, args.limit).map(item => ({
+      content: truncateText(item.content, LIMITS.perItemMax),
+      type: item.type,
+      id: item.id,
+      status: item.status,
+      validFrom: item.validFrom,
+      validTo: item.validTo,
+      confidence: item.confidence,
+    }));
 
     return {
       ok: true,
+      mode: found.mode || args.mode || 'current',
       results,
       total: found.total,
       truncated: found.truncated === true,
@@ -111,7 +142,7 @@ const definition = Object.freeze({
         found.reason === 'memory_disabled'
           ? '记忆功能未启用'
           : results.length
-            ? `找到 ${results.length} 条相关记忆`
+            ? `找到 ${results.length} 条${found.mode === 'history' ? '历史' : ''}相关记忆`
             : '未找到相关记忆',
     };
   },

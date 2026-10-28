@@ -178,6 +178,7 @@ function makeItem({
   verification,
   freshness,
   untrusted = false,
+  relevance = null,
 }) {
   entrySeq += 1;
   return {
@@ -188,6 +189,8 @@ function makeItem({
     verification,
     freshness,
     untrusted,
+    // 检索侧的相关度（0~1）；来源不提供时为 null，组内决胜退回原有次序。
+    relevance,
   };
 }
 
@@ -251,6 +254,9 @@ const memorySource = {
     const items = found.results.map(result => {
       const type = MEMORY_TYPE_MAP[result.type] || 'project_fact';
       const ttlConfig = config.ttl[type];
+      // 记忆条目的时效起点用 validFrom（生效时间），缺失时退回 updatedAt：
+      // 有真实时间戳才能算 fresh/stale/expired，不再一律标 unknown。
+      const fetchedAt = result.validFrom || result.updatedAt || null;
       return makeItem({
         content: result.content,
         source: 'memory',
@@ -259,14 +265,14 @@ const memorySource = {
           status: 'schema_valid',
           checked_items: ['extracted', 'source_verified', 'sensitive_filtered'],
         },
-        // searchMemories 不返回获取时间戳：诚实标注 unknown（时效未知），
-        // 不臆测为 fresh/stale。
         freshness: computeFreshness({
           type,
           ttl: ttlConfig && ttlConfig.ttlMs,
-          fetchedAt: null,
+          fetchedAt,
           config,
         }),
+        // 组内决胜信号：记忆检索自带相关度，同组多条同源同时间戳时不再判平局弃权。
+        relevance: Number.isFinite(result.relevance) ? result.relevance : null,
       });
     });
 

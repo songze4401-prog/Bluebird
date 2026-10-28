@@ -33,6 +33,9 @@ import { HistoryScreen } from './components/HistoryScreen';
 import { ControlPanelScreen } from './components/ControlPanelScreen';
 import { ModelScreen } from './components/ModelScreen';
 import { PlusPanel } from './components/PlusPanel';
+import { SettingsDrawer } from './components/SettingsDrawer';
+import { BottomTabBar, type ChatTab } from './components/BottomTabBar';
+import { TasksPanel } from './components/TasksPanel';
 
 import { usePresence } from './lib/presence';
 import { useChatSession } from './hooks/useChatSession';
@@ -46,7 +49,11 @@ import { useAttachments } from './hooks/useAttachments';
 export default function App() {
   // ---- 页面与弹层（纯 UI 状态，不进任何 hook）----
   const [screen, setScreen] = useState<'home' | 'chat'>('home');
-  const [menuOpen, setMenuOpen] = useState(false);
+  // 底部标签栏选中的「同一屏内容」：对话 / 任务。
+  // 记忆是独立的全屏弹层（它自己取数、有自己的返回），不占这个状态，
+  // 否则点「对话」还得先把弹层关掉，两个来源会互相覆盖。
+  const [tab, setTab] = useState<ChatTab>('chat');
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
@@ -66,7 +73,8 @@ export default function App() {
   const styles = useMemo(() => createAppStyles(theme), [theme]);
 
   const { streamingEnabled, setStreaming } = useStreamingPreference();
-  const { selectedModel, refreshModelSelection } = useModelSelection();
+  const { selectedModel, selectedModelLabel, refreshModelSelection } =
+    useModelSelection();
 
   // 在线状态感知：AppState 前后台 + 心跳 + 用户互动上报。
   // 仅上报状态，不改变任何聊天、记忆、情绪或会话数据。
@@ -85,7 +93,7 @@ export default function App() {
     pendingAttachments: attachments.pendingAttachments,
     onDraftConsumed: () => setInput(''),
     onAttachmentsConsumed: attachments.clearAttachments,
-    onMenuCloseRequest: () => setMenuOpen(false),
+    onMenuCloseRequest: () => setDrawerOpen(false),
   });
 
   const sessionList = useSessionList();
@@ -137,6 +145,17 @@ export default function App() {
     void chat.loadEmotion();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 标签栏「记忆」：直接开全屏弹层，不写 tab —— 记忆弹层自带取数与返回，
+  // 若也进 tab 状态，点「对话」时会出现「弹层还开着但选中项已变」的错位。
+  const handleTabChange = (next: ChatTab) => {
+    if (next === 'memory') {
+      setMemoryOpen(true);
+      return;
+    }
+
+    setTab(next);
+  };
 
   // 历史聊天：打开列表弹层，并让列表刷新一次（服务端为权威）
   const openChatHistory = () => {
@@ -212,59 +231,97 @@ export default function App() {
       <KeyboardAvoidingView style={styles.keyboardArea} behavior="padding">
         <ChatHeader
           theme={theme}
-          mood={chat.mood}
-          menuOpen={menuOpen}
-          onToggleMenu={() => setMenuOpen(prev => !prev)}
-          onOpenMemory={() => {
-            setMenuOpen(false);
-            setMemoryOpen(true);
-          }}
-          onSelectMode={selectMode}
-          onOpenThemePicker={() => {
-            setMenuOpen(false);
-            setThemePickerOpen(true);
-          }}
-          onOpenControlPanel={() => {
-            setMenuOpen(false);
-            setPanelOpen(true);
-          }}
-          onOpenModels={() => {
-            setMenuOpen(false);
-            setModelsOpen(true);
-          }}
-          onClearHistory={chat.clearHistory}
+          onOpenDrawer={() => setDrawerOpen(true)}
+          onNewChat={actions.createNewChat}
+          onOpenHistory={openChatHistory}
+          creatingChat={actions.creatingSession}
         />
 
-        <MessageList
-          theme={theme}
-          messages={chat.messages}
-          sessionId={currentSessionId}
-          loadingHistory={chat.loadingHistory}
-          sending={chat.sending}
-          continuing={chat.continuing}
-          onRecall={chat.recallMessage}
-          onRetry={chat.sendMessage}
-          onContinue={() => void chat.sendContinuation()}
-        />
+        {tab === 'tasks' ? (
+          // 任务页：后端没有任务接口，这里只放真实空状态，不画假卡片
+          <TasksPanel theme={theme} />
+        ) : (
+          <MessageList
+            theme={theme}
+            messages={chat.messages}
+            sessionId={currentSessionId}
+            loadingHistory={chat.loadingHistory}
+            sending={chat.sending}
+            continuing={chat.continuing}
+            liveToolSteps={chat.liveToolSteps}
+            onRecall={chat.recallMessage}
+            onRetry={chat.sendMessage}
+            onContinue={() => void chat.sendContinuation()}
+          />
+        )}
 
-        {/* 悬浮输入栏：dock 留在正常流里（键盘弹起会被顶上去），胶囊绝对定位贴底 */}
-        <ChatInput
-          theme={theme}
-          value={input}
-          onChangeText={setInput}
-          sending={chat.sending}
-          loadingHistory={chat.loadingHistory}
-          uploadingImage={attachments.uploadingImage}
-          pendingAttachments={attachments.pendingAttachments}
-          onRemoveAttachment={attachments.removeAttachment}
-          onSend={() => void chat.sendMessage()}
-          onPlus={() => {
-            Keyboard.dismiss();
-            setPlusOpen(true);
-          }}
-          onReturnHome={() => setScreen('home')}
-        />
+        {/* 输入区随页切换：任务页不是聊天，不放发送框 */}
+        {tab === 'chat' && (
+          <ChatInput
+            theme={theme}
+            value={input}
+            onChangeText={setInput}
+            sending={chat.sending}
+            loadingHistory={chat.loadingHistory}
+            uploadingImage={attachments.uploadingImage}
+            pendingAttachments={attachments.pendingAttachments}
+            onRemoveAttachment={attachments.removeAttachment}
+            onSend={() => void chat.sendMessage()}
+            onPlus={() => {
+              Keyboard.dismiss();
+              setPlusOpen(true);
+            }}
+            modelLabel={selectedModelLabel}
+            onOpenModels={() => setModelsOpen(true)}
+          />
+        )}
       </KeyboardAvoidingView>
+
+      {/* 标签栏留在 KeyboardAvoidingView 之外：Android 用 adjustResize，
+          窗口本身缩小，放在外面才不会被 KAV 的 padding 再顶一次 */}
+      <BottomTabBar theme={theme} active={tab} onChange={handleTabChange} />
+
+      {/* 设置抽屉：☰ / ⋮ 的目的地，历史·记忆·控制面板·模型·主题·清理都从这里进 */}
+      <SettingsDrawer
+        visible={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        theme={theme}
+        mood={chat.mood}
+        creatingChat={actions.creatingSession}
+        onOpenHistory={() => {
+          setDrawerOpen(false);
+          openChatHistory();
+        }}
+        onNewChat={() => {
+          setDrawerOpen(false);
+          actions.createNewChat();
+        }}
+        onReturnHome={() => {
+          setDrawerOpen(false);
+          setScreen('home');
+        }}
+        onOpenMemory={() => {
+          setDrawerOpen(false);
+          setMemoryOpen(true);
+        }}
+        onOpenControlPanel={() => {
+          setDrawerOpen(false);
+          setPanelOpen(true);
+        }}
+        onOpenModels={() => {
+          setDrawerOpen(false);
+          setModelsOpen(true);
+        }}
+        onOpenThemePicker={() => {
+          setDrawerOpen(false);
+          setThemePickerOpen(true);
+        }}
+        onSelectMode={selectMode}
+        onClearHistory={() => {
+          setDrawerOpen(false);
+          chat.clearHistory();
+        }}
+      />
 
       {/* 加号面板：相册 / 拍照 / 表情包（底部弹层，不新增路由） */}
       <PlusPanel

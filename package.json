@@ -37,7 +37,8 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "test": "node scripts/run-tests.js",
-    "test:unit": "jest"
+    "test:unit": "jest",
+    "eval:memory": "node tests/memory-eval/run-eval.js"
   },
   "private": true,
   "jest": {

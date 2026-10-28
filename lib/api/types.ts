@@ -12,6 +12,7 @@ import type {
   PersonaConfig,
   ReplySegment,
   SessionMeta,
+  ToolStep,
 } from '../types';
 
 // ---- 通用错误体 ----
@@ -36,13 +37,16 @@ export type DeleteSessionResponse = {
 };
 
 // ---- 历史 ----
-// 服务端 /history 返回的条目：id 可选（旧数据可能没有），附件原样透传
+// 服务端 /history 返回的条目：id 可选（旧数据可能没有），附件原样透传，
+// toolSteps 为 Agent 工具执行摘要（仅 assistant、仅本轮最后一格，server
+// sessions.js sanitizeToolSteps 产出）
 export type HistoryMessage = {
   id?: string;
   role: 'user' | 'assistant';
   content: string;
   createdAt?: string;
   attachments?: Attachment[];
+  toolSteps?: ToolStep[];
 };
 
 export type HistoryResponse = {
@@ -56,11 +60,27 @@ export type ClearHistoryResponse = {
   message: string;
 };
 
+// 撤回响应：消息撤回与记忆撤回是分开的两件事。
+// 服务端只有在两边都干净时才回 ok:true；
+// 消息删成、记忆没删成时回 503 + partial:true + messagesRecalled:true，
+// 客户端必须按 removedIds 收敛本地列表，再单独提示记忆失败。
+export type RecallMemoryResult = {
+  removedEntries?: number;
+  removedContributions?: number;
+  consistent?: boolean;
+  reason?: string;
+  status?: 'failed';
+};
+
 export type RecallResponse = {
-  ok: true;
+  ok?: boolean;
   sessionId: string;
   removedCount: number;
   removedIds: string[];
+  memory?: RecallMemoryResult;
+  partial?: boolean;
+  messagesRecalled?: boolean;
+  error?: string;
 };
 
 // ---- 情绪 ----
@@ -81,16 +101,43 @@ export type PersonaSaveResponse = { config: PersonaConfig };
 
 // ---- 记忆 ----
 export type MemoryItem = {
+  // 稳定 id：更正/删除优先用它定位（旧的 createdAt + content 定位仍受支持）
+  id?: string;
   content: string;
   type?: string;
   keywords?: string[];
   confidence?: number;
+  status?: 'active' | 'pending' | 'superseded' | 'archived';
+  validFrom?: string;
+  validTo?: string | null;
+  supersededBy?: string | null;
+  supersedes?: string | null;
   sourceQuote?: string;
+  pendingReason?: string;
+  pendingTargetId?: string | null;
+  eventAt?: string | null;
+  condition?: string | null;
+  lastDecision?: {
+    action?: string;
+    reason?: string;
+    at?: string;
+    actor?: string;
+    sourceType?: string;
+  };
   createdAt?: string;
   updatedAt?: string;
 };
 
 export type MemoryListResponse = { memories: MemoryItem[] };
+
+export type MemoryLifecycleResponse = {
+  ok: true;
+  id: string;
+  removed?: number;
+  updated?: number;
+  reason?: string;
+  status?: string;
+};
 
 export type MemoryDeleteResponse = { ok: true; removed: boolean };
 
@@ -149,6 +196,9 @@ export type ChatResponse = {
   assistantMessageId?: string;
   createdAt?: string;
   persisted?: boolean;
+  // Agent 工具执行摘要：有则同时出现在顶层与 replies 最后一格，
+  // 无则整个字段不出现（旧响应零变化）
+  toolSteps?: ToolStep[];
 };
 
 // ---- 在线状态 ----

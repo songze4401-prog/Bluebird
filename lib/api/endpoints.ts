@@ -25,6 +25,10 @@ export const API_PATHS = {
   memory: '/memory',
   memoryDelete: '/memory/delete',
   memoryClear: '/memory/clear',
+  memoryPending: '/memory/pending',
+  memoryConfirm: '/memory/confirm',
+  memoryReject: '/memory/reject',
+  memoryArchive: '/memory/archive',
 
   // 附件上传
   uploads: '/uploads/image',

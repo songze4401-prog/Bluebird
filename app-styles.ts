@@ -20,7 +20,10 @@ export const createAppStyles = (theme: Theme) =>
   StyleSheet.create({
     container: {
       flex: 1,
-      backgroundColor: theme.background,
+      // 聊天页底色：设计图是平色底（浅色纯白），不再用全站列表底色 #f4f5f7，
+      // 否则消息流会铺在灰底上、与卡片式页面混淆。深色模式下两者同值，
+      // 背景光晕层仍按原逻辑生效。
+      backgroundColor: theme.chatBg,
     },
     // KeyboardAvoidingView 专用：刻意不设背景，
     // 否则它会在背景光晕层之上再铺一层不透明底，把光晕全部盖掉。

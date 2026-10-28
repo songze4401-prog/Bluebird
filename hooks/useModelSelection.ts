@@ -11,15 +11,38 @@ import { apiFetch } from '../lib/api/client';
 import { API_PATHS } from '../lib/api/endpoints';
 import type { ModelProvidersResponse } from '../lib/api/types';
 import { readJsonResponse } from '../lib/utils';
-import type { ModelDefaults } from '../lib/types';
+
+import type { ModelDefaults, ModelProvider } from '../lib/types';
+
+// 由 defaults + providers 拼出展示名（设计图的模型 pill：「DeepSeek V4.1 Flash」）。
+// 服务商名与模型名都来自 /model-providers 的真实数据；对不上时退回 modelId，
+// 拿不到选择时返回空串（模型 pill 此时不渲染）。
+function buildLabel(
+  providers: ModelProvider[],
+  defaults: ModelDefaults | null
+): string {
+  if (!defaults) return '';
+
+  const provider = providers.find(item => item.id === defaults.providerId);
+  const model = provider?.models.find(item => item.id === defaults.modelId);
+
+  const name = model?.name || model?.id || defaults.modelId;
+
+  if (!name) return '';
+
+  return provider?.name ? `${provider.name} ${name}` : name;
+}
 
 export function useModelSelection(): {
   selectedModel: ModelDefaults | null;
+  // 当前所选模型的展示名（供输入区上方的模型 pill 显示）
+  selectedModelLabel: string;
   refreshModelSelection: () => Promise<void>;
 } {
   const [selectedModel, setSelectedModel] = useState<ModelDefaults | null>(
     null
   );
+  const [selectedModelLabel, setSelectedModelLabel] = useState('');
 
   const refreshModelSelection = useCallback(async () => {
     try {
@@ -33,7 +56,12 @@ export function useModelSelection(): {
       const { providerId, modelId } = data.defaults;
 
       if (typeof providerId === 'string' && typeof modelId === 'string') {
-        setSelectedModel({ providerId, modelId });
+        const defaults = { providerId, modelId };
+
+        setSelectedModel(defaults);
+        setSelectedModelLabel(
+          buildLabel(Array.isArray(data.providers) ? data.providers : [], defaults)
+        );
       }
     } catch (error) {
       console.error('Load model selection error:', error);
@@ -59,5 +87,5 @@ export function useModelSelection(): {
     };
   }, [refreshModelSelection]);
 
-  return { selectedModel, refreshModelSelection };
+  return { selectedModel, selectedModelLabel, refreshModelSelection };
 }

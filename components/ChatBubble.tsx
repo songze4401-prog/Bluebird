@@ -15,25 +15,22 @@ import {
   imageUrl,
   stickerImageUrl,
 } from '../lib/uploads';
-import {
-  withAlpha,
-  shouldShowMessageTime,
-  formatMessageTime,
-  parseStickerMarkers,
-} from '../lib/utils';
+import { formatMessageTime, moodEmoji, parseStickerMarkers } from '../lib/utils';
+import { CHAT_LAYOUT, CHAT_TYPE } from '../lib/design';
+import { ToolCallPillRow } from './ToolCallPill';
 
-// 单条消息气泡（纯展示）：时间标签 + 用户/Bluebird 两种气泡 + 重新发送 + 继续说。
-// 所有交互通过回调上抛，组件内不持有任何状态（除样式 memo）。
-// 附件（图片/表情包）渲染在气泡内文字上方，经服务端鉴权路由读取。
+// 附件（图片 / 表情包）：渲染在正文上方，经服务端鉴权路由读取真实图片。
 function BubbleAttachments({
   attachments,
   styles,
+  alignEnd,
 }: {
   attachments: Attachment[];
   styles: ReturnType<typeof createStyles>;
+  alignEnd?: boolean;
 }) {
   return (
-    <View style={styles.attachmentStack}>
+    <View style={[styles.attachmentStack, alignEnd && styles.attachmentEnd]}>
       {attachments.map(att =>
         att.expired ? (
           // 仓库条目已被物理删除（GET /history 标注）：图片不可达，显示占位
@@ -98,10 +95,8 @@ function InlineSticker({
   );
 }
 
-// Bluebird 正文：直接渲染数据层切好的片段（App 在消息进入 state 前已解析）。
-// 命中标记的片段换成行内图片，其余片段原样传给孩子 Text，
-// 换行与字号/行高完全沿用气泡样式。
-// segments 缺失只可能来自绕过 App 数据层的调用，此时才退回一次解析（不会闪）。
+// Bluebird 正文：直接渲染数据层切好的片段（消息进入 state 前已解析）。
+// segments 缺失只可能来自绕过数据层的调用，此时才退回一次解析（不会闪）。
 function AssistantContent({
   content,
   segments,
@@ -114,7 +109,7 @@ function AssistantContent({
   const resolved = segments ?? parseStickerMarkers(content);
 
   return (
-    <Text style={styles.messageText}>
+    <Text style={styles.text}>
       {resolved.map((segment, index) =>
         segment.type === 'text' ? (
           <Text key={`text-${index}`}>{segment.text}</Text>
@@ -131,6 +126,11 @@ function AssistantContent({
   );
 }
 
+// 单条消息（设计图 ui6 的无气泡排版）：
+//   用户 → 右对齐「时间戳 / 正文」两行；
+//   助手 → 左对齐 who-line（Bluebird + 心情表情 + 时间戳）、可选工具 pill、正文。
+// 没有任何气泡底、描边与阴影：整页只有文字与灰底 pill，这是设计图的核心差别。
+// 纯展示组件：交互全部通过回调上抛。
 export function ChatBubble({
   theme,
   item,
@@ -154,106 +154,112 @@ export function ChatBubble({
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);
 
-  const showTime = shouldShowMessageTime(item, previous);
+  const isUser = item.role === 'user';
 
-  // 只有"最新一条且是 Bluebird 正常回复"时才显示续写按钮
+  // 同一轮流式/分条的助手续接用较小的空档（设计图 .msg.same），
+  // 换轮次（用户↔助手）才用大空档
+  const isContinuation = !isUser && previous?.role === 'assistant';
+
+  // 只有「最新一条且是 Bluebird 正常回复」时才显示续写入口
   const showContinue =
-    isLast && item.role === 'assistant' && !item.retryText && !sending;
+    isLast && !isUser && !item.retryText && !sending;
+
+  const timeText = item.createdAt
+    ? formatMessageTime(item.createdAt, true)
+    : '';
 
   return (
-    <View>
-      {showTime && item.createdAt && (
-        <Text style={styles.messageTime}>
-          {formatMessageTime(item.createdAt)}
-        </Text>
-      )}
+    <View
+      // 单测靠它取到这一行的实际间距（版式规则见 lib/design 的 turnGap/sameGap）
+      testID="chat-row"
+      style={[
+        styles.row,
+        isUser && styles.rowEnd,
+        { marginTop: isContinuation ? CHAT_LAYOUT.sameGap : CHAT_LAYOUT.turnGap },
+      ]}
+    >
+      {isUser ? (
+        <TouchableOpacity
+          style={styles.userColumn}
+          activeOpacity={1}
+          onLongPress={() => onRecall(item)}
+          accessibilityLabel="长按撤回这条消息"
+        >
+          {!!timeText && <Text style={styles.time}>{timeText}</Text>}
 
-      <View
-        style={[styles.messageRow, item.role === 'user' && styles.userRow]}
-      >
-        {item.role === 'user' ? (
-          <TouchableOpacity
-            // 底色交给 styles.userBubble：半透明材质需要 alpha，
-            // 内联的 theme.bubble 是不透明 hex，会覆盖掉它
-            style={[styles.bubble, styles.userBubble]}
-            activeOpacity={0.75}
-            onLongPress={() => onRecall(item)}
-          >
-            {!!item.attachments?.length && (
-              <BubbleAttachments
-                attachments={item.attachments}
-                styles={styles}
-              />
-            )}
-            {!!item.content && (
-              <Text style={[styles.messageText, styles.userMessageText]}>
-                {item.content}
-              </Text>
-            )}
-          </TouchableOpacity>
-        ) : (
-          // 气泡与「继续说」包在同一列里：列宽 = 气泡宽，按钮靠右即贴住气泡右边缘
-          <View style={styles.assistantColumn}>
-            <View style={[styles.bubble, styles.bluebirdBubble]}>
-              {!!item.attachments?.length && (
-                <BubbleAttachments
-                  attachments={item.attachments}
-                  styles={styles}
-                />
-              )}
-              {!!item.content && (
-                <AssistantContent
-                  content={item.content}
-                  segments={item.segments}
-                  styles={styles}
-                />
-              )}
+          {!!item.attachments?.length && (
+            <BubbleAttachments
+              attachments={item.attachments}
+              styles={styles}
+              alignEnd
+            />
+          )}
 
-              {/* 图片触发了视觉能力路由：如实说明实际使用的模型（后端结果） */}
-              {!!item.modelNote && (
-                <Text style={styles.modelNote}>{item.modelNote}</Text>
-              )}
+          {!!item.content && (
+            <Text style={[styles.text, styles.textAfterTs]}>{item.content}</Text>
+          )}
+        </TouchableOpacity>
+      ) : (
+        <View style={styles.assistantColumn}>
+          {/* who-line：名字用强调色，表情是当前心情，时间是这条自己的时间戳 */}
+          <View style={styles.whoLine}>
+            <Text style={styles.name}>Bluebird</Text>
 
-              {!!item.retryText && (
-                <TouchableOpacity
-                  style={[styles.retryButton, { backgroundColor: theme.bubble }]}
-                  onPress={() => onRetry(item.retryText, item.retryAttachments)}
-                  disabled={sending}
-                >
-                  <Text style={styles.retryText}>重新发送</Text>
-                </TouchableOpacity>
-              )}
-            </View>
+            <Text style={styles.mood}>{moodEmoji(item.mood)}</Text>
 
-            {showContinue && (
-              <View style={styles.continueRow}>
-                <TouchableOpacity
-                  style={[
-                    styles.continueButton,
-                    { borderColor: theme.accentBorder },
-                  ]}
-                  onPress={onContinue}
-                  disabled={continuing}
-                  activeOpacity={0.6}
-                >
-                  <Text
-                    style={[
-                      styles.continueText,
-                      {
-                        color: continuing
-                          ? theme.accentBorder
-                          : theme.accent,
-                      },
-                    ]}
-                  >
-                    {continuing ? '···' : '→'}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            )}
+            {!!timeText && <Text style={styles.time}>{timeText}</Text>}
           </View>
-        )}
-      </View>
+
+          {!!item.toolSteps?.length && (
+            <ToolCallPillRow theme={theme} steps={item.toolSteps} />
+          )}
+
+          {!!item.attachments?.length && (
+            <BubbleAttachments attachments={item.attachments} styles={styles} />
+          )}
+
+          {!!item.content && (
+            <AssistantContent
+              content={item.content}
+              segments={item.segments}
+              styles={styles}
+            />
+          )}
+
+          {/* 图片触发了视觉能力路由：如实说明实际使用的模型（后端结果） */}
+          {!!item.modelNote && (
+            <Text style={styles.modelNote}>{item.modelNote}</Text>
+          )}
+
+          {!!item.retryText && (
+            <TouchableOpacity
+              style={styles.retryButton}
+              onPress={() => onRetry(item.retryText, item.retryAttachments)}
+              disabled={sending}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.retryText}>重新发送</Text>
+            </TouchableOpacity>
+          )}
+
+          {showContinue && (
+            // 设计图 .acts：正文下方的图标操作行。
+            // 这里只放真实存在的动作：撤回仅支持用户消息（后端 recall 只认
+            // role=user），所以助手侧只有「继续说」。
+            <View style={styles.actsRow}>
+              <TouchableOpacity
+                style={styles.actButton}
+                onPress={onContinue}
+                disabled={continuing}
+                activeOpacity={0.6}
+                accessibilityLabel="继续说"
+              >
+                <Text style={styles.actIcon}>{continuing ? '···' : '→'}</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+      )}
     </View>
   );
 }
@@ -261,100 +267,79 @@ export function ChatBubble({
 // 样式由主题派生：只包含本组件用到的键
 const createStyles = (theme: Theme) =>
   StyleSheet.create({
-    messageTime: {
-      alignSelf: 'center',
-      color: theme.textMuted,
-      fontSize: 12,
-      marginBottom: 12,
-      marginTop: 4,
-      fontVariant: ['tabular-nums'],
-    },
-    messageRow: {
+    row: {
       flexDirection: 'row',
-      alignItems: 'flex-end',
-      marginBottom: 12,
     },
-    userRow: {
+    rowEnd: {
       justifyContent: 'flex-end',
     },
-    bubble: {
-      paddingHorizontal: 14,
-      paddingVertical: 10,
-      borderRadius: 18,
+    // 定宽 86%：流式正文持续变长，宽度恒定可避免整块内容左右抖
+    userColumn: {
+      width: '86%',
+      alignItems: 'flex-end',
     },
-    // 对方消息：气泡与「继续说」同一列。
-    // 定宽 80%（而非按内容收缩的 maxWidth）：流式时正文持续变长，
-    // 若宽度随文本自适应，气泡会逐帧变宽、看起来在抖；定宽后文本
-    // 只影响高度，宽度恒定。
     assistantColumn: {
-      width: '80%',
-      // 让气泡和「继续说」行都撑满这 80% 的列宽
-      alignItems: 'stretch',
+      width: '100%',
+      alignItems: 'flex-start',
     },
-    bluebirdBubble: {
-      // 通透材质：半透明底（深色模式更透、浅色模式略实，保证文字对比度）
-      backgroundColor: withAlpha(
-        theme.bubbleIncoming,
-        theme.mode === 'dark' ? 0.74 : 0.84
-      ),
-      borderWidth: 1,
-      borderColor: theme.bubbleIncomingBorder,
-      borderBottomLeftRadius: 6,
-      // 光感：用强调色做柔和外发光，而不是黑色投影（避免"厚重阴影"）
-      shadowColor: theme.accent,
-      shadowOpacity: theme.mode === 'dark' ? 0.2 : 0.14,
-      shadowRadius: 10,
-      shadowOffset: { width: 0, height: 2 },
-      elevation: 2,
+    whoLine: {
+      flexDirection: 'row',
+      alignItems: 'center',
     },
-    userBubble: {
-      // 定宽 80%：父级是 messageRow（宽度确定），百分比生效。
-      // 与 Bluebird 气泡同样定宽，避免文字/附件让气泡宽度抖动。
-      width: '80%',
-      // 用户气泡更实体、更稳定：不透明度高于 Bluebird 气泡
-      backgroundColor: withAlpha(theme.bubble, theme.mode === 'dark' ? 0.88 : 0.92),
-      borderWidth: 1,
-      // 细边缘高光：只用一条极淡的白边体现"材质边界"，不做强描边
-      borderColor: 'rgba(255,255,255,0.14)',
-      borderBottomRightRadius: 6,
-      shadowColor: '#000',
-      shadowOpacity: 0.14,
-      shadowRadius: 6,
-      shadowOffset: { width: 0, height: 2 },
-      elevation: 1,
+    name: {
+      color: theme.accent,
+      fontSize: CHAT_TYPE.name,
+      fontWeight: '700',
+      marginRight: 8,
     },
-    messageText: {
-      color: theme.textBody,
-      fontSize: 16,
-      lineHeight: 23,
+    mood: {
+      fontSize: 17,
+      lineHeight: 22,
+      marginRight: 8,
     },
-    // 用户气泡是饱和底色，需要铺在其上的浅色文字
-    userMessageText: {
-      color: theme.textOnAccent,
+    time: {
+      color: theme.chatMuted,
+      fontSize: CHAT_TYPE.meta,
+      fontVariant: ['tabular-nums'],
+      // who-line 里的时间与名字基线对齐；单独成行时由 tsToText 控制下方间距
+      marginBottom: 0,
     },
-    // 模型路由提示：弱化的小字，附在气泡正文下方，不参与正文排版
+    text: {
+      color: theme.chatText,
+      fontSize: CHAT_TYPE.body,
+      lineHeight: CHAT_TYPE.bodyLine,
+      marginTop: CHAT_LAYOUT.nameToText,
+    },
+    // 用户消息是「时间戳 → 正文」，实测间距 12dp（助手是 who-line → 正文 10dp）
+    textAfterTs: {
+      marginTop: CHAT_LAYOUT.tsToText,
+    },
+    // 模型路由提示：弱化的小字，附在正文下方，不参与正文排版
     modelNote: {
-      color: theme.textMuted,
+      color: theme.chatMuted,
       fontSize: 11,
       lineHeight: 16,
       marginTop: 6,
     },
-    // ---- 气泡内附件（图片 / 表情包） ----
+    // ---- 附件 ----
     attachmentStack: {
       gap: 8,
-      marginBottom: 2,
+      marginTop: CHAT_LAYOUT.nameToText,
+    },
+    attachmentEnd: {
+      alignItems: 'flex-end',
     },
     attachmentImage: {
       width: 200,
       height: 200,
-      borderRadius: 12,
-      backgroundColor: theme.surface,
+      borderRadius: 14,
+      backgroundColor: theme.pill,
     },
     stickerImage: {
       width: 120,
       height: 120,
     },
-    // 正文行内表情包：尺寸与行高配合，避免撑破气泡
+    // 正文行内表情包：尺寸与行高配合，避免撑破行
     inlineSticker: {
       width: 96,
       height: 96,
@@ -362,7 +347,7 @@ const createStyles = (theme: Theme) =>
       marginHorizontal: 2,
     },
     inlineStickerExpired: {
-      color: theme.textMuted,
+      color: theme.chatMuted,
       fontSize: 13,
     },
     // 已删除表情包的占位盒：与 stickerImage 同尺寸，虚线框 + 弱化文字
@@ -373,43 +358,43 @@ const createStyles = (theme: Theme) =>
       borderRadius: 12,
       alignItems: 'center',
       justifyContent: 'center',
-      backgroundColor: theme.surface,
+      backgroundColor: theme.pill,
     },
     stickerExpiredText: {
-      color: theme.textMuted,
+      color: theme.chatMuted,
       fontSize: 12,
     },
-    // ---- 「继续说」按钮 ----
-    continueRow: {
+    // ---- 操作行 / 重试 ----
+    actsRow: {
       flexDirection: 'row',
-      // 撑满整列（列宽 = 气泡宽），内容靠右 → 按钮右边缘贴住气泡右边缘
-      alignSelf: 'stretch',
-      justifyContent: 'flex-end',
-      // 与气泡下方留出间距（进同一列后原来的 -2 会压住气泡）
-      marginTop: 6,
-      marginBottom: 10,
+      alignItems: 'center',
+      gap: 10,
+      marginTop: CHAT_LAYOUT.textToActions,
     },
-    continueButton: {
-      paddingHorizontal: 10,
-      paddingVertical: 3,
-      borderRadius: 9,
-      borderWidth: 1,
+    actButton: {
+      width: 28,
+      height: 24,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
-    continueText: {
-      fontSize: 12,
+    actIcon: {
+      color: theme.chatMuted,
+      fontSize: 16,
+      lineHeight: 20,
       fontWeight: '700',
-      letterSpacing: 1,
     },
     retryButton: {
-      marginTop: 9,
+      marginTop: CHAT_LAYOUT.nameToText,
       alignSelf: 'flex-start',
-      paddingHorizontal: 10,
-      paddingVertical: 5,
-      borderRadius: 8,
-      backgroundColor: theme.bubble,
+      paddingHorizontal: 14,
+      height: 30,
+      borderRadius: 15,
+      backgroundColor: theme.pill,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     retryText: {
-      color: theme.textOnAccent,
-      fontSize: 13,
+      color: theme.pillText,
+      fontSize: CHAT_TYPE.pill,
     },
   });
