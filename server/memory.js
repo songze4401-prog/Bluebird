@@ -1114,10 +1114,24 @@ async function applyCandidate(raw, options = {}) {
   }
 
   const sessionId = cleanText(options.sessionId);
+  const abortedResult = () => ({
+    ...base,
+    reason: 'aborted',
+    decision: DECISION.REJECT,
+  });
 
   return enqueueWrite(async () => {
+    if (options.signal && options.signal.aborted) {
+      return abortedResult();
+    }
+
     const current = Array.isArray(memories) ? memories : [];
     const next = current.map(cloneEntry);
+    const persist = async () => {
+      if (options.signal && options.signal.aborted) return false;
+      await saveMemories(next);
+      return true;
+    };
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
     const effective = next.filter(item => isEffectiveAt(item, nowMs));
@@ -1194,7 +1208,7 @@ async function applyCandidate(raw, options = {}) {
 
       next.push(pending);
       trimToCapacity(next);
-      await saveMemories(next);
+      if (!(await persist())) return abortedResult();
       memories = next;
 
       return {
@@ -1233,7 +1247,7 @@ async function applyCandidate(raw, options = {}) {
 
       next[index] = updated;
       trimToCapacity(next);
-      await saveMemories(next);
+      if (!(await persist())) return abortedResult();
       memories = next;
 
       return {
@@ -1270,7 +1284,7 @@ async function applyCandidate(raw, options = {}) {
 
       next.push(replacement);
       trimToCapacity(next);
-      await saveMemories(next);
+      if (!(await persist())) return abortedResult();
       memories = next;
 
       return {
@@ -1293,7 +1307,7 @@ async function applyCandidate(raw, options = {}) {
 
     next.push(created);
     trimToCapacity(next);
-    await saveMemories(next);
+    if (!(await persist())) return abortedResult();
     memories = next;
 
     return {

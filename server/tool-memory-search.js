@@ -118,6 +118,7 @@ const definition = Object.freeze({
     required: Object.freeze(['query']),
   }),
   timeoutMs: 5000,
+  readOnly: true,
 
   /**
    * 服务端白名单校验：不信任模型传入的任何参数。

@@ -317,6 +317,58 @@ async function main() {
   check('C3: 关闭时无 trace 输出（引擎零调用）', traceLinesC.length === 0, `got ${traceLinesC.length}`);
   check('C4: 关闭时无引擎日志', !logLines.some(l => l.includes('[context] engine')));
 
+  // ============ H. 历史用户消息不得重复注入 systemPrompt ============
+  ORIG_LOG('\n[E2E-H] 历史用户消息只保留在消息数组');
+  process.env.BLUEBIRD_CONTEXT_ENGINE = '1';
+  logLines.length = 0;
+  errorLines.length = 0;
+  scripted.length = 0;
+  callIndex = 0;
+  stubCalls.length = 0;
+
+  const sessionH = await newSession();
+  const historySentinel = 'HISTORY-SENTINEL-ALPHA-9f3c';
+  scripted.push({ content: '[calm] 第一次回复' });
+  const firstH = await post('/chat', {
+    message: historySentinel,
+    sessionId: sessionH,
+  });
+
+  scripted.length = 0;
+  callIndex = 0;
+  stubCalls.length = 0;
+  scripted.push({ content: '[calm] 第二次回复' });
+  const secondH = await post('/chat', {
+    message: '第二次消息',
+    sessionId: sessionH,
+  });
+
+  const callH = stubCalls[stubCalls.length - 1];
+  const sysPromptH =
+    callH && Array.isArray(callH.messages) && callH.messages[0]
+      ? String(callH.messages[0].content || '')
+      : '';
+  const historyInMessages =
+    !!callH &&
+    Array.isArray(callH.messages) &&
+    callH.messages
+      .slice(1)
+      .some(message => String(message.content || '').includes(historySentinel));
+
+  check(
+    'H1: 历史用户消息在消息数组中，且不重复进入 systemPrompt',
+    firstH.status === 200 &&
+      secondH.status === 200 &&
+      historyInMessages &&
+      !sysPromptH.includes(historySentinel),
+    JSON.stringify({
+      firstStatus: firstH.status,
+      secondStatus: secondH.status,
+      historyInMessages,
+      systemHasHistory: sysPromptH.includes(historySentinel),
+    })
+  );
+
   // ============ D. Agent 路径：工具调用进入 trace ============
   ORIG_LOG('\n[E2E-D] Agent 工具路径（引擎 + 工具双开）');
   process.env.BLUEBIRD_CONTEXT_ENGINE = '1';

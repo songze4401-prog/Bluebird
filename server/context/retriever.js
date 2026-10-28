@@ -179,6 +179,7 @@ function makeItem({
   freshness,
   untrusted = false,
   relevance = null,
+  fromHistory = false,
 }) {
   entrySeq += 1;
   return {
@@ -191,6 +192,9 @@ function makeItem({
     untrusted,
     // 检索侧的相关度（0~1）；来源不提供时为 null，组内决胜退回原有次序。
     relevance,
+    // 该条目来自已进入模型消息历史的用户消息。它仍需参与裁决，
+    // 但不能再渲染进 systemPrompt，否则同一句话会被注入两次。
+    fromHistory,
   };
 }
 
@@ -327,6 +331,7 @@ const userSource = {
             fetchedAt: m.createdAt || null,
             config,
           }),
+          fromHistory: true,
         })
       );
 

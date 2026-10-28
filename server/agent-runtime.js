@@ -103,7 +103,15 @@ function registerTool(definition) {
     throw new TypeError('[agent] 工具定义必须是对象');
   }
 
-  const { name, description, parameters, validate, handler, timeoutMs } = definition;
+  const {
+    name,
+    description,
+    parameters,
+    validate,
+    handler,
+    timeoutMs,
+    readOnly,
+  } = definition;
 
   if (!TOOL_NAME_RE.test(name || '')) {
     throw new TypeError(`[agent] 非法工具名：${name}`);
@@ -122,6 +130,9 @@ function registerTool(definition) {
   }
   if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
     throw new TypeError(`[agent] 工具 timeoutMs 非法：${name}`);
+  }
+  if (readOnly !== undefined && typeof readOnly !== 'boolean') {
+    throw new TypeError(`[agent] 工具 readOnly 必须是布尔值：${name}`);
   }
 
   tools.set(name, definition);
@@ -191,6 +202,16 @@ async function executeToolCall(name, rawArgs, context) {
 
   if (!def) {
     return { ok: false, code: 'unknown_tool', error: `未注册的工具：${name}` };
+  }
+
+  // 显式区分只读工具与有副作用的写入工具：写入工具必须在运行层拿到
+  // 当前会话与用户原话，不能只依赖模型参数或 handler 内部兜底。
+  if (def.readOnly === false && (!context || !context.sessionId || !context.userText)) {
+    return {
+      ok: false,
+      code: 'unauthorized_write',
+      error: '写入工具缺少当前会话或用户原话，已拒绝执行',
+    };
   }
 
   if (rawArgs === null || rawArgs === undefined) {

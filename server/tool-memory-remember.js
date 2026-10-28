@@ -93,6 +93,9 @@ const definition = Object.freeze({
     required: Object.freeze(['content', 'type', 'sourceQuote']),
   }),
   timeoutMs: 5000,
+  // 受控写入工具：运行层要求 context 同时带 sessionId 与当前用户原话，
+  // 真正的创建/合并/拒绝仍由 applyCandidate 的授权管线决定。
+  readOnly: false,
 
   validate(args) {
     if (!args || typeof args !== 'object' || Array.isArray(args)) {
@@ -208,6 +211,7 @@ const definition = Object.freeze({
         actor: 'agent',
         userText: context.userText,
         requireUserGrounding: true,
+        signal: context.signal,
       }
     );
 

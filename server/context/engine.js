@@ -436,14 +436,19 @@ async function runContextEngine({
 function renderContextBlocks({ systemContexts = [] } = {}) {
   const blocks = [];
 
-  const trustedLines = systemContexts.map(item => {
-    const marks = [];
-    if (item.freshness && item.freshness.status === 'stale') marks.push('可能过时');
-    if (item.freshness && item.freshness.status === 'unknown') marks.push('时效未知');
-    if (item.pendingValidation) marks.push('待验证');
-    const mark = marks.length ? `（${marks.join('，')}）` : '';
-    return `- ${item.content}${mark}`;
-  });
+  // 历史用户消息已经在模型消息数组里；这里跳过，避免 systemPrompt
+  // 与对话历史重复注入同一句话。注入型 user 条目（fromHistory=false）
+  // 仍按正常上下文渲染。
+  const trustedLines = systemContexts
+    .filter(item => item.fromHistory !== true)
+    .map(item => {
+      const marks = [];
+      if (item.freshness && item.freshness.status === 'stale') marks.push('可能过时');
+      if (item.freshness && item.freshness.status === 'unknown') marks.push('时效未知');
+      if (item.pendingValidation) marks.push('待验证');
+      const mark = marks.length ? `（${marks.join('，')}）` : '';
+      return `- ${item.content}${mark}`;
+    });
 
   if (trustedLines.length) {
     blocks.push(

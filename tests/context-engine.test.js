@@ -844,13 +844,14 @@ test('J1: runContextEngine 全链路可用（route→planner→retrieve→adjudi
     injectedTask: '用户最近说了什么',
   });
   assert.strictEqual(out.ok, true);
-  // user 源从 history 检索到用户消息
-  const userItem = out.systemContexts.find(s => s.source === 'user');
+  // user 源从 history 检索到用户消息，参与裁决……
+  const userItem = out.decisions.selected.find(s => s.source === 'user');
   assert.ok(userItem);
   assert.match(userItem.content, /东京出差/);
-  // 渲染块可用于注入 systemPrompt
+  // ……但历史消息本来就在模型消息数组里，不能再渲染到 systemPrompt。
+  assert.ok(!out.systemContexts.some(s => s.source === 'user'));
   const blocks = engine.renderContextBlocks(out);
-  assert.ok(blocks.length >= 1);
+  assert.strictEqual(blocks.length, 0);
 });
 
 test('J2: verifyResult 检测到 expired 实时数据进入上下文时失败', () => {
