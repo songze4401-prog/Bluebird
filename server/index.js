@@ -2541,10 +2541,20 @@ app.post('/chat', requireAuth, async (req, res) => {
     // ③ 非带图请求——带图（useVision）后端强制无工具，不依赖前端。
     // 任一不满足都走下方原路径，行为与改造前逐字节一致。
     noteSwitchObservation();
+    const agentSwitchOn = agentToolsEnabled();
+    const agentToolsSupported = supportsTools(ctx.providerId, ctx.modelId);
     const agentOn =
-      agentToolsEnabled() &&
+      agentSwitchOn &&
       !ctx.useVision &&
-      supportsTools(ctx.providerId, ctx.modelId);
+      agentToolsSupported;
+
+    // 只记录判定元数据：模型、开关、能力、是否带图、最终是否放行。
+    // 不记录用户消息、附件内容、工具参数或记忆正文。
+    console.log(
+      `[agent-gate] path=chat provider=${ctx.providerId} model=${ctx.modelId}` +
+        ` switch=${agentSwitchOn} toolsCapability=${agentToolsSupported}` +
+        ` hasImage=${ctx.useVision} allowed=${agentOn}`
+    );
 
     if (agentOn) {
       console.log(
@@ -2788,10 +2798,20 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   // 事件向客户端反馈进度；最终文本仍走 stripper → delta → done，
   // 不新增也不改变既有事件格式（旧客户端忽略新 type 即可）。
   noteSwitchObservation();
+  const agentSwitchOn = agentToolsEnabled();
+  const agentToolsSupported = supportsTools(ctx.providerId, ctx.modelId);
   const agentOn =
-    agentToolsEnabled() &&
+    agentSwitchOn &&
     !ctx.useVision &&
-    supportsTools(ctx.providerId, ctx.modelId);
+    agentToolsSupported;
+
+  // 只记录判定元数据：模型、开关、能力、是否带图、最终是否放行。
+  // 不记录用户消息、附件内容、工具参数或记忆正文。
+  console.log(
+    `[agent-gate] path=stream provider=${ctx.providerId} model=${ctx.modelId}` +
+      ` switch=${agentSwitchOn} toolsCapability=${agentToolsSupported}` +
+      ` hasImage=${ctx.useVision} allowed=${agentOn}`
+  );
 
   if (agentOn) {
     console.log(
