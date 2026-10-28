@@ -165,18 +165,20 @@ function backendEnv(dataDir) {
   };
 }
 
-function runBackendFile(name, dataDir) {
-  const result = spawnSync(
-    process.execPath,
-    [path.join(TESTS_DIR, `${name}.test.js`)],
-    {
-      cwd: ROOT,
-      env: backendEnv(dataDir),
-      encoding: 'utf8',
-      timeout: 120000,
-      maxBuffer: 16 * 1024 * 1024,
-    }
-  );
+function runBackendFile(name, dataDir, format = 'custom') {
+  const file = path.join(TESTS_DIR, `${name}.test.js`);
+  const args =
+    format === 'node'
+      ? ['--test', '--test-concurrency=1', file]
+      : [file];
+
+  const result = spawnSync(process.execPath, args, {
+    cwd: ROOT,
+    env: backendEnv(dataDir),
+    encoding: 'utf8',
+    timeout: 120000,
+    maxBuffer: 16 * 1024 * 1024,
+  });
 
   const output = `${result.stdout || ''}${result.stderr || ''}`;
   const parsed = parseBackendOutput(output);
@@ -270,7 +272,11 @@ function main() {
 
   try {
     for (const name of files) {
-      const result = runBackendFile(name, dataDir);
+      const result = runBackendFile(
+        name,
+        dataDir,
+        baseline.files[name] ? baseline.files[name].format : 'custom'
+      );
       actualResults[name] = result;
       const status = result.ok ? 'PASS' : `FAIL(${result.status})`;
       console.log(`${status} ${name}${result.parsed ? ` ${result.parsed.count}` : ' ?'}`);
