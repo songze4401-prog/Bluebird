@@ -88,6 +88,12 @@ const ID_PREFIX_ISSUED = 'mem-';
 // 权重区间因此只有 [0.94, 1.0] —— 够拆掉近似平局，不够让强相关的低置信
 // 记忆被弱相关的高置信记忆挤下去。
 const CONFIDENCE_WEIGHT_FLOOR = 0.6;
+// 非 identity 候选的最低混合相关度：过滤掉英文常用二元组造成的 1-2% 词面噪声，
+// 同时保留“1 个二元组 / 6 个内容二元组”这类合法但很低的命中（约 5%）。
+const MIN_RELEVANCE = 0.04;
+// 无关键词命中时，纯内容二元组重合至少达到 10% 才算相关；避免长文本中
+// 一两个常见二元组（如 Windows 里的 do/us）把无关条目带进结果。
+const MIN_CONTENT_SCORE = 0.1;
 
 // 检索评分权重：每项都可解释，测试里直接断言这些因子。
 // 类型权重只调整同等相关度下的次序；时间衰减只作用于事件型事实，
@@ -1849,7 +1855,13 @@ function rankMemories(validMemories, current, cap = 10, options = {}) {
         sourceTypes: contributionSourceTypes(item),
       };
     })
-    .filter(({ relevance }) => relevance > 0)
+    .filter(
+      ({ relevance, keywordHits, contentScore, semanticScore }) =>
+        relevance >= MIN_RELEVANCE &&
+        (semanticScore > 0 ||
+          keywordHits > 0 ||
+          contentScore >= MIN_CONTENT_SCORE)
+    )
     .sort((a, b) => {
       if (b.score !== a.score) {
         return b.score - a.score;

@@ -320,6 +320,98 @@ console.log('\nA. 本地概念语义');
       );
     })()
   );
+
+  check(
+    '词典已扩展到至少 16 个可解释概念',
+    capability.conceptCount >= 16 &&
+      [
+        'allergy',
+        'theme',
+        'project',
+        'birthday',
+        'exam',
+        'computer',
+        'spicy_food',
+        'travel',
+        'license_plate',
+        'dietary_restriction',
+      ].every(concept => capability.concepts.includes(concept)),
+    JSON.stringify(capability.concepts)
+  );
+  check(
+    '过敏：allergy 与中文“花粉/过敏”命中',
+    semantic.semanticSimilarity('what am I allergic to', '用户对花粉过敏')
+      .score === 1
+  );
+  check(
+    '主题：theme 与中文“深色主题”命中',
+    semantic.semanticSimilarity('what theme do I like', '用户偏好深色主题')
+      .score === 1
+  );
+  check(
+    '项目：project 与“项目/云岫/Bluebird”命中',
+    semantic.semanticSimilarity('what project am I working on', '用户在开发云岫 Bluebird 项目')
+      .score === 1
+  );
+  check(
+    '生日：birthday 与中文“生日”命中',
+    semantic.semanticSimilarity('when is my birthday', '用户的生日是3月14日')
+      .score === 1
+  );
+  check(
+    '考试：exam 与中文“研究生入学考试”命中',
+    semantic.semanticSimilarity('what exam am I preparing for', '用户正在准备研究生入学考试')
+      .score === 1
+  );
+  check(
+    '电脑：computer 与“Windows/电脑”命中',
+    semantic.semanticSimilarity('what computer do I use', '用户用 Windows 11 电脑做开发')
+      .score === 1
+  );
+  check(
+    '口味：spicy food 与“辣/湖南口味”命中',
+    semantic.semanticSimilarity('do I like spicy food', '用户爱吃辣，偏好湖南口味')
+      .score === 1
+  );
+  check(
+    '出行：travel 与“出差”命中',
+    semantic.semanticSimilarity('where did I travel', '用户上周去青岛出差')
+      .score === 1
+  );
+  check(
+    '车牌：license plate 与“车牌号”命中',
+    semantic.semanticSimilarity('what is my license plate', '用户的车牌号是沪A12345')
+      .score === 1
+  );
+  check(
+    '饮食限制：avoid 与“不吃香菜”命中',
+    semantic.semanticSimilarity('what food do I avoid', '用户不吃香菜')
+      .score === 1
+  );
+  check(
+    '职业：engineer 与“软件工程师”命中',
+    semantic.semanticSimilarity('what is my job', '用户是软件工程师').score === 1
+  );
+  check(
+    '昵称：nickname 与“小名”命中',
+    semantic.semanticSimilarity('what is my nickname', '用户的小名是小蓝').score === 1
+  );
+  check(
+    '反例：projector 不应被映射为 project',
+    semantic.semanticProfile('projector').concepts.length === 0
+  );
+  check(
+    '反例：正式姓名查询不应误召回昵称',
+    semantic.semanticSimilarity('what is my name', '用户的小名是小蓝').score === 0
+  );
+  check(
+    '反例：workstation 不应被映射为 job',
+    semantic.semanticProfile('workstation').concepts.length === 0
+  );
+  check(
+    '反例：tea 不应被映射为 coffee',
+    !semantic.semanticProfile('tea').concepts.includes('coffee')
+  );
 }
 
 // ================= B. 混合排序、低相关与事实更新 =================
@@ -657,6 +749,27 @@ seed([
       item.match.semantic.matched === false &&
       item.match.reason !== 'concept',
     JSON.stringify(item && item.components)
+  );
+
+  seed([
+    mem({
+      id: 'sem-low-noise',
+      content: '用户用 Windows 11 电脑做开发',
+      type: 'fact',
+      keywords: [],
+      updatedAt: iso(7),
+      validFrom: iso(100),
+    }),
+  ]);
+
+  const noise = memory.searchMemories({
+    query: 'what do I use',
+    sessionId: SESSION_A,
+  });
+  check(
+    '低相关英文二元组噪声被 MIN_RELEVANCE 拒绝',
+    noise.results.length === 0,
+    JSON.stringify(noise.results.map(item => [item.id, item.relevance]))
   );
 }
 
