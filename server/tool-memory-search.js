@@ -58,8 +58,9 @@ function validateTime(value, label) {
 const definition = Object.freeze({
   name: 'memory_search',
   description:
-    '检索与当前会话相关的长期记忆（只读）。当用户问到关于自己的事实、偏好、身份，' +
-    '或需要回忆过去明确说过的事情时使用。不要用它检索临时对话内容。',
+    '检索与当前会话相关的长期记忆（只读），同时使用关键词与本地概念语义（同义/跨语言）；' +
+    '当用户问到关于自己的事实、偏好、身份，或需要回忆过去明确说过的事情时使用。' +
+    '不要用它检索临时对话内容。',
   parameters: Object.freeze({
     type: 'object',
     properties: Object.freeze({
@@ -286,6 +287,14 @@ const definition = Object.freeze({
       excluded:
         found.diagnostics && found.diagnostics.excluded
           ? found.diagnostics.excluded
+          : null,
+      notReturned:
+        found.diagnostics && found.diagnostics.notReturned
+          ? found.diagnostics.notReturned
+          : null,
+      semantic:
+        found.diagnostics && found.diagnostics.semantic
+          ? found.diagnostics.semantic
           : null,
       ...(found.reason ? { reason: found.reason } : {}),
       summary:
