@@ -9,8 +9,9 @@
  *   D. 命中理由、分项评分、来源、ID、未返回原因等可解释结果
  *   E. 小记忆库不得绕过相关性过滤
  *
- * 说明：仓库没有向量/模型语义检索依赖，bigramScore 是字符二元组重合的
- * 词面近似，结果里用 semanticKind='lexical_bigram_only' 明确标注，不冒充向量语义。
+ * 说明：字符二元组是词面分；概念语义分来自 memory-semantic.js 的本地词典
+ * （同义/上下位/中英跨语言），标记为 semanticKind='concept_lexicon_v1'，
+ * 不是神经 embedding；开放域语义仍见 docs/memory-semantic.md 的阻塞说明。
  *
  * 运行：node tests/memory-retrieval.test.js
  */
@@ -653,7 +654,7 @@ seed(rankStore());
       Array.isArray(identity.sourceTypes) &&
       identity.sourceTypes.includes('user') &&
       identity.scope === 'primary' &&
-      identity.components.semanticKind === 'lexical_bigram_only'
+      identity.components.semanticKind === 'concept_lexicon_v1'
   );
   check(
     '诊断明确标注 token 估算器版本',
@@ -884,6 +885,9 @@ seed(baseStore());
           output.results[0].match.reason &&
           typeof output.results[0].score === 'number' &&
           output.excluded &&
+          output.notReturned &&
+          output.semantic.provider === 'local-concept-lexicon' &&
+          output.results[0].match.semantic.matched === true &&
           output.budget.estimator === 'heuristic-cjk-ascii-v1',
         JSON.stringify(output)
       );

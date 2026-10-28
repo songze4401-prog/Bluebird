@@ -28,6 +28,10 @@ const {
   DECISION,
   decide,
 } = require('./memory-decision');
+const {
+  semanticSimilarity,
+  semanticCapability,
+} = require('./memory-semantic');
 
 // 数据目录可通过 BLUEBIRD_DATA_DIR 覆盖：测试用临时目录，避免碰到真实数据。
 // 未设置时与 sessions.js / emotion.js 保持一致，落在 server/data/。
@@ -1693,9 +1697,10 @@ function buildMemoryContext(message, sessionId = null) {
 // （searchMemories，scope 化）共用同一套算分，不另造轮子。
 // current 传原始查询串：关键词命中按归一化文本比较，内容二元组按原文计算。
 // identity 类型优先（≤2 条），保证身份类事实不会因字面 0 分被丢弃；
-// 其余按 关键词命中 0.7 + 内容二元组重合 0.3 打分，得分 > 0 入选。
-// 综合分 = 词面相关度 × 类型权重 × 时间衰减 × 状态权重 × 置信度权重；
-// 词面相关度只使用关键词与字符二元组，不冒充向量/模型语义检索。
+// 其余按 关键词命中 0.7 + 内容二元组重合 0.3 得到词面相关度，再与
+// 概念语义相关度按 0.7 / 0.3 混合；语义分来自 memory-semantic.js 的本地
+// concept 词典（同义/上下位/跨语言），不是神经 embedding。
+// 综合分 = 混合相关度 × 类型权重 × 时间衰减 × 状态权重 × 置信度权重。
 // cap 为上限。已被更正（status=superseded）的条目在 current 路径先被
 // 候选过滤剔除；历史路径会给它更低的状态权重。
 // 返回 [{item, relevance, score, ...分项}]：分项直接用于可解释检索结果。
@@ -1713,24 +1718,42 @@ function rankMemories(validMemories, current, cap = 10, options = {}) {
   const identity = candidates
     .filter(item => item.type === 'identity')
     .slice(0, 2)
-    .map(item => ({
-      item,
-      relevance: 0,
-      score: 0,
-      keywordHits: 0,
-      keywordScore: 0,
-      contentScore: 0,
-      bigramScore: 0,
-      semanticKind: 'lexical_bigram_only',
-      matchKeywords: [],
-      matchReason: 'identity_priority',
-      weight: confidenceWeight(item),
-      typeWeight: typeWeightOf(item),
-      timeDecay: timeDecayWeight(item, now),
-      statusWeight: statusWeightOf(item),
-      status: item.status || STATUS_ACTIVE,
-      sourceTypes: contributionSourceTypes(item),
-    }));
+    .map(item => {
+      const semantic = semanticSimilarity(
+        current,
+        item.content,
+        item.keywords
+      );
+
+      return {
+        item,
+        relevance: 0,
+        lexicalRelevance: 0,
+        score: 0,
+        keywordHits: 0,
+        keywordScore: 0,
+        contentScore: 0,
+        bigramScore: 0,
+        semanticScore: semantic.score,
+        semanticCoverage: semantic.coverage,
+        semanticPrecision: semantic.precision,
+        semanticConcepts: semantic.concepts,
+        semanticEvidence: semantic.evidence,
+        semanticProvider: semantic.provider,
+        semanticKind: semantic.kind,
+        semanticNeural: semantic.neural,
+        semanticLimited: semantic.limited,
+        semanticBlocked: semantic.blocked,
+        matchKeywords: [],
+        matchReason: 'identity_priority',
+        weight: confidenceWeight(item),
+        typeWeight: typeWeightOf(item),
+        timeDecay: timeDecayWeight(item, now),
+        statusWeight: statusWeightOf(item),
+        status: item.status || STATUS_ACTIVE,
+        sourceTypes: contributionSourceTypes(item),
+      };
+    });
 
   const scored = candidates
     .map(item => {
@@ -1767,32 +1790,57 @@ function rankMemories(validMemories, current, cap = 10, options = {}) {
           ? hits / memoryBigrams.size
           : 0;
 
-      const relevance = keywords.length
+      const lexicalRelevance = keywords.length
         ? keywordScore * 0.7 + contentScore * 0.3
         : contentScore;
+      const semantic = semanticSimilarity(
+        current,
+        item.content,
+        keywords
+      );
+      // 混合相关度：词面相关度与概念语义相关度加权。查询没有命中任何
+      // concept 时 semantic=0，行为与旧词面检索保持一致；命中时语义分
+      // 可以把词面完全不同的同义/跨语言记忆召回，但不会压过综合分更高的条目。
+      const relevance =
+        semantic.score > 0
+          ? lexicalRelevance * 0.7 + semantic.score * 0.3
+          : lexicalRelevance;
 
       const weight = confidenceWeight(item);
       const typeWeight = typeWeightOf(item);
       const timeDecay = timeDecayWeight(item, now);
       const statusWeight = statusWeightOf(item);
+      const lexicalReason =
+        keywordHits && contentScore > 0
+          ? 'keyword+content'
+          : keywordHits
+            ? 'keyword'
+            : contentScore > 0
+              ? 'content'
+              : null;
 
       return {
         item,
         relevance,
+        lexicalRelevance,
         score: relevance * typeWeight * timeDecay * statusWeight * weight,
         keywordHits,
         keywordScore,
         contentScore,
-        // 词面二元组重合的别名；明确标注它不是向量语义相似度。
+        // 词面二元组重合的别名；语义分单独由 concept 词典计算。
         bigramScore: contentScore,
-        semanticKind: 'lexical_bigram_only',
+        semanticScore: semantic.score,
+        semanticCoverage: semantic.coverage,
+        semanticPrecision: semantic.precision,
+        semanticConcepts: semantic.concepts,
+        semanticEvidence: semantic.evidence,
+        semanticProvider: semantic.provider,
+        semanticKind: semantic.kind,
+        semanticNeural: semantic.neural,
+        semanticLimited: semantic.limited,
+        semanticBlocked: semantic.blocked,
         matchKeywords,
-        matchReason:
-          keywordHits && contentScore > 0
-            ? 'keyword+content'
-            : keywordHits
-              ? 'keyword'
-              : 'content',
+        matchReason: lexicalReason || (semantic.score > 0 ? 'concept' : 'none'),
         weight,
         typeWeight,
         timeDecay,
@@ -2097,6 +2145,7 @@ function searchMemories({
     totalMax,
     maxTokens,
     tokenEstimator: TOKEN_ESTIMATOR_VERSION,
+    semantic: semanticCapability(),
     estimatedTokens: 0,
   };
 
@@ -2249,11 +2298,32 @@ function searchMemories({
         keywords: entry.matchKeywords,
         keywordScore: +entry.keywordScore.toFixed(6),
         contentScore: +entry.contentScore.toFixed(6),
+        semantic: {
+          matched: entry.semanticScore > 0,
+          score: +entry.semanticScore.toFixed(6),
+          coverage: +entry.semanticCoverage.toFixed(6),
+          precision: +entry.semanticPrecision.toFixed(6),
+          concepts: entry.semanticConcepts,
+          evidence: entry.semanticEvidence,
+          provider: entry.semanticProvider,
+          kind: entry.semanticKind,
+          neural: entry.semanticNeural,
+          limited: entry.semanticLimited,
+          blocked: entry.semanticBlocked,
+        },
       },
       components: {
-        lexicalRelevance: +entry.relevance.toFixed(6),
+        lexicalRelevance: +entry.lexicalRelevance.toFixed(6),
+        hybridRelevance: +entry.relevance.toFixed(6),
         bigramScore: +entry.bigramScore.toFixed(6),
+        semanticScore: +entry.semanticScore.toFixed(6),
+        semanticCoverage: +entry.semanticCoverage.toFixed(6),
+        semanticPrecision: +entry.semanticPrecision.toFixed(6),
         semanticKind: entry.semanticKind,
+        semanticProvider: entry.semanticProvider,
+        semanticNeural: entry.semanticNeural,
+        semanticLimited: entry.semanticLimited,
+        semanticBlocked: entry.semanticBlocked,
         typeWeight: entry.typeWeight,
         timeDecay: +entry.timeDecay.toFixed(6),
         statusWeight: entry.statusWeight,
