@@ -132,6 +132,8 @@ export type AgentPolicySaveResponse = {
 export type PersonaResponse = {
   config: PersonaConfig;
   defaults?: PersonaConfig;
+  // 字段上限由服务端下发（persona.js 为唯一来源），前端字数提示直接用它
+  limits?: { customPromptMaxChars?: number };
 };
 
 export type PersonaSaveResponse = { config: PersonaConfig };

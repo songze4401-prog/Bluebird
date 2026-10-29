@@ -7,6 +7,7 @@ import {
   StyleSheet,
   Switch,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -284,6 +285,8 @@ const sliderStyles = StyleSheet.create({
   },
 });
 
+type Notice = { text: string; error: boolean };
+
 export function ControlPanelScreen({
   theme,
   visible,
@@ -302,8 +305,11 @@ export function ControlPanelScreen({
   const [config, setConfig] = useState<PersonaConfig | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // 字数上限由服务端 GET /persona 下发（persona.js 是唯一来源，前端不写死）；
+  // 拿到之前只做纯计数展示，不做拦截——超限由服务端拒绝并回显原因。
+  const [customPromptMax, setCustomPromptMax] = useState<number | null>(null);
 
   const [policy, setPolicy] = useState<AgentPolicyConfig | null>(null);
   const [policyMeta, setPolicyMeta] = useState<AgentPolicyResponse['meta'] | null>(null);
@@ -316,7 +322,7 @@ export function ControlPanelScreen({
   const [policyError, setPolicyError] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
-  // 打开即拉取当前配置（含服务端默认值，恢复默认以此为准）
+  // 打开即拉取当前配置（含服务端默认值与字段上限，恢复默认以此为准）
   useEffect(() => {
     if (!visible) return;
 
@@ -336,7 +342,10 @@ export function ControlPanelScreen({
           throw apiErrorFromPayload(data, response.status, '配置加载失败');
         }
 
-        if (!cancelled) setConfig(data.config);
+        if (!cancelled) {
+          setConfig(data.config);
+          setCustomPromptMax(data.limits?.customPromptMaxChars ?? null);
+        }
       } catch {
         if (!cancelled) setLoadError('配置加载失败，请检查后端连接');
       } finally {
@@ -483,25 +492,36 @@ export function ControlPanelScreen({
     setNotice(null);
   };
 
-  const putConfig = async (body: object): Promise<boolean> => {
+  const updateCustomPrompt = (text: string) => {
+    setConfig(prev => (prev ? { ...prev, customPrompt: text } : prev));
+    setNotice(null);
+  };
+
+  const notify = (text: string, error = false) => setNotice({ text, error });
+
+  // 返回 null 表示保存成功；返回字符串表示失败原因（本地编辑内容一律保留）。
+  const applyConfig = async (body: object): Promise<string | null> => {
     const response = await apiFetch(API_PATHS.persona, {
       method: 'PUT',
       body: JSON.stringify(body),
     });
 
-    const data = (await response.json()) as PersonaSaveResponse;
+    const data = (await response.json()) as PersonaSaveResponse & {
+      error?: string;
+    };
 
     if (response.status === 409) {
-      setNotice('配置文件已损坏，服务端已原地保护，拒绝写入');
-      return false;
+      return '配置文件已损坏，服务端已原地保护，拒绝写入';
     }
 
     if (!response.ok) {
-      throw apiErrorFromPayload(data, response.status, '保存失败');
+      // 400 等：服务端已给出可执行的中文原因，直接回显，用户改了再存
+      return data.error || '保存失败，请检查后端连接';
     }
 
+    // 以服务端归一化结果为准（换行统一、越界夹取），避免面板与实际注入不一致
     setConfig(data.config);
-    return true;
+    return null;
   };
 
   const handleSave = async () => {
@@ -511,9 +531,14 @@ export function ControlPanelScreen({
     setNotice(null);
 
     try {
-      if (await putConfig({ config })) setNotice('已保存，下一轮聊天生效');
+      const failure = await applyConfig({ config });
+
+      // 失败原因（400/409/500）一律按错误样式显示，不能和成功提示同色
+      if (failure) notify(failure, true);
+      else notify('已保存，下一轮聊天生效');
     } catch {
-      setNotice('保存失败，请检查后端连接');
+      // 网络层异常：config state 未被覆盖，用户写的文字仍在编辑框里
+      notify('保存失败，请检查后端连接', true);
     } finally {
       setSaving(false);
     }
@@ -527,13 +552,21 @@ export function ControlPanelScreen({
 
     try {
       // 恢复默认由服务端落盘其自身默认值，不依赖前端缓存
-      if (await putConfig({ reset: true })) setNotice('已恢复默认');
+      const failure = await applyConfig({ reset: true });
+
+      if (failure) notify(failure, true);
+      else notify('已恢复默认');
     } catch {
-      setNotice('恢复默认失败，请检查后端连接');
+      notify('恢复默认失败，请检查后端连接', true);
     } finally {
       setSaving(false);
     }
   };
+
+  const customPromptText = config?.customPrompt ?? '';
+  const customPromptChars = Array.from(customPromptText).length;
+  const customPromptOver =
+    customPromptMax !== null && customPromptChars > customPromptMax;
 
   const selectedPolicyToolNames = policy
     ? new Set(policy.tools.allowedTools ?? policyTools.map(tool => tool.name))
@@ -645,16 +678,61 @@ export function ControlPanelScreen({
                 })}
               </View>
 
+              <View style={styles.customBlock}>
+                <View style={styles.sliderHead}>
+                  <Text style={styles.sliderTitle}>自定义人格提示词</Text>
+                  <Text
+                    style={
+                      customPromptOver
+                        ? styles.counterOver
+                        : styles.counterNormal
+                    }
+                  >
+                    {customPromptMax === null
+                      ? `${customPromptChars} 字`
+                      : `${customPromptChars} / ${customPromptMax} 字`}
+                  </Text>
+                </View>
+
+                {/* 整句写在一条字符串里：JSX 会把换行折成空格，中文里就多出断词空格 */}
+                <Text style={styles.customHint} testID="custom-prompt-hint">
+                  {'用你自己的话描述希望她怎么陪你：性格、称呼、语气、想聊和不想聊的话题都可以。只影响表达方式，不会因此获得任何工具权限或绕过确认；清空即回到只用上面的滑块。'}
+                </Text>
+
+                <TextInput
+                  testID="custom-prompt-input"
+                  style={styles.customInput}
+                  value={customPromptText}
+                  onChangeText={updateCustomPrompt}
+                  multiline
+                  textAlignVertical="top"
+                  placeholder="例如：别叫我主人，说话直接一点，我难过的时候先陪我待一会儿再讲道理。"
+                  placeholderTextColor={theme.textMuted}
+                  accessibilityLabel="自定义人格提示词"
+                />
+              </View>
+
               <View style={styles.summaryCard}>
                 <Text style={styles.summaryTitle}>当前配置</Text>
                 <Text style={styles.summaryText}>
                   口语化 {config.colloquial} · 温暖 {config.warmth} · 主动表达{' '}
                   {config.initiative} · 表达长度 {config.length}
                   {'\n'}消息模式：{MODE_LABEL[config.messageMode]}
+                  {'\n'}自定义提示词：
+                  {customPromptChars === 0
+                    ? '未填写'
+                    : `已填写 ${customPromptChars} 字`}
                 </Text>
               </View>
 
-              {notice && <Text style={styles.notice}>{notice}</Text>}
+              {notice && (
+                <Text
+                  style={notice.error ? styles.noticeError : styles.notice}
+                  testID="persona-notice"
+                >
+                  {notice.text}
+                </Text>
+              )}
 
               <View style={styles.buttonRow}>
                 <TouchableOpacity
@@ -1106,6 +1184,35 @@ const createStyles = (theme: Theme) =>
       color: theme.textPrimary,
       fontSize: 15,
     },
+    customBlock: {
+      marginTop: 6,
+      marginBottom: 22,
+    },
+    customHint: {
+      color: theme.textMuted,
+      fontSize: 12,
+      lineHeight: 18,
+      marginBottom: 10,
+    },
+    customInput: {
+      borderWidth: 1,
+      borderRadius: 10,
+      padding: 12,
+      minHeight: 120,
+      fontSize: 15,
+      lineHeight: 22,
+      color: theme.textBody,
+      backgroundColor: theme.surface,
+      borderColor: theme.borderStrong,
+    },
+    counterNormal: {
+      color: theme.textMuted,
+      fontSize: 12,
+    },
+    counterOver: {
+      color: theme.danger,
+      fontSize: 12,
+    },
     summaryCard: {
       backgroundColor: theme.surface,
       borderRadius: 12,
@@ -1127,6 +1234,12 @@ const createStyles = (theme: Theme) =>
     notice: {
       color: theme.textSecondary,
       fontSize: 13,
+      marginBottom: 12,
+    },
+    noticeError: {
+      color: theme.danger,
+      fontSize: 13,
+      lineHeight: 19,
       marginBottom: 12,
     },
     buttonRow: {
