@@ -5,6 +5,13 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const express = require('express');
 const cors = require('cors');
+const retrieval = require('./retrieval');
+const { createRetrievalRouter } = require('./retrieval/routes');
+
+// 生产级可观测性：独立模块 + 只读查询 API。记录失败绝不影响主业务；
+// BLUEBIRD_MONITORING=0 可关闭，前端会显示 disabled 而不是健康。
+const monitoring = require('./monitoring');
+const { createMonitoringRouter } = require('./monitoring/routes');
 
 // 模型客户端统一由 model-adapter.js 按服务商配置创建（内置 DeepSeek 从
 // DEEPSEEK_API_KEY 派生）。缺 key 时服务照常启动（管理接口可用），
@@ -23,6 +30,11 @@ app.use('/uploads/image', express.json({ limit: '8mb' }));
 // 表情包仓库上传同理：图片以 dataURL 提交，与 uploads 共用 8mb 路由级限额
 app.use('/sticker-repo', express.json({ limit: '8mb' }));
 app.use(express.json({ limit: '1mb' }));
+
+// 埋点中间件注册在 body 解析之后（需要 sessionId 生成脱敏 session_ref），
+// 在限流之前（429 也是真实请求终态）；/monitoring 自身跳过，避免查询噪声。
+// 监控初始化放在单实例锁之后（见文件末尾），避免被拒绝启动的实例先写监控文件。
+app.use(monitoring.monitoringMiddleware());
 
 // 简单内存限流：客户端 bundle 里必然带 EXPO_PUBLIC_ token（纯前端无法隐藏），
 // 这是缓解 token 泄露后被暴力/盗刷的基本防线。按 IP+token 每分钟限频。
@@ -52,6 +64,11 @@ function rateLimit({ maxPerWindow = 60 } = {}) {
 }
 
 app.use(rateLimit());
+
+// 统一检索：查询只读，摄取/删除/重建写索引；全部复用 Bearer 鉴权与全局限流。
+app.use('/retrieval', createRetrievalRouter({ requireAuth }));
+// 只读监控 API：复用现有 Bearer 鉴权与全局限流；没有任何写接口。
+app.use('/monitoring', createMonitoringRouter({ requireAuth }));
 
 // 定期清理过期限流桶，防止内存无限增长
 setInterval(() => {
@@ -108,6 +125,27 @@ function requireAuth(req, res, next) {
   }
 
   next();
+}
+
+// 高风险数据操作审计：只记录动作、对象类别、结果、操作者/会话的哈希引用，
+// 不记录任何数据正文、路径或令牌原文。监控未启用时为 no-op。
+function auditAction(
+  req,
+  action,
+  { target = 'system', result = 'success', sessionId = null, reason = null } = {}
+) {
+  try {
+    monitoring.recordAudit({
+      action,
+      target,
+      result,
+      reason,
+      actorRef: monitoring.actorRefFor(req.headers.authorization),
+      sessionRef: monitoring.sessionRefFor(sessionId),
+    });
+  } catch (_) {
+    /* 审计失败不影响主业务 */
+  }
 }
 
 
@@ -878,10 +916,21 @@ app.delete('/sessions/:id', requireAuth, (req, res) => {
     }
 
     if (result === false) {
+      auditAction(req, 'session.delete', {
+        target: 'session',
+        result: 'failed',
+        sessionId: req.params.id,
+        reason: 'store_read_only',
+      });
       return res.status(500).json({
         error: '删除失败：聊天存储当前不可写',
       });
     }
+
+    auditAction(req, 'session.delete', {
+      target: 'session',
+      sessionId: req.params.id,
+    });
 
     // 会话已删除：移除对应的等待状态，避免 presence.json 残留孤儿条目
     try {
@@ -893,6 +942,12 @@ app.delete('/sessions/:id', requireAuth, (req, res) => {
     res.json({ ok: true, sessionId: req.params.id, message: '会话已删除' });
   } catch (error) {
     console.error('Session delete error:', error);
+    auditAction(req, 'session.delete', {
+      target: 'session',
+      result: 'failed',
+      sessionId: req.params.id,
+      reason: error && error.name ? error.name : 'delete_failed',
+    });
     res.status(500).json({ error: '删除会话失败' });
   }
 });
@@ -980,6 +1035,12 @@ app.post('/history/clear', requireAuth, (req, res) => {
   const guard = clearGuardError(req);
 
   if (guard) {
+    auditAction(req, 'history.clear', {
+      target: 'history',
+      result: 'denied',
+      sessionId: resolveSessionId(req, 'body'),
+      reason: 'confirm_required',
+    });
     return res.status(403).json({ error: guard, requireConfirm: true });
   }
 
@@ -1009,9 +1070,16 @@ app.post('/history/clear', requireAuth, (req, res) => {
       console.error('Presence reset error:', error);
     }
 
+    auditAction(req, 'history.clear', { target: 'history', sessionId });
     res.json({ ok: true, sessionId, message: '聊天记录已清理' });
   } catch (error) {
     console.error('History clear error:', error);
+    auditAction(req, 'history.clear', {
+      target: 'history',
+      result: 'failed',
+      sessionId: resolveSessionId(req, 'body'),
+      reason: error && error.name ? error.name : 'clear_failed',
+    });
     res.status(500).json({ error: '清理聊天记录失败' });
   }
 });
@@ -1103,6 +1171,12 @@ app.post('/history/recall', requireAuth, async (req, res) => {
 
       // 消息已经删干净了：如实告诉调用方「消息成功、记忆失败」的半完成状态，
       // 让它按 removedIds 收敛本地列表，而不是把这条消息继续显示出来。
+      auditAction(req, 'history.recall', {
+        target: 'history',
+        result: 'partial_success',
+        sessionId,
+        reason: 'memory_recall_failed',
+      });
       return res.status(503).json({
         error: '聊天记录已撤回，但长期记忆撤回失败，请重试或到记忆库手动删除',
         partial: true,
@@ -1124,6 +1198,12 @@ app.post('/history/recall', requireAuth, async (req, res) => {
         extra: { sessionId, reason: memoryRecall.reason },
       });
 
+      auditAction(req, 'history.recall', {
+        target: 'history',
+        result: 'partial_success',
+        sessionId,
+        reason: 'memory_recall_inconsistent',
+      });
       return res.status(503).json({
         error: '聊天记录已撤回，但长期记忆的落盘校验未通过，请重试',
         partial: true,
@@ -1135,6 +1215,10 @@ app.post('/history/recall', requireAuth, async (req, res) => {
       });
     }
 
+    auditAction(req, 'history.recall', {
+      target: 'history',
+      sessionId,
+    });
     res.json({
       ok: true,
       sessionId,
@@ -1235,6 +1319,7 @@ app.delete('/uploads/image/:id', requireAuth, (req, res) => {
     return res.status(404).json({ error: '图片不存在' });
   }
 
+  auditAction(req, 'attachment.delete', { target: 'attachment' });
   res.json({ ok: true, id });
 });
 
@@ -1405,6 +1490,7 @@ app.delete('/sticker-repo/:id', requireAuth, (req, res) => {
     if (!deleteSticker(req.params.id)) {
       return res.status(404).json({ error: '表情包不存在' });
     }
+    auditAction(req, 'sticker.delete', { target: 'sticker' });
     res.json({ ok: true, id: req.params.id });
   } catch (error) {
     console.error('Sticker repo delete error:', error);
@@ -1476,8 +1562,17 @@ app.post('/model-providers', requireAuth, async (req, res) => {
         .json({ error: result.error });
     }
 
+    auditAction(req, 'model_provider.create', {
+      target: 'model_provider',
+      reason: 'configuration_changed',
+    });
     res.status(201).json({ provider: result.provider });
   } catch (error) {
+    auditAction(req, 'model_provider.create', {
+      target: 'model_provider',
+      result: 'failed',
+      reason: error && error.code ? error.code : 'create_failed',
+    });
     const info = classifyError(error);
     res.status(info.status).json({ error: info.error, code: info.code });
   }
@@ -1504,8 +1599,17 @@ app.patch('/model-providers/:id', requireAuth, async (req, res) => {
     }
 
     invalidateProviderCache(req.params.id);
+    auditAction(req, 'model_provider.update', {
+      target: 'model_provider',
+      reason: 'configuration_changed',
+    });
     res.json({ provider: result.provider });
   } catch (error) {
+    auditAction(req, 'model_provider.update', {
+      target: 'model_provider',
+      result: 'failed',
+      reason: error && error.code ? error.code : 'update_failed',
+    });
     const info = classifyError(error);
     res.status(info.status).json({ error: info.error, code: info.code });
   }
@@ -1525,6 +1629,10 @@ app.delete('/model-providers/:id', requireAuth, (req, res) => {
   }
 
   invalidateProviderCache(req.params.id);
+  auditAction(req, 'model_provider.delete', {
+    target: 'model_provider',
+    reason: 'configuration_changed',
+  });
   res.json({ ok: true });
 });
 
@@ -1534,6 +1642,10 @@ app.put('/model-providers/default', requireAuth, (req, res) => {
   if (result.error) {
     return res.status(400).json({ error: result.error });
   }
+  auditAction(req, 'model_provider.set_default', {
+    target: 'model_provider',
+    reason: 'configuration_changed',
+  });
   res.json({ defaults: result.defaults });
 });
 
@@ -1556,6 +1668,10 @@ app.post('/model-providers/:id/enabled', requireAuth, (req, res) => {
   }
 
   if (body.enabled === false) invalidateProviderCache(req.params.id);
+  auditAction(req, body.enabled ? 'model_provider.enable' : 'model_provider.disable', {
+    target: 'model_provider',
+    reason: 'configuration_changed',
+  });
   res.json({ provider: result.provider });
 });
 
@@ -1570,6 +1686,11 @@ app.post('/memory/clear', requireAuth, async (req, res) => {
   const guard = clearGuardError(req);
 
   if (guard) {
+    auditAction(req, 'memory.clear', {
+      target: 'memory',
+      result: 'denied',
+      reason: 'confirm_required',
+    });
     return res.status(403).json({ error: guard, requireConfirm: true });
   }
 
@@ -1587,6 +1708,11 @@ app.post('/memory/clear', requireAuth, async (req, res) => {
         extra: { reason: consistency.reason },
       });
 
+      auditAction(req, 'memory.clear', {
+        target: 'memory',
+        result: 'partial_success',
+        reason: 'consistency_failed',
+      });
       return res.status(503).json({
         error: '记忆已清空，但落盘校验未通过，请重试',
         partial: true,
@@ -1612,6 +1738,15 @@ app.post('/memory/clear-session', requireAuth, async (req, res) => {
   const guard = clearGuardError(req);
 
   if (guard) {
+    auditAction(req, 'memory.clear_session', {
+      target: 'memory',
+      result: 'denied',
+      sessionId:
+        typeof (req.body || {}).sessionId === 'string'
+          ? req.body.sessionId.trim()
+          : null,
+      reason: 'confirm_required',
+    });
     return res.status(403).json({ error: guard, requireConfirm: true });
   }
 
@@ -1652,6 +1787,12 @@ app.post('/memory/clear-session', requireAuth, async (req, res) => {
         extra: { sessionId, reason: consistency.reason },
       });
 
+      auditAction(req, 'memory.clear_session', {
+        target: 'memory',
+        result: 'partial_success',
+        sessionId,
+        reason: 'consistency_failed',
+      });
       return res.status(503).json({
         error: '会话记忆已清理，但落盘校验未通过，请重试',
         partial: true,
@@ -1660,6 +1801,10 @@ app.post('/memory/clear-session', requireAuth, async (req, res) => {
       });
     }
 
+    auditAction(req, 'memory.clear_session', {
+      target: 'memory',
+      sessionId,
+    });
     res.json({
       ok: true,
       sessionId,
@@ -1668,6 +1813,12 @@ app.post('/memory/clear-session', requireAuth, async (req, res) => {
       remaining: result.remaining,
     });
   } catch (error) {
+    auditAction(req, 'memory.clear_session', {
+      target: 'memory',
+      result: 'failed',
+      sessionId,
+      reason: error && error.name ? error.name : 'clear_failed',
+    });
     logDataEvent({
       module: 'memory',
       event: 'memory_clear_session_failed',
@@ -1968,6 +2119,11 @@ app.post('/memory/delete', requireAuth, async (req, res) => {
         extra: { reason: consistency.reason },
       });
 
+      auditAction(req, 'memory.delete', {
+        target: 'memory',
+        result: 'partial_success',
+        reason: 'consistency_failed',
+      });
       return res.status(503).json({
         error: '记忆已删除，但落盘校验未通过，请重试',
         partial: true,
@@ -1979,9 +2135,15 @@ app.post('/memory/delete', requireAuth, async (req, res) => {
       return res.status(404).json({ error: '记忆不存在' });
     }
 
+    auditAction(req, 'memory.delete', { target: 'memory' });
     res.json({ ok: true, removed: result.removed, id: result.id });
   } catch (error) {
     console.error('Memory delete error:', error);
+    auditAction(req, 'memory.delete', {
+      target: 'memory',
+      result: 'failed',
+      reason: error && error.name ? error.name : 'delete_failed',
+    });
     res.status(500).json({ error: '删除记忆失败' });
   }
 });
@@ -2081,6 +2243,9 @@ async function prepareChatRequest(req) {
   // 上下文历史以服务端存储为准：不同会话严格隔离，客户端就算传来别的
   // 会话的历史也不会串进来。图片消息在这里转成模型可用的形态。
   const storedItems = getMessages(sessionId) || [];
+
+  // 会话加载证据：只记录条数，不记录任何消息正文或原始会话 ID。
+  monitoring.recordSessionLoaded({ messageCount: storedItems.length });
 
   // 历史里只有 user 消息会产生 image blocks（AI 的图片/表情包本就降级为文本），
   // 所以只统计用户图片；它决定目标模型能否承载完整上下文。
@@ -2300,6 +2465,19 @@ async function prepareChatRequest(req) {
   const toolsReserveTokens = agentPossible ? estimateAgentToolsReserve() : 0;
 
   let contextRuntime;
+  const contextBuildStartedAt = Date.now();
+  const contextSpan = monitoring.startSpan('context.build', {
+    history_total: projectedHistory.length,
+  });
+  monitoring.recordEvent({
+    event_name: monitoring.EVENTS.CONTEXT_BUILD_STARTED,
+    component: 'context',
+    status: 'unknown',
+    attributes: {
+      history_total: projectedHistory.length,
+    },
+  });
+
   try {
     contextRuntime = await runContextRuntime({
       task: memoryQuery,
@@ -2325,6 +2503,26 @@ async function prepareChatRequest(req) {
       config: contextConfig,
     });
   } catch (error) {
+    contextSpan.end({ status: 'failed', errorCode: 'context_runtime_error' });
+    monitoring.recordContextBuild({
+      runtime: {
+        ok: false,
+        errorCode: 'context_runtime_error',
+        error: '上下文组装失败',
+        trace: { stages: {}, history: {}, retrieval: {} },
+        measurement: {},
+        memory: { accepted: [] },
+        summary: { count: 0 },
+        dropped: [],
+      },
+      durationMs: Date.now() - contextBuildStartedAt,
+    });
+    monitoring.recordTask({
+      status: 'failed',
+      termination: 'context_runtime_error',
+      durationMs: Date.now() - contextBuildStartedAt,
+      errorCode: 'context_runtime_error',
+    });
     console.error(
       `[context] runtime 异常 session=${sessionId}` +
         ` error=${error && error.message ? error.message : error}`
@@ -2334,7 +2532,25 @@ async function prepareChatRequest(req) {
     };
   }
 
+  contextSpan.end({
+    status: contextRuntime.ok ? 'success' : 'failed',
+    errorCode: contextRuntime.errorCode || null,
+  });
+  monitoring.recordContextBuild({
+    runtime: contextRuntime,
+    durationMs: Date.now() - contextBuildStartedAt,
+  });
+
   if (!contextRuntime.ok) {
+    monitoring.recordTask({
+      status: 'failed',
+      termination:
+        contextRuntime.errorCode === 'context_too_large'
+          ? 'context_rejected'
+          : 'context_build_failed',
+      durationMs: Date.now() - contextBuildStartedAt,
+      errorCode: contextRuntime.errorCode || 'context_runtime_error',
+    });
     console.error(`[context-trace] ${JSON.stringify(contextRuntime.trace)}`);
     const status = contextRuntime.errorCode === 'context_too_large' ? 413 : 500;
     return {
@@ -2483,6 +2699,16 @@ function completeChatTurn({
   // 客户端已断开时不落盘，避免回复成为"幽灵消息"（用户没收到却已入库）。
   let persisted = false;
   let trimmedMessages = [];
+  const persistStartedAt = Date.now();
+  const persistSpan = monitoring.startSpan('persistence.write', {
+    message_count: stamped.length,
+  });
+  monitoring.recordEvent({
+    event_name: monitoring.EVENTS.PERSISTENCE_WRITE_STARTED,
+    component: 'persistence',
+    status: 'unknown',
+    attributes: { message_count: stamped.length },
+  });
 
   if (!isClientGone()) {
     try {
@@ -2498,9 +2724,35 @@ function completeChatTurn({
           'messages were NOT saved'
         );
       }
+
+      persistSpan.end({
+        status: persisted ? 'success' : 'failed',
+        errorCode: persisted ? null : 'write_failed',
+      });
+      monitoring.recordPersistence({
+        status: persisted ? 'success' : 'failed',
+        messageCount: stamped.length,
+        trimmedCount: trimmedMessages.length,
+        durationMs: Date.now() - persistStartedAt,
+      });
     } catch (error) {
       console.error('History save error:', error);
+      persistSpan.end({ status: 'failed', errorCode: 'write_exception' });
+      monitoring.recordPersistence({
+        status: 'failed',
+        messageCount: stamped.length,
+        trimmedCount: 0,
+        durationMs: Date.now() - persistStartedAt,
+      });
     }
+  } else {
+    persistSpan.end({ status: 'skipped', errorCode: 'client_closed' });
+    monitoring.recordPersistence({
+      status: 'skipped',
+      messageCount: stamped.length,
+      trimmedCount: 0,
+      durationMs: Date.now() - persistStartedAt,
+    });
   }
 
   // 达到保留上限后裁掉的旧消息：它们的图片/表情包引用可能已无人使用。
@@ -2595,6 +2847,13 @@ function scheduleMemoryExtraction(
         if (!outcome) return;
         if (outcome.reason === 'not_triggered') return; // 普通闲聊，不值得记
 
+        monitoring.recordMemoryWrite({
+          action: outcome.action || 'none',
+          status: outcome.written ? 'success' : 'skipped',
+          written: outcome.written === true,
+          reason: outcome.written ? null : outcome.reason,
+        });
+
         logDataEvent({
           module: 'memory',
           event: outcome.written
@@ -2612,6 +2871,12 @@ function scheduleMemoryExtraction(
         });
       })
       .catch(error => {
+        monitoring.recordMemoryWrite({
+          action: 'extract',
+          status: 'failed',
+          written: false,
+          reason: error && error.name ? error.name : 'extract_failed',
+        });
         logDataEvent({
           module: 'memory',
           event: 'memory_extract_failed',
@@ -2634,6 +2899,16 @@ function recordSentForContext(ctx, { round = 1, messages = ctx.requestMessages, 
     contextIds: ctx.contextIds || [],
     model: { providerId: ctx.providerId, modelId: ctx.modelId },
     toolsCount,
+  });
+
+  const list = Array.isArray(messages) ? messages : [];
+  const nonSystem = list.filter(message => message && message.role !== 'system').length;
+  monitoring.recordSent({
+    count: nonSystem + (Array.isArray(ctx.contextIds) ? ctx.contextIds.length : 0),
+    round,
+    toolsCount,
+    contextCount: Array.isArray(ctx.contextIds) ? ctx.contextIds.length : 0,
+    messageCount: list.length,
   });
 }
 
@@ -2661,6 +2936,9 @@ app.post('/chat', requireAuth, async (req, res) => {
   // 与模型耗时无关（回复可能几十秒后才完成）。
   const userMessageReceivedAt = Date.now();
   let ctxForTrace = null;
+  // 失败路径也要记录真实的 Agent 轮数/工具数；这些变量必须在 try 外声明。
+  let lastAgentRounds = 0;
+  let lastAgentToolCount = 0;
 
   try {
     const prepared = await prepareChatRequest(req);
@@ -2672,6 +2950,13 @@ app.post('/chat', requireAuth, async (req, res) => {
 
     const { ctx } = prepared;
     ctxForTrace = ctx;
+
+    monitoring.recordModelRoute({
+      requested: ctx.modelRoute.requested,
+      actual: ctx.modelRoute.actual,
+      auto: ctx.modelRoute.auto,
+      reason: ctx.modelRoute.reason,
+    });
 
     // 真实 API 调用流水：每次消耗密钥都在日志留痕，便于与服务商控制台
     // 用量对账、排查意外调用来源。纯日志，不影响逻辑，绝不含密钥本身。
@@ -2701,6 +2986,16 @@ app.post('/chat', requireAuth, async (req, res) => {
     if (ctx.contextTrace) {
       ctx.contextTrace.recordPolicy(ctx.agentPolicy, ctx.agentPolicyMeta, agentGate);
     }
+    monitoring.recordAgentGate({
+      path: 'chat',
+      switchOn: agentSwitchOn,
+      toolsSupported: agentToolsSupported,
+      hasNewImage: ctx.hasNewImage,
+      includeHistoryImages: ctx.includeHistoryImages,
+      useVision: ctx.useVision,
+      reason: agentGate.reason,
+      allowed: agentOn,
+    });
 
     // 只记录判定元数据：模型、开关、能力、新图/历史图、原因、是否放行。
     // 不记录用户消息、附件内容、工具参数或记忆正文。
@@ -2723,6 +3018,7 @@ app.post('/chat', requireAuth, async (req, res) => {
     let rawReply;
     let toolSteps = null;
     let agentOutcome = null;
+    let agentReachedMaxRounds = false;
 
     if (agentOn) {
       const outcome = await runAgentTurn({
@@ -2744,6 +3040,9 @@ app.post('/chat', requireAuth, async (req, res) => {
       completion = outcome.completion;
       rawReply = outcome.rawReply;
       toolSteps = outcome.toolSteps.length ? outcome.toolSteps : null;
+      agentReachedMaxRounds = outcome.reachedMaxRounds === true;
+      lastAgentRounds = outcome.rounds;
+      lastAgentToolCount = outcome.toolSteps.length;
 
       console.log(
         `[agent] finished session=${ctx.sessionId} rounds=${outcome.rounds}` +
@@ -2804,6 +3103,22 @@ app.post('/chat', requireAuth, async (req, res) => {
     // 非 Agent 路径的 trace 收尾（无工具调用，同样输出结构化 trace）
     emitContextTrace(ctx);
 
+    monitoring.recordTask({
+      status: clientGone
+        ? 'cancelled'
+        : agentReachedMaxRounds
+          ? 'partial_success'
+          : 'success',
+      termination: clientGone
+        ? 'client_closed'
+        : agentReachedMaxRounds
+          ? 'max_rounds'
+          : 'model_end',
+      durationMs: Date.now() - userMessageReceivedAt,
+      rounds: agentOn ? lastAgentRounds : 1,
+      toolCount: lastAgentToolCount,
+    });
+
     res.json({
       ...result,
       // model 是本次请求实际解析并按此下发的服务商模型（与设置页所选一致）；
@@ -2828,6 +3143,19 @@ app.post('/chat', requireAuth, async (req, res) => {
     // 其余（内部 bug）保持原有 500 语义不变。
     if (error instanceof ModelCallError) {
       console.error('AI API Error:', error.kind, error.message);
+      monitoring.recordTask({
+        status:
+          error.kind === 'timeout'
+            ? 'timeout'
+            : error.kind === 'auth'
+              ? 'denied'
+              : 'failed',
+        termination: 'model_error',
+        durationMs: Date.now() - userMessageReceivedAt,
+        rounds: lastAgentRounds || 1,
+        toolCount: lastAgentToolCount,
+        errorCode: error.kind,
+      });
       return res.status(error.status).json({
         error: error.message,
         code: error.kind,
@@ -2838,6 +3166,14 @@ app.post('/chat', requireAuth, async (req, res) => {
     }
 
     console.error('AI API Error:', error);
+    monitoring.recordTask({
+      status: 'failed',
+      termination: 'internal_error',
+      durationMs: Date.now() - userMessageReceivedAt,
+      rounds: lastAgentRounds || 1,
+      toolCount: lastAgentToolCount,
+      errorCode: 'internal_error',
+    });
 
     res.status(500).json({
       error: 'AI 请求失败',
@@ -2867,6 +3203,9 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
 
   const userMessageReceivedAt = Date.now();
   let ctxForTrace = null;
+  // 失败/断连路径也要记录 Agent 真实轮数与工具数，声明在 try 之外。
+  let lastAgentRounds = 0;
+  let lastAgentToolCount = 0;
 
   // 校验与上下文组装：失败时还没切 SSE，按普通 JSON 错误返回，
   // 客户端收到非 200 可走旧 /chat 回退路径
@@ -2875,17 +3214,65 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   try {
     prepared = await prepareChatRequest(req);
   } catch (error) {
+    monitoring.recordSseCompleted({
+      status: 'rejected',
+      durationMs: Date.now() - userMessageReceivedAt,
+      errorCode: 'prepare_failed',
+    });
     console.error('AI API Error:', error);
     return res.status(500).json({ error: 'AI 请求失败' });
   }
 
   if (prepared.error) {
     const [status, body] = prepared.error;
+    monitoring.recordSseCompleted({
+      status: 'rejected',
+      durationMs: Date.now() - userMessageReceivedAt,
+      errorCode: body && body.code ? body.code : `http_${status}`,
+    });
     return res.status(status).json(body);
   }
 
   const { ctx } = prepared;
   ctxForTrace = ctx;
+
+  monitoring.recordModelRoute({
+    requested: ctx.modelRoute.requested,
+    actual: ctx.modelRoute.actual,
+    auto: ctx.modelRoute.auto,
+    reason: ctx.modelRoute.reason,
+  });
+
+  const sseStartedAt = Date.now();
+  let sseFirstTokenAt = null;
+  let sseDeltaEvents = 0;
+  let sseFinalized = false;
+  const sseSpan = monitoring.startSpan('response.stream', {
+    stream: true,
+  });
+
+  const finishSse = (status, errorCode = null) => {
+    if (sseFinalized) return;
+    sseFinalized = true;
+    sseSpan.end({
+      status:
+        status === 'completed'
+          ? 'success'
+          : status === 'aborted'
+            ? 'cancelled'
+            : status === 'rejected'
+              ? 'denied'
+              : 'failed',
+      errorCode,
+    });
+    monitoring.recordSseCompleted({
+      status,
+      durationMs: Date.now() - sseStartedAt,
+      firstTokenMs: sseFirstTokenAt ? sseFirstTokenAt - sseStartedAt : null,
+      deltaEvents: sseDeltaEvents,
+      errorCode,
+    });
+  };
 
   res.status(200);
   res.set({
@@ -2896,14 +3283,19 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
     'X-Accel-Buffering': 'no',
   });
   res.flushHeaders();
+  monitoring.recordSseStarted();
 
   const sendEvent = payload => {
     if (clientGone || res.writableEnded) return false;
 
     try {
       res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      if (payload && payload.type === 'delta') {
+        sseDeltaEvents += 1;
+        if (sseFirstTokenAt === null) sseFirstTokenAt = Date.now();
+      }
       return true;
-    } catch (error) {
+    } catch (_error) {
       return false;
     }
   };
@@ -2931,6 +3323,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   const model = ctx.modelId;
   let upstreamModel = null;
   let toolSteps = null;
+  let agentReachedMaxRounds = false;
   const stripper = createMoodTagStripper();
   let streamError = null;
 
@@ -2953,6 +3346,16 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   if (ctx.contextTrace) {
     ctx.contextTrace.recordPolicy(ctx.agentPolicy, ctx.agentPolicyMeta, agentGate);
   }
+  monitoring.recordAgentGate({
+    path: 'stream',
+    switchOn: agentSwitchOn,
+    toolsSupported: agentToolsSupported,
+    hasNewImage: ctx.hasNewImage,
+    includeHistoryImages: ctx.includeHistoryImages,
+    useVision: ctx.useVision,
+    reason: agentGate.reason,
+    allowed: agentOn,
+  });
 
   // 只记录判定元数据：模型、开关、能力、新图/历史图、原因、是否放行。
   // 不记录用户消息、附件内容、工具参数或记忆正文。
@@ -3003,6 +3406,9 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
             ? outcome.completion.model
             : null;
         toolSteps = outcome.toolSteps.length ? outcome.toolSteps : null;
+        lastAgentRounds = outcome.rounds;
+        lastAgentToolCount = outcome.toolSteps.length;
+        agentReachedMaxRounds = outcome.reachedMaxRounds === true;
 
         console.log(
           `[agent] finished (stream) session=${ctx.sessionId}` +
@@ -3078,6 +3484,15 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
 
   // 客户端断开：直接结束，不落盘、不发 done
   if (clientGone) {
+    finishSse('aborted', 'client_closed');
+    monitoring.recordTask({
+      status: 'cancelled',
+      termination: 'client_closed',
+      durationMs: Date.now() - userMessageReceivedAt,
+      rounds: agentOn ? lastAgentRounds : 1,
+      toolCount: lastAgentToolCount,
+      errorCode: 'client_closed',
+    });
     try {
       res.end();
     } catch (_) {
@@ -3088,6 +3503,24 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
 
   if (streamError) {
     emitContextTrace(ctxForTrace);
+    finishSse(
+      'failed',
+      streamError instanceof ModelCallError ? streamError.kind : 'stream_error'
+    );
+    monitoring.recordTask({
+      status:
+        streamError instanceof ModelCallError && streamError.kind === 'timeout'
+          ? 'timeout'
+          : streamError instanceof ModelCallError && streamError.kind === 'auth'
+            ? 'denied'
+            : 'failed',
+      termination: 'model_error',
+      durationMs: Date.now() - userMessageReceivedAt,
+      rounds: agentOn ? lastAgentRounds : 1,
+      toolCount: lastAgentToolCount,
+      errorCode:
+        streamError instanceof ModelCallError ? streamError.kind : 'stream_error',
+    });
     // 模型调用类错误带 code（连接/限流/超时/服务商/模型，已脱敏）；
     // 内部错误保持原有通用文案。客户端断开的场景上面已提前返回。
     if (streamError instanceof ModelCallError) {
@@ -3106,6 +3539,15 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   }
 
   if (!rawReply) {
+    finishSse('failed', 'empty_response');
+    monitoring.recordTask({
+      status: 'failed',
+      termination: 'empty_response',
+      durationMs: Date.now() - userMessageReceivedAt,
+      rounds: agentOn ? lastAgentRounds : 1,
+      toolCount: lastAgentToolCount,
+      errorCode: 'empty_response',
+    });
     sendEvent({ type: 'error', error: '模型没有返回有效内容' });
     res.end();
     return;
@@ -3129,6 +3571,15 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('AI stream finalize error:', error);
     emitContextTrace(ctxForTrace);
+    finishSse('failed', 'finalize_error');
+    monitoring.recordTask({
+      status: 'failed',
+      termination: 'finalize_error',
+      durationMs: Date.now() - userMessageReceivedAt,
+      rounds: agentOn ? lastAgentRounds : 1,
+      toolCount: lastAgentToolCount,
+      errorCode: 'finalize_error',
+    });
     sendEvent({ type: 'error', error: 'AI 请求失败' });
     res.end();
     return;
@@ -3136,6 +3587,15 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
 
   // 非 Agent 路径的 trace 收尾（无工具调用，同样输出结构化 trace）
   emitContextTrace(ctx);
+
+  monitoring.recordTask({
+    status: agentReachedMaxRounds ? 'partial_success' : 'success',
+    termination: agentReachedMaxRounds ? 'max_rounds' : 'model_end',
+    durationMs: Date.now() - userMessageReceivedAt,
+    rounds: agentOn ? lastAgentRounds : 1,
+    toolCount: lastAgentToolCount,
+  });
+  finishSse('completed');
 
   sendEvent({ type: 'done', ...result, ...(agentGate.notice ? { agentNotice: agentGate.notice } : {}), model, providerId: ctx.providerId, upstreamModel, modelRoute: ctx.modelRoute, sessionId: ctx.sessionId });
   res.end();
@@ -3148,12 +3608,25 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
 // 先抢占数据目录锁：已有实例在跑就直接退出，绝不带病启动造成静默覆盖
 acquireSingleInstance({ port: PORT });
 
+// 检索索引初始化失败不阻止聊天服务启动：状态接口会显式返回 degraded，
+// 上下文只降级外部知识块，主链路仍可用。
+const retrievalStatus = retrieval.initialize();
+if (!retrievalStatus.enabled) {
+  console.log('[retrieval] 统一检索已关闭（BLUEBIRD_RETRIEVAL=0）');
+} else {
+  console.log(`[retrieval] 统一检索状态：${retrievalStatus.state || 'unknown'}`);
+}
+// 拿到锁之后再初始化监控：初始化失败只降级，不影响聊天主链路。
+monitoring.initMonitoring();
+
 const server = app.listen(PORT, '0.0.0.0', () => {
   // PORT 为 0 时由操作系统分配空闲端口，日志回显真实端口
   console.log(`Bluebird API running on port ${server.address().port}`);
 });
 
-installShutdownHooks(server);
+installShutdownHooks(server, {
+  onShutdown: () => monitoring.shutdownMonitoring(),
+});
 
 // 导出 app 与 server 实例：测试可用 PORT=0 拿到系统分配的空闲端口，
 // 避免固定端口被占用时误连到别的服务（会读写对方的真实数据目录）。

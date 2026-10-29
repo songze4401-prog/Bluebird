@@ -16,6 +16,7 @@ const { config: defaultConfig } = require('./config');
 const { selectHistory } = require('./history');
 const { buildHistorySummary } = require('./summary');
 const { retrieveMemory } = require('./retriever');
+const { retrieveKnowledge } = require('./knowledge');
 const { buildContext } = require('./builder');
 const { fitRequest } = require('./input-guard');
 const { createTrace } = require('./trace');
@@ -143,15 +144,35 @@ async function runContextRuntime({
     };
   }
 
+  let knowledge;
+  try {
+    knowledge = await retrieveKnowledge({
+      task,
+      sessionId,
+      now,
+    });
+  } catch (error) {
+    knowledge = {
+      status: 'error',
+      count: 0,
+      items: [],
+      trace: null,
+      errorCode: (error && error.code) || 'knowledge_retrieval_failed',
+      error: '外部知识检索失败',
+    };
+  }
+
   const build = buildContext({
     recent: selection.recent,
     recalled: selection.recalled,
     summary,
     memoryItems: retrieval.items || [],
+    knowledgeItems: knowledge.items || [],
     config,
   });
 
   trace.recordRetrieval(retrieval, build.memory);
+  trace.recordKnowledge(knowledge, build.knowledge);
 
   const fit = fitRequest({
     systemBlocks,
@@ -164,17 +185,22 @@ async function runContextRuntime({
   });
 
   trace.recordStages({
-    candidate: (selection.tokens.totalMessages || 0) + (retrieval.count || 0),
+    candidate:
+      (selection.tokens.totalMessages || 0) +
+      (retrieval.count || 0) +
+      (knowledge.count || 0),
     selected:
       selection.recent.length +
       selection.recalled.length +
       (summary.sources ? summary.sources.length : 0) +
-      (retrieval.count || 0),
+      (retrieval.count || 0) +
+      (knowledge.count || 0),
     accepted:
       selection.recent.length +
       selection.recalled.length +
       (summary.sources ? summary.sources.length : 0) +
       build.memory.accepted.length +
+      build.knowledge.accepted.length +
       (currentMessage ? 1 : 0),
   });
   trace.recordBuild(build, fit);
@@ -199,6 +225,12 @@ async function runContextRuntime({
       contextIds: [],
       summary,
       memory: build.memory,
+      knowledge: {
+        ...build.knowledge,
+        status: knowledge.status,
+        count: knowledge.count || 0,
+        error: knowledge.error || null,
+      },
       trace: trace.toJSON(),
       traceApi: trace,
     };
@@ -233,6 +265,12 @@ async function runContextRuntime({
       warning: summaryWarning,
     },
     memory: build.memory,
+    knowledge: {
+      ...build.knowledge,
+      status: knowledge.status,
+      count: knowledge.count || 0,
+      error: knowledge.error || null,
+    },
     verification,
     trace: trace.toJSON(),
     traceApi: trace,
