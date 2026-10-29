@@ -65,6 +65,33 @@ const CONTEXT_SOURCES = (() => {
   return list.length ? [...new Set(list)] : ['document', 'web', 'code'];
 })();
 
+// Embedding 供应商预设：配置只写 provider + apiKey 即可，其余取预设；
+// 显式设置的 BASE_URL / MODEL / DIMENSION 永远优先，方便换自建/代理端点。
+// 选择依据：中文语料表现稳定、按量计费、可随时替换 provider。
+const EMBEDDING_PRESETS = Object.freeze({
+  // 阿里云百炼 text-embedding-v3：中文强、1024 维、按 token 计费，国内直连
+  dashscope: Object.freeze({
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    model: 'text-embedding-v3',
+    dimension: 1024,
+    pricePerMillionTokens: 0.07,
+  }),
+  // 硅基流动 BAAI/bge-m3：多语言/中文好、1024 维、价格更低
+  siliconflow: Object.freeze({
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    model: 'BAAI/bge-m3',
+    dimension: 1024,
+    pricePerMillionTokens: 0.01,
+  }),
+  // OpenAI text-embedding-3-small：通用基线，1536 维
+  openai: Object.freeze({
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'text-embedding-3-small',
+    dimension: 1536,
+    pricePerMillionTokens: 0.02,
+  }),
+});
+
 const embeddingProvider = readString(
   process.env.BLUEBIRD_RETRIEVAL_EMBEDDING_PROVIDER,
   ''
@@ -83,6 +110,24 @@ const embeddingDimension = readInt(
   0,
   4096,
   'BLUEBIRD_RETRIEVAL_EMBEDDING_DIMENSION'
+);
+
+const embeddingPreset =
+  EMBEDDING_PRESETS[embeddingProvider.toLowerCase()] || null;
+const resolvedBaseUrl = embeddingBaseUrl || (embeddingPreset ? embeddingPreset.baseUrl : '');
+const resolvedModel = embeddingModel || (embeddingPreset ? embeddingPreset.model : '');
+const resolvedDimension =
+  embeddingDimension > 0
+    ? embeddingDimension
+    : embeddingPreset
+      ? embeddingPreset.dimension
+      : 0;
+const resolvedPrice = readInt(
+  process.env.BLUEBIRD_RETRIEVAL_EMBEDDING_PRICE_PER_MILLION,
+  embeddingPreset ? Math.round(embeddingPreset.pricePerMillionTokens * 1000) : 0,
+  0,
+  1000000,
+  'BLUEBIRD_RETRIEVAL_EMBEDDING_PRICE_PER_MILLION'
 );
 
 const config = {
@@ -257,13 +302,59 @@ const config = {
     dedupeThreshold: 0.9,
   }),
 
+  // 候选重排序 + 时效性：RRF/词法/向量三路原始分归一后加权，再叠加
+  // 时间衰减与记忆图谱（共享关键词）加成。纯本地确定性计算，不调用外部服务。
+  rerank: Object.freeze({
+    enabled: readBool(
+      process.env.BLUEBIRD_RETRIEVAL_RERANK,
+      true,
+      'BLUEBIRD_RETRIEVAL_RERANK'
+    ),
+    weights: Object.freeze({
+      rrf: 0.5,
+      lexical: 0.15,
+      vector: 0.2,
+      recency: 0.1,
+      graph: 0.05,
+    }),
+    // 时间衰减半衰期：越旧权重越低，但保留下限，不让老记忆直接消失
+    recencyHalfLifeDays: readInt(
+      process.env.BLUEBIRD_RETRIEVAL_RECENCY_HALF_LIFE_DAYS,
+      30,
+      1,
+      3650,
+      'BLUEBIRD_RETRIEVAL_RECENCY_HALF_LIFE_DAYS'
+    ),
+    recencyFloor: 0.15,
+    // 记忆图谱：两条候选共享至少 N 个关键词视为一条边
+    graphMinKeywordOverlap: readInt(
+      process.env.BLUEBIRD_RETRIEVAL_GRAPH_MIN_OVERLAP,
+      2,
+      1,
+      20,
+      'BLUEBIRD_RETRIEVAL_GRAPH_MIN_OVERLAP'
+    ),
+    // 时效性硬过滤：只对下面这些时效敏感的源生效，0 = 关闭
+    maxAgeDays: readInt(
+      process.env.BLUEBIRD_RETRIEVAL_MAX_AGE_DAYS,
+      0,
+      0,
+      36500,
+      'BLUEBIRD_RETRIEVAL_MAX_AGE_DAYS'
+    ),
+    recencyFilterSources: Object.freeze(['web']),
+  }),
+
   embedding: Object.freeze({
     provider: embeddingProvider,
-    baseUrl: embeddingBaseUrl,
-    model: embeddingModel,
+    baseUrl: resolvedBaseUrl,
+    model: resolvedModel,
     apiKey: readString(process.env.BLUEBIRD_RETRIEVAL_EMBEDDING_API_KEY, ''),
     version: readString(process.env.BLUEBIRD_RETRIEVAL_EMBEDDING_VERSION, 'v1'),
-    dimension: embeddingDimension,
+    dimension: resolvedDimension,
+    // 每百万 token 的美元单价（整数缩放了 1000 倍存储，避免浮点 env 解析）；
+    // 只用于成本估算展示，不参与检索逻辑。
+    pricePerMillionTokens: resolvedPrice / 1000,
     batchSize: readInt(
       process.env.BLUEBIRD_RETRIEVAL_EMBEDDING_BATCH,
       16,
@@ -290,6 +381,8 @@ const config = {
 
 Object.freeze(config.limits);
 Object.freeze(config.fusion);
+Object.freeze(config.rerank.weights);
+Object.freeze(config.rerank);
 Object.freeze(config.embedding);
 Object.freeze(config);
 

@@ -1034,3 +1034,190 @@ test('错误语义：缺少 session 检索记忆/会话返回明确错误，未�
   assert.equal(empty.ok, false);
   assert.equal(empty.errorCode, 'query_required');
 });
+
+test('重排：同等 RRF 下更近的候选排前，老内容有下限不会沉底', () => {
+  const now = Date.parse('2026-10-30T00:00:00Z');
+  const make = (id, updatedAt) => ({
+    chunk: createChunk({
+      sourceType: 'document',
+      sourceId: `document:${id}`,
+      content: `部署检查清单 ${id}`,
+      uri: `document://${id}`,
+      locator: `${id}.md#L1`,
+      createdAt: updatedAt,
+      updatedAt,
+      scope: { visibility: 'global' },
+    }),
+    rrf: 0.02,
+    channelScores: { lexical: 1 },
+    matchedTerms: [],
+  });
+
+  const fresh = make('fresh', '2026-10-29T00:00:00Z');
+  const old = make('old', '2026-01-01T00:00:00Z');
+  const out = engine.rerankEntries({ entries: [old, fresh], config, now });
+
+  assert.equal(out.applied, true);
+  assert.equal(out.entries[0].chunk.chunkId, fresh.chunk.chunkId);
+  assert.ok(out.entries[0].rerank.score > out.entries[1].rerank.score);
+  // 下限生效：再老的条目时间分也不为 0
+  assert.ok(out.entries[1].rerank.signals.recency >= config.rerank.recencyFloor);
+});
+
+test('重排：共享关键词的记忆形成图谱边并获得加成', () => {
+  const now = Date.parse('2026-10-30T00:00:00Z');
+  const make = (id, keywords) => ({
+    chunk: createChunk({
+      sourceType: 'memory',
+      sourceId: `memory:${id}`,
+      content: `同一话题的记忆 ${id}`,
+      uri: `memory://${id}`,
+      locator: `memory/${id}`,
+      scope: { visibility: 'session', sessions: ['s-graph'] },
+      metadata: { keywords },
+    }),
+    rrf: 0.02,
+    channelScores: {},
+    matchedTerms: [],
+  });
+
+  const a = make('a', ['咖啡', '拿铁']);
+  const b = make('b', ['咖啡', '拿铁']);
+  const c = make('c', ['天气', '下雨']);
+  const out = engine.rerankEntries({ entries: [c, a, b], config, now });
+  const byId = new Map(out.entries.map(entry => [entry.chunk.chunkId, entry]));
+
+  assert.ok(byId.get(a.chunk.chunkId).rerank.score > byId.get(c.chunk.chunkId).rerank.score);
+  assert.equal(byId.get(a.chunk.chunkId).rerank.signals.graph, 1);
+  assert.equal(byId.get(c.chunk.chunkId).rerank.signals.graph, 0);
+});
+
+test('重排：向量通道不可用时剔除其权重并重新归一', () => {
+  const now = Date.now();
+  const make = id =>
+    ({
+      chunk: createChunk({
+        sourceType: 'document',
+        sourceId: `document:${id}`,
+        content: `文档 ${id}`,
+        uri: `document://${id}`,
+        locator: `${id}.md#L1`,
+        scope: { visibility: 'global' },
+      }),
+      rrf: 0.02,
+      channelScores: { lexical: 1 },
+      matchedTerms: [],
+    });
+
+  const out = engine.rerankEntries({ entries: [make('x'), make('y')], config, now });
+  assert.equal(out.applied, true);
+  assert.equal(out.vectorAvailable, false);
+  assert.equal(out.weights.vector, 0);
+  assert.ok(out.weights.rrf > 0);
+});
+
+test('时效过滤：超期网页判 stale_source，长期记忆不受同一条规则影响', () => {
+  const now = Date.now();
+  const stale = new Date(now - 30 * 86400000).toISOString();
+  const strict = {
+    ...config,
+    rerank: { ...config.rerank, maxAgeDays: 7, recencyFilterSources: ['web'] },
+  };
+  const plan = engine.createPlan({
+    query: '部署检查',
+    sessionId: 's-stale',
+    sources: ['web', 'memory'],
+    limit: 5,
+    tokenBudget: 800,
+    timeoutMs: 1000,
+    maxQueryChars: 200,
+    maxEvidence: 12,
+  });
+
+  const webChunk = createChunk({
+    sourceType: 'web',
+    sourceId: 'web:stale',
+    content: '旧的网页快照',
+    uri: 'https://example.com/old',
+    locator: 'https://example.com/old',
+    createdAt: stale,
+    updatedAt: stale,
+    scope: { visibility: 'global' },
+  });
+  const memoryChunk = createChunk({
+    sourceType: 'memory',
+    sourceId: 'memory:stale',
+    content: '很久以前记下的稳定事实',
+    uri: 'memory://stale',
+    locator: 'memory/stale',
+    createdAt: stale,
+    updatedAt: stale,
+    scope: { visibility: 'session', sessions: ['s-stale'] },
+  });
+
+  assert.equal(engine.ageAllows(webChunk, plan, strict), false);
+  assert.equal(engine.policyCheck(webChunk, plan, strict), 'stale_source');
+  assert.equal(engine.ageAllows(memoryChunk, plan, strict), true);
+
+  // 默认配置（maxAgeDays=0）下网页也不因时间被拒
+  assert.equal(engine.policyCheck(webChunk, plan, config), null);
+});
+
+test('记忆全链路：新增命中→更新后旧内容失效→删除后不可检索', async () => {
+  const sid = 'session-lifecycle';
+  const base = memoryItem({
+    id: 'm-life-1',
+    content: '我的新电脑是 M4 Max 32G',
+    keywords: ['电脑', 'M4'],
+    sessionId: sid,
+  });
+
+  seedMemory([base]);
+  await retrieval.rebuild({ vectors: false });
+  const hit1 = await retrieval.search({
+    query: 'M4 Max 电脑配置',
+    sessionId: sid,
+    sources: ['memory'],
+    limit: 5,
+    tokenBudget: 800,
+  });
+  assert.ok(hit1.evidence.some(item => item.sourceId === 'memory:m-life-1'));
+
+  const updated = {
+    ...base,
+    content: '我的电脑换成了 M5 Pro 64G',
+    keywords: ['电脑', 'M5'],
+    updatedAt: new Date().toISOString(),
+  };
+  seedMemory([updated]);
+  await retrieval.rebuild({ vectors: false });
+
+  const hit2 = await retrieval.search({
+    query: 'M5 Pro 64G',
+    sessionId: sid,
+    sources: ['memory'],
+    limit: 5,
+    tokenBudget: 800,
+  });
+  assert.ok(hit2.evidence.some(item => item.sourceId === 'memory:m-life-1'));
+
+  const oldQuery = await retrieval.search({
+    query: 'M4 Max 32G',
+    sessionId: sid,
+    sources: ['memory'],
+    limit: 5,
+    tokenBudget: 800,
+  });
+  assert.ok(!oldQuery.evidence.some(item => /M4 Max 32G/.test(item.content || '')));
+
+  seedMemory([]);
+  await retrieval.rebuild({ vectors: false });
+  const hit3 = await retrieval.search({
+    query: 'M5 Pro 64G',
+    sessionId: sid,
+    sources: ['memory'],
+    limit: 5,
+    tokenBudget: 800,
+  });
+  assert.ok(!hit3.evidence.some(item => item.sourceId === 'memory:m-life-1'));
+});

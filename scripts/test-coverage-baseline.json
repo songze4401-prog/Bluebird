@@ -1,9 +1,9 @@
 {
   "version": 1,
   "updateRule": "新增/删除 tests/*.test.js 或改变用例数时，必须在同一变更中更新 files、backendTotal、nodeTestSuiteTotal、runnerTotal、frontend；不得只改总数或删除条目。nodeTestSuiteFiles 只包含由 node --test 七套命令执行的文件；runnerFiles 包含 CI 自定义 runner 逐文件执行的 37 个条目（其中 8 个仍使用 node:test 但按单文件退出码执行）。CI 清单必须覆盖所有 files 条目，verify-test-coverage.js 会检查。",
-  "backendTotal": 1523,
+  "backendTotal": 1528,
   "nodeTestSuiteTotal": 221,
-  "runnerTotal": 1302,
+  "runnerTotal": 1307,
   "frontend": {
     "suites": 10,
     "tests": 124
@@ -91,7 +91,7 @@
     "memory-semantic": { "format": "custom", "count": 54, "runner": true },
     "memory-session-isolation": { "format": "node", "count": 15, "runner": true },
     "memory-startup-lock": { "format": "custom", "count": 31, "runner": true },
-    "retrieval": { "format": "node", "count": 25, "runner": true },
+    "retrieval": { "format": "node", "count": 30, "runner": true },
     "retrieval-api": { "format": "node", "count": 10, "runner": true },
     "memory": { "format": "node", "count": 40, "runner": false },
     "emotion": { "format": "node", "count": 34, "runner": false },

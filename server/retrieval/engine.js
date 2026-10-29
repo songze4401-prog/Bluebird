@@ -155,15 +155,142 @@ function prefilter(chunk, plan) {
   return plan.sourceSet.has(chunk.sourceType) && scopeAllows(chunk, plan);
 }
 
-function policyCheck(chunk, plan) {
+// 时效性硬过滤：只对配置里列出的时效敏感源（默认 web）生效，
+// 超过 maxAgeDays 的内容直接判 stale_source；0 = 关闭。
+// 长期记忆/文档不受影响——它们的价值不随时间线性消失，只由重排做软衰减。
+function ageAllows(chunk, plan, config) {
+  const rerank = (config && config.rerank) || {};
+  const maxAgeDays = Number(rerank.maxAgeDays) || 0;
+  if (!maxAgeDays) return true;
+  const sources = Array.isArray(rerank.recencyFilterSources)
+    ? rerank.recencyFilterSources
+    : [];
+  if (!sources.includes(chunk.sourceType)) return true;
+  const stamp = Date.parse(chunk.updatedAt || chunk.observedAt || chunk.createdAt || '');
+  if (!Number.isFinite(stamp)) return true;
+  return plan.now - stamp <= maxAgeDays * 86400000;
+}
+
+function policyCheck(chunk, plan, config) {
   if (!plan.sourceSet.has(chunk.sourceType)) return 'source_filtered';
   if (!scopeAllows(chunk, plan)) return 'scope_denied';
   if (!statusAllows(chunk)) return 'status_not_active';
   if (!validityAllows(chunk, plan)) return 'outside_validity';
+  if (!ageAllows(chunk, plan, config)) return 'stale_source';
   if (!traceable(chunk)) return 'missing_source_locator';
   const risk = injectionRisk(chunk.content);
   if (risk.high) return 'prompt_injection_risk';
   return null;
+}
+
+// 时间衰减分：半衰期越短掉得越快，但有下限，避免老记忆直接沉底。
+function recencyScore(chunk, now, halfLifeDays, floor) {
+  const stamp = Date.parse(chunk.updatedAt || chunk.createdAt || chunk.observedAt || '');
+  if (!Number.isFinite(stamp)) return floor;
+  const ageDays = Math.max(0, (now - stamp) / 86400000);
+  const decayed = Math.pow(0.5, ageDays / Math.max(1, halfLifeDays));
+  return Math.max(floor, Math.min(1, decayed));
+}
+
+// 记忆图谱分：候选之间共享足够多的关键词视为一条边，度数越高说明它处在
+// 同一话题簇里，适度加权。只用已有的 metadata.keywords，不引入新存储。
+function graphScores(entries, minOverlap) {
+  const sets = entries.map(entry => {
+    const meta = entry.chunk.metadata || {};
+    const list = Array.isArray(meta.keywords) ? meta.keywords : [];
+    return new Set(
+      list
+        .map(keyword => String(keyword || '').toLowerCase().trim())
+        .filter(Boolean)
+    );
+  });
+
+  const peers = entries.map(() => 0);
+  for (let i = 0; i < entries.length; i += 1) {
+    if (!sets[i].size) continue;
+    for (let j = 0; j < entries.length; j += 1) {
+      if (i === j || !sets[j].size) continue;
+      let shared = 0;
+      for (const keyword of sets[i]) {
+        if (sets[j].has(keyword)) shared += 1;
+        if (shared >= minOverlap) break;
+      }
+      if (shared >= minOverlap) peers[i] += 1;
+    }
+  }
+
+  const maxPeers = peers.reduce((max, value) => Math.max(max, value), 0);
+  return peers.map(value => (maxPeers ? value / maxPeers : 0));
+}
+
+// 候选重排序：把 RRF、词法分、向量余弦、时间衰减、图谱度数各自归一后加权。
+// 向量通道不可用时自动把它的权重剔除并重新归一，不把「没有向量」当 0 分打压。
+function rerankEntries({ entries, config, now }) {
+  const rerank = (config && config.rerank) || {};
+  if (!rerank.enabled || entries.length < 2) {
+    return { entries, applied: false, weights: null };
+  }
+
+  const weights = rerank.weights || {};
+  const maxRrf = entries.reduce((max, entry) => Math.max(max, entry.rrf), 0) || 1;
+  const maxLexical =
+    entries.reduce(
+      (max, entry) => Math.max(max, Number(entry.channelScores.lexical) || 0),
+      0
+    ) || 1;
+  const vectorAvailable = entries.some(
+    entry => typeof entry.channelScores.vector === 'number'
+  );
+  const maxVector = vectorAvailable
+    ? entries.reduce(
+        (max, entry) => Math.max(max, Number(entry.channelScores.vector) || 0),
+        0
+      ) || 1
+    : 1;
+
+  const effective = {
+    rrf: Number(weights.rrf) || 0,
+    lexical: Number(weights.lexical) || 0,
+    vector: vectorAvailable ? Number(weights.vector) || 0 : 0,
+    recency: Number(weights.recency) || 0,
+    graph: Number(weights.graph) || 0,
+  };
+  const total =
+    effective.rrf + effective.lexical + effective.vector + effective.recency + effective.graph ||
+    1;
+
+  const graph = graphScores(entries, Number(rerank.graphMinKeywordOverlap) || 2);
+
+  const scored = entries.map((entry, index) => {
+    const signals = {
+      rrf: entry.rrf / maxRrf,
+      lexical: (Number(entry.channelScores.lexical) || 0) / maxLexical,
+      vector: vectorAvailable ? (Number(entry.channelScores.vector) || 0) / maxVector : 0,
+      recency: recencyScore(
+        entry.chunk,
+        now,
+        Number(rerank.recencyHalfLifeDays) || 30,
+        Number.isFinite(rerank.recencyFloor) ? rerank.recencyFloor : 0.15
+      ),
+      graph: graph[index],
+    };
+    const combined =
+      (signals.rrf * effective.rrf +
+        signals.lexical * effective.lexical +
+        signals.vector * effective.vector +
+        signals.recency * effective.recency +
+        signals.graph * effective.graph) /
+      total;
+    entry.rerank = { score: Number(combined.toFixed(6)), signals };
+    return entry;
+  });
+
+  scored.sort((a, b) => {
+    if (b.rerank.score !== a.rerank.score) return b.rerank.score - a.rerank.score;
+    return a.chunk.chunkId < b.chunk.chunkId ? -1 : 1;
+  });
+
+  return { entries: scored, applied: true, weights: effective, vectorAvailable };
 }
 
 function withTimeout(promise, ms, errorCode) {
@@ -407,7 +534,7 @@ function fuseResults({ lexical, exact, vector, config, plan }) {
   const accepted = [];
   const rejected = [];
   for (const entry of deduped) {
-    const reason = policyCheck(entry.chunk, plan);
+    const reason = policyCheck(entry.chunk, plan, config);
     if (reason) {
       rejected.push({ chunkId: entry.chunk.chunkId, reason });
       continue;
@@ -415,12 +542,14 @@ function fuseResults({ lexical, exact, vector, config, plan }) {
     accepted.push(entry);
   }
 
+  const reranked = rerankEntries({ entries: accepted, config, now: plan.now });
+
   const diversity = [];
   const perSource = new Map();
   const perFile = new Map();
   const selected = [];
 
-  for (const entry of accepted) {
+  for (const entry of reranked.entries) {
     const chunk = entry.chunk;
     const fileKey =
       (chunk.metadata && (chunk.metadata.filePath || chunk.metadata.relativePath)) ||
@@ -451,6 +580,11 @@ function fuseResults({ lexical, exact, vector, config, plan }) {
     rejected,
     diversity,
     selected,
+    rerank: {
+      applied: reranked.applied,
+      weights: reranked.weights,
+      vectorAvailable: Boolean(reranked.vectorAvailable),
+    },
   };
 }
 
@@ -609,6 +743,7 @@ async function executeSearch({ store, embedding, config, plan }) {
     policyRejected: fusion.rejected.length,
     diversityDropped: fusion.diversity.length,
     ranked: fusion.selected.length,
+    rerank: fusion.rerank,
   };
   trace.policy = {
     accepted: fusion.accepted.length,
@@ -671,9 +806,13 @@ module.exports = {
   executeSearch,
   scopeAllows,
   validityAllows,
+  ageAllows,
   policyCheck,
   fuseResults,
   packEvidence,
   cosine,
+  recencyScore,
+  graphScores,
+  rerankEntries,
   SOURCE_TYPES,
 };

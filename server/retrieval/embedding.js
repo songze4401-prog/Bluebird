@@ -42,6 +42,16 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// 已知供应商：openai-compatible 是通用入口，其余是在 config.js 里
+// 解析成 baseUrl/model/dimension 的预设；未知 provider 直接判不可用，
+// 避免拼错名字后静默降级却看不出来。
+const KNOWN_PROVIDERS = new Set([
+  'openai-compatible',
+  'dashscope',
+  'siliconflow',
+  'openai',
+]);
+
 function createEmbeddingProvider(cfg) {
   const config = cfg || {};
   const provider = String(config.provider || '');
@@ -53,9 +63,15 @@ function createEmbeddingProvider(cfg) {
   let cacheHits = 0;
   let cacheMisses = 0;
 
-  let available = provider === 'openai-compatible';
-  let reason = available ? null : 'not_configured';
+  let available = KNOWN_PROVIDERS.has(provider);
+  let reason = available ? null : provider ? 'unknown_provider' : 'not_configured';
   let endpoint = '';
+
+  // 用量与成本估算：只统计真实发出的请求，估算值明确标注为 estimated
+  let requests = 0;
+  let textsSent = 0;
+  let tokensReported = 0;
+  let estimatedTokens = 0;
 
   if (available) {
     if (!model) {
@@ -156,6 +172,19 @@ function createEmbeddingProvider(cfg) {
       }
       vectors[index] = vector;
     }
+
+    requests += 1;
+    textsSent += texts.length;
+    const usageTokens =
+      json && json.usage && Number.isFinite(json.usage.total_tokens)
+        ? json.usage.total_tokens
+        : 0;
+    if (usageTokens) tokensReported += usageTokens;
+    // 供应商没回 usage 时用「字符数/4」做保守估算，只用于成本展示
+    estimatedTokens += texts.reduce(
+      (sum, text) => sum + Math.ceil(String(text).length / 4),
+      0
+    );
 
     return {
       ok: true,
@@ -266,6 +295,17 @@ function createEmbeddingProvider(cfg) {
         cacheHits,
         cacheMisses,
         cacheSize: cache.size,
+        requests,
+        texts: textsSent,
+        tokensReported,
+        estimatedTokens,
+        pricePerMillionTokens: config.pricePerMillionTokens || 0,
+        estimatedCostUsd: Number(
+          (
+            ((tokensReported || estimatedTokens) / 1000000) *
+            (config.pricePerMillionTokens || 0)
+          ).toFixed(6)
+        ),
       };
     },
     resetCache() {

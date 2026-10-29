@@ -130,25 +130,43 @@ async function main() {
   await retrieval.ingest({ type: 'document', inputPath: 'docs/retrieval.md' });
   await retrieval.ingest({ type: 'code', inputPath: 'code' });
 
+  let hits1 = 0;
   let hits3 = 0;
   let hits5 = 0;
   let reciprocalRank = 0;
+  const latencies = [];
+  let vectorStatus = null;
   const rows = [];
 
   for (const expected of QUERIES) {
+    const startedAt = Date.now();
     const result = await retrieval.search({
       query: expected.query,
       sources: ['document', 'code'],
       limit: 5,
     });
+    const elapsed = Date.now() - startedAt;
+    latencies.push(elapsed);
+
+    if (!vectorStatus && result.trace) {
+      const vectorChannel = (result.trace.channels || []).find(item => item.name === 'vector');
+      vectorStatus = {
+        status: vectorChannel ? vectorChannel.status : 'unknown',
+        reason: vectorChannel ? vectorChannel.errorCode || null : null,
+        embedding: result.trace.embedding || null,
+      };
+    }
+
     const evidence = result.ok ? result.evidence : [];
     const rank = evidence.findIndex(item => isRelevant(item, expected)) + 1;
+    if (rank === 1) hits1 += 1;
     if (rank > 0 && rank <= 3) hits3 += 1;
     if (rank > 0 && rank <= 5) hits5 += 1;
     if (rank > 0) reciprocalRank += 1 / rank;
     rows.push({
       query: expected.query,
       rank,
+      ms: elapsed,
       top: evidence[0]
         ? { type: evidence[0].sourceType, locator: evidence[0].locator }
         : null,
@@ -156,17 +174,83 @@ async function main() {
   }
 
   const total = QUERIES.length;
+  const sortedLatency = [...latencies].sort((a, b) => a - b);
+  const percentile = ratio => {
+    if (!sortedLatency.length) return 0;
+    const index = Math.min(
+      sortedLatency.length - 1,
+      Math.max(0, Math.ceil(ratio * sortedLatency.length) - 1)
+    );
+    return sortedLatency[index];
+  };
+
   const metrics = {
     queries: total,
+    recallAt1: Number((hits1 / total).toFixed(4)),
     recallAt3: Number((hits3 / total).toFixed(4)),
     recallAt5: Number((hits5 / total).toFixed(4)),
+    hitRate: Number(((hits1 + (hits3 - hits1) + (hits5 - hits3)) / total).toFixed(4)),
     mrr: Number((reciprocalRank / total).toFixed(4)),
+    latencyMs: { p50: percentile(0.5), p95: percentile(0.95), max: sortedLatency[sortedLatency.length - 1] || 0 },
+    vectorChannel: vectorStatus,
   };
 
   for (const row of rows) {
     console.log(`rank=${row.rank || '-'} query=${row.query} top=${row.top ? `${row.top.type}:${row.top.locator}` : 'none'}`);
   }
   console.log(`fixed-corpus retrieval eval: ${JSON.stringify(metrics)}`);
+
+  // 索引一致性：改内容 → 新内容可检索、旧内容消失；删文件 → 条目消失
+  const deployPath = path.join(CORPUS, 'docs', 'deploy.md');
+  const originalDeploy = fs.readFileSync(deployPath, 'utf8');
+  fs.writeFileSync(
+    deployPath,
+    originalDeploy.replace('HEALTH-CHECK-EVAL', 'HEALTH-CHECK-V2'),
+    'utf8'
+  );
+  // 外部文件源的同步是显式的（AGENTS 约定）：rebuild 只同步记忆/会话，
+  // 文档/代码要用 refreshAllExternal 重新按根目录+相对路径读盘。
+  await retrieval.refreshAllExternal();
+  const updated = await retrieval.search({ query: 'HEALTH-CHECK-V2', sources: ['document'], limit: 5 });
+  const stale = await retrieval.search({ query: 'HEALTH-CHECK-EVAL', sources: ['document'], limit: 5 });
+  const consistentAfterUpdate =
+    updated.ok &&
+    updated.evidence.some(item => (item.content || '').includes('HEALTH-CHECK-V2')) &&
+    !stale.evidence.some(item => (item.content || '').includes('HEALTH-CHECK-EVAL'));
+
+  fs.writeFileSync(deployPath, originalDeploy, 'utf8');
+  await retrieval.refreshAllExternal();
+
+  fs.unlinkSync(path.join(CORPUS, 'docs', 'auth.md'));
+  await retrieval.refreshAllExternal();
+  const afterDelete = await retrieval.search({ query: 'E_AUTH_401', sources: ['document'], limit: 5 });
+  const consistentAfterDelete =
+    afterDelete.ok && !afterDelete.evidence.some(item => (item.locator || '').includes('auth.md'));
+
+  const consistency = retrieval.checkConsistency();
+  console.log(
+    `index consistency: update=${consistentAfterUpdate ? 'ok' : 'FAIL'} delete=${consistentAfterDelete ? 'ok' : 'FAIL'} store=${consistency && consistency.ok ? 'ok' : 'FAIL'}`
+  );
+  if (!(consistency && consistency.ok)) {
+    console.error('store consistency check failed:', JSON.stringify(consistency).slice(0, 400));
+    process.exitCode = 1;
+  }
+
+  if (metrics.vectorChannel && metrics.vectorChannel.status === 'unavailable') {
+    console.log(
+      `vector channel: unavailable (${metrics.vectorChannel.reason || 'unknown'}) — ` +
+        '真实 embedding 未配置，向量检索未验证（不计入本次指标，也不冒充通过）'
+    );
+  }
+
+  if (process.argv.includes('--assert') && !consistentAfterUpdate) {
+    console.error('index consistency failed: update did not replace old content');
+    process.exitCode = 1;
+  }
+  if (process.argv.includes('--assert') && !consistentAfterDelete) {
+    console.error('index consistency failed: deleted source still retrievable');
+    process.exitCode = 1;
+  }
 
   if (process.argv.includes('--assert') && (metrics.recallAt5 < 0.9 || metrics.mrr < 0.75)) {
     console.error('retrieval eval below threshold');
