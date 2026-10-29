@@ -21,6 +21,7 @@ export const API_PATHS = {
   // 情绪 / 人格
   emotion: '/emotion',
   persona: '/persona',
+  agentPolicy: '/agent-policy',
 
   // 记忆
   memory: '/memory',

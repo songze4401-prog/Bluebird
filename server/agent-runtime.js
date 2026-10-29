@@ -30,6 +30,7 @@ const { createChatCompletion } = require('./model-adapter');
 const memorySearchTool = require('./tool-memory-search');
 const memoryRememberTool = require('./tool-memory-remember');
 const { truncateText } = require('./text-utils');
+const { buildPolicyInstruction } = require('./agent-policy');
 
 // ---- 可调参数（环境变量，加载时读取；开关除外——开关每请求重读） ----
 // 逐个显式读取（不用动态 process.env[name]：既让 lint 的
@@ -63,6 +64,7 @@ const TOOL_TIMEOUT_DEFAULT = clampIntEnv(
 );
 // 回传给模型的工具结果体硬上限（防御工具自身返回巨型内容）。
 const TOOL_RESULT_MAX = 4000;
+const TOOL_RISKS = new Set(['read', 'reversible_write', 'high_risk']);
 
 // ---- 紧急关闭开关 ----
 
@@ -112,6 +114,7 @@ function registerTool(definition) {
     handler,
     timeoutMs,
     readOnly,
+    risk,
   } = definition;
 
   if (!TOOL_NAME_RE.test(name || '')) {
@@ -136,7 +139,13 @@ function registerTool(definition) {
     throw new TypeError(`[agent] 工具 readOnly 必须是布尔值：${name}`);
   }
 
-  tools.set(name, definition);
+  const resolvedRisk =
+    risk === undefined ? (readOnly === true ? 'read' : 'reversible_write') : risk;
+  if (!TOOL_RISKS.has(resolvedRisk)) {
+    throw new TypeError(`[agent] 工具 risk 非法：${name}`);
+  }
+
+  tools.set(name, { ...definition, risk: resolvedRisk });
 }
 
 function unregisterTool(name) {
@@ -147,15 +156,35 @@ function supportsTool(name) {
   return tools.has(String(name || ''));
 }
 
+function policyAllowsTool(policy, name) {
+  if (!policy) return true;
+  if (policy.mode === 'answer_only') return false;
+  const allowed = policy.tools && policy.tools.allowedTools;
+  return allowed === null || allowed === undefined || allowed.includes(name);
+}
+
 // 转成 OpenAI Chat Completions 的 tools 入参格式。
-function listToolSpecs() {
+// 传入策略时只暴露服务端已注册且被策略允许的工具；不能靠策略注册新工具。
+function listToolSpecs(policy = null) {
+  return [...tools.values()]
+    .filter(def => policyAllowsTool(policy, def.name))
+    .map(def => ({
+      type: 'function',
+      function: {
+        name: def.name,
+        description: def.description,
+        parameters: def.parameters,
+      },
+    }));
+}
+
+function listToolMetadata() {
   return [...tools.values()].map(def => ({
-    type: 'function',
-    function: {
-      name: def.name,
-      description: def.description,
-      parameters: def.parameters,
-    },
+    name: def.name,
+    description: def.description,
+    readOnly: def.readOnly === true,
+    risk: def.risk,
+    timeoutMs: def.timeoutMs || TOOL_TIMEOUT_DEFAULT,
   }));
 }
 
@@ -200,9 +229,25 @@ function buildToolSummary(result) {
  */
 async function executeToolCall(name, rawArgs, context) {
   const def = tools.get(String(name || ''));
+  const policy = context && context.policy ? context.policy : null;
 
   if (!def) {
     return { ok: false, code: 'unknown_tool', error: `未注册的工具：${name}` };
+  }
+
+  if (policy && !policyAllowsTool(policy, def.name)) {
+    return {
+      ok: false,
+      code: 'policy_tool_denied',
+      error: '当前 Agent 策略不允许该工具',
+    };
+  }
+  if (def.risk === 'high_risk') {
+    return {
+      ok: false,
+      code: 'confirmation_required',
+      error: '高风险工具需要后端确认，当前没有已授权的确认流程',
+    };
   }
 
   // 显式区分只读工具与有副作用的写入工具：写入工具必须在运行层拿到
@@ -358,6 +403,7 @@ async function runAgentTurn({
   temperature = 0.8,
   maxTokens = 1200,
   timeout = 90000,
+  policy = null,
   isClientGone,
   abortSignal,
   onToolEvent,
@@ -365,23 +411,60 @@ async function runAgentTurn({
 }) {
   logSwitchIfChanged();
 
-  const specs = listToolSpecs();
+  const activePolicy = policy && typeof policy === 'object' ? policy : null;
+  const specs = listToolSpecs(activePolicy);
   // 请求内上下文：中间轮 tool_calls / tool 消息只在这里，随请求消亡，
   // 绝不写入 sessions.json（落盘由调用方只收最终消息）。
   const conversation = messages.map(message => ({ ...message }));
+  const instruction = buildPolicyInstruction(activePolicy);
+  if (instruction) {
+    const insertAt = conversation[0] && conversation[0].role === 'system' ? 1 : 0;
+    conversation.splice(insertAt, 0, { role: 'system', content: instruction });
+  }
   const toolSteps = [];
   const cache = new Map();
+
+  const configuredRounds =
+    activePolicy && activePolicy.budgets ? activePolicy.budgets.maxRounds : null;
+  const maxRounds = Number.isInteger(configuredRounds)
+    ? Math.min(MAX_ROUNDS, Math.max(2, configuredRounds))
+    : MAX_ROUNDS;
+  const maxToolCalls =
+    activePolicy && activePolicy.tools && Number.isInteger(activePolicy.tools.maxToolCalls)
+      ? activePolicy.tools.maxToolCalls
+      : 12;
+  const maxTotalMs =
+    activePolicy && activePolicy.budgets && Number.isInteger(activePolicy.budgets.maxTotalMs)
+      ? activePolicy.budgets.maxTotalMs
+      : 90000;
+  const maxReadOnlyRetries =
+    activePolicy && activePolicy.tools && Number.isInteger(activePolicy.tools.maxReadOnlyRetries)
+      ? activePolicy.tools.maxReadOnlyRetries
+      : 0;
+  const startedAt = Date.now();
 
   let completion = null;
   let rawReply = '';
   let rounds = 0;
+  let stopReason = null;
+  let toolCallCount = 0;
+  let readOnlyRetries = 0;
+  let consecutiveFailures = 0;
 
-  for (let round = 1; round <= MAX_ROUNDS; round += 1) {
-    // 断连：绝不发起下一轮模型调用
-    if (typeof isClientGone === 'function' && isClientGone()) break;
+  for (let round = 1; round <= maxRounds; round += 1) {
+    if (typeof isClientGone === 'function' && isClientGone()) {
+      stopReason = 'client_gone';
+      break;
+    }
+    if (Date.now() - startedAt > maxTotalMs) {
+      stopReason = 'total_time_budget';
+      break;
+    }
+
+    const toolBudgetReached = toolCallCount >= maxToolCalls;
+    const isFinalRound = round === maxRounds || toolBudgetReached;
 
     rounds = round;
-    const isFinalRound = round === MAX_ROUNDS;
     const requestToolCount = isFinalRound ? 0 : specs.length;
     const requestToolNames = isFinalRound
       ? ''
@@ -389,7 +472,7 @@ async function runAgentTurn({
 
     // 记录实际请求元数据：不记录 messages、工具参数或用户内容。
     console.log(
-      `[agent-request] round=${round}/${MAX_ROUNDS} provider=${providerId}` +
+      `[agent-request] round=${round}/${maxRounds} provider=${providerId}` +
         ` model=${modelId} toolCount=${requestToolCount}` +
         ` toolNames=${requestToolNames || 'none'}`
     );
@@ -407,14 +490,15 @@ async function runAgentTurn({
       }
     }
 
+    const remainingMs = Math.max(1000, maxTotalMs - (Date.now() - startedAt));
     completion = await createChatCompletion({
       providerId,
       modelId,
       messages: conversation,
       temperature,
       maxTokens,
-      timeout,
-      // 末轮强制无 tools：模型只能产出文本，从结构上终结循环
+      timeout: Math.min(timeout, remainingMs),
+      // 末轮/预算耗尽轮强制无 tools：模型只能产出文本，从结构上终结循环
       ...(isFinalRound ? {} : { tools: specs, tool_choice: 'auto' }),
     });
 
@@ -447,6 +531,7 @@ async function runAgentTurn({
     if (!toolCalls.length) {
       rawReply =
         message && typeof message.content === 'string' ? message.content : '';
+      if (toolBudgetReached) stopReason = 'tool_call_budget';
       break;
     }
 
@@ -454,6 +539,7 @@ async function runAgentTurn({
       // 末轮本就未带 tools；防御：仍返回 tool_calls 时只收文本，不进下一轮
       rawReply =
         message && typeof message.content === 'string' ? message.content : '';
+      if (toolBudgetReached) stopReason = 'tool_call_budget';
       break;
     }
 
@@ -475,13 +561,29 @@ async function runAgentTurn({
       )
     );
 
+    let batchStopReason = null;
+
     for (const normalized of normalizedCalls) {
-      const startedAt = Date.now();
+      if (typeof isClientGone === 'function' && isClientGone()) {
+        batchStopReason = 'client_gone';
+        break;
+      }
+      if (Date.now() - startedAt > maxTotalMs) {
+        batchStopReason = 'total_time_budget';
+        break;
+      }
+      if (toolCallCount >= maxToolCalls) {
+        batchStopReason = 'tool_call_budget';
+        break;
+      }
+
+      const startedAtTool = Date.now();
+      const toolName = normalized.function.name;
 
       if (typeof onToolEvent === 'function') {
         onToolEvent({
           type: 'tool_start',
-          name: normalized.function.name,
+          name: toolName,
           callId: normalized.id,
         });
       }
@@ -493,30 +595,49 @@ async function runAgentTurn({
         rawArgs = null;
       }
 
-      console.log(
-        `[agent-dispatch] round=${round} name=${normalized.function.name} dispatched=true`
-      );
+      console.log(`[agent-dispatch] round=${round} name=${toolName} dispatched=true`);
 
-      const result = await executeToolCall(normalized.function.name, rawArgs, {
+      const toolContext = {
         sessionId,
         userText,
         userMessageId,
         cache,
         abortSignal,
-      });
+        policy: activePolicy,
+      };
+      let result = await executeToolCall(toolName, rawArgs, toolContext);
+      toolCallCount += 1;
+
+      const toolDef = tools.get(toolName);
+      if (
+        !result.ok &&
+        toolDef &&
+        toolDef.readOnly === true &&
+        readOnlyRetries < maxReadOnlyRetries &&
+        (result.code === 'tool_timeout' || result.code === 'tool_error')
+      ) {
+        readOnlyRetries += 1;
+        result = await executeToolCall(toolName, rawArgs, {
+          ...toolContext,
+          cache: new Map(),
+        });
+      }
+
+      if (result.ok) consecutiveFailures = 0;
+      else consecutiveFailures += 1;
 
       const summary = buildToolSummary(result);
 
       console.log(
-        `[agent-tool] round=${round} name=${normalized.function.name}` +
+        `[agent-tool] round=${round} name=${toolName}` +
           ` ok=${result.ok === true} code=${result.code || 'none'}` +
-          ` deduped=${result.deduped === true} durationMs=${Date.now() - startedAt}`
+          ` deduped=${result.deduped === true} durationMs=${Date.now() - startedAtTool}`
       );
 
       if (typeof onToolEvent === 'function') {
         onToolEvent({
           type: 'tool_end',
-          name: normalized.function.name,
+          name: toolName,
           callId: normalized.id,
           ok: result.ok === true,
           ...(result.code ? { code: result.code } : {}),
@@ -526,10 +647,10 @@ async function runAgentTurn({
       }
 
       toolSteps.push({
-        name: normalized.function.name,
+        name: toolName,
         ok: result.ok === true,
         summary: truncateText(summary, 120),
-        durationMs: Date.now() - startedAt,
+        durationMs: Date.now() - startedAtTool,
       });
 
       conversation.push(
@@ -543,16 +664,35 @@ async function runAgentTurn({
         )
       );
 
-      console.log(
-        `[agent-result] round=${round} name=${normalized.function.name} forwarded=true`
-      );
+      console.log(`[agent-result] round=${round} name=${toolName} forwarded=true`);
+
+      if (consecutiveFailures >= 2) {
+        batchStopReason = 'repeated_tool_failure';
+        break;
+      }
+    }
+
+    if (batchStopReason) {
+      stopReason = batchStopReason;
+      break;
     }
 
     // 已执行完成的工具不回滚，但断连后不再消耗下一轮模型调用
-    if (typeof isClientGone === 'function' && isClientGone()) break;
+    if (typeof isClientGone === 'function' && isClientGone()) {
+      stopReason = 'client_gone';
+      break;
+    }
   }
 
-  return { rawReply, toolSteps, rounds, completion };
+  return {
+    rawReply,
+    toolSteps,
+    rounds,
+    completion,
+    stopReason,
+    toolCallCount,
+    readOnlyRetries,
+  };
 }
 
 module.exports = {
@@ -563,6 +703,7 @@ module.exports = {
   unregisterTool,
   supportsTool,
   listToolSpecs,
+  listToolMetadata,
   agentToolsEnabled,
   noteSwitchObservation,
   runAgentTurn,

@@ -68,6 +68,7 @@ describe('固定路径', () => {
       historyRecall: '/history/recall',
       emotion: '/emotion',
       persona: '/persona',
+      agentPolicy: '/agent-policy',
       memory: '/memory',
       memoryDelete: '/memory/delete',
       memoryClear: '/memory/clear',

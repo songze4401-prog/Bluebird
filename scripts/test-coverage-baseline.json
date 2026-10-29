@@ -1,12 +1,12 @@
 {
   "version": 1,
-  "updateRule": "新增/删除 tests/*.test.js 或改变用例数时，必须在同一变更中更新 files、backendTotal、nodeTestSuiteTotal、runnerTotal、frontend；不得只改总数或删除条目。nodeTestSuiteFiles 只包含由 node --test 六套命令执行的文件；runnerFiles 包含 CI 自定义 runner 逐文件执行的 33 个条目（其中 6 个仍使用 node:test 但按单文件退出码执行）。CI 清单必须覆盖所有 files 条目，verify-test-coverage.js 会检查。",
-  "backendTotal": 1344,
+  "updateRule": "新增/删除 tests/*.test.js 或改变用例数时，必须在同一变更中更新 files、backendTotal、nodeTestSuiteTotal、runnerTotal、frontend；不得只改总数或删除条目。nodeTestSuiteFiles 只包含由 node --test 六套命令执行的文件；runnerFiles 包含 CI 自定义 runner 逐文件执行的 34 个条目（其中 6 个仍使用 node:test 但按单文件退出码执行）。CI 清单必须覆盖所有 files 条目，verify-test-coverage.js 会检查。",
+  "backendTotal": 1392,
   "nodeTestSuiteTotal": 193,
-  "runnerTotal": 1151,
+  "runnerTotal": 1199,
   "frontend": {
-    "suites": 7,
-    "tests": 111
+    "suites": 8,
+    "tests": 113
   },
   "nodeTestSuiteFiles": [
     "memory",
@@ -35,6 +35,7 @@
     "sticker-repo",
     "model-providers",
     "model-routing",
+    "agent-policy",
     "agent-tools",
     "context-engine-e2e",
     "delete-semantics",
@@ -71,6 +72,7 @@
     "model-providers": { "format": "custom", "count": 113, "runner": true },
     "model-routing": { "format": "custom", "count": 21, "runner": true },
     "agent-tools": { "format": "custom", "count": 127, "runner": true },
+    "agent-policy": { "format": "custom", "count": 48, "runner": true },
     "context-engine-e2e": { "format": "custom", "count": 38, "runner": true },
     "delete-semantics": { "format": "custom", "count": 34, "runner": true },
     "memory-agent-write": { "format": "custom", "count": 10, "runner": true },

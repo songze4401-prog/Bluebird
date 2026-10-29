@@ -5,6 +5,8 @@
 // 不为了"看起来完整"去描述服务端没返回的东西。
 
 import type {
+  AgentPolicyConfig,
+  AgentPolicyTool,
   Attachment,
   ModelDefaults,
   ModelProvider,
@@ -92,6 +94,38 @@ export type EmotionResponse = {
   emotion?: string;
   intensity?: number;
   [key: string]: unknown;
+};
+
+// ---- Agent 工作策略 ----
+export type AgentPolicyMeta = {
+  schemaVersion: number;
+  revision: number;
+  updatedAt: string | null;
+  digest: string;
+  corrupted: boolean;
+  writeBlocked: boolean;
+  error?: string;
+  recovery?: string;
+};
+
+export type AgentPolicyResponse = {
+  policy: AgentPolicyConfig;
+  defaults: AgentPolicyConfig;
+  meta: AgentPolicyMeta;
+  limits: {
+    maxRounds: { min: number; max: number };
+    maxToolCalls: { min: number; max: number };
+    maxTotalMs: { min: number; max: number };
+    maxReadOnlyRetries: { min: number; max: number };
+    maxAllowedTools: number;
+  };
+  runtimeLimits: { maxRounds: number };
+  availableTools: AgentPolicyTool[];
+};
+
+export type AgentPolicySaveResponse = {
+  policy: AgentPolicyConfig;
+  meta: AgentPolicyMeta;
 };
 
 // ---- 人格 ----
