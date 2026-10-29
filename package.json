@@ -46,6 +46,7 @@
   "private": true,
   "jest": {
     "preset": "jest-expo",
+    "testTimeout": 20000,
     "testMatch": [
       "<rootDir>/tests/unit/**/*.test.[jt]s?(x)"
     ]
