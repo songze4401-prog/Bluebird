@@ -105,7 +105,7 @@
 
 Trace 里每个 span 只保留标识、名称、状态、耗时、错误码与安全属性；单 Trace span 上限 200，超出计数写入 `spans_dropped`。
 
-「为什么没有调用工具」由 `agent.gate` 事件直接回答（开关、模型工具能力、本次新图、视觉互斥、原因、是否放行）；模型选择结果与视觉自动路由原因由 `model.route` 事件回答。「为什么没有注入记忆」由上下文事件的 `memory_skipped_reasons` 与 Trace 的 `context.memory_skipped` 回答；上下文裁剪原因由 `dropped_reasons` / `context.dropped` 回答（只记录短码，不记录正文）。
+「为什么没有调用工具」由 `agent.gate` 事件直接回答（开关、模型工具能力、本次新图、视觉互斥、原因、是否放行）；模型选择结果与视觉自动路由原因由 `model.route` 事件回答。长期记忆提取与表情包语义描述使用独立的 `auxiliary.model` Trace，包含自己的 model span 与 Token，不混入聊天任务的 `sent` 证据。「为什么没有注入记忆」由上下文事件的 `memory_skipped_reasons` 与 Trace 的 `context.memory_skipped` 回答；上下文裁剪原因由 `dropped_reasons` / `context.dropped` 回答（只记录短码，不记录正文）。
 
 ## 5. 指标定义（口径 / 单位 / 空值语义）
 
@@ -227,7 +227,7 @@ Trace 里每个 span 只保留标识、名称、状态、耗时、错误码与�
 
 | 命令 | 结果 |
 | --- | --- |
-| `node --test --test-concurrency=1 tests/monitoring.test.js` | 25 passed / 0 failed |
+| `node --test --test-concurrency=1 tests/monitoring.test.js` | 26 passed / 0 failed |
 | `node tests/monitoring-api.test.js` | 38 passed / 0 failed |
 | `npx jest tests/unit/monitoring-screen.test.tsx --ci` | 6 passed / 0 failed |
 | `npx tsc --noEmit` | 0 errors |
@@ -249,4 +249,4 @@ Trace 里每个 span 只保留标识、名称、状态、耗时、错误码与�
 7. **查询只覆盖内存保留窗口**：滚动文件用于离线排查，不通过 API 查询历史归档。
 8. **监控本身是单进程内存聚合**：与应用单实例约束一致；多实例场景需外部聚合，不在 v1 范围。
 9. **监控数据会进入备份目录**：备份递归采集 `server/data`，监控元数据随之备份；不含正文/密钥，容量受上限与保留期约束。
-10. **辅助模型调用未纳入模型指标**：长期记忆提取与表情包语义描述走各自固定客户端，不经过 `model-adapter.createChatCompletion`，因此不计入模型请求/Token 指标；它们仍会出现在既有运行日志中。将辅助调用纳入统一适配层需要单独改造，未在本轮扩大范围。
+10. **辅助调用 provider 标签固定为内置 DeepSeek**：记忆提取/表情语义硬编码 `deepseek-chat` / `deepseek-flash`，监控如实按这两个模型记录；若未来把它们迁到可配置 provider，需要同步改为真实 provider_id。

@@ -616,6 +616,170 @@ function beginToolCall({ toolName, round = 1, readOnly = null, registered = true
   };
 }
 
+function beginAuxiliaryModel({
+  providerId,
+  modelId,
+  kind = 'auxiliary',
+  sessionRef = null,
+} = {}) {
+  if (!ACTIVE) return { active: false, complete() {} };
+
+  // 辅助调用（记忆提取/表情语义）发生在主请求收尾之后，独立建 Trace，
+  // 不污染聊天任务的 sent 证据，也不依赖仍可能存活的 ALS 上下文。
+  const trace = store.startTrace({
+    name: 'auxiliary.model',
+    sessionRef,
+    attributes: { kind, provider_id: providerId, model_id: modelId },
+  });
+
+  if (!trace) return { active: false, complete() {} };
+
+  const traceId = trace.trace_id;
+  const spanId = context.newSpanId();
+  store.addSpan(traceId, {
+    span_id: spanId,
+    parent_span_id: null,
+    name: 'model.request',
+    started_at: new Date().toISOString(),
+    attributes: { provider_id: providerId, model_id: modelId, kind, auxiliary: true },
+  });
+
+  const startedAt = Date.now();
+  recordEvent({
+    event_name: EVENTS.MODEL_REQUEST_STARTED,
+    component: 'model',
+    status: 'unknown',
+    trace_id: traceId,
+    span_id: spanId,
+    attributes: {
+      provider_id: providerId,
+      model_id: modelId,
+      kind,
+      round: 1,
+      tools_count: 0,
+      stream: false,
+      auxiliary: true,
+    },
+  });
+
+  let settled = false;
+  return {
+    active: true,
+    complete({ status = 'success', usage = null, errorCode = null } = {}) {
+      if (settled) return;
+      settled = true;
+      const durationMs = Date.now() - startedAt;
+      const usageSource =
+        usage &&
+        (Number.isFinite(usage.prompt_tokens) ||
+          Number.isFinite(usage.completion_tokens) ||
+          Number.isFinite(usage.total_tokens))
+          ? 'provider'
+          : 'missing';
+      const promptTokens = Number.isFinite(usage && usage.prompt_tokens)
+        ? usage.prompt_tokens
+        : null;
+      const completionTokens = Number.isFinite(usage && usage.completion_tokens)
+        ? usage.completion_tokens
+        : null;
+      const totalTokens =
+        Number.isFinite(usage && usage.total_tokens)
+          ? usage.total_tokens
+          : Number.isFinite(promptTokens) && Number.isFinite(completionTokens)
+            ? promptTokens + completionTokens
+            : null;
+
+      try {
+        metrics.increment('model_requests_total', {
+          provider_id: providerId,
+          model_id: modelId,
+          status,
+          kind,
+        });
+        metrics.observe(
+          'model_request_duration_ms',
+          { provider_id: providerId, model_id: modelId },
+          durationMs
+        );
+        if (promptTokens !== null) {
+          metrics.increment(
+            'model_tokens_total',
+            {
+              provider_id: providerId,
+              model_id: modelId,
+              token_kind: 'input',
+              usage_source: usageSource,
+            },
+            promptTokens
+          );
+        }
+        if (completionTokens !== null) {
+          metrics.increment(
+            'model_tokens_total',
+            {
+              provider_id: providerId,
+              model_id: modelId,
+              token_kind: 'output',
+              usage_source: usageSource,
+            },
+            completionTokens
+          );
+        }
+
+        store.updateTrace(traceId, item => {
+          item.model.calls += 1;
+          item.model.rounds = 1;
+          if (!item.model.provider_ids.includes(providerId)) {
+            item.model.provider_ids.push(providerId);
+          }
+          if (!item.model.model_ids.includes(modelId)) {
+            item.model.model_ids.push(modelId);
+          }
+          if (totalTokens !== null) {
+            item.model.input_tokens = (item.model.input_tokens || 0) + (promptTokens || 0);
+            item.model.output_tokens =
+              (item.model.output_tokens || 0) + (completionTokens || 0);
+            item.model.total_tokens = (item.model.total_tokens || 0) + totalTokens;
+            item.model.usage_source = 'provider';
+          }
+          item.task = { status, termination: kind, error_code: errorCode };
+        });
+
+        recordEvent({
+          event_name: EVENTS.MODEL_REQUEST_COMPLETED,
+          component: 'model',
+          status,
+          duration_ms: durationMs,
+          trace_id: traceId,
+          span_id: spanId,
+          error_code: errorCode,
+          error_category: status === 'success' ? null : 'provider',
+          attributes: {
+            provider_id: providerId,
+            model_id: modelId,
+            kind,
+            round: 1,
+            input_tokens: promptTokens,
+            output_tokens: completionTokens,
+            total_tokens: totalTokens,
+            usage_source: usageSource,
+            auxiliary: true,
+          },
+        });
+
+        store.endSpan(traceId, spanId, { status, errorCode });
+        store.endTrace(traceId, {
+          status,
+          errorCode,
+          errorCategory: status === 'success' ? null : 'provider',
+        });
+      } catch (_) {
+        INTERNAL_ERRORS += 1;
+      }
+    },
+  };
+}
+
 function recordModelRoute({ requested = {}, actual = {}, auto = false, reason = null } = {}) {
   if (!ACTIVE) return;
   try {
@@ -1771,6 +1935,7 @@ module.exports = {
   beginModelCall,
   beginToolCall,
   recordToolResultReturned,
+  beginAuxiliaryModel,
   recordModelRoute,
   beginMemorySearch,
   recordContextBuild,

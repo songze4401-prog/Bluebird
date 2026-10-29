@@ -322,6 +322,27 @@ test('store：Trace 阶段/span/工具计数与上限行为一致', () => {
   assert.equal(saved.status, 'success');
 });
 
+test('辅助模型调用拥有独立 Trace，不混入聊天任务', () => {
+  const handle = monitoring.beginAuxiliaryModel({
+    providerId: 'deepseek',
+    modelId: 'deepseek-chat',
+    kind: 'unit_auxiliary',
+    sessionRef: 's_unit',
+  });
+  assert.equal(handle.active, true);
+  handle.complete({
+    status: 'success',
+    usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+  });
+
+  const traces = store.listTraces({ limit: 100 });
+  const auxiliary = traces.items.find(item => item.name === 'auxiliary.model');
+  assert.ok(auxiliary);
+  assert.equal(auxiliary.task.termination, 'unit_auxiliary');
+  assert.equal(auxiliary.model.total_tokens, 5);
+  assert.ok(auxiliary.span_count >= 1);
+});
+
 test('store：Trace 列表支持状态/模型/工具过滤', () => {
   const trace = store.startTrace({ name: 'filter.trace' });
   store.updateTrace(trace.trace_id, item => {
