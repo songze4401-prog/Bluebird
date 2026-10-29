@@ -109,19 +109,19 @@ function selectHistory({
 
   const older = usable.slice(0, recentStart);
   const backReference = hasBackReference(query);
-  const scored = older.map(entry =>
-    ({
-      ...entry,
-      ...scoreMessage({
-        message: entry.message,
-        query,
-        index: entry.message.index,
-        total: messages.length,
-        backReference,
-        backReferenceBoost: historyConfig.backReferenceBoost,
-      }),
-    })
-  );
+  const scoreEntry = entry => ({
+    ...entry,
+    ...scoreMessage({
+      message: entry.message,
+      query,
+      index: entry.message.index,
+      total: messages.length,
+      backReference,
+      backReferenceBoost: historyConfig.backReferenceBoost,
+    }),
+  });
+
+  const scored = older.map(scoreEntry);
 
   const qualified = scored
     .filter(entry => {
@@ -159,7 +159,9 @@ function selectHistory({
           candidate.message.index === entry.message.index - 1 &&
           candidate.message.role === 'user'
       );
-      if (previous) tryRecall(previous);
+      // 配对条目来自 older（未评分），必须补齐 score/lexical/entity，
+      // 否则决策阶段读取 recalled.score.toFixed 会抛 TypeError（2026-10-30 线上故障）。
+      if (previous) tryRecall(scoreEntry(previous));
     }
   }
 

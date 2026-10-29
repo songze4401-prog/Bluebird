@@ -256,6 +256,32 @@ test('B4: 回指词提升旧消息召回，助手回复带出上一句用户提�
   assert.ok(selection.recalled.some(entry => entry.message.id === 'u-old'));
 });
 
+test('B4b: 配对召回的用户消息必须带评分，不得触发 toFixed 崩溃', () => {
+  const items = longFiller(100, 10);
+  items[5] = message('u-pair', 'user', '记忆检索方案讨论', 5);
+  items[6] = message('a-pair', 'assistant', '建议使用 memory_search 做记忆检索', 6);
+  // 收紧 recentBudgetTokens，让第 5/6 条落入 older 区，复现 2026-10-30 线上故障条件。
+  const tightConfig = {
+    ...config,
+    history: { ...config.history, recentBudgetTokens: 40, minRecentMessages: 2 },
+  };
+  const selection = selectHistory({
+    messages: project(items),
+    query: 'memory_search 记忆检索',
+    render,
+    config: tightConfig,
+  });
+  const paired = selection.recalled.find(entry => entry.message.id === 'u-pair');
+  assert.ok(paired, '配对召回的用户消息应被纳入 recalled');
+  assert.strictEqual(typeof paired.score, 'number', '配对条目的 score 必须是数字');
+  assert.strictEqual(typeof paired.lexical, 'number');
+  assert.strictEqual(typeof paired.entity, 'number');
+  const decision = selection.decisions.find(item => item.messageId === 'u-pair');
+  assert.ok(decision, '配对召回条目应有决策记录');
+  assert.strictEqual(decision.stage, 'recalled');
+  assert.match(decision.reason, /相关度 \d\.\d{3}/);
+});
+
 test('B5: 含图片的旧消息被召回时只保留文字，并明确标注图片未重放', () => {
   const items = longFiller(100, 10);
   items[3] = message('img-msg', 'user', '这是设计稿的说明文字，主题是蓝色。', 3, {
