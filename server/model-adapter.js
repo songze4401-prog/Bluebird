@@ -1,4 +1,3 @@
-/* global __dirname */
 /**
  * 云岫 Bluebird — 统一模型适配层（model-adapter.js）
  *
@@ -32,6 +31,7 @@ const http = require('http');
 const https = require('https');
 const { URL } = require('url');
 const OpenAI = require('openai');
+const monitoring = require('./monitoring');
 
 const {
   findProvider,
@@ -398,15 +398,26 @@ async function createChatCompletion({
   wantVision = false,
   tools,
   tool_choice,
+  monitoringRound = 1,
 }) {
   const target = wantVision
     ? resolveVisionTarget({ providerId, modelId })
     : resolveTarget({ providerId, modelId, wantVision: false });
 
   const key = getProviderKey(target.providerId);
+  const startedAt = Date.now();
+  const monitor = monitoring.beginModelCall({
+    providerId: target.providerId,
+    modelId: target.modelId,
+    kind: stream ? 'stream' : 'chat',
+    round: monitoringRound,
+    toolsCount: Array.isArray(tools) ? tools.length : 0,
+    stream,
+  });
 
+  let result;
   try {
-    return await getClient(target.provider, key).chat.completions.create(
+    result = await getClient(target.provider, key).chat.completions.create(
       {
         model: target.modelId,
         temperature,
@@ -419,8 +430,101 @@ async function createChatCompletion({
       { timeout }
     );
   } catch (error) {
-    throw normalizeSdkError(error, key);
+    const normalized = normalizeSdkError(error, key);
+    monitor.fail({
+      status: monitoringStatusForKind(normalized.kind),
+      durationMs: Date.now() - startedAt,
+      errorCode: normalized.kind,
+      errorCategory: 'provider',
+    });
+    throw normalized;
   }
+
+  if (!stream) {
+    monitor.complete({
+      status: 'success',
+      durationMs: Date.now() - startedAt,
+      usage: result && result.usage ? result.usage : null,
+    });
+    return result;
+  }
+
+  return wrapMonitoredStream(result, monitor, startedAt);
+}
+
+function monitoringStatusForKind(kind) {
+  if (kind === 'timeout') return 'timeout';
+  if (kind === 'auth') return 'denied';
+  if (kind === 'cancelled') return 'cancelled';
+  return 'failed';
+}
+
+// 流式响应没有统一的 usage 承诺：能拿到就用供应商真实值，拿不到就明确标 missing。
+// 迭代正常结束记 success，调用方提前 return（客户端断连）记 cancelled，
+// 迭代抛错记 failed；原始错误对象原样抛回，保持上层错误语义不变。
+function wrapMonitoredStream(stream, monitor, startedAt) {
+  let settled = false;
+  let usage = null;
+
+  const finish = (status, errorCode = null) => {
+    if (settled) return;
+    settled = true;
+    if (status === 'success') {
+      monitor.complete({
+        status,
+        durationMs: Date.now() - startedAt,
+        usage,
+      });
+    } else {
+      monitor.fail({
+        status,
+        durationMs: Date.now() - startedAt,
+        errorCode,
+        errorCategory: status === 'cancelled' ? null : 'provider',
+      });
+    }
+  };
+
+  return new Proxy(stream, {
+    get(target, property) {
+      if (property === Symbol.asyncIterator) {
+        return function monitoredIterator() {
+          const iterator = target[Symbol.asyncIterator]();
+          return {
+            async next() {
+              try {
+                const step = await iterator.next();
+                if (step.done) {
+                  finish('success');
+                } else if (step.value && step.value.usage) {
+                  usage = step.value.usage;
+                }
+                return step;
+              } catch (error) {
+                finish('failed', error && error.code ? String(error.code) : 'stream_error');
+                throw error;
+              }
+            },
+            async return(value) {
+              finish('cancelled', 'client_closed');
+              if (typeof iterator.return === 'function') {
+                return iterator.return(value);
+              }
+              return { done: true, value };
+            },
+            async throw(error) {
+              finish('failed', 'stream_error');
+              if (typeof iterator.throw === 'function') {
+                return iterator.throw(error);
+              }
+              throw error;
+            },
+          };
+        };
+      }
+      return Reflect.get(target, property);
+    },
+  });
 }
 
 /**

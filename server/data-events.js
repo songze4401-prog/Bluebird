@@ -1,5 +1,3 @@
-/* global process */
-
 // 数据文件相关事件（损坏 + 持久化异常）的统一记录器：每次写一行 JSON 到 stderr。
 //
 // 为什么单独抽这个模块：sessions.js / memory.js / emotion.js 三个模块都要记录
@@ -85,6 +83,27 @@ function logDataEvent(info) {
   if (extra && typeof extra === 'object') Object.assign(record, extra);
 
   console.error(JSON.stringify(record));
+
+  // 数据损坏/落盘异常同时进入监控（只带受控短码，不带文件路径或任何正文）。
+  // 监控未初始化时 recordEvent 为 no-op；异常不得影响原日志与业务。
+  try {
+    const monitoring = require('./monitoring');
+    monitoring.recordEvent({
+      event_name: 'data.event',
+      component: 'persistence',
+      status: level === 'error' ? 'failed' : 'success',
+      error_code: typeof reason === 'string' ? reason : undefined,
+      error_category: 'persistence',
+      attributes: {
+        module,
+        action,
+        reason: reason || undefined,
+        event_kind: event,
+      },
+    });
+  } catch (_) {
+    /* 监控失败不影响数据事件日志 */
+  }
 }
 
 /** 数据文件损坏事件的便捷封装（event 固定为 data_file_corruption）。 */

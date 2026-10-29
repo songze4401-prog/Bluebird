@@ -1,4 +1,4 @@
-/* global process */
+/* global __dirname */
 const fs = require('fs');
 const path = require('path');
 
@@ -110,7 +110,7 @@ function release() {
 // 优雅退出：先关 HTTP server，再释放锁。
 // 兜底：server.close 可能因残留长连接迟迟不回调，故加超时强制退出，
 // 宁可强制退出也要保证进程能停（锁会由 exit 钩子兜底释放）。
-function installShutdownHooks(server) {
+function installShutdownHooks(server, options = {}) {
   const stop = signal => () => {
     try {
       if (typeof server.closeAllConnections === 'function') {
@@ -127,16 +127,35 @@ function installShutdownHooks(server) {
 
     if (timer.unref) timer.unref();
 
+    const finalize = async () => {
+      // 收尾也要有硬上限：监控刷盘等异步动作不得让进程永远停不下来。
+      const guard = setTimeout(() => {
+        release();
+        process.exit(0);
+      }, 2000);
+      if (guard.unref) guard.unref();
+
+      try {
+        if (typeof options.onShutdown === 'function') {
+          await options.onShutdown();
+        }
+      } catch (_) {
+        /* 收尾失败不影响退出 */
+      } finally {
+        clearTimeout(guard);
+        release();
+        process.exit(0);
+      }
+    };
+
     try {
       server.close(() => {
         clearTimeout(timer);
-        release();
-        process.exit(0);
+        void finalize();
       });
     } catch (_) {
       clearTimeout(timer);
-      release();
-      process.exit(0);
+      void finalize();
     }
 
     if (signal) console.log(`[single-instance] 收到 ${signal}，正在停止`);
