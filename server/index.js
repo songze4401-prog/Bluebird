@@ -5,6 +5,8 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const express = require('express');
 const cors = require('cors');
+const retrieval = require('./retrieval');
+const { createRetrievalRouter } = require('./retrieval/routes');
 
 // 生产级可观测性：独立模块 + 只读查询 API。记录失败绝不影响主业务；
 // BLUEBIRD_MONITORING=0 可关闭，前端会显示 disabled 而不是健康。
@@ -63,6 +65,8 @@ function rateLimit({ maxPerWindow = 60 } = {}) {
 
 app.use(rateLimit());
 
+// 统一检索：查询只读，摄取/删除/重建写索引；全部复用 Bearer 鉴权与全局限流。
+app.use('/retrieval', createRetrievalRouter({ requireAuth }));
 // 只读监控 API：复用现有 Bearer 鉴权与全局限流；没有任何写接口。
 app.use('/monitoring', createMonitoringRouter({ requireAuth }));
 
@@ -3493,6 +3497,14 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
 // 先抢占数据目录锁：已有实例在跑就直接退出，绝不带病启动造成静默覆盖
 acquireSingleInstance({ port: PORT });
 
+// 检索索引初始化失败不阻止聊天服务启动：状态接口会显式返回 degraded，
+// 上下文只降级外部知识块，主链路仍可用。
+const retrievalStatus = retrieval.initialize();
+if (!retrievalStatus.enabled) {
+  console.log('[retrieval] 统一检索已关闭（BLUEBIRD_RETRIEVAL=0）');
+} else {
+  console.log(`[retrieval] 统一检索状态：${retrievalStatus.state || 'unknown'}`);
+}
 // 拿到锁之后再初始化监控：初始化失败只降级，不影响聊天主链路。
 monitoring.initMonitoring();
 

@@ -448,9 +448,11 @@ async function main() {
   check(
     'Agent 路径已激活（请求带白名单 tools，模型自己选择不调用）',
     Array.isArray(stubCalls[0].tools) &&
-      stubCalls[0].tools.length === 2 &&
+      stubCalls[0].tools.length === 3 &&
       stubCalls[0].tools.every(tool =>
-        ['memory_search', 'memory_remember'].includes(tool.function.name)
+        ['memory_search', 'memory_remember', 'knowledge_search'].includes(
+          tool.function.name
+        )
       )
   );
   check('model 回执保持原语义', plain.json.model === 'deepseek-chat');
@@ -527,10 +529,11 @@ async function main() {
   check('恰好 2 轮模型调用', stubCalls.length === 2, `calls=${stubCalls.length}`);
   check('首轮带 tools 与 tool_choice=auto', Array.isArray(stubCalls[0].tools) && stubCalls[0].tool_choice === 'auto');
   check(
-    '首轮 tools 含白名单 memory_search 与 memory_remember',
-    stubCalls[0].tools.length === 2 &&
+    '首轮 tools 含白名单 memory_search / memory_remember / knowledge_search',
+    stubCalls[0].tools.length === 3 &&
       stubCalls[0].tools.some(tool => tool.function.name === 'memory_search') &&
-      stubCalls[0].tools.some(tool => tool.function.name === 'memory_remember')
+      stubCalls[0].tools.some(tool => tool.function.name === 'memory_remember') &&
+      stubCalls[0].tools.some(tool => tool.function.name === 'knowledge_search')
   );
   check(
     '第二轮带回了 assistant tool_calls 与 tool 结果',

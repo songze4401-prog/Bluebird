@@ -1,0 +1,25 @@
+# 换行策略：文本文件在仓库内统一存 LF，检出也统一成 LF。
+# 这样任何按 "\n" 解析文件的脚本（冲突解析、生成器、Lint）在 Windows 上也不会
+# 因为工作区是 CRLF 而解析失败；Git 比较时仍会做规范化，不影响历史内容。
+* text=auto eol=lf
+
+# Windows 原生脚本保留 CRLF：cmd.exe / PowerShell 对 LF 兼容性不一
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制资源不做任何换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.mp3 binary
+*.mp4 binary
+*.zip binary
+*.gz binary
