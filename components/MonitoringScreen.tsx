@@ -159,7 +159,7 @@ function statusTone(theme: Theme, status?: string) {
   if (status === 'success' || status === 'completed' || status === 'ok') {
     return { color: theme.online, background: withTone(theme.online) };
   }
-  if (status === 'timeout' || status === 'partial_success') {
+  if (status === 'timeout' || status === 'partial_success' || status === 'needs_confirmation') {
     return { color: theme.accent, background: withTone(theme.accent) };
   }
   if (status === 'denied' || status === 'failed' || status === 'degraded') {

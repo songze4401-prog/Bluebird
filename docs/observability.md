@@ -69,7 +69,10 @@
 | `error_code` / `error_category` | 稳定错误码与分类 |
 | `attributes` | 白名单属性；只允许计量/标识/原因，敏感键直接丢弃 |
 
-状态枚举：`success`、`partial_success`、`failed`、`timeout`、`cancelled`、`skipped`、`disabled`、`no_result`、`denied`、`unknown`。不同失败语义不混用；无样本不得写成成功。
+状态枚举：`success`、`partial_success`、`failed`、`timeout`、`cancelled`、`skipped`、`disabled`、`no_result`、`denied`、`needs_confirmation`、`unknown`。不同失败语义不混用；无样本不得写成成功。
+
+工具调用终态由 `schema.toolCallStatus({ ok, code })` 这一纯函数决定，四种语义互不混用：
+`success`（成功）／`denied`（策略拒绝 `policy_tool_denied`、写入未授权 `unauthorized_write`）／`needs_confirmation`（高风险工具待人工确认 `confirmation_required`，尚未执行）／`failed`（其余执行失败）；超时单独记为 `timeout`。`needs_confirmation` 的事件级别为 `warn`，不计入 `tool_failure_rate` 告警的分子。
 
 已声明事件：
 
@@ -119,7 +122,7 @@ Trace 里每个 span 只保留标识、名称、状态、耗时、错误码与�
 | `model_request_duration_ms` | histogram | provider_id, model_id | 模型请求耗时（不含工具执行） | 无样本为 `null` |
 | `model_tokens_total` | counter | provider_id, model_id, token_kind, usage_source | 供应商 usage 或 `missing` | 缺失不估算，不伪装精确值 |
 | `model_cached_tokens_total` | counter | provider_id, model_id | 供应商返回的缓存命中 Token | 未返回时无样本 |
-| `tool_calls_total` | counter | tool_name, status | 工具请求/执行结果；未注册工具归入 `unknown_tool` | 无样本不显示 0% 成功率 |
+| `tool_calls_total` | counter | tool_name, status | 工具请求/执行结果；未注册工具归入 `unknown_tool`；status 见上方终态规则 | 无样本不显示 0% 成功率 |
 | `tool_deduped_total` | counter | tool_name | 同请求内同参数去重的调用 | 无样本为 0 |
 | `agent_rounds` | histogram | status | 一次 Agent 回合实际模型轮数 | 无样本为 `null` |
 | `model_auto_routed_total` | counter | reason | 视觉能力触发的模型自动路由 | 未发生为 0 |
