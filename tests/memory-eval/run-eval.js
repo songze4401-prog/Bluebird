@@ -1112,17 +1112,23 @@ async function runPhase4() {
 
   const query = '我喝咖啡选什么';
   const scoped = scopedRetrieve(query, fixtures.SESSIONS.main);
-  const engineOut = await engine.runContextEngine({
+  const engineOut = await engine.runContextRuntime({
     task: query,
     sessionId: fixtures.SESSIONS.main,
-    history: [],
-    systemPrompt: '你是云岫。',
+    projectedMessages: [],
+    renderMessage: () => null,
+    systemBlocks: [
+      { id: 'core', kind: 'core', priority: 100, critical: true, text: '你是云岫。' },
+    ],
+    currentMessage: { role: 'user', content: query },
   });
 
-  const blocks = engine.renderContextBlocks(engineOut);
-  const rendered = blocks.join('\n');
+  const rendered = engineOut.systemPrompt || '';
 
   reg = previousRegistry;
+
+  const skipped = engineOut.memory ? engineOut.memory.skipped : [];
+  const skippedBy = reason => skipped.filter(item => item.reason === reason).length;
 
   report.phase4 = {
     query,
@@ -1131,16 +1137,18 @@ async function runPhase4() {
     engine: {
       ok: engineOut.ok,
       error: engineOut.error || null,
-      route: engineOut.route.decision,
-      retrievedItems: engineOut.trace.retrieval.sources.map(source => ({
-        source: source.source,
-        status: source.status,
-        count: source.count,
-      })),
-      selected: engineOut.decisions.selected.length,
-      conflicts: engineOut.decisions.conflicts.length,
-      demoted: engineOut.decisions.demoted.length,
-      expired: engineOut.decisions.expired.length,
+      route: 'direct',
+      retrievedItems: [
+        {
+          source: 'memory',
+          status: engineOut.trace.retrieval.status,
+          count: engineOut.trace.retrieval.candidates,
+        },
+      ],
+      selected: engineOut.memory ? engineOut.memory.accepted.length : 0,
+      conflicts: engineOut.memory ? engineOut.memory.conflicts.length : 0,
+      demoted: skippedBy('demoted_to_pending'),
+      expired: skippedBy('expired_realtime_refetch'),
       injectedLines: rendered
         .split('\n')
         .filter(line => line.startsWith('- '))
@@ -1148,15 +1156,14 @@ async function runPhase4() {
       unknownFreshnessMarks: (rendered.match(/（时效未知）/g) || []).length,
     },
     verdict:
-      '同组近似候选按 fetchedAt（真实 validFrom）→ relevance 决胜，不再整组判平局丢弃；' +
-      '注入 1 条而直连 2 条是「同组只留一个赢家」的设计结果，不是漏召回',
+      '同组近似候选按来源/时间/覆盖关系裁决；未覆盖的补充事实保留，不整组丢弃',
   };
 
   origLog(
     `查询「${query}」 直连检索命中 ${scoped.ids.length} 条 = ${fmtIds(scoped.ids)}`
   );
   origLog(
-    `引擎：ok=${engineOut.ok} route=${engineOut.route.decision} ` +
+    `引擎：ok=${engineOut.ok} route=${report.phase4.engine.route} ` +
       `selected=${report.phase4.engine.selected} conflicts=${report.phase4.engine.conflicts} ` +
       `注入行=${JSON.stringify(report.phase4.engine.injectedLines)} ` +
       `标记「时效未知」的行数=${report.phase4.engine.unknownFreshnessMarks}`

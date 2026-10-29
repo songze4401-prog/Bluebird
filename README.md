@@ -27,10 +27,11 @@ npx expo start             # Metro :8081
 ## Quality gates
 
 ```bash
-npm test                    # backend: auto-discovers tests/*.test.js (39 files / 1325 checks)
-npm run test:unit -- --ci   # frontend: 7 suites / 108 cases
+npm test                    # backend: auto-discovers tests/*.test.js (39 files / 1344 checks)
+npm run test:unit -- --ci   # frontend: 7 suites / 111 cases
 npx tsc --noEmit            # TypeScript
 npm run lint                # Expo ESLint
+npm run eval:context        # real-model capability eval (needs DEEPSEEK_API_KEY; not in CI)
 ```
 
 CI (`.github/workflows/ci.yml`) runs the backend suites, TypeScript, lint, and Jest on Node 22, plus the runtime test-coverage verifier and two data-isolation tripwires that ensure tests never read or write the real `server/data`.
@@ -39,6 +40,7 @@ CI (`.github/workflows/ci.yml`) runs the backend suites, TypeScript, lint, and J
 
 - Everything the user owns lives in one directory: `server/data/` or `BLUEBIRD_DATA_DIR`. It is gitignored.
 - The API must run as a single process; a second instance is refused by the startup lock.
+- Each session retains up to 1000 messages; `/history` returns at most 200 per page and the client loads older pages with a `before` cursor. Trimming releases unreferenced upload files.
 - Back up with `node scripts/bluebird-backup.js` (recursive snapshot + SHA-256 manifest). API keys are excluded by default; see `AGENTS.md` for `--encrypt-secrets`.
 - Rehearse restore with `node scripts/bluebird-restore-drill.js`.
 - `api-keys.json` is plaintext at rest (best-effort `0600`); do not commit the data directory or `.env` files.

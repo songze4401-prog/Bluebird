@@ -54,6 +54,8 @@ import type {
 
 // 历史一次性拉取上限（服务端按需截断）
 const HISTORY_LIMIT = 200;
+// 向上翻页每次加载的更早消息数；服务端单页硬上限为 200。
+const HISTORY_OLDER_LIMIT = 50;
 
 // 进入模型上下文的最大历史条数
 const HISTORY_CONTEXT_LIMIT = 20;
@@ -113,6 +115,10 @@ export type ChatSessionApi = {
   loadHistory: (
     sessionId: string
   ) => Promise<{ ok: boolean; status: number; stale?: boolean }>;
+  // 向上加载更早历史；hasMoreHistory=false 或没有游标时直接返回 false。
+  loadOlderHistory: () => Promise<{ ok: boolean; status: number; stale?: boolean }>;
+  hasMoreHistory: boolean;
+  loadingOlder: boolean;
   markHistoryLoaded: () => void;
   // 启动时读取服务端持久化的情绪状态（顶部 Emoji 与 Emotion System 保持一致）
   loadEmotion: () => Promise<void>;
@@ -134,6 +140,9 @@ export function useChatSession({
 }: ChatSessionConfig): ChatSessionApi {
   const [messagesState, setMessagesState] = useState<Message[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(true);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  const [historyCursor, setHistoryCursor] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [continuing, setContinuing] = useState(false);
   const [mood, setMood] = useState('calm');
@@ -174,7 +183,12 @@ export function useChatSession({
   }, [sessionId]);
 
   const markHistoryLoaded = useCallback(() => setLoadingHistory(false), []);
-  const resetMessages = useCallback(() => setMessages([]), [setMessages]);
+  const resetMessages = useCallback(() => {
+    setMessages([]);
+    setHasMoreHistory(false);
+    setHistoryCursor(null);
+    setLoadingOlder(false);
+  }, [setMessages]);
 
   // 启动时读取服务端持久化的真实情绪状态，让顶部 Emoji 与 Emotion System 保持一致。
   // mood 属于本 hook，所以由这里发起读取；与聊天回复的 setMood 写同一份状态。
@@ -226,6 +240,13 @@ export function useChatSession({
         return { ok: false, status: response.status };
       }
 
+      const nextCursor =
+        typeof data.nextCursor === 'string' ? data.nextCursor : null;
+      const more = data.hasMore === true && !!nextCursor;
+
+      setHasMoreHistory(more);
+      setHistoryCursor(more ? nextCursor : null);
+      setLoadingOlder(false);
       setMessages(
         data.history.length === 0
           ? buildWelcomeMessages()
@@ -242,6 +263,69 @@ export function useChatSession({
       console.error('History load error:', error);
 
       return { ok: false, status: 0 };
+    }
+  };
+
+  // 向上加载更早历史：只插入到列表头部，不改变当前滚动位置；
+  // 复用 historyGate，切会话/重新加载时旧的翻页响应会被判定为 stale。
+  const loadOlderHistory = async (): Promise<{
+    ok: boolean;
+    status: number;
+    stale?: boolean;
+  }> => {
+    if (loadingHistory || loadingOlder || !hasMoreHistory || !historyCursor) {
+      return { ok: false, status: 0 };
+    }
+
+    const ticket = historyGate.begin();
+    setLoadingOlder(true);
+
+    try {
+      const response = await apiFetch(
+        API_PATHS.history(sessionId, HISTORY_OLDER_LIMIT, historyCursor),
+        { signal: ticket.signal }
+      );
+      const data = (await readJsonResponse(response)) as HistoryResponse;
+
+      if (!historyGate.isCurrent(ticket.id)) {
+        return { ok: false, status: response.status, stale: true };
+      }
+      if (!response.ok || !Array.isArray(data.history)) {
+        Alert.alert('加载更早消息失败', '请稍后再试。');
+        return { ok: false, status: response.status };
+      }
+
+      const older = data.history.map(mapHistoryItem);
+      setMessages(prev => {
+        const existing = new Set(prev.map(item => item.id));
+        return [...older.filter(item => !existing.has(item.id)), ...prev];
+      });
+
+      const nextCursor =
+        typeof data.nextCursor === 'string' ? data.nextCursor : null;
+      const more = data.hasMore === true && !!nextCursor;
+      setHasMoreHistory(more);
+      setHistoryCursor(more ? nextCursor : null);
+
+      return { ok: true, status: response.status };
+    } catch (error) {
+      if (!historyGate.isCurrent(ticket.id)) {
+        return { ok: false, status: 0, stale: true };
+      }
+      console.error('Older history load error:', error);
+      Alert.alert('加载更早消息失败', '请稍后再试。');
+      return { ok: false, status: 0 };
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
+
+  // 撤回可能删掉当前分页的游标消息；此时停止继续翻页，避免下一次
+  // before 指向已不存在的 id（服务端会返回 400）。重新进入会话即可恢复。
+  const invalidateCursorIfRemoved = (removedIds: string[]) => {
+    if (historyCursor && removedIds.includes(historyCursor)) {
+      setHistoryCursor(null);
+      setHasMoreHistory(false);
     }
   };
 
@@ -631,6 +715,9 @@ export function useChatSession({
               }
 
               setMessages([]);
+              setHasMoreHistory(false);
+              setHistoryCursor(null);
+              setLoadingOlder(false);
               onMenuCloseRequest();
               Alert.alert('完成', '聊天记录已经清空。');
             } catch (error) {
@@ -676,6 +763,7 @@ export function useChatSession({
               // 此时本地列表必须跟着删掉，否则界面继续显示一条服务端已不存在的消息。
               if (data.messagesRecalled) {
                 setMessages(prev => prev.filter(m => !removedIds.includes(m.id)));
+                invalidateCursorIfRemoved(removedIds);
                 Alert.alert(
                   '部分撤回失败',
                   data.error || '消息已撤回，但长期记忆撤回失败，请稍后重试。'
@@ -687,6 +775,7 @@ export function useChatSession({
             }
 
             setMessages(prev => prev.filter(m => !removedIds.includes(m.id)));
+            invalidateCursorIfRemoved(removedIds);
           } catch (error) {
             console.error('Recall error:', error);
             Alert.alert('撤回失败', '请稍后再试。');
@@ -706,6 +795,9 @@ export function useChatSession({
     sendMessage,
     sendContinuation,
     loadHistory,
+    loadOlderHistory,
+    hasMoreHistory,
+    loadingOlder,
     markHistoryLoaded,
     loadEmotion,
     clearHistory,

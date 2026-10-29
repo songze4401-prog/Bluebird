@@ -342,6 +342,160 @@ async function waitReady() {
     );
   }
 
+  origLog('\n保留上限 1000 与历史分页');
+  {
+    const paged = sessions.createSession({ title: '分页会话' });
+    const pageMessages = Array.from({ length: 250 }, (_, i) => ({
+      id: `page-${i}`,
+      role: i % 2 === 0 ? 'user' : 'assistant',
+      content: `分页消息 ${i}`,
+      createdAt: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
+    }));
+    const appended = sessions.appendMessages(paged.id, pageMessages);
+    check('分页会话追加 250 条成功', Array.isArray(appended) && appended.length === 250);
+
+    const firstPage = sessions.getHistoryPage(paged.id, { limit: 100 });
+    check(
+      '分页第一页返回最近 100 条',
+      firstPage &&
+        firstPage.items.length === 100 &&
+        firstPage.items[0].id === 'page-150' &&
+        firstPage.items[99].id === 'page-249'
+    );
+    check(
+      '分页第一页标记 hasMore 与 nextCursor',
+      firstPage.hasMore === true && firstPage.nextCursor === 'page-150'
+    );
+
+    const secondPage = sessions.getHistoryPage(paged.id, {
+      limit: 100,
+      before: firstPage.nextCursor,
+    });
+    check(
+      '分页第二页向前读取 50..149',
+      secondPage.items.length === 100 &&
+        secondPage.items[0].id === 'page-50' &&
+        secondPage.items[99].id === 'page-149' &&
+        secondPage.hasMore === true
+    );
+
+    const thirdPage = sessions.getHistoryPage(paged.id, {
+      limit: 100,
+      before: secondPage.nextCursor,
+    });
+    check(
+      '分页最后一页只有 50 条且 hasMore=false',
+      thirdPage.items.length === 50 &&
+        thirdPage.items[0].id === 'page-0' &&
+        thirdPage.hasMore === false &&
+        thirdPage.nextCursor === null
+    );
+
+    const invalid = sessions.getHistoryPage(paged.id, {
+      limit: 100,
+      before: 'does-not-exist',
+    });
+    check('不存在的 before 游标显式返回 invalidCursor', invalid.invalidCursor === true);
+
+    const httpDefault = await req(`/history?sessionId=${paged.id}`);
+    check(
+      'HTTP 未传 limit 时默认返回 50 条并保留游标',
+      httpDefault.status === 200 &&
+        httpDefault.json.history.length === 50 &&
+        httpDefault.json.hasMore === true
+    );
+
+    const httpFirst = await req(`/history?sessionId=${paged.id}&limit=100`);
+    check(
+      'HTTP 分页第一页结构与游标正确',
+      httpFirst.status === 200 &&
+        httpFirst.json.history.length === 100 &&
+        httpFirst.json.history[0].id === 'page-150' &&
+        httpFirst.json.hasMore === true &&
+        httpFirst.json.nextCursor === 'page-150',
+      JSON.stringify({
+        status: httpFirst.status,
+        hasMore: httpFirst.json && httpFirst.json.hasMore,
+      })
+    );
+
+    const httpSecond = await req(
+      `/history?sessionId=${paged.id}&limit=100&before=page-150`
+    );
+    check(
+      'HTTP 分页第二页不重复且继续向前',
+      httpSecond.status === 200 &&
+        httpSecond.json.history.length === 100 &&
+        httpSecond.json.history[0].id === 'page-50' &&
+        httpSecond.json.nextCursor === 'page-50'
+    );
+
+    const httpOld = await req(`/history?sessionId=${paged.id}&limit=200`);
+    check(
+      '旧客户端 limit=200 仍一次返回 200 条',
+      httpOld.status === 200 &&
+        httpOld.json.history.length === 200 &&
+        httpOld.json.history[0].id === 'page-50'
+    );
+
+    const httpInvalid = await req(
+      `/history?sessionId=${paged.id}&limit=100&before=not-there`
+    );
+    check('HTTP 非法游标返回 400', httpInvalid.status === 400, `实际 ${httpInvalid.status}`);
+
+    const httpCapped = await req(`/history?sessionId=${paged.id}&limit=1000`);
+    check(
+      'HTTP 单页上限仍为 200，不能一次拉全 1000 条',
+      httpCapped.status === 200 && httpCapped.json.history.length === 200
+    );
+
+    const capped = sessions.createSession({ title: '上限会话' });
+    const capMessages = Array.from({ length: 1001 }, (_, i) => ({
+      id: `cap-${i}`,
+      role: 'user',
+      content: `上限消息 ${i}`,
+    }));
+    const capResult = sessions.appendMessagesDetailed(capped.id, capMessages);
+    const kept = sessions.getMessages(capped.id);
+    check(
+      '超过 1000 条只裁掉最旧一条',
+      capResult.messages.length === 1001 &&
+        kept.length === 1000 &&
+        kept[0].id === 'cap-1' &&
+        kept[999].id === 'cap-1000'
+    );
+    check(
+      '裁剪明细返回被裁消息（含附件引用）',
+      capResult.trimmed.length === 1 && capResult.trimmed[0].id === 'cap-0'
+    );
+
+    const attached = sessions.createSession({ title: '裁剪附件' });
+    const withAttachment = Array.from({ length: 1000 }, (_, i) => ({
+      id: `att-${i}`,
+      role: 'user',
+      content: `附件消息 ${i}`,
+      ...(i === 0
+        ? { attachments: [{ id: 'trim-image', kind: 'image', mime: 'image/png' }] }
+        : {}),
+    }));
+    sessions.appendMessages(attached.id, withAttachment);
+    const trimResult = sessions.appendMessagesDetailed(attached.id, [
+      { id: 'att-new', role: 'user', content: '新消息' },
+    ]);
+    check(
+      '裁剪明细保留被裁消息的附件，供上层回收',
+      trimResult.trimmed.length === 1 &&
+        trimResult.trimmed[0].id === 'att-0' &&
+        Array.isArray(trimResult.trimmed[0].attachments) &&
+        trimResult.trimmed[0].attachments[0].id === 'trim-image'
+    );
+    check(
+      '裁剪后会话仍保留 1000 条且包含新消息',
+      sessions.getMessages(attached.id).length === 1000 &&
+        sessions.getMessages(attached.id).some(item => item.id === 'att-new')
+    );
+  }
+
   origLog(`\n通过 ${passed} 项，失败 ${failed} 项`);
   if (failures.length) {
     origLog('\n失败明细：');

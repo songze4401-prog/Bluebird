@@ -56,6 +56,9 @@ export function MessageList({
   messages,
   sessionId,
   loadingHistory,
+  loadingOlder,
+  hasMoreHistory,
+  onLoadOlder,
   sending,
   continuing,
   liveToolSteps,
@@ -69,6 +72,11 @@ export function MessageList({
   sessionId: string;
   /** 真·批载锁：载入期间禁止任何自动滚；分页载入结束后停在 locked */
   loadingHistory: boolean;
+  /** 向上翻页请求进行中（与首屏加载分开，避免误判为空会话） */
+  loadingOlder: boolean;
+  /** 服务端是否还有更早的历史页 */
+  hasMoreHistory: boolean;
+  onLoadOlder: () => Promise<{ ok: boolean; status: number; stale?: boolean }>;
   sending: boolean;
   continuing: boolean;
   /** 本轮在途的 Agent 工具调用（tool_start 已到、done 未到）：footer 里的实时 pill */
@@ -331,10 +339,26 @@ export function MessageList({
   const badgeText =
     pendingNewCount > 99 ? '99+ 条新消息' : `${pendingNewCount} 条新消息`;
 
+  const listHeader = hasMoreHistory ? (
+    <TouchableOpacity
+      activeOpacity={0.7}
+      disabled={loadingOlder}
+      onPress={() => void onLoadOlder()}
+      style={[styles.loadOlderButton, loadingOlder && styles.loadOlderButtonDisabled]}
+      accessibilityRole="button"
+      accessibilityLabel="加载更早消息"
+    >
+      <Text style={styles.loadOlderText}>
+        {loadingOlder ? '正在加载更早消息…' : '加载更早消息'}
+      </Text>
+    </TouchableOpacity>
+  ) : null;
+
   return (
     <View style={styles.host}>
       <FlatList
         ref={flatListRef}
+        ListHeaderComponent={listHeader || undefined}
         data={messages}
         keyExtractor={item => item.id}
         // 只有用户主动拖拽才进入 locked；滚动事件本身不再改写状态机
@@ -422,6 +446,23 @@ const createStyles = (theme: Theme) =>
     // 绝对定位才不会落到 KeyboardAvoidingView 的底边（会被标签栏盖住）
     host: {
       flex: 1,
+    },
+    loadOlderButton: {
+      alignSelf: 'center',
+      marginTop: 12,
+      marginBottom: 4,
+      paddingHorizontal: 14,
+      paddingVertical: 7,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: theme.chatMuted,
+    },
+    loadOlderButtonDisabled: {
+      opacity: 0.5,
+    },
+    loadOlderText: {
+      color: theme.chatMuted,
+      fontSize: CHAT_TYPE.meta,
     },
     messages: {
       paddingHorizontal: CHAT_LAYOUT.gutter,

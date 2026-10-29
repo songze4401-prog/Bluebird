@@ -39,7 +39,8 @@
     "test": "node scripts/run-tests.js",
     "test:unit": "jest",
     "eval:memory": "node tests/memory-eval/run-eval.js",
-    "eval:semantic": "node tests/memory-semantic-eval.js --assert"
+    "eval:semantic": "node tests/memory-semantic-eval.js --assert",
+    "eval:context": "node scripts/context-capability-eval.js"
   },
   "private": true,
   "jest": {

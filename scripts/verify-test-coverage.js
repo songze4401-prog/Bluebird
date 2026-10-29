@@ -213,6 +213,8 @@ function backendEnv(dataDir) {
     DEEPSEEK_API_KEY: '',
     BLUEBIRD_API_TOKEN: 'test-token-coverage',
     PORT: '0',
+    // 开发者本地 .env 可能打开 Agent 开关；覆盖验证必须从确定默认态开始。
+    BLUEBIRD_AGENT_TOOLS: '',
   };
 }
 

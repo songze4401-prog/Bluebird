@@ -160,6 +160,23 @@ function stubModule(file, exportsObj) {
 
 stubModule('memory.js', {
   buildMemoryContext: () => '【记忆】MEMORY-CTX',
+  // Context Runtime v3 走 searchMemories；返回一条稳定记忆，证明记忆链路未断。
+  searchMemories: () => ({
+    results: [
+      {
+        id: 'mem-ctx',
+        content: 'MEMORY-CTX',
+        type: 'fact',
+        relevance: 0.9,
+        validFrom: new Date().toISOString(),
+      },
+    ],
+    total: 1,
+    estimatedTokens: 4,
+    truncated: false,
+    mode: 'current',
+    diagnostics: {},
+  }),
   processMemory: async (client, text, sessionId) => {
     memoryCalls.push({ text, sessionId });
     return null;

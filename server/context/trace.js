@@ -1,45 +1,33 @@
 /**
- * 云岫 Bluebird — Context Engine 结构化 trace（trace.js）
+ * 云岫 Bluebird — Context Runtime v3 结构化 trace（trace.js）
  *
- * 职责（冻结基线第 6 节 / RULES.md 第 12 节）：
- * - 还原任务及路由结果、Planner 是否调用及原因、检索来源/数量/失败分类、
- *   时效检查与冲突裁决理由、上下文组装与预算裁剪摘要、
- *   工具调用结果/重试次数/执行状态、最终验证结果与失败原因；
- * - 结构化（JSON 可序列化），支持自动化测试逐字段断言，
- *   而不是一段无法解析的自然语言日志；
- * - 遵守项目隐私规范：trace 只记录元数据（长度、数量、状态、阶段、策略理由），
- *   **绝不记录**用户任务原文、记忆条目原文、工具结果内容片段；
- *   也绝不记录 API 密钥、认证令牌、密码等敏感原文。
- *   需要还原规模时用长度/计数，而不是截断正文。
+ * 必须能证明上下文每个阶段实际发生了什么：
+ *   candidate → selected → accepted → injected → sent；consumed 仅在有可靠
+ *   消费证据时才可记录，本系统不采集该证据，因此固定为 null 并注明。
  *
- * trace 对象生命周期：由 engine.js 创建，各阶段通过 record* 方法追加字段，
- * 最终由 engine.js 输出（toJSON）。测试可直接断言其字段。
+ * 隐私：只记录稳定标识、数量、长度、来源、阶段、原因、计量与模型标识；
+ * 绝不记录用户任务原文、历史正文、记忆正文、工具参数或工具结果正文。
  */
 const { textLength, truncateText } = require('../text-utils');
+const { modelMessageId } = require('./projection');
 
-// 诊断类文本（策略理由 / 错误码）仍做敏感词兜底打码，避免上游错误信息里
-// 意外夹带密钥；这类字段只允许策略/错误描述，不允许用户或记忆正文。
 const SENSITIVE_PATTERN =
-  /(密码|口令|私钥|助记词|验证码|信用卡|银行卡|身份证|手机号|cvv|api[\s_-]?key|secret|bearer|token|sk-[a-zA-Z0-9_-]{8,}|(?:\d[\s-]?){11,})/i;
+  /(密码|口令|私钥|助记词|验证码|信用卡|银行卡|身份证|手机号|cvv|api[\s_-]?key|secret|bearer|token\s*[:=]|sk-[a-zA-Z0-9_-]{8,}|(?:\d[\s-]?){11,})/i;
 
 function maskSensitive(text) {
   if (typeof text !== 'string' || !text) return text;
-  // 命中敏感模式（密码/密钥/长数字串等）即整段打码：
-  // 绝不把敏感词或疑似密钥的片段原文带进 trace
   return SENSITIVE_PATTERN.test(text) ? '[REDACTED]' : text;
 }
 
-// 诊断文本统一截断：只用于策略理由/错误描述，不用于正文。
-const TRACE_TEXT_MAX = 60;
+const TRACE_TEXT_MAX = 80;
 
 function sanitizeText(value) {
   const truncated = truncateText(typeof value === 'string' ? value : '', TRACE_TEXT_MAX);
   return maskSensitive(truncated);
 }
 
-// 标识/时间只做长度与格式限制，不记录任何正文。
 function sanitizeId(value) {
-  return typeof value === 'string' && value.length <= 80 ? value : null;
+  return typeof value === 'string' && value.length <= 120 ? value : null;
 }
 
 function sanitizeTimestamp(value) {
@@ -50,157 +38,226 @@ function sanitizeTimestamp(value) {
     : null;
 }
 
-function createTrace({ task, sessionId, ts } = {}) {
-  const startedAt = ts || new Date().toISOString();
+function sanitizeReason(value) {
+  return sanitizeText(value);
+}
 
+function createTrace({ task, sessionId, ts } = {}) {
   const trace = {
-    ts: startedAt,
-    // 只记录任务长度，不记录任务原文（隐私要求）
+    ts: ts || new Date().toISOString(),
     taskLength: textLength(typeof task === 'string' ? task : ''),
     sessionId: typeof sessionId === 'string' ? sessionId : null,
-    route: null, // { decision: 'direct' | 'planner', reason, skippedPlanner }
-    planner: null, // { called: bool, reason, plan }
-    retrieval: {
-      sources: [], // [{ source, status: 'ok'|'no_result'|'retrieval_error'|'tool_missing', count, error? }]
-      total: 0,
+    history: {
+      totalMessages: 0,
+      recent: 0,
+      recalled: 0,
+      summarized: 0,
+      omitted: 0,
+      tokens: { recent: 0, recalled: 0, summaryInputMessages: 0 },
+      decisions: [],
+      summary: { count: 0, sources: [], conflicts: [], warning: null },
     },
-    adjudication: {
-      inputs: 0,
-      selected: 0,
-      demoted: 0,
-      conflicts: 0,
-      expired: 0,
-      // 只记录条目长度 + 裁决类型/理由，不记录条目正文
-      reasons: [], // [{ itemLength, decision, reason }]
+    retrieval: {
+      source: 'memory',
+      status: null,
+      candidates: 0,
+      accepted: 0,
+      skipped: [],
+      conflicts: [],
+      error: null,
     },
     build: {
-      ok: null, // 最终组装是否成功（false 时上层必须显式降级/报错）
-      error: null,
-      inputItems: 0, // 进入组装器的已选中条目数，不等于实际注入数
-      injectedItems: 0, // 实际写入 systemContexts / untrustedContexts 的条目数
-      // 已选中但按规则跳过的历史条目：只记录标识/原因，不记录正文
-      skippedHistory: [],
-      trimmed: 0,
-      totalTokens: 0,
-      perTypeSummary: {}, // { type: { kept, trimmed, tokens } }
-      guaranteed: { system: 0, task: 0 },
-    },
-    tools: [], // [{ name, ok, code, retries, durationMs }]
-    verification: {
       ok: null,
-      reason: null,
+      error: null,
+      blocks: [],
+      contextIds: [],
+      dropped: [],
+      measurement: null,
+    },
+    tools: [],
+    verification: { ok: null, reason: null, checks: [] },
+    stages: {
+      candidate: 0,
+      selected: 0,
+      accepted: 0,
+      injected: 0,
+      sent: 0,
+    },
+    sent: {
+      rounds: [],
+      consumed: null,
+      consumedNote: '未采集模型实际消费证据；HTTP 成功不等于模型已消费',
     },
   };
 
   return {
-    recordRoute(route) {
-      trace.route = {
-        decision: route.decision,
-        reason: sanitizeText(route.reason),
-        skippedPlanner: route.skippedPlanner === true,
-      };
-    },
+    recordHistory(selection, summary) {
+      const decisions = Array.isArray(selection.decisions) ? selection.decisions : [];
+      const count = stage => decisions.filter(item => item.stage === stage).length;
 
-    recordPlanner(planner) {
-      trace.planner = {
-        called: planner.called === true,
-        reason: sanitizeText(planner.reason),
-        plan: planner.plan ? sanitizeText(JSON.stringify(planner.plan)) : null,
-      };
-    },
+      trace.history.totalMessages = selection.tokens.totalMessages || 0;
+      trace.history.recent = selection.recent.length;
+      trace.history.recalled = selection.recalled.length;
+      trace.history.summarized = count('summarized');
+      trace.history.omitted = count('omitted');
+      trace.history.tokens = selection.tokens;
+      trace.history.decisions = decisions.slice(0, 200).map(item => ({
+        messageId: sanitizeId(item.messageId),
+        index: Number.isInteger(item.index) ? item.index : null,
+        stage: item.stage,
+        reason: sanitizeReason(item.reason),
+        ...(Number.isFinite(item.score) ? { score: item.score } : {}),
+      }));
 
-    recordRetrieval(source, status, meta = {}) {
-      trace.retrieval.sources.push({
-        source,
-        status,
-        count: meta.count || 0,
-        ...(meta.error ? { error: sanitizeText(meta.error) } : {}),
-        ...(meta.toolMissingKind ? { toolMissingKind: meta.toolMissingKind } : {}),
-      });
-      trace.retrieval.total += meta.count || 0;
-    },
-
-    recordAdjudication(inputs, decisions) {
-      const len = arr => (Array.isArray(arr) ? arr.length : Number(arr) || 0);
-      trace.adjudication.inputs = inputs;
-      trace.adjudication.selected = len(decisions.selected);
-      trace.adjudication.demoted = len(decisions.demoted);
-      trace.adjudication.conflicts = len(decisions.conflicts);
-      trace.adjudication.expired = len(decisions.expired);
-      if (Array.isArray(decisions.reasons)) {
-        trace.adjudication.reasons = decisions.reasons
-          .slice(0, 50)
-          .map(r => ({
-            // 只保留长度，绝不把条目正文带进 trace
-            itemLength: textLength(typeof r.item === 'string' ? r.item : ''),
-            decision: r.decision,
-            reason: sanitizeText(r.reason),
-          }));
+      if (summary) {
+        trace.history.summary = {
+          count: summary.count || 0,
+          sources: (summary.sources || []).map(source => ({
+            ref: sanitizeId(source.ref),
+            messageId: sanitizeId(source.messageId),
+            role: source.role,
+            section: source.section,
+            createdAt: sanitizeTimestamp(source.createdAt),
+          })),
+          conflicts: (summary.conflicts || []).map(conflict => ({
+            section: conflict.section,
+            refs: conflict.refs,
+            reason: conflict.reason,
+          })),
+          warning: summary.error ? sanitizeText(summary.error) : null,
+        };
       }
+
+      trace.stages.candidate = selection.tokens.totalMessages || 0;
     },
 
-    recordBuild(summary) {
-      const guaranteed =
-        summary.guaranteed && typeof summary.guaranteed === 'object'
-          ? summary.guaranteed
-          : { system: summary.guaranteedSystem, task: summary.guaranteedTask };
-      const skippedHistory = Array.isArray(summary.skippedHistoryItems)
-        ? summary.skippedHistoryItems.map(item => ({
-            id: sanitizeId(item && item.id),
-            messageId: sanitizeId(item && item.messageId),
-            source: sanitizeId(item && item.source),
-            type: sanitizeId(item && item.type),
-            reason: sanitizeText(item && item.reason ? item.reason : ''),
-            fetchedAt: sanitizeTimestamp(item && item.fetchedAt),
-          }))
-        : [];
-      trace.build = {
-        ok: summary.ok === true,
-        error: summary.error ? sanitizeText(summary.error) : null,
-        inputItems: summary.inputItems || 0,
-        injectedItems: Number(summary.injectedItems) || 0,
-        skippedHistory,
-        trimmed: summary.trimmed || 0,
-        totalTokens: summary.totalTokens || 0,
-        perTypeSummary: summary.perTypeSummary || {},
-        guaranteed: {
-          system: guaranteed.system || 0,
-          task: guaranteed.task || 0,
-        },
+    recordRetrieval(outcome, adjudication) {
+      trace.retrieval = {
+        source: 'memory',
+        status: outcome.status || null,
+        candidates: outcome.count || 0,
+        accepted: adjudication ? adjudication.accepted.length : 0,
+        skipped: adjudication
+          ? adjudication.skipped.slice(0, 100).map(item => ({
+              id: sanitizeId(item.id),
+              source: item.source || null,
+              stage: item.stage || 'accepted',
+              reason: sanitizeReason(item.reason),
+              ...(Number.isFinite(item.score) ? { score: item.score } : {}),
+              ...(item.against ? { against: sanitizeId(item.against) } : {}),
+            }))
+          : [],
+        conflicts: adjudication
+          ? adjudication.conflicts.slice(0, 100).map(item => ({
+              id: sanitizeId(item.id),
+              source: item.source || null,
+              reason: sanitizeReason(item.reason),
+              against: sanitizeId(item.against),
+            }))
+          : [],
+        error: outcome.error ? sanitizeText(outcome.error) : null,
       };
+    },
+
+    recordBuild(build, inputFit) {
+      trace.build = {
+        ok: build.ok === true && (!inputFit || inputFit.ok !== false),
+        error: build.error
+          ? sanitizeText(build.error)
+          : inputFit && inputFit.error
+            ? sanitizeText(inputFit.error)
+            : null,
+        blocks: (build.blocks || []).map(block => ({
+          id: sanitizeId(block.id),
+          kind: block.kind,
+          priority: block.priority,
+          itemIds: (block.itemIds || []).map(sanitizeId),
+        })),
+        contextIds: (inputFit && inputFit.injectedContextIds
+          ? inputFit.injectedContextIds
+          : []
+        ).map(sanitizeId),
+        dropped: (inputFit && inputFit.dropped ? inputFit.dropped : []).map(item => ({
+          id: sanitizeId(item.id),
+          kind: item.kind,
+          stage: item.stage,
+          reason: sanitizeReason(item.reason),
+          ...(Number.isFinite(item.priority) ? { priority: item.priority } : {}),
+        })),
+        measurement: inputFit ? inputFit.measurement : null,
+      };
+
+      const injectedMessageIds =
+        inputFit && Array.isArray(inputFit.injectedMessageIds)
+          ? inputFit.injectedMessageIds
+          : [];
+      const injectedContextIds =
+        inputFit && Array.isArray(inputFit.injectedContextIds)
+          ? inputFit.injectedContextIds
+          : [];
+      trace.stages.injected = injectedMessageIds.length + injectedContextIds.length;
     },
 
     recordTool(tool) {
-      // 只记录元数据：名称、成败、错误码、重试次数、耗时；
-      // 工具结果/参数内容一律不进 trace（隐私要求）。
       trace.tools.push({
-        name: tool.name,
+        name: sanitizeId(tool.name),
         ok: tool.ok === true,
-        ...(tool.code ? { code: tool.code } : {}),
-        ...(tool.retries ? { retries: tool.retries } : {}),
-        ...(tool.durationMs ? { durationMs: tool.durationMs } : {}),
+        ...(tool.code ? { code: sanitizeText(tool.code) } : {}),
+        ...(Number.isFinite(tool.durationMs) ? { durationMs: tool.durationMs } : {}),
       });
+    },
+
+    recordStages(stages = {}) {
+      for (const key of ['candidate', 'selected', 'accepted', 'injected', 'sent']) {
+        if (Number.isFinite(stages[key])) trace.stages[key] = stages[key];
+      }
     },
 
     recordVerification(result) {
       trace.verification = {
         ok: result.ok === true,
         ...(result.reason ? { reason: sanitizeText(result.reason) } : {}),
+        checks: (result.checks || []).map(check => ({
+          ok: check.ok === true,
+          rule: sanitizeId(check.rule),
+        })),
       };
+    },
+
+    // 必须在调用提供方之前、用真实要发送的 messages 调用。
+    recordSent({ round = 1, messages = [], contextIds = [], model = {}, toolsCount = 0 } = {}) {
+      const list = Array.isArray(messages) ? messages : [];
+      const nonSystem = list.filter(message => message && message.role !== 'system');
+
+      trace.sent.rounds.push({
+        round,
+        messageCount: list.length,
+        roles: list.map(message => (message && message.role) || null),
+        messageIds: nonSystem.map(message => sanitizeId(modelMessageId(message))),
+        contextIds: (contextIds || []).map(sanitizeId),
+        toolsCount,
+        providerId: sanitizeId(model.providerId),
+        modelId: sanitizeId(model.modelId),
+        systemLength: list[0] && list[0].role === 'system'
+          ? textLength(String(list[0].content || ''))
+          : 0,
+      });
+      trace.stages.sent = Math.max(
+        trace.stages.sent,
+        nonSystem.length + (Array.isArray(contextIds) ? contextIds.length : 0)
+      );
     },
 
     toJSON() {
       return JSON.parse(JSON.stringify(trace));
     },
 
-    // 测试辅助：返回是否所有关键阶段都已记录
     isComplete() {
       return (
-        trace.route !== null &&
-        trace.planner !== null &&
-        trace.retrieval.sources.length > 0 &&
+        trace.history.totalMessages >= 0 &&
         trace.build.ok !== null &&
-        trace.verification.ok !== null
+        trace.verification.ok !== null &&
+        trace.sent.rounds.length > 0
       );
     },
   };
@@ -209,5 +266,6 @@ function createTrace({ task, sessionId, ts } = {}) {
 module.exports = {
   createTrace,
   sanitizeText,
+  sanitizeId,
   TRACE_TEXT_MAX,
 };

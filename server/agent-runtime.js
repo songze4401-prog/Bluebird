@@ -24,6 +24,7 @@
  * 进程内修改环境变量即时生效；状态变化打 warn 日志。
  */
 const crypto = require('crypto');
+const { tagModelMessage } = require('./context/projection');
 
 const { createChatCompletion } = require('./model-adapter');
 const memorySearchTool = require('./tool-memory-search');
@@ -360,6 +361,7 @@ async function runAgentTurn({
   isClientGone,
   abortSignal,
   onToolEvent,
+  onRequest,
 }) {
   logSwitchIfChanged();
 
@@ -391,6 +393,19 @@ async function runAgentTurn({
         ` model=${modelId} toolCount=${requestToolCount}` +
         ` toolNames=${requestToolNames || 'none'}`
     );
+
+    // 在真正调用提供方之前，把实际要发送的消息交给调用方记录 sent 证据。
+    if (typeof onRequest === 'function') {
+      try {
+        onRequest({
+          round,
+          messages: conversation,
+          toolsCount: requestToolCount,
+        });
+      } catch (_) {
+        /* trace 回调失败不影响聊天 */
+      }
+    }
 
     completion = await createChatCompletion({
       providerId,
@@ -449,11 +464,16 @@ async function runAgentTurn({
 
     // 追加 assistant tool_calls 消息（仅请求内存）：后续轮次需要读到
     // 完整的调用记录，否则模型会重复发起相同调用。
-    conversation.push({
-      role: 'assistant',
-      content: message.content == null ? null : message.content,
-      tool_calls: normalizedCalls,
-    });
+    conversation.push(
+      tagModelMessage(
+        {
+          role: 'assistant',
+          content: message.content == null ? null : message.content,
+          tool_calls: normalizedCalls,
+        },
+        `assistant-tool-call:${round}`
+      )
+    );
 
     for (const normalized of normalizedCalls) {
       const startedAt = Date.now();
@@ -512,11 +532,16 @@ async function runAgentTurn({
         durationMs: Date.now() - startedAt,
       });
 
-      conversation.push({
-        role: 'tool',
-        tool_call_id: normalized.id,
-        content: truncateText(JSON.stringify(result), TOOL_RESULT_MAX),
-      });
+      conversation.push(
+        tagModelMessage(
+          {
+            role: 'tool',
+            tool_call_id: normalized.id,
+            content: truncateText(JSON.stringify(result), TOOL_RESULT_MAX),
+          },
+          `tool:${normalized.id}`
+        )
+      );
 
       console.log(
         `[agent-result] round=${round} name=${normalized.function.name} forwarded=true`

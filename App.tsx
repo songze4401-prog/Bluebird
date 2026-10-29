@@ -245,7 +245,10 @@ export default function App() {
             theme={theme}
             messages={chat.messages}
             sessionId={currentSessionId}
-            loadingHistory={chat.loadingHistory}
+            loadingHistory={chat.loadingHistory || chat.loadingOlder}
+            loadingOlder={chat.loadingOlder}
+            hasMoreHistory={chat.hasMoreHistory}
+            onLoadOlder={chat.loadOlderHistory}
             sending={chat.sending}
             continuing={chat.continuing}
             liveToolSteps={chat.liveToolSteps}

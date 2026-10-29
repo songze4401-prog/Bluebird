@@ -1,6 +1,6 @@
 name: CI
 
-# 回归兜底：后端 39 个测试文件（1325 项）+ 前端 7 套单元测试（108 项）+ tsc --noEmit + Expo lint。
+# 回归兜底：后端 39 个测试文件（1344 项）+ 前端 7 套单元测试（111 项）+ tsc --noEmit + Expo lint。
 # 触发范围：main、workbuddy/**、qoder/** 分支的 push、针对 main 的 PR、手动触发。
 # 测试命令与 AGENTS.md「Tests」小节保持一致——新增测试文件时同步更新本文件，
 # 否则新文件不会被运行（静默漏测）；覆盖验证脚本会比对 CI 清单与 tests/ 实际文件。
@@ -44,12 +44,12 @@ jobs:
             exit 1
           fi
 
-      - name: node:test 六套（memory + emotion + sticker-markers + streaming-segments + backup + context-engine，共 200 项）
+      - name: node:test 六套（memory + emotion + sticker-markers + streaming-segments + backup + context-engine，共 193 项）
         run: node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js
 
       # 逐文件单独跑（AGENTS.md 约定）。某个套件失败也跑完其余套件，
       # 最后统一以非零退出码结束，方便一次看全失败面。
-      - name: 自定义 runner 三十三套（逐文件单独跑，共 1125 项）
+      - name: 自定义 runner 三十三套（逐文件单独跑，共 1151 项）
         run: |
           fail=0
           for f in api atomic-write chat-persist corruption-contract data-events emotion-decay-global memory-session-scope session-scope-e2e sessions-recovery sessions presence time-gap persona chat-stream multimodal sticker-repo model-providers model-routing agent-tools context-engine-e2e delete-semantics memory-agent-write memory-api-recall memory-context-injection memory-eval-baseline memory-id-migration memory-id-order memory-lifecycle-decisions memory-restart memory-retrieval memory-semantic memory-session-isolation memory-startup-lock; do
@@ -80,7 +80,7 @@ jobs:
       # 前端单元测试：jest-expo preset + @testing-library/react-native 的 renderHook。
       # 只跑 tests/unit/**（jest.config 的 testMatch 已限定），不会误收上面的
       # node:test 文件 tests/*.test.js——两套 runner 的分工必须保持不变。
-      - name: 前端单元测试（jest，7 套 / 106 项）
+      - name: 前端单元测试（jest，7 套 / 111 项）
         run: npm run test:unit -- --ci
 
       # 先真实执行全部测试，再用运行时计数与基线对账；静态 test(/check( 计数不作为通过依据。

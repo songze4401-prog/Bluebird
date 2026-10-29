@@ -112,7 +112,6 @@ function requireAuth(req, res, next) {
 
 
 const {
-  buildMemoryContext,
   processMemory,
   clearMemories,
   clearSessionMemories,
@@ -142,12 +141,14 @@ const crypto = require('crypto');
 // 全部收在 sessions.js，index.js 只负责路由与请求编排。
 const {
   DEFAULT_SESSION_ID,
-  SESSION_MESSAGE_MAX,
+  HISTORY_PAGE_MAX,
+  HISTORY_PAGE_DEFAULT,
+  getHistoryPage,
   listSessions,
   getSession,
   createSession,
   getMessages,
-  appendMessages,
+  appendMessagesDetailed,
   replaceMessages,
   getAllMessages,
   deleteSession,
@@ -177,38 +178,6 @@ const { splitReplyIntoSegments } = require('./split-reply');
 
 // 情绪标签剥离：全量（/chat）与增量（/chat/stream）共用同一套规则。
 const { stripMoodTags, createMoodTagStripper } = require('./stream-strip');
-
-// Context Engine（v2.3 规则基线）：可选接入层，负责检索信息的
-// 可裁决选取、降级、拒绝与预算裁剪。开关 BLUEBIRD_CONTEXT_ENGINE=1 启用
-// （默认关闭——关闭时上下文组装与改造前逐字节一致，兼容既有行为）。
-// 关闭时本模块零加载、零读取：引擎与 server/context/config.json 均延迟到
-// 首次真正启用时才 require/读取，避免引擎配置缺失或损坏影响正常启动。
-// require 自带模块缓存，这里不额外缓存（保持可测试：清 require.cache 即重新加载）。
-function getContextEngine() {
-  return require('./context/engine');
-}
-
-function contextEngineEnabled() {
-  return process.env.BLUEBIRD_CONTEXT_ENGINE === '1';
-}
-
-let lastContextEngineState = contextEngineEnabled();
-
-if (lastContextEngineState) {
-  console.log(
-    '[context] BLUEBIRD_CONTEXT_ENGINE=1：Context Engine 已启用（每请求重新判断，进程内改环境变量即时生效）'
-  );
-}
-
-function noteContextEngineObservation() {
-  const now = contextEngineEnabled();
-  if (now !== lastContextEngineState) {
-    console.warn(
-      `[context] 引擎开关状态变化：${lastContextEngineState ? '开' : '关'} -> ${now ? '开' : '关'}`
-    );
-    lastContextEngineState = now;
-  }
-}
 
 const AGENT_NEW_IMAGE_NOTICE = '本次带图，已切换到视觉模型，工具暂不可用';
 
@@ -298,7 +267,33 @@ const {
   runAgentTurn,
   agentToolsEnabled,
   noteSwitchObservation,
+  listToolSpecs,
+  MAX_ROUNDS,
 } = require('./agent-runtime');
+
+// Context Runtime v3：唯一上下文链路（无兼容双路径）。
+const { runContextRuntime } = require('./context/engine');
+const {
+  projectStoredMessages,
+  toModelMessages,
+} = require('./context/projection');
+const { config: contextConfig } = require('./context/config');
+const { estimateTokens } = require('./text-utils');
+
+// Agent 工具循环的输入预留：工具 schema 实测 + 每轮结果上限的保守上界。
+// 轮数上限来自 agent-runtime.MAX_ROUNDS；单轮预留值集中在 context 配置。
+function estimateAgentToolsReserve() {
+  try {
+    const schemaTokens = estimateTokens(JSON.stringify(listToolSpecs()));
+    const rounds = Math.max(0, MAX_ROUNDS - 1);
+    return (
+      schemaTokens +
+      rounds * contextConfig.inputGuard.toolsRoundReserveTokens
+    );
+  } catch (_) {
+    return 0;
+  }
+}
 
 // 模型选型已移交 model-adapter.js：服务商/模型的解析、视觉能力校验与
 // 调用统一在那里完成（内置 DeepSeek 的文本/视觉模型 ID 见 api-configs.js
@@ -372,79 +367,22 @@ function attachmentDataUrl(att) {
   return readImageDataUrl(att.id);
 }
 
-// 历史消息 → 模型入参。
-// 关键约束：DeepSeek 视觉图片只允许出现在 user 消息，因此
-// - 用户的图片消息转成 content blocks（text + image_url）；
-// - AI 的图片/表情包消息降级为文本占位，原样回传会被 API 400 拒绝；
-// - 图片文件读取失败（被外部删除）时退化为纯文本，不让整轮请求崩掉。
-// - includeImages=false 时（目标模型未声明视觉能力）用户图片一并降级为文本占位，
-//   避免把 image_url block 发给看不懂图的模型。
-function historyToModelMessages(items, { includeImages = true } = {}) {
-  const out = [];
-
-  for (const item of items) {
-    if (!item || (item.role !== 'user' && item.role !== 'assistant')) continue;
-
-    const text = typeof item.content === 'string' ? item.content : '';
-    const attachments = Array.isArray(item.attachments)
-      ? item.attachments
-      : [];
-
-    if (item.role === 'user' && attachments.length) {
-      if (!includeImages) {
-        out.push({ role: 'user', content: text.trim() || '（图片消息）' });
-        continue;
-      }
-
-      const blocks = [];
-      if (text.trim()) blocks.push({ type: 'text', text });
-
-      for (const att of attachments) {
-        const dataUrl = attachmentDataUrl(att);
-        if (dataUrl) {
-          blocks.push({ type: 'image_url', image_url: { url: dataUrl } });
-        }
-      }
-
-      out.push({
-        role: 'user',
-        content: blocks.length ? blocks : text || '（图片已失效）',
-      });
-      continue;
-    }
-
-    if (item.role === 'assistant' && attachments.length) {
-      // 表情包占位直接回显协议标记（用仓库 ID，不带文件名）：
-      // 上下文里示范的格式即唯一合法输出格式，模型复述时也只会复述对的。
-      const labels = attachments.map(att =>
-        att.kind === KIND_STICKER
-          ? `[sticker:${att.id}]`
-          : '（发送了图片）'
-      );
-      const content = [text, ...labels].filter(Boolean).join('\n');
-
-      out.push({ role: 'assistant', content: content || '（发送了图片）' });
-      continue;
-    }
-
-    if (text) out.push({ role: item.role, content: text });
-  }
-
-  return out;
-}
-
-// Context Engine 只消费历史消息的 role/content/createdAt（见 retriever.userSource）：
-// 显式投影，避免把附件、工具步骤等字段带进引擎；模型消息契约保持不变。
-function projectHistoryForContext(items, { limit = 20 } = {}) {
-  return (Array.isArray(items) ? items : [])
-    .filter(item => item && (item.role === 'user' || item.role === 'assistant'))
-    .slice(-limit)
-    .map(item => ({
-      id: typeof item.id === 'string' ? item.id : null,
-      role: item.role,
-      content: typeof item.content === 'string' ? item.content : '',
-      createdAt: typeof item.createdAt === 'string' ? item.createdAt : null,
-    }));
+// 投影消息 → 模型消息：契约与多模态约束集中在 context/projection.js。
+// includeImages 决定历史用户图片是否以 image_url 上行；助手图片一律文本占位。
+function renderProjectedHistoryMessage(
+  message,
+  { includeImages = true, placeholderImages = false } = {}
+) {
+  return (
+    toModelMessages([message], {
+      includeImages,
+      // 历史选择阶段只需要图片数量做 token 估算；用占位 URL 避免为所有
+      // 历史图片读盘 + base64。选中后再用真实 dataURL 重新渲染。
+      readAttachment: placeholderImages
+        ? () => 'data:image/png;base64,AA'
+        : attachmentDataUrl,
+    })[0] || null
+  );
 }
 
 // 解析 AI 回复里的图片声明：
@@ -934,12 +872,24 @@ app.get('/history', requireAuth, (req, res) => {
     }
 
     const limit = Math.min(
-      Math.max(parseInt(req.query.limit, 10) || 50, 1),
-      SESSION_MESSAGE_MAX
+      Math.max(parseInt(req.query.limit, 10) || HISTORY_PAGE_DEFAULT, 1),
+      HISTORY_PAGE_MAX
     );
+    const before =
+      typeof req.query.before === 'string' && req.query.before.trim()
+        ? req.query.before.trim()
+        : null;
 
-    // 表情包附件失效标注：仓库已物理删除时给前端明确的占位信号
-    const history = getMessages(sessionId, limit) || [];
+    // 表情包附件失效标注：仓库已物理删除时给前端明确的占位信号。
+    // page 返回副本，标注不会写回 sessions.json。
+    const page = getHistoryPage(sessionId, { limit, before });
+    if (!page) {
+      return res.status(404).json({ error: '会话不存在' });
+    }
+    if (page.invalidCursor) {
+      return res.status(400).json({ error: 'before 游标不存在' });
+    }
+    const history = page.items;
     for (const item of history) {
       if (!Array.isArray(item.attachments)) continue;
       for (const att of item.attachments) {
@@ -952,6 +902,9 @@ app.get('/history', requireAuth, (req, res) => {
     res.json({
       sessionId,
       history,
+      // 新增字段是向后兼容的：旧客户端忽略即可；新客户端据此向上翻页。
+      hasMore: page.hasMore,
+      nextCursor: page.nextCursor,
     });
   } catch (error) {
     console.error('History API Error:', error);
@@ -2122,57 +2075,26 @@ async function prepareChatRequest(req) {
 
   const useVision = hasNewImage || includeHistoryImages;
 
-  const storedHistory = historyToModelMessages(storedItems, {
-    includeImages: includeHistoryImages,
-  }).slice(-20);
-
-  const clientHistory = historyToModelMessages(
-    Array.isArray(history) ? history : [],
-    { includeImages: includeHistoryImages }
-  ).slice(-20);
-
   // B1：客户端历史回退只对「默认会话」开放。
-  // 默认会话是旧客户端（不带 sessionId）的唯一落点，保留回退以兼容
-  // 「存储为空但客户端握着历史」的旧行为；而新建的独立会话一旦为空，
-  // 其上下文就该是空的——否则前端只要误传上一段会话的历史，就会把
-  // 别的会话的内容注入进来，破坏严格隔离。
-  const promptHistory =
-    storedHistory.length || sessionId !== DEFAULT_SESSION_ID
-      ? storedHistory
-      : clientHistory;
-
-  // Context Engine 与模型消息共用同一来源与窗口（服务端存储优先，
-  // 默认会话空存储时沿用旧客户端回退），但只传显式投影：
-  // 保留 id/createdAt 供追溯与时效判断，不带附件/工具步骤等字段。
-  const engineHistory = projectHistoryForContext(
-    storedHistory.length || sessionId !== DEFAULT_SESSION_ID
+  // 服务端存储是权威来源；默认会话存储为空时沿用旧客户端历史，
+  // 具名会话即使为空也绝不注入客户端传来的其他会话历史。
+  const historySourceItems =
+    storedItems.length || sessionId !== DEFAULT_SESSION_ID
       ? storedItems
       : Array.isArray(history)
         ? history
-        : []
-  );
+        : [];
 
-  // 续写没有新的用户消息，用最近一条用户消息作为记忆检索的查询，
-  // 保证续写仍然复用现有 Memory System，而不是绕过它。
-  // 图片消息的 content 是 blocks 数组，不能当查询词，跳过取最近一条文本。
+  const projectedHistory = projectStoredMessages(historySourceItems, {
+    sessionId,
+  });
+
+  // 续写没有新的用户消息，用最近一条用户消息作为记忆检索查询。
+  // 投影后的 content 一定是字符串，图片消息也不会变成不可检索的 blocks。
   const memoryQuery = isContinue
-    ? (
-        [...promptHistory]
-          .reverse()
-          .find(
-            item => item.role === 'user' && typeof item.content === 'string'
-          ) || {}
-      ).content || ''
+    ? ([...projectedHistory].reverse().find(item => item.role === 'user' && item.content.trim()) || {}).content || ''
     : userText;
 
-  // Context Engine 开启时，记忆/上下文检索由引擎接管（引擎内部复用
-  // memory.js 的检索，并做三维裁决与预算裁剪）；关闭时维持原路径。
-  // 引擎抛错或返回 ok=false 时回退到原 buildMemoryContext 路径，绝不因此 500。
-  const contextEngineOn = contextEngineEnabled();
-  let memoryContext = '';
-  let engineBlocks = [];
-  let untrustedContext = null;
-  let contextTrace = null;
   const timeContext = getTimeContext(req.body.timeZone || 'Asia/Shanghai');
   const gapContext = buildTimeGapContext(
     req.body.timeZone || 'Asia/Shanghai',
@@ -2223,96 +2145,6 @@ async function prepareChatRequest(req) {
     );
   }
 
-  // ---- Context Engine（可选）：检索信息的可裁决选取、降级、拒绝与预算裁剪 ----
-  // 开启时替换"buildMemoryContext 全局注入"：引擎并行检索（memory/user/外部源），
-  // 按 v2.3 顺序裁决、按信息类型设单条上限、按相关度裁剪。
-  // 外部不可信内容（doc/web）不进入系统指令区：引擎单独返回，
-  // 由下方以独立的 user 消息（带显式边界标记）注入，与 system 指令结构隔离。
-  // 引擎抛错或 ok=false 时回退 buildMemoryContext：宁可用旧路径，也不让聊天 500。
-  if (contextEngineOn) {
-    noteContextEngineObservation();
-
-    try {
-      const engine = getContextEngine();
-      const engineOut = await engine.runContextEngine({
-        task: memoryQuery,
-        sessionId,
-        history: engineHistory,
-        // 保底系统指令：引擎的预算裁剪绝不碰这些必要指令（冻结基线第 5 节）
-        systemPrompt: [
-          BLUEBIRD_SYSTEM_PROMPT,
-          timeContext,
-          gapContext.promptText,
-          emotionContext,
-          personaContext,
-          isContinue ? CONTINUE_INSTRUCTION : '',
-          ...visionInstructions,
-        ]
-          .filter(Boolean)
-          .join('\n\n'),
-        injectedTask: userText,
-      });
-
-      if (engineOut.ok) {
-        contextTrace = engineOut.traceApi;
-        engineBlocks = engine.renderContextBlocks(engineOut);
-        untrustedContext = engine.renderUntrustedContextBlock(engineOut);
-      } else {
-        // 无法安全组装：显式记录降级原因，并回退旧路径（记忆仍然可用）
-        memoryContext = buildMemoryContext(memoryQuery, sessionId);
-        console.error(
-          `[context] engine 组装失败/降级，回退 buildMemoryContext session=${sessionId} error=${engineOut.error}`
-        );
-      }
-
-      console.log(
-        `[context] engine session=${sessionId} ok=${engineOut.ok}` +
-          ` route=${engineOut.route.decision}` +
-          ` selected=${engineOut.decisions.selected.length}` +
-          ` demoted=${engineOut.decisions.demoted.length}` +
-          ` conflicts=${engineOut.decisions.conflicts.length}` +
-          ` expired=${engineOut.decisions.expired.length}` +
-          ` sources=${engineOut.enabledSources.join(',')}`
-      );
-    } catch (error) {
-      // 引擎内部异常：绝不向上抛（否则整个聊天请求失败），回退旧路径
-      contextTrace = null;
-      engineBlocks = [];
-      untrustedContext = null;
-      memoryContext = buildMemoryContext(memoryQuery, sessionId);
-      console.error(
-        `[context] engine 异常，回退 buildMemoryContext session=${sessionId}` +
-          ` error=${error && error.message ? error.message : error}`
-      );
-    }
-  } else {
-    memoryContext = buildMemoryContext(memoryQuery, sessionId);
-  }
-
-  const systemPrompt = [
-      BLUEBIRD_SYSTEM_PROMPT,
-      timeContext,
-      gapContext.promptText,
-      ...(engineBlocks.length
-        ? engineBlocks
-        : memoryContext
-          ? [memoryContext]
-          : []),
-      emotionContext,
-      personaContext,
-      isContinue ? CONTINUE_INSTRUCTION : '',
-      ...visionInstructions,
-  ]
-      .filter(Boolean)
-      .join('\n\n');
-
-  // 外部不可信内容（doc/web）具有独立的结构边界：作为单独一条 user 消息
-  // 附在历史末尾（带显式边界标记），绝不并入 systemPrompt 指令区。
-  // 用副本承载，绝不改动 storedHistory / 客户端回退历史。
-  const modelHistory = untrustedContext
-    ? [...promptHistory, { role: 'user', content: untrustedContext }]
-    : promptHistory;
-
   // 当前用户消息：带附件时转成 content blocks（文本 + 图片 dataURL）。
   // 图片从服务端磁盘读取，不信任客户端传来的任何图片字节。
   let userContent = isContinue ? '（继续）' : userText;
@@ -2331,6 +2163,128 @@ async function prepareChatRequest(req) {
     if (blocks.length) userContent = blocks;
   }
 
+  // 当前任务消息：与历史消息共用同一模型消息契约。
+  const currentMessage = { role: 'user', content: userContent };
+
+  // 基础系统块按优先级声明：core 永不裁剪；时间/表情/情绪/人格等非关键块
+  // 在输入保护阶段可先让位，决策记录在 trace.build.dropped。
+  const baseSystemBlocks = [
+    {
+      id: 'core',
+      kind: 'core',
+      priority: 100,
+      critical: true,
+      text: [BLUEBIRD_SYSTEM_PROMPT, isContinue ? CONTINUE_INSTRUCTION : '']
+        .filter(Boolean)
+        .join('\n\n'),
+    },
+    ...(timeContext || gapContext.promptText
+      ? [
+          {
+            id: 'time',
+            kind: 'time',
+            priority: 80,
+            critical: false,
+            text: [timeContext, gapContext.promptText].filter(Boolean).join('\n\n'),
+          },
+        ]
+      : []),
+    ...(emotionContext
+      ? [{ id: 'emotion', kind: 'emotion', priority: 20, critical: false, text: emotionContext }]
+      : []),
+    ...(personaContext
+      ? [{ id: 'persona', kind: 'persona', priority: 25, critical: false, text: personaContext }]
+      : []),
+    ...(visionInstructions.length
+      ? [
+          {
+            id: 'sticker',
+            kind: 'sticker',
+            priority: 10,
+            critical: false,
+            text: visionInstructions.join('\n\n'),
+          },
+        ]
+      : []),
+  ];
+
+  // Agent 工具循环会在请求内追加 tool 消息：按工具 schema + 每轮结果预留
+  // 输入预算。这是保守上界；轮数仍由 agent-runtime 的 MAX_ROUNDS 控制。
+  const agentPossible = evaluateAgentGate({
+    switchOn: agentToolsEnabled(),
+    toolsSupported: supportsTools(modelTarget.providerId, modelTarget.modelId),
+    hasNewImage,
+  }).allowed;
+  const toolsReserveTokens = agentPossible ? estimateAgentToolsReserve() : 0;
+
+  let contextRuntime;
+  try {
+    contextRuntime = await runContextRuntime({
+      task: memoryQuery,
+      sessionId,
+      projectedMessages: projectedHistory,
+      renderMessage: item =>
+        renderProjectedHistoryMessage(item, {
+          includeImages: includeHistoryImages,
+          placeholderImages: true,
+        }),
+      renderFinalMessage: item =>
+        renderProjectedHistoryMessage(item, {
+          includeImages: includeHistoryImages,
+        }),
+      systemBlocks: baseSystemBlocks,
+      currentMessage,
+      model: {
+        providerId: modelTarget.providerId,
+        modelId: modelTarget.modelId,
+        contextWindow: modelTarget.model.contextWindow,
+      },
+      toolsReserveTokens,
+      config: contextConfig,
+    });
+  } catch (error) {
+    console.error(
+      `[context] runtime 异常 session=${sessionId}` +
+        ` error=${error && error.message ? error.message : error}`
+    );
+    return {
+      error: [500, { error: '上下文组装失败', code: 'context_runtime_error' }],
+    };
+  }
+
+  if (!contextRuntime.ok) {
+    console.error(`[context-trace] ${JSON.stringify(contextRuntime.trace)}`);
+    const status = contextRuntime.errorCode === 'context_too_large' ? 413 : 500;
+    return {
+      error: [
+        status,
+        {
+          error: contextRuntime.error || '上下文组装失败',
+          code: contextRuntime.errorCode || 'context_runtime_error',
+        },
+      ],
+    };
+  }
+
+  const contextTrace = contextRuntime.traceApi;
+  const systemPrompt = contextRuntime.systemPrompt;
+  const requestMessages = contextRuntime.messages;
+  const promptHistory = contextRuntime.historyMessages;
+
+  console.log(
+    `[context] runtime session=${sessionId}` +
+      ` history=${contextRuntime.trace.history.totalMessages}` +
+      ` recent=${contextRuntime.trace.history.recent}` +
+      ` recalled=${contextRuntime.trace.history.recalled}` +
+      ` summary=${contextRuntime.summary.count}` +
+      ` memory=${contextRuntime.memory.accepted.length}/${contextRuntime.trace.retrieval.candidates}` +
+      ` dropped=${contextRuntime.dropped.length}` +
+      ` window=${contextRuntime.measurement.window.tokens}` +
+      ` windowSource=${contextRuntime.measurement.window.source}` +
+      ` estInput=${contextRuntime.measurement.estimatedInputTokens}` +
+      ` toolsReserve=${contextRuntime.measurement.toolsReserveTokens}`
+  );
+
   return {
     ctx: {
       sessionId,
@@ -2341,10 +2295,15 @@ async function prepareChatRequest(req) {
       includeHistoryImages,
       useVision,
       userContent,
-      promptHistory: modelHistory,
+      promptHistory,
+      requestMessages,
       systemPrompt,
       personaConfig,
       contextTrace,
+      contextMeasurement: contextRuntime.measurement,
+      contextSummary: contextRuntime.summary,
+      contextDropped: contextRuntime.dropped,
+      contextIds: contextRuntime.contextIds,
       providerId: modelTarget.providerId,
       providerName: modelTarget.provider.name,
       modelId: modelTarget.modelId,
@@ -2399,7 +2358,7 @@ function completeChatTurn({
   // 边界拆成多条气泡。每条分条是独立的 assistant 消息，撤回会整轮删除。
   const segments = splitReplyIntoSegments(reply, personaConfig.messageMode);
 
-  // 同步生成稳定 id 并立即返回给前端（撤回需要）；appendMessages 会沿用已有 id。
+  // 同步生成稳定 id 并立即返回给前端（撤回需要）；appendMessagesDetailed 会沿用已有 id。
   const now = new Date().toISOString();
 
   // 回复带出的图片/表情包附件挂在最后一格气泡上：阅读顺序与
@@ -2439,10 +2398,13 @@ function completeChatTurn({
   // 竞争（Node 单线程下这段同步代码不可被打断）。
   // 客户端已断开时不落盘，避免回复成为"幽灵消息"（用户没收到却已入库）。
   let persisted = false;
+  let trimmedMessages = [];
 
   if (!isClientGone()) {
     try {
-      persisted = !!appendMessages(sessionId, stamped);
+      const appended = appendMessagesDetailed(sessionId, stamped);
+      persisted = !!appended.messages;
+      trimmedMessages = Array.isArray(appended.trimmed) ? appended.trimmed : [];
 
       if (!persisted) {
         console.error(
@@ -2454,6 +2416,22 @@ function completeChatTurn({
       }
     } catch (error) {
       console.error('History save error:', error);
+    }
+  }
+
+  // 达到保留上限后裁掉的旧消息：它们的图片/表情包引用可能已无人使用。
+  // 必须等落盘成功后再扫描全库；只删确认无引用的文件，清理失败不影响回复。
+  if (persisted && trimmedMessages.length) {
+    try {
+      const removed = releaseOrphanAttachments(
+        trimmedMessages.map(item => item && item.attachments)
+      );
+      console.log(
+        `[sessions] trimmed=${trimmedMessages.length}` +
+          ` session=${sessionId} releasedUploads=${removed.length}`
+      );
+    } catch (error) {
+      console.error('Trim orphan cleanup error:', error.message);
     }
   }
 
@@ -2562,6 +2540,27 @@ function scheduleMemoryExtraction(
   });
 }
 
+// 每次真正调用提供方之前记录 sent 证据：使用与 createChatCompletion 完全
+// 相同的 messages 数组；只记录标识/角色/数量，不记录正文。
+function recordSentForContext(ctx, { round = 1, messages = ctx.requestMessages, toolsCount = 0 } = {}) {
+  if (!ctx.contextTrace) return;
+  ctx.contextTrace.recordSent({
+    round,
+    messages,
+    contextIds: ctx.contextIds || [],
+    model: { providerId: ctx.providerId, modelId: ctx.modelId },
+    toolsCount,
+  });
+}
+
+// trace 只输出一次：成功、模型错误、工具路径共用同一个出口，避免重复行；
+// 失败路径也必须留下证据，不能只在成功时记录。
+function emitContextTrace(ctx) {
+  if (!ctx || !ctx.contextTrace || ctx.contextTraceEmitted) return;
+  console.error(`[context-trace] ${JSON.stringify(ctx.contextTrace.toJSON())}`);
+  ctx.contextTraceEmitted = true;
+}
+
 app.post('/chat', requireAuth, async (req, res) => {
   // 客户端提前断开时标记，避免回复落盘成"幽灵消息"（用户没收到却已入库）；
   // 同时中止进行中的工具执行——已完成的只读工具不回滚，但不再做无用功。
@@ -2577,6 +2576,7 @@ app.post('/chat', requireAuth, async (req, res) => {
   // 用户消息的到达时刻：Presence 用它计算「用户最后互动时间」，
   // 与模型耗时无关（回复可能几十秒后才完成）。
   const userMessageReceivedAt = Date.now();
+  let ctxForTrace = null;
 
   try {
     const prepared = await prepareChatRequest(req);
@@ -2587,6 +2587,7 @@ app.post('/chat', requireAuth, async (req, res) => {
     }
 
     const { ctx } = prepared;
+    ctxForTrace = ctx;
 
     // 真实 API 调用流水：每次消耗密钥都在日志留痕，便于与服务商控制台
     // 用量对账、排查意外调用来源。纯日志，不影响逻辑，绝不含密钥本身。
@@ -2630,7 +2631,6 @@ app.post('/chat', requireAuth, async (req, res) => {
     let completion;
     let rawReply;
     let toolSteps = null;
-    let contextTraceEmitted = false;
 
     if (agentOn) {
       const outcome = await runAgentTurn({
@@ -2643,18 +2643,8 @@ app.post('/chat', requireAuth, async (req, res) => {
         timeout: 90000,
         isClientGone: () => clientGone,
         abortSignal: disconnect.signal,
-        messages: [
-          {
-            role: 'system',
-            content: ctx.systemPrompt,
-          },
-          ...ctx.promptHistory,
-          {
-            // 续写模式用一个内部短指令占位：只存在于本次请求，不落任何盘
-            role: 'user',
-            content: ctx.userContent,
-          },
-        ],
+        messages: ctx.requestMessages,
+        onRequest: requestMeta => recordSentForContext(ctx, requestMeta),
       });
 
       completion = outcome.completion;
@@ -2677,10 +2667,7 @@ app.post('/chat', requireAuth, async (req, res) => {
             durationMs: step.durationMs,
           });
         }
-        console.error(
-          `[context-trace] ${JSON.stringify(ctx.contextTrace.toJSON())}`
-        );
-        contextTraceEmitted = true;
+        emitContextTrace(ctx);
       }
 
       if (!completion) {
@@ -2688,6 +2675,7 @@ app.post('/chat', requireAuth, async (req, res) => {
         throw new Error('模型没有返回有效内容');
       }
     } else {
+      recordSentForContext(ctx);
       completion = await createChatCompletion({
         providerId: ctx.providerId,
         modelId: ctx.modelId,
@@ -2695,18 +2683,7 @@ app.post('/chat', requireAuth, async (req, res) => {
         temperature: 0.8,
         maxTokens: 1200,
         timeout: 90000,
-        messages: [
-          {
-            role: 'system',
-            content: ctx.systemPrompt,
-          },
-          ...ctx.promptHistory,
-          {
-            // 续写模式用一个内部短指令占位：只存在于本次请求，不落任何盘
-            role: 'user',
-            content: ctx.userContent,
-          },
-        ],
+        messages: ctx.requestMessages,
       });
 
       rawReply = completion.choices?.[0]?.message?.content;
@@ -2725,11 +2702,7 @@ app.post('/chat', requireAuth, async (req, res) => {
     });
 
     // 非 Agent 路径的 trace 收尾（无工具调用，同样输出结构化 trace）
-    if (ctx.contextTrace && !contextTraceEmitted) {
-      console.error(
-        `[context-trace] ${JSON.stringify(ctx.contextTrace.toJSON())}`
-      );
-    }
+    emitContextTrace(ctx);
 
     res.json({
       ...result,
@@ -2750,6 +2723,7 @@ app.post('/chat', requireAuth, async (req, res) => {
       messageId: result.userMessageId || null,
     });
   } catch (error) {
+    emitContextTrace(ctxForTrace);
     // 模型调用类错误：按 kind 映射 HTTP 状态，返回结构化错误（已脱敏）；
     // 其余（内部 bug）保持原有 500 语义不变。
     if (error instanceof ModelCallError) {
@@ -2792,6 +2766,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   });
 
   const userMessageReceivedAt = Date.now();
+  let ctxForTrace = null;
 
   // 校验与上下文组装：失败时还没切 SSE，按普通 JSON 错误返回，
   // 客户端收到非 200 可走旧 /chat 回退路径
@@ -2810,6 +2785,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   }
 
   const { ctx } = prepared;
+  ctxForTrace = ctx;
 
   res.status(200);
   res.set({
@@ -2855,7 +2831,6 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   const model = ctx.modelId;
   let upstreamModel = null;
   let toolSteps = null;
-  let contextTraceEmitted = false;
   const stripper = createMoodTagStripper();
   let streamError = null;
 
@@ -2904,17 +2879,8 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         onToolEvent: event => {
           sendEvent(event);
         },
-        messages: [
-          {
-            role: 'system',
-            content: ctx.systemPrompt,
-          },
-          ...ctx.promptHistory,
-          {
-            role: 'user',
-            content: ctx.userContent,
-          },
-        ],
+        messages: ctx.requestMessages,
+        onRequest: requestMeta => recordSentForContext(ctx, requestMeta),
       });
 
       if (outcome.completion) {
@@ -2943,10 +2909,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
               durationMs: step.durationMs,
             });
           }
-          console.error(
-            `[context-trace] ${JSON.stringify(ctx.contextTrace.toJSON())}`
-          );
-          contextTraceEmitted = true;
+          emitContextTrace(ctx);
         }
 
         // 最终文本经同一套情绪标签剥离后以 delta 发出
@@ -2954,6 +2917,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         if (emit) sendEvent({ type: 'delta', content: emit });
       }
     } else {
+      recordSentForContext(ctx);
       const stream = await createChatCompletion({
         providerId: ctx.providerId,
         modelId: ctx.modelId,
@@ -2962,17 +2926,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         maxTokens: 1200,
         timeout: 90000,
         stream: true,
-        messages: [
-          {
-            role: 'system',
-            content: ctx.systemPrompt,
-          },
-          ...ctx.promptHistory,
-          {
-            role: 'user',
-            content: ctx.userContent,
-          },
-        ],
+        messages: ctx.requestMessages,
       });
 
       for await (const chunk of stream) {
@@ -3020,6 +2974,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   }
 
   if (streamError) {
+    emitContextTrace(ctxForTrace);
     // 模型调用类错误带 code（连接/限流/超时/服务商/模型，已脱敏）；
     // 内部错误保持原有通用文案。客户端断开的场景上面已提前返回。
     if (streamError instanceof ModelCallError) {
@@ -3060,17 +3015,14 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
     });
   } catch (error) {
     console.error('AI stream finalize error:', error);
+    emitContextTrace(ctxForTrace);
     sendEvent({ type: 'error', error: 'AI 请求失败' });
     res.end();
     return;
   }
 
   // 非 Agent 路径的 trace 收尾（无工具调用，同样输出结构化 trace）
-  if (ctx.contextTrace && !contextTraceEmitted) {
-    console.error(
-      `[context-trace] ${JSON.stringify(ctx.contextTrace.toJSON())}`
-    );
-  }
+  emitContextTrace(ctx);
 
   sendEvent({ type: 'done', ...result, ...(agentGate.notice ? { agentNotice: agentGate.notice } : {}), model, providerId: ctx.providerId, upstreamModel, modelRoute: ctx.modelRoute, sessionId: ctx.sessionId });
   res.end();

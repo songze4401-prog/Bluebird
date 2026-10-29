@@ -19,7 +19,11 @@ const LEGACY_HISTORY_FILE = path.join(DATA_DIR, 'chat-history.json');
 const DEFAULT_SESSION_ID = 'default';
 const DEFAULT_SESSION_TITLE = '默认会话';
 const NEW_SESSION_TITLE = '新会话';
-const SESSION_MESSAGE_MAX = 200;
+const SESSION_MESSAGE_MAX = 1000;
+// /history 单次响应上限：旧客户端仍可一次拿 200 条；更大的保留量靠向
+// 前翻页读取，不用一次把 1000 条全塞进响应和前端列表。
+const HISTORY_PAGE_MAX = 200;
+const HISTORY_PAGE_DEFAULT = 50;
 const STORE_VERSION = 1;
 
 // 内存缓存：与旧 chat-historyCache 同思路，避免每次 /chat、/history 都读盘。
@@ -511,8 +515,27 @@ function createSession({ title } = {}) {
   return { ...meta, messageCount: 0 };
 }
 
+// 返回给调用方的消息副本：附件也复制，避免 /history 标注 expired 时
+// 反向修改内存缓存，再被后续 saveStore 写回文件。
+function cloneMessage(item) {
+  const copy = { ...item };
+  if (Array.isArray(item.attachments)) {
+    copy.attachments = item.attachments.map(att =>
+      att && typeof att === 'object' ? { ...att } : att
+    );
+  }
+  if (Array.isArray(item.toolSteps)) {
+    copy.toolSteps = item.toolSteps.map(step =>
+      step && typeof step === 'object' ? { ...step } : step
+    );
+  }
+  return copy;
+}
+
 // 读取某会话消息。会话不存在返回 null（调用方据此回 404）；
 // 会话存在但为空返回 []（合法空会话）。
+// 默认返回全部保留消息（上限 SESSION_MESSAGE_MAX），供上下文/撤回等内部
+// 路径使用；/history 页面读取走 getHistoryPage，不拿全量。
 function getMessages(sessionId, limit) {
   const current = loadStore();
 
@@ -524,7 +547,55 @@ function getMessages(sessionId, limit) {
       ? Math.min(limit, SESSION_MESSAGE_MAX)
       : SESSION_MESSAGE_MAX;
 
-  return list.slice(-cap).map(item => ({ ...item }));
+  return list.slice(-cap).map(cloneMessage);
+}
+
+// /history 的游标分页：before 是当前页最早一条消息的 id。
+// 返回 { items, hasMore, nextCursor, invalidCursor, total }。
+// nextCursor 只在 hasMore=true 时给出，客户端据此继续向前加载。
+function getHistoryPage(sessionId, { limit, before } = {}) {
+  const current = loadStore();
+
+  if (!findMeta(sessionId)) return null;
+
+  const list = current.messages[sessionId] || [];
+  const requested =
+    Number.isFinite(limit) && limit > 0
+      ? Math.floor(limit)
+      : HISTORY_PAGE_DEFAULT;
+  const pageSize = Math.min(Math.max(requested, 1), HISTORY_PAGE_MAX);
+
+  let end = list.length;
+
+  if (typeof before === 'string' && before) {
+    const index = list.findIndex(item => item && item.id === before);
+    if (index < 0) {
+      return {
+        items: [],
+        hasMore: false,
+        nextCursor: null,
+        invalidCursor: true,
+        total: list.length,
+      };
+    }
+    end = index;
+  }
+
+  const start = Math.max(0, end - pageSize);
+  const items = list.slice(start, end).map(cloneMessage);
+  const hasMore = start > 0;
+  const nextCursor =
+    hasMore && items.length && typeof items[0].id === 'string'
+      ? items[0].id
+      : null;
+
+  return {
+    items,
+    hasMore,
+    nextCursor,
+    invalidCursor: false,
+    total: list.length,
+  };
 }
 
 // 追加消息到指定会话，返回带 id/createdAt 的消息数组；会话不存在返回 null
@@ -583,11 +654,11 @@ function sanitizeToolSteps(list) {
   return items.length ? items : undefined;
 }
 
-function appendMessages(sessionId, messages) {
+function appendMessagesDetailed(sessionId, messages) {
   const current = loadStore();
   const meta = findMeta(sessionId);
 
-  if (!meta) return null;
+  if (!meta) return { messages: null, trimmed: [] };
 
   const createdAt = nowIso();
 
@@ -609,20 +680,26 @@ function appendMessages(sessionId, messages) {
 
   const existing = current.messages[sessionId] || [];
   const prevUpdatedAt = meta.updatedAt;
+  const combined = [...existing, ...stamped];
+  const overflow = Math.max(0, combined.length - SESSION_MESSAGE_MAX);
+  const trimmed = overflow ? combined.slice(0, overflow) : [];
 
-  current.messages[sessionId] = [...existing, ...stamped].slice(
-    -SESSION_MESSAGE_MAX
-  );
+  current.messages[sessionId] = combined.slice(-SESSION_MESSAGE_MAX);
   meta.updatedAt = createdAt;
 
   if (!saveStore()) {
     // 落盘失败：回滚内存，避免内存里多出磁盘上不存在的消息
     current.messages[sessionId] = existing;
     meta.updatedAt = prevUpdatedAt;
-    return null;
+    return { messages: null, trimmed: [] };
   }
 
-  return stamped;
+  return { messages: stamped, trimmed };
+}
+
+// 兼容旧调用方：只返回本次追加的消息；裁剪明细由 appendMessagesDetailed 提供。
+function appendMessages(sessionId, messages) {
+  return appendMessagesDetailed(sessionId, messages).messages;
 }
 
 // 用给定数组整体替换某会话消息（撤回/清理用）。刻意不改 updatedAt：
@@ -646,7 +723,7 @@ function replaceMessages(sessionId, messages) {
 }
 
 // 全库消息视图：撤回/清理后判断图片附件是否还有别处引用（决定能否删文件）。
-// 会话数 × 200 条上限，全量合并的成本可忽略。
+// 会话数 × 保留上限，全量合并只用于撤回/清理后的附件引用检查。
 function getAllMessages() {
   const current = loadStore();
   const all = [];
@@ -693,6 +770,9 @@ module.exports = {
   DEFAULT_SESSION_TITLE,
   NEW_SESSION_TITLE,
   SESSION_MESSAGE_MAX,
+  HISTORY_PAGE_MAX,
+  HISTORY_PAGE_DEFAULT,
+  getHistoryPage,
   DATA_DIR,
   STORE_FILE,
   LEGACY_HISTORY_FILE,
@@ -701,6 +781,7 @@ module.exports = {
   createSession,
   getMessages,
   appendMessages,
+  appendMessagesDetailed,
   replaceMessages,
   getAllMessages,
   deleteSession,
