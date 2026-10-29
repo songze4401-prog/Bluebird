@@ -215,6 +215,7 @@ function backendEnv(dataDir) {
     PORT: '0',
     // 开发者本地 .env 可能打开 Agent 开关；覆盖验证必须从确定默认态开始。
     BLUEBIRD_AGENT_TOOLS: '',
+    BLUEBIRD_MONITORING: '0',
   };
 }
 

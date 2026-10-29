@@ -174,6 +174,13 @@ const { splitReplyIntoSegments } = require(path.join(
 const { server } = require(path.join(SERVER, 'index.js'));
 // 与 index.js 同一份模块实例（require 缓存），测试直接复用服务端常量
 const personaModule = require(path.join(SERVER, 'persona.js'));
+// 工具集只由代码注册表决定：期望值取自注册表本身，而不是写死名单，
+// 否则新增内置工具（如 retrieval 的 knowledge_search）会让断言失真。
+const agentRuntime = require(path.join(SERVER, 'agent-runtime.js'));
+const REGISTERED_TOOL_NAMES = agentRuntime
+  .listToolMetadata()
+  .map(tool => tool.name)
+  .sort();
 const CUSTOM_MAX = personaModule.CUSTOM_PROMPT_MAX_CHARS;
 const PERSONA_FILE = path.join(DATA_DIR, 'persona.json');
 
@@ -1005,7 +1012,7 @@ async function main() {
   check(
     '工具集由代码注册表决定，与自定义文本无关',
     JSON.stringify((agentParams.tools || []).map(t => t.function.name).sort()) ===
-      JSON.stringify(['memory_remember', 'memory_search'])
+      JSON.stringify(REGISTERED_TOOL_NAMES)
   );
 
   process.env.BLUEBIRD_AGENT_TOOLS = '0';

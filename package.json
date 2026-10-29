@@ -40,11 +40,13 @@
     "test:unit": "jest",
     "eval:memory": "node tests/memory-eval/run-eval.js",
     "eval:semantic": "node tests/memory-semantic-eval.js --assert",
-    "eval:context": "node scripts/context-capability-eval.js"
+    "eval:context": "node scripts/context-capability-eval.js",
+    "eval:retrieval": "node tests/retrieval-eval.js --assert"
   },
   "private": true,
   "jest": {
     "preset": "jest-expo",
+    "testTimeout": 20000,
     "testMatch": [
       "<rootDir>/tests/unit/**/*.test.[jt]s?(x)"
     ]

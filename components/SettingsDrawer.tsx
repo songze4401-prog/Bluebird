@@ -33,6 +33,7 @@ export function SettingsDrawer({
   onReturnHome,
   onOpenMemory,
   onOpenControlPanel,
+  onOpenMonitoring,
   onOpenModels,
   onOpenThemePicker,
   onSelectMode,
@@ -48,6 +49,7 @@ export function SettingsDrawer({
   onReturnHome: () => void;
   onOpenMemory: () => void;
   onOpenControlPanel: () => void;
+  onOpenMonitoring?: () => void;
   onOpenModels: () => void;
   onOpenThemePicker: () => void;
   onSelectMode: (mode: ThemeMode) => void;
@@ -136,6 +138,14 @@ export function SettingsDrawer({
               label="控制面板"
               onPress={onOpenControlPanel}
             />
+
+            {onOpenMonitoring ? (
+              <DrawerItem
+                theme={theme}
+                label="系统监控"
+                onPress={onOpenMonitoring}
+              />
+            ) : null}
 
             <DrawerItem theme={theme} label="模型" onPress={onOpenModels} />
 

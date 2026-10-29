@@ -5,6 +5,8 @@
 // 不为了"看起来完整"去描述服务端没返回的东西。
 
 import type {
+  AgentPolicyConfig,
+  AgentPolicyTool,
   Attachment,
   ModelDefaults,
   ModelProvider,
@@ -92,6 +94,38 @@ export type EmotionResponse = {
   emotion?: string;
   intensity?: number;
   [key: string]: unknown;
+};
+
+// ---- Agent 工作策略 ----
+export type AgentPolicyMeta = {
+  schemaVersion: number;
+  revision: number;
+  updatedAt: string | null;
+  digest: string;
+  corrupted: boolean;
+  writeBlocked: boolean;
+  error?: string;
+  recovery?: string;
+};
+
+export type AgentPolicyResponse = {
+  policy: AgentPolicyConfig;
+  defaults: AgentPolicyConfig;
+  meta: AgentPolicyMeta;
+  limits: {
+    maxRounds: { min: number; max: number };
+    maxToolCalls: { min: number; max: number };
+    maxTotalMs: { min: number; max: number };
+    maxReadOnlyRetries: { min: number; max: number };
+    maxAllowedTools: number;
+  };
+  runtimeLimits: { maxRounds: number };
+  availableTools: AgentPolicyTool[];
+};
+
+export type AgentPolicySaveResponse = {
+  policy: AgentPolicyConfig;
+  meta: AgentPolicyMeta;
 };
 
 // ---- 人格 ----
@@ -213,4 +247,377 @@ export type PresenceReportResponse = {
   ok: true;
   duplicate: boolean;
   presence: unknown;
+};
+
+// ---- 系统监控（只读） ----
+// 字段与服务端 server/monitoring/* 的真实返回一一对应；未知/未采集用 null，
+// 不用 0 冒充健康。所有时间均为 UTC ISO。
+export type MonitoringMetricValue = {
+  label: string;
+  value: number | string | number[] | null;
+  unit: string;
+  note?: string;
+  definition?: string;
+  approximate?: boolean;
+};
+
+export type MonitoringCard = {
+  key: string;
+  title: string;
+  data_status: 'ok' | 'no_data' | 'disabled' | 'unknown';
+  primary: MonitoringMetricValue;
+  metrics: MonitoringMetricValue[];
+};
+
+export type MonitoringCoverage = {
+  retained_events?: number;
+  retained_traces?: number;
+  retention_days?: number | null;
+  approximate_percentiles?: boolean;
+};
+
+export type MonitoringOverviewResponse = {
+  ok: boolean;
+  reason?: string;
+  data_status?: string;
+  generated_at?: string;
+  range?: { from: string; to: string; duration_minutes: number };
+  cards?: MonitoringCard[];
+  alerts?: {
+    firing: number;
+    by_severity: Record<string, number>;
+    notifications: { configured: boolean; reason?: string };
+  };
+  monitoring_health?: {
+    status: string;
+    reasons: string[];
+    data_freshness_seconds: number | null;
+  };
+  backup?: MonitoringBackup;
+  cost?: { status: string; value: number | null; currency: string | null; note: string };
+  definitions?: Record<string, MonitoringMetricDefinition>;
+  coverage?: MonitoringCoverage;
+};
+
+export type MonitoringMetricDefinition = {
+  type: 'counter' | 'histogram';
+  unit: string;
+  description: string;
+  labels: string[];
+  buckets?: number[];
+};
+
+export type MonitoringMetricPoint = {
+  ts: string;
+  count: number;
+  sum: number;
+  avg: number | null;
+  p50?: { value: number; approximate: boolean } | null;
+  p95?: { value: number; approximate: boolean } | null;
+  p99?: { value: number; approximate: boolean } | null;
+  approximate?: boolean;
+  samples: number;
+};
+
+export type MonitoringMetricsResponse = {
+  ok: boolean;
+  reason?: string;
+  generated_at?: string;
+  approximate_percentiles?: boolean;
+  series?: {
+    name: string;
+    definition: MonitoringMetricDefinition;
+    interval_minutes: number;
+    points: MonitoringMetricPoint[];
+  }[];
+};
+
+export type MonitoringTraceSummary = {
+  trace_id: string;
+  name: string;
+  started_at: string;
+  duration_ms: number | null;
+  status: string;
+  error_code: string | null;
+  error_category: string | null;
+  session_ref: string | null;
+  task: { status: string; termination: string | null };
+  stages: {
+    candidate: number | null;
+    selected: number | null;
+    accepted: number | null;
+    injected: number | null;
+    sent: number | null;
+    consumed: number | null;
+  };
+  model: {
+    rounds: number;
+    calls: number;
+    total_tokens: number | null;
+    usage_source: string;
+    model_ids: string[];
+    cached_tokens?: number | null;
+  };
+  tools: {
+    requested: number;
+    executed: number;
+    succeeded: number;
+    failed: number;
+    deduped: number;
+    duration_ms: number;
+  };
+  span_count: number;
+  event_count: number;
+};
+
+export type MonitoringTracesResponse = {
+  ok: boolean;
+  reason?: string;
+  generated_at?: string;
+  items?: MonitoringTraceSummary[];
+  nextCursor?: string | null;
+  hasMore?: boolean;
+  total?: number;
+  coverage?: MonitoringCoverage;
+};
+
+export type MonitoringSpan = {
+  span_id: string;
+  parent_span_id: string | null;
+  name: string;
+  started_at: string;
+  ended_at: string | null;
+  duration_ms: number | null;
+  status: string;
+  error_code: string | null;
+  attributes: Record<string, unknown>;
+};
+
+export type MonitoringTraceDetail = {
+  trace_id: string;
+  name: string;
+  started_at: string;
+  ended_at: string | null;
+  duration_ms: number | null;
+  status: string;
+  error_code: string | null;
+  error_category: string | null;
+  session_ref: string | null;
+  spans: MonitoringSpan[];
+  spans_dropped: number;
+  stages: MonitoringTraceSummary['stages'];
+  event_count: number;
+  model: MonitoringTraceSummary['model'] & {
+    input_tokens: number | null;
+    output_tokens: number | null;
+    cached_tokens?: number | null;
+    provider_ids: string[];
+  };
+  tools: MonitoringTraceSummary['tools'];
+  task: { status: string; termination: string | null; duration_ms?: number };
+  context: Record<string, unknown> | null;
+  counts: Record<string, number>;
+};
+
+export type MonitoringTraceDetailResponse = {
+  ok: boolean;
+  reason?: string;
+  trace?: MonitoringTraceDetail;
+  events?: MonitoringEvent[];
+  events_total?: number;
+  events_truncated?: boolean;
+};
+
+export type MonitoringEvent = {
+  schema_version: number;
+  event_id: string;
+  event_name: string;
+  occurred_at: string;
+  collected_at: string;
+  component: string;
+  level: string;
+  status: string;
+  duration_ms: number | null;
+  trace_id: string | null;
+  span_id: string | null;
+  session_ref: string | null;
+  error_code: string | null;
+  error_category: string | null;
+  attributes: Record<string, unknown>;
+};
+
+export type MonitoringEventsResponse = {
+  ok: boolean;
+  reason?: string;
+  generated_at?: string;
+  items?: MonitoringEvent[];
+  nextCursor?: string | null;
+  hasMore?: boolean;
+  total?: number;
+  coverage?: MonitoringCoverage;
+};
+
+export type MonitoringAuditRecord = {
+  audit_id: string;
+  occurred_at: string;
+  action: string;
+  target: string | null;
+  result: string;
+  actor_ref: string | null;
+  session_ref: string | null;
+  reason: string | null;
+};
+
+export type MonitoringAuditResponse = {
+  ok: boolean;
+  reason?: string;
+  items?: MonitoringAuditRecord[];
+  total?: number;
+};
+
+export type MonitoringTool = {
+  name: string;
+  description?: string;
+  read_only: boolean;
+  side_effect: boolean;
+  timeout_ms: number;
+  registered: boolean;
+  calls: number;
+  success: number;
+  failed: number;
+  timeout: number;
+  denied: number;
+  p95: number | null;
+};
+
+export type MonitoringToolsResponse = {
+  ok: boolean;
+  reason?: string;
+  data_status?: string;
+  agent_switch_on?: boolean;
+  agent_switch_note?: string;
+  tools?: MonitoringTool[];
+  missing_capabilities?: string[];
+};
+
+export type MonitoringModelRow = {
+  provider_id: string;
+  model_id: string;
+  requests: number;
+  success: number;
+  failed: number;
+  timeout: number;
+  denied: number;
+  cancelled: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cached_tokens?: number | null;
+  usage_missing: number;
+  duration: { avg: number | null; p50: number | null; p95: number | null; p99: number | null };
+};
+
+export type MonitoringModelsResponse = {
+  ok: boolean;
+  reason?: string;
+  models?: MonitoringModelRow[];
+  cost?: { status: string; note: string };
+};
+
+export type MonitoringAlert = {
+  alert_id: string;
+  rule_id: string;
+  rule_name: string;
+  rule_version: number;
+  severity: string;
+  status: 'firing' | 'resolved';
+  triggered_at: string;
+  last_evaluated_at: string;
+  resolved_at: string | null;
+  suppressed_evaluations: number;
+  evidence: Record<string, unknown>;
+  note: string;
+};
+
+export type MonitoringAlertRule = {
+  id: string;
+  name: string;
+  severity: string;
+  version: number;
+  description: string;
+  window_minutes: number;
+  min_samples: number;
+  enabled: boolean;
+  disabled_reason?: string;
+};
+
+export type MonitoringAlertsResponse = {
+  ok: boolean;
+  reason?: string;
+  items?: MonitoringAlert[];
+  total?: number;
+  rules?: MonitoringAlertRule[];
+  states?: { rule: MonitoringAlertRule; state: string; last_evaluated_at: string | null }[];
+  health?: {
+    initialized: boolean;
+    rule_count: number;
+    enabled_rules: number;
+    evaluations: number;
+    evaluation_errors: number;
+    last_evaluated_at: string | null;
+    active_alerts: number;
+    notifications: { configured: boolean; reason: string };
+  };
+};
+
+export type MonitoringBackup = {
+  source: string;
+  code_present?: boolean;
+  exists: boolean;
+  ok: boolean;
+  stale?: boolean | null;
+  age_hours?: number | null;
+  reason?: string | null;
+  last_success_at?: string | null;
+  consecutive_failures?: number | null;
+  same_volume_as_source?: boolean | null;
+  disaster_recovery_grade?: boolean | null;
+  restore_drill?: string;
+  restore_drill_note?: string;
+  scheduled_task_configured?: string;
+  scheduled_task_note?: string;
+};
+
+export type MonitoringHealthResponse = {
+  ok: boolean;
+  data_status?: string;
+  status: string;
+  enabled: boolean;
+  reasons: string[];
+  generated_at?: string;
+  uptime_seconds?: number;
+  data_freshness_seconds?: number | null;
+  last_event_at?: string | null;
+  counters?: Record<string, number | string | null>;
+  metrics?: Record<string, unknown>;
+  alerting?: MonitoringAlertsResponse['health'];
+  persistence?: {
+    source: string;
+    writes: number;
+    failed: number;
+    ok: boolean | null;
+    note: string;
+  };
+  backup?: MonitoringBackup;
+  storage?: {
+    retained_events: number;
+    retained_traces: number;
+    retained_audit: number;
+    retained_alerts: number;
+    queue_depth: number;
+    bytes: { total_bytes: number; files: Record<string, number | null> } | null;
+    limits: Record<string, unknown> | null;
+  };
+  memory?: { rss_bytes: number; heap_used_bytes: number; external_bytes: number } | null;
+  capabilities?: Record<string, unknown>;
+  query_layer?: { calls: number; errors: number; last_query_at: string | null };
 };

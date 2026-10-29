@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { logDataEvent } = require('./data-events');
+const monitoring = require('./monitoring');
 const { writeFileAtomic, writeFileExclusiveSync } = require('./atomic-write');
 const { registerCorruptionHandler, handleCorruption } = require('./corruption');
 const {
@@ -911,8 +912,16 @@ async function extractMemory(client, message, force = false, sessionId = null, o
       `[AI call] memory-extraction session=${sessionId || 'default'} at=${new Date().toISOString()}`
     );
 
-    const completion =
-      await client.chat.completions.create(
+    const auxiliary = monitoring.beginAuxiliaryModel({
+      providerId: 'deepseek',
+      modelId: 'deepseek-chat',
+      kind: 'memory_extract',
+      sessionRef: monitoring.sessionRefFor(sessionId),
+    });
+
+    let completion;
+    try {
+      completion = await client.chat.completions.create(
         {
           model: 'deepseek-chat',
           temperature: 0,
@@ -959,6 +968,21 @@ sourceQuote 必须来自用户原话。
           timeout: 15000,
         }
       );
+
+      auxiliary.complete({
+        status: 'success',
+        usage: completion && completion.usage ? completion.usage : null,
+      });
+    } catch (error) {
+      auxiliary.complete({
+        status: error && error.kind === 'timeout' ? 'timeout' : 'failed',
+        errorCode:
+          error && (error.kind || error.code)
+            ? error.kind || error.code
+            : 'model_error',
+      });
+      throw error;
+    }
 
     const raw =
       completion.choices?.[0]?.message?.content;

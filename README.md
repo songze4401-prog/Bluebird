@@ -22,16 +22,17 @@ node server/index.js       # API :3000
 npx expo start             # Metro :8081
 ```
 
-`server/.env` 读取 `DEEPSEEK_API_KEY`、`BLUEBIRD_API_TOKEN`、`PORT`、`MEMORY_ENABLED`；根 `.env` 读取 `EXPO_PUBLIC_API_URL`、`EXPO_PUBLIC_BLUEBIRD_API_TOKEN`。
+`server/.env` 读取 `DEEPSEEK_API_KEY`、`BLUEBIRD_API_TOKEN`、`PORT`、`MEMORY_ENABLED`、`BLUEBIRD_MONITORING`；根 `.env` 读取 `EXPO_PUBLIC_API_URL`、`EXPO_PUBLIC_BLUEBIRD_API_TOKEN`。
 
 ## Quality gates
 
 ```bash
-npm test                    # backend: auto-discovers tests/*.test.js (39 files / 1374 checks)
-npm run test:unit -- --ci   # frontend: 8 suites / 116 cases
+npm test                    # backend: auto-discovers tests/*.test.js (44 files / 1521 checks)
+npm run test:unit -- --ci   # frontend: 10 suites / 124 cases
 npx tsc --noEmit            # TypeScript
 npm run lint                # Expo ESLint
 npm run eval:context        # real-model capability eval (needs DEEPSEEK_API_KEY; not in CI)
+npm run eval:retrieval      # fixed-corpus unified retrieval eval (lexical/exact; no external model)
 ```
 
 CI (`.github/workflows/ci.yml`) runs the backend suites, TypeScript, lint, and Jest on Node 22, plus the runtime test-coverage verifier and two data-isolation tripwires that ensure tests never read or write the real `server/data`.
@@ -45,10 +46,20 @@ CI (`.github/workflows/ci.yml`) runs the backend suites, TypeScript, lint, and J
 - Rehearse restore with `node scripts/bluebird-restore-drill.js`.
 - `api-keys.json` is plaintext at rest (best-effort `0600`); do not commit the data directory or `.env` files.
 
+## Observability
+
+- 只读控制台：设置抽屉 →「系统监控」；总览 / Trace / 上下文·记忆 / 工具 / 模型·成本 / 错误·事件 / 安全·可靠性 / 健康·告警。
+- 真实链路埋点覆盖 HTTP、会话、上下文、记忆检索、模型、工具、SSE 与落盘；事件/Trace/审计/告警分别有界存储于 `server/data/monitoring/`（`BLUEBIRD_DATA_DIR` 可覆盖）。
+- 默认启用；`BLUEBIRD_MONITORING=0` 可关闭，前端会显示 disabled/degraded，而不是健康。API 只读、复用 Bearer 鉴权，入口为 `/monitoring/*`。
+- Token 用量优先使用供应商 usage；成本未配置费率时显示“未配置”，不编造金额。外部通知未配置，当前只有站内告警。
+- 契约、指标口径、告警规则、容量上限与未完成项见 `docs/observability.md`。
+
 ## Documentation
 
 - `AGENTS.md` — architecture, data safety, commands, tests, and rules. This is the primary engineering reference.
 - `docs/persona-custom-prompt.md` — the user-authored persona text: field contract, priority order, untrusted-text handling, and validation error codes.
+- `docs/unified-retrieval.md` — unified semantic retrieval/knowledge index: contracts, source connectors, hybrid pipeline, API, limits, verified/blocked capabilities.
+- `docs/observability.md` — monitoring architecture, event/metric contract, alert rules, retention, privacy, and known gaps.
 - `MODEL_ROUTING_RISKS.md` — current status of model-routing risks; the 2026-10-25 original is archived under `docs/archive/`.
 
 ## License

@@ -21,6 +21,7 @@ export const API_PATHS = {
   // 情绪 / 人格
   emotion: '/emotion',
   persona: '/persona',
+  agentPolicy: '/agent-policy',
 
   // 记忆
   memory: '/memory',
@@ -58,4 +59,41 @@ export const API_PATHS = {
   presenceReport: '/presence/report',
   presence: (sessionId: string) =>
     `/presence?sessionId=${encodeURIComponent(sessionId)}`,
+
+  // 系统监控（只读）
+  monitoringMeta: '/monitoring/meta',
+  monitoringOverview: (from: string, to: string) =>
+    monitoringQuery('/monitoring/overview', { from, to }),
+  monitoringMetrics: (from: string, to: string, names?: string[]) =>
+    monitoringQuery('/monitoring/metrics', {
+      from,
+      to,
+      ...(names && names.length ? { names: names.join(',') } : {}),
+    }),
+  monitoringTraces: (params: Record<string, string | number | undefined>) =>
+    monitoringQuery('/monitoring/traces', params),
+  monitoringTrace: (traceId: string) =>
+    `/monitoring/traces/${encodeURIComponent(traceId)}`,
+  monitoringEvents: (params: Record<string, string | number | undefined>) =>
+    monitoringQuery('/monitoring/events', params),
+  monitoringAudit: (from: string, to: string, limit = 50) =>
+    monitoringQuery('/monitoring/audit', { from, to, limit }),
+  monitoringTools: (from: string, to: string) =>
+    monitoringQuery('/monitoring/tools', { from, to }),
+  monitoringModels: (from: string, to: string) =>
+    monitoringQuery('/monitoring/models', { from, to }),
+  monitoringAlerts: '/monitoring/alerts',
+  monitoringHealth: '/monitoring/health',
 } as const;
+
+function monitoringQuery(
+  path: string,
+  params: Record<string, string | number | undefined>
+): string {
+  const query = Object.entries(params)
+    .filter(([, value]) => value !== undefined && value !== '')
+    .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+    .join('&');
+
+  return query ? `${path}?${query}` : path;
+}

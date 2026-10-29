@@ -36,6 +36,8 @@ const env = {
   DEEPSEEK_API_KEY: '',
   // 开发者本地 .env 可能打开 Agent 开关；测试必须从确定的默认态开始。
   BLUEBIRD_AGENT_TOOLS: '',
+  // 监控默认开启；普通测试关闭，监控专项测试在文件内显式打开并使用临时目录。
+  BLUEBIRD_MONITORING: '0',
 };
 
 const failed = [];
