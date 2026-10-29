@@ -374,23 +374,43 @@ async function main() {
     );
 
     const upload = await uploadImage(server.port, makeRedPngBase64(), 'eval-red.png');
-    const resVision = upload.json
-      ? await chat(server.port, {
-          message: '这张图片是什么颜色？只回答颜色。',
-          sessionId: longSid,
-          attachmentIds: [upload.json.id],
-        })
-      : { status: 0, json: null };
-    const traceVision = server.traceLines().pop();
-    const replyVision = String((resVision.json && resVision.json.reply) || '');
+    // 视觉门禁：单次采样不足以宣称稳定（同一字节曾出现一次误判）。
+    // 判据分两层：① 请求侧确定性——每次都必须 200 且 trace 里 imageCount === 1；
+    // ② 模型侧采样——固定 3 次、多数通过（≥2/3），并逐次打印答案，
+    //    低于 3/3 时证据里可以直接看到真实波动，不能拿单次通过当稳定。
+    const VISION_SAMPLES = 3;
+    const visionRuns = [];
+    let traceVision = null;
+    for (let i = 0; i < VISION_SAMPLES; i += 1) {
+      const resVision = upload.json
+        ? await chat(server.port, {
+            message: '这张图片是什么颜色？只回答颜色。',
+            sessionId: longSid,
+            attachmentIds: [upload.json.id],
+          })
+        : { status: 0, json: null };
+      const traceRun = server.traceLines().pop() || null;
+      if (traceRun) traceVision = traceRun;
+      const reply = String((resVision.json && resVision.json.reply) || '');
+      visionRuns.push({
+        status: resVision.status,
+        reply: reply.slice(0, 20),
+        imageCount: traceRun ? traceRun.build.measurement.current.imageCount : null,
+        correct: /红|red/i.test(reply),
+      });
+    }
+    const visionCorrect = visionRuns.filter(run => run.correct).length;
+    const visionRequestsOk = visionRuns.every(
+      run => run.status === 200 && run.imageCount === 1
+    );
     record(
-      '多模态：真实视觉模型识别图片内容（红色）',
+      `多模态：真实视觉模型识别图片内容（${VISION_SAMPLES} 次采样多数通过）`,
       upload.status === 200 &&
-        resVision.status === 200 &&
-        /红|red/i.test(replyVision) &&
-        traceVision &&
-        traceVision.build.measurement.current.imageCount === 1,
-      `upload=${upload.status} status=${resVision.status} reply=${JSON.stringify(replyVision.slice(0, 60))} images=${traceVision ? traceVision.build.measurement.current.imageCount : 'n/a'}`
+        visionRequestsOk &&
+        visionCorrect >= Math.ceil(VISION_SAMPLES / 2),
+      `upload=${upload.status} samples=${visionRuns
+        .map(run => JSON.stringify(run.reply))
+        .join(',')} images=${visionRuns.map(run => run.imageCount).join(',')} correct=${visionCorrect}/${VISION_SAMPLES}`
     );
 
     record(

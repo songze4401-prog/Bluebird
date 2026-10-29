@@ -1,6 +1,6 @@
 name: CI
 
-# 回归兜底：后端 44 个测试文件（1521 项）+ 前端 10 套单元测试（124 项）+ tsc --noEmit + Expo lint。
+# 回归兜底：后端 44 个测试文件（1522 项）+ 前端 10 套单元测试（124 项）+ tsc --noEmit + Expo lint。
 # 触发范围：main、workbuddy/**、qoder/** 分支的 push、针对 main 的 PR、手动触发。
 # 测试命令与 AGENTS.md「Tests」小节保持一致——新增测试文件时同步更新本文件，
 # 否则新文件不会被运行（静默漏测）；覆盖验证脚本会比对 CI 清单与 tests/ 实际文件。
@@ -44,7 +44,7 @@ jobs:
             exit 1
           fi
 
-      - name: node:test 七套（memory + emotion + sticker-markers + streaming-segments + backup + context-engine + monitoring，共 219 项）
+      - name: node:test 七套（memory + emotion + sticker-markers + streaming-segments + backup + context-engine + monitoring，共 220 项）
         run: node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js tests/monitoring.test.js
 
       # 逐文件单独跑（AGENTS.md 约定）。某个套件失败也跑完其余套件，

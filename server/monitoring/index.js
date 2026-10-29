@@ -561,14 +561,7 @@ function beginToolCall({ toolName, round = 1, readOnly = null, registered = true
       if (settled) return;
       settled = true;
 
-      const status =
-        ok === true
-          ? 'success'
-          : code === 'tool_timeout'
-            ? 'timeout'
-            : code === 'unauthorized_write'
-              ? 'denied'
-              : 'failed';
+      const status = schema.toolCallStatus({ ok, code });
       const errorCategory = ok ? null : 'tool';
 
       try {

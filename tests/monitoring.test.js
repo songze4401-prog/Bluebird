@@ -98,6 +98,36 @@ test('schema：非法事件名与组件被拒绝，状态枚举回退 unknown', 
   assert.equal(event.status, 'unknown');
 });
 
+test('schema：工具调用终态区分策略拒绝/待确认/执行失败/成功', () => {
+  assert.equal(schema.toolCallStatus({ ok: true }), 'success');
+  assert.equal(schema.toolCallStatus({ ok: true, code: null }), 'success');
+  assert.equal(schema.toolCallStatus({ ok: false, code: 'policy_tool_denied' }), 'denied');
+  assert.equal(schema.toolCallStatus({ ok: false, code: 'unauthorized_write' }), 'denied');
+  assert.equal(schema.toolCallStatus({ ok: false, code: 'confirmation_required' }), 'needs_confirmation');
+  assert.equal(schema.toolCallStatus({ ok: false, code: 'tool_error' }), 'failed');
+  assert.equal(schema.toolCallStatus({ ok: false, code: 'invalid_params' }), 'failed');
+  assert.equal(schema.toolCallStatus({ ok: false, code: 'unknown_tool' }), 'failed');
+  assert.equal(schema.toolCallStatus({ ok: false, code: 'tool_timeout' }), 'timeout');
+  assert.equal(schema.toolCallStatus(), 'failed');
+
+  // 四种语义产生四个不同状态，且都在事件枚举内
+  const four = new Set([
+    schema.toolCallStatus({ ok: true }),
+    schema.toolCallStatus({ ok: false, code: 'policy_tool_denied' }),
+    schema.toolCallStatus({ ok: false, code: 'confirmation_required' }),
+    schema.toolCallStatus({ ok: false, code: 'tool_error' }),
+  ]);
+  assert.equal(four.size, 4);
+  for (const status of four) assert.ok(schema.STATUSES.includes(status), status);
+
+  // 待确认不是错误级别：事件记为 warn，其余终态仍按既有规则
+  const level = status =>
+    schema.normalizeEvent({ event_name: 'tool.call.completed', component: 'tool', status }).event.level;
+  assert.equal(level('needs_confirmation'), 'warn');
+  assert.equal(level('denied'), 'info');
+  assert.equal(level('failed'), 'error');
+});
+
 test('schema：正文/密钥类属性被丢弃，敏感文本被整段打码', () => {
   const { event } = schema.normalizeEvent({
     event_name: 'context.build.completed',

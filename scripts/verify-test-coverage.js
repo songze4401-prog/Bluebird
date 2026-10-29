@@ -130,7 +130,7 @@ function evaluateInventory(baseline, actualResults) {
 
   if (nodeSuiteTotal !== baseline.nodeTestSuiteTotal) {
     errors.push(
-      `node:test 六套总计 ${nodeSuiteTotal} 与基线 ${baseline.nodeTestSuiteTotal} 不一致`
+      `node:test 七套总计 ${nodeSuiteTotal} 与基线 ${baseline.nodeTestSuiteTotal} 不一致`
     );
   }
   if (runnerTotal !== baseline.runnerTotal) {

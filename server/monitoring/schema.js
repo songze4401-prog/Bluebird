@@ -27,8 +27,24 @@ const STATUSES = Object.freeze([
   'disabled',
   'no_result',
   'denied',
+  'needs_confirmation',
   'unknown',
 ]);
+
+// 工具调用终态：策略拒绝 / 待确认 / 执行失败 / 成功互不混用。
+// 只依赖 (ok, code)，不读运行时状态，便于确定性单测。
+//   success              ok === true
+//   timeout              tool_timeout（超时是独立的失败语义）
+//   denied               policy_tool_denied（策略拒绝）、unauthorized_write（写入未授权）
+//   needs_confirmation   confirmation_required（高风险工具需人工确认，尚未执行）
+//   failed               其余执行失败（tool_error、invalid_params、unknown_tool 等）
+function toolCallStatus({ ok = false, code = null } = {}) {
+  if (ok === true) return 'success';
+  if (code === 'tool_timeout') return 'timeout';
+  if (code === 'unauthorized_write' || code === 'policy_tool_denied') return 'denied';
+  if (code === 'confirmation_required') return 'needs_confirmation';
+  return 'failed';
+}
 
 const LEVELS = Object.freeze(['debug', 'info', 'warn', 'error', 'critical']);
 
@@ -247,7 +263,9 @@ function normalizeEvent(input, { now = Date.now() } = {}) {
     ? source.level
     : status === 'failed' || status === 'timeout'
       ? 'error'
-      : 'info';
+      : status === 'needs_confirmation'
+        ? 'warn'
+        : 'info';
 
   const errorCategory = ERROR_CATEGORIES.includes(source.error_category)
     ? source.error_category
@@ -317,6 +335,7 @@ module.exports = {
   LEVELS,
   ERROR_CATEGORIES,
   EVENTS,
+  toolCallStatus,
   normalizeEvent,
   sanitizeAttributes,
   maskSensitive,
