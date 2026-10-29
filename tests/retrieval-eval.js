@@ -189,7 +189,7 @@ async function main() {
     recallAt1: Number((hits1 / total).toFixed(4)),
     recallAt3: Number((hits3 / total).toFixed(4)),
     recallAt5: Number((hits5 / total).toFixed(4)),
-    hitRate: Number(((hits1 + (hits3 - hits1) + (hits5 - hits3)) / total).toFixed(4)),
+    hitRate: Number((hits5 / total).toFixed(4)),
     mrr: Number((reciprocalRank / total).toFixed(4)),
     latencyMs: { p50: percentile(0.5), p95: percentile(0.95), max: sortedLatency[sortedLatency.length - 1] || 0 },
     vectorChannel: vectorStatus,
