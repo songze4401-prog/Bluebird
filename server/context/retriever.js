@@ -10,6 +10,7 @@
  */
 const { config: defaultConfig } = require('./config');
 const { searchMemories } = require('../memory');
+const monitoring = require('../monitoring');
 
 const MEMORY_TYPE_MAP = {
   preference: 'user_preference',
@@ -111,7 +112,8 @@ function mapMemoryResult(result, config) {
   });
 }
 
-async function fetchMemory({ task, sessionId, config, injected }) {
+async function fetchMemory({ task, sessionId, config, injected, attempt = 1 }) {
+  const monitor = monitoring.beginMemorySearch({ source: 'memory', attempt });
   const injectedEntries = Array.isArray(injected.memory) ? injected.memory : [];
   if (injectedEntries.length) {
     const items = injectedEntries
@@ -133,6 +135,11 @@ async function fetchMemory({ task, sessionId, config, injected }) {
       })
       .filter(item => item.content);
 
+    monitor.complete({
+      status: items.length ? 'success' : 'no_result',
+      count: items.length,
+    });
+
     return {
       status: items.length ? 'ok' : 'no_result',
       count: items.length,
@@ -140,29 +147,45 @@ async function fetchMemory({ task, sessionId, config, injected }) {
     };
   }
 
-  const found = searchMemories({
-    query: task,
-    sessionId,
-    limits: {
-      maxItems: config.retrieval.memoryMaxItems,
-      perItemMax: config.retrieval.memoryPerItemMax,
-      totalMax: config.retrieval.memoryTotalMax,
-    },
-  });
+  try {
+    const found = searchMemories({
+      query: task,
+      sessionId,
+      limits: {
+        maxItems: config.retrieval.memoryMaxItems,
+        perItemMax: config.retrieval.memoryPerItemMax,
+        totalMax: config.retrieval.memoryTotalMax,
+      },
+    });
 
-  if (found.reason === 'memory_disabled') {
-    return { status: 'source_unavailable', count: 0, items: [], error: '长期记忆未启用', reason: 'memory_disabled' };
-  }
-  if (found.reason === 'empty_query' || found.reason === 'empty_store') {
-    return { status: 'no_result', count: 0, items: [], reason: found.reason };
-  }
+    if (found.reason === 'memory_disabled') {
+      monitor.complete({ status: 'disabled', count: 0, errorCode: 'memory_disabled' });
+      return { status: 'source_unavailable', count: 0, items: [], error: '长期记忆未启用', reason: 'memory_disabled' };
+    }
+    if (found.reason === 'empty_query' || found.reason === 'empty_store') {
+      monitor.complete({ status: 'no_result', count: 0 });
+      return { status: 'no_result', count: 0, items: [], reason: found.reason };
+    }
 
-  const items = found.results.map(result => mapMemoryResult(result, config));
-  return {
-    status: items.length ? 'ok' : 'no_result',
-    count: items.length,
-    items,
-  };
+    const items = found.results.map(result => mapMemoryResult(result, config));
+    monitor.complete({
+      status: items.length ? 'success' : 'no_result',
+      count: items.length,
+    });
+
+    return {
+      status: items.length ? 'ok' : 'no_result',
+      count: items.length,
+      items,
+    };
+  } catch (error) {
+    monitor.complete({
+      status: 'failed',
+      count: 0,
+      errorCode: 'memory_search_error',
+    });
+    throw error;
+  }
 }
 
 async function retrieveMemory({
@@ -173,6 +196,8 @@ async function retrieveMemory({
   now = Date.now(),
 } = {}) {
   if (isTripped('memory', config, now)) {
+    const skipped = monitoring.beginMemorySearch({ source: 'memory' });
+    skipped.complete({ status: 'skipped', count: 0, errorCode: 'breaker_open' });
     return {
       status: 'retrieval_error',
       count: 0,
@@ -185,7 +210,7 @@ async function retrieveMemory({
   let lastError = null;
   for (let attempt = 0; attempt <= config.retry.maxRetries; attempt += 1) {
     try {
-      const outcome = await fetchMemory({ task, sessionId, config, injected });
+      const outcome = await fetchMemory({ task, sessionId, config, injected, attempt: attempt + 1 });
       if (outcome.status === 'retrieval_error') {
         lastError = outcome;
         continue;

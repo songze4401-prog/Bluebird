@@ -23,6 +23,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const monitoring = require('./monitoring');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -611,9 +612,17 @@ async function generateStickerSemantic(client, id) {
       `[AI call] sticker-semantic id=${id} at=${new Date().toISOString()}`
     );
 
-    const completion = await client.chat.completions.create(
-      {
-        model: 'deepseek-flash',
+    const auxiliary = monitoring.beginAuxiliaryModel({
+      providerId: 'deepseek',
+      modelId: 'deepseek-flash',
+      kind: 'sticker_semantic',
+    });
+
+    let completion;
+    try {
+      completion = await client.chat.completions.create(
+        {
+          model: 'deepseek-flash',
         temperature: 0,
         max_tokens: 200,
         messages: [
@@ -635,8 +644,23 @@ async function generateStickerSemantic(client, id) {
           },
         ],
       },
-      { timeout: 60000 }
-    );
+        { timeout: 60000 }
+      );
+
+      auxiliary.complete({
+        status: 'success',
+        usage: completion && completion.usage ? completion.usage : null,
+      });
+    } catch (error) {
+      auxiliary.complete({
+        status: error && error.kind === 'timeout' ? 'timeout' : 'failed',
+        errorCode:
+          error && (error.kind || error.code)
+            ? error.kind || error.code
+            : 'model_error',
+      });
+      throw error;
+    }
 
     const parsed = parseModelJson(
       completion.choices && completion.choices[0] && completion.choices[0].message
