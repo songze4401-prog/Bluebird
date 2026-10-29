@@ -31,6 +31,7 @@ import { ThemeScreen } from './components/ThemeScreen';
 import { HomeScreen } from './components/HomeScreen';
 import { HistoryScreen } from './components/HistoryScreen';
 import { ControlPanelScreen } from './components/ControlPanelScreen';
+import { MonitoringScreen } from './components/MonitoringScreen';
 import { ModelScreen } from './components/ModelScreen';
 import { PlusPanel } from './components/PlusPanel';
 import { SettingsDrawer } from './components/SettingsDrawer';
@@ -60,6 +61,7 @@ export default function App() {
   const [modelsOpen, setModelsOpen] = useState(false);
   const [plusOpen, setPlusOpen] = useState(false);
   const [themePickerOpen, setThemePickerOpen] = useState(false);
+  const [monitoringOpen, setMonitoringOpen] = useState(false);
 
   // ---- 当前会话 id（组合状态：聊天请求与历史列表都要用）----
   // 会话 id 不落本地存储，以服务端 /sessions 为权威。
@@ -311,6 +313,10 @@ export default function App() {
           setDrawerOpen(false);
           setPanelOpen(true);
         }}
+        onOpenMonitoring={() => {
+          setDrawerOpen(false);
+          setMonitoringOpen(true);
+        }}
         onOpenModels={() => {
           setDrawerOpen(false);
           setModelsOpen(true);
@@ -340,6 +346,13 @@ export default function App() {
       <MemoryScreen
         visible={memoryOpen}
         onClose={() => setMemoryOpen(false)}
+        theme={theme}
+      />
+
+      {/* 系统监控：独立只读工作区，不把监控卡片堆进聊天页 */}
+      <MonitoringScreen
+        visible={monitoringOpen}
+        onClose={() => setMonitoringOpen(false)}
         theme={theme}
       />
 

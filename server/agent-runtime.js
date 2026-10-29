@@ -27,6 +27,7 @@ const crypto = require('crypto');
 const { tagModelMessage } = require('./context/projection');
 
 const { createChatCompletion } = require('./model-adapter');
+const monitoring = require('./monitoring');
 const memorySearchTool = require('./tool-memory-search');
 const memoryRememberTool = require('./tool-memory-remember');
 const { truncateText } = require('./text-utils');
@@ -200,14 +201,35 @@ function buildToolSummary(result) {
  */
 async function executeToolCall(name, rawArgs, context) {
   const def = tools.get(String(name || ''));
+  const toolName = String(name || '');
+  const round = context && Number.isInteger(context.round) ? context.round : 1;
+  const monitor = monitoring.beginToolCall({
+    toolName,
+    round,
+    readOnly: def ? def.readOnly === true : null,
+    registered: Boolean(def),
+  });
+  const startedAt = Date.now();
 
   if (!def) {
+    monitor.complete({
+      ok: false,
+      code: 'unknown_tool',
+      durationMs: 0,
+      executed: false,
+    });
     return { ok: false, code: 'unknown_tool', error: `未注册的工具：${name}` };
   }
 
   // 显式区分只读工具与有副作用的写入工具：写入工具必须在运行层拿到
   // 当前会话与用户原话，不能只依赖模型参数或 handler 内部兜底。
   if (def.readOnly === false && (!context || !context.sessionId || !context.userText)) {
+    monitor.complete({
+      ok: false,
+      code: 'unauthorized_write',
+      durationMs: Date.now() - startedAt,
+      executed: false,
+    });
     return {
       ok: false,
       code: 'unauthorized_write',
@@ -216,18 +238,41 @@ async function executeToolCall(name, rawArgs, context) {
   }
 
   if (rawArgs === null || rawArgs === undefined) {
+    monitor.complete({
+      ok: false,
+      code: 'invalid_params',
+      durationMs: Date.now() - startedAt,
+      executed: false,
+    });
     return { ok: false, code: 'invalid_params', error: '工具参数不是合法 JSON' };
   }
 
   const validated = def.validate(rawArgs);
   if (!validated.ok) {
+    monitor.complete({
+      ok: false,
+      code: 'invalid_params',
+      durationMs: Date.now() - startedAt,
+      executed: false,
+    });
     return { ok: false, code: 'invalid_params', error: validated.error };
   }
 
   // 同请求去重：同工具 + 同规范化参数直接复用上次结果
   const dedupeKey = `${def.name}|${stableStringify(validated.args)}`;
   if (context.cache.has(dedupeKey)) {
-    return { ...context.cache.get(dedupeKey), deduped: true };
+    const cached = { ...context.cache.get(dedupeKey), deduped: true };
+    const serializedCached = JSON.stringify(cached);
+    monitor.complete({
+      ok: cached.ok === true,
+      code: cached.code || null,
+      durationMs: Date.now() - startedAt,
+      deduped: true,
+      executed: false,
+      resultBytes: serializedCached ? serializedCached.length : 0,
+      truncated: serializedCached ? serializedCached.length > TOOL_RESULT_MAX : false,
+    });
+    return cached;
   }
 
   const timeoutMs =
@@ -293,16 +338,41 @@ async function executeToolCall(name, rawArgs, context) {
   };
 
   try {
-    return remember(await Promise.race([handlerPromise, timeoutPromise]));
+    const result = remember(await Promise.race([handlerPromise, timeoutPromise]));
+    const serialized = JSON.stringify(result);
+    monitor.complete({
+      ok: result.ok === true,
+      code: result.code || null,
+      durationMs: Date.now() - startedAt,
+      deduped: result.deduped === true,
+      executed: true,
+      resultBytes: serialized ? serialized.length : 0,
+      truncated: serialized ? serialized.length > TOOL_RESULT_MAX : false,
+    });
+    return result;
   } catch (error) {
     if (timedOut || error instanceof ToolTimeoutError) {
-      return remember({
+      const result = remember({
         ok: false,
         code: 'tool_timeout',
         error: `工具执行超时（>${timeoutMs}ms），已中止`,
       });
+      monitor.complete({
+        ok: false,
+        code: result.code,
+        durationMs: Date.now() - startedAt,
+        executed: true,
+      });
+      return result;
     }
-    return remember({ ok: false, code: 'tool_error', error: '工具内部错误' });
+    const result = remember({ ok: false, code: 'tool_error', error: '工具内部错误' });
+    monitor.complete({
+      ok: false,
+      code: result.code,
+      durationMs: Date.now() - startedAt,
+      executed: true,
+    });
+    return result;
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -414,6 +484,7 @@ async function runAgentTurn({
       temperature,
       maxTokens,
       timeout,
+      monitoringRound: round,
       // 末轮强制无 tools：模型只能产出文本，从结构上终结循环
       ...(isFinalRound ? {} : { tools: specs, tool_choice: 'auto' }),
     });
@@ -439,6 +510,12 @@ async function runAgentTurn({
       `[agent-response] round=${round} provider=${providerId} model=${modelId}` +
         ` finishReason=${finishReason || 'null'} toolCalls=${toolCalls.length}`
     );
+
+    monitoring.recordAgentRound({
+      round,
+      finishReason,
+      toolCalls: toolCalls.length,
+    });
 
     // F3 修复：message 可能为 undefined（服务商返回空 choices / 缺 message
     // 等畸形响应）。与普通路径的 completion.choices?.[0]?.message?.content
@@ -503,6 +580,7 @@ async function runAgentTurn({
         userMessageId,
         cache,
         abortSignal,
+        round,
       });
 
       const summary = buildToolSummary(result);
@@ -543,6 +621,12 @@ async function runAgentTurn({
         )
       );
 
+      monitoring.recordToolResultReturned({
+        toolName: normalized.function.name,
+        round,
+        forwarded: true,
+      });
+
       console.log(
         `[agent-result] round=${round} name=${normalized.function.name} forwarded=true`
       );
@@ -552,7 +636,33 @@ async function runAgentTurn({
     if (typeof isClientGone === 'function' && isClientGone()) break;
   }
 
-  return { rawReply, toolSteps, rounds, completion };
+  const reachedMaxRounds = rounds >= MAX_ROUNDS;
+  const clientGone = typeof isClientGone === 'function' && isClientGone();
+
+  monitoring.recordAgentRun({
+    status: clientGone ? 'cancelled' : rawReply ? 'success' : 'failed',
+    rounds,
+    toolCount: toolSteps.length,
+    maxRounds: MAX_ROUNDS,
+    reachedMaxRounds,
+    clientGone,
+  });
+
+  return { rawReply, toolSteps, rounds, completion, reachedMaxRounds };
+}
+
+function listToolRegistry() {
+  return [...tools.values()].map(def => ({
+    name: def.name,
+    description: def.description,
+    read_only: def.readOnly === true,
+    side_effect: def.readOnly === false,
+    timeout_ms:
+      Number.isFinite(def.timeoutMs) && def.timeoutMs > 0
+        ? def.timeoutMs
+        : TOOL_TIMEOUT_DEFAULT,
+    registered: true,
+  }));
 }
 
 module.exports = {
@@ -563,6 +673,7 @@ module.exports = {
   unregisterTool,
   supportsTool,
   listToolSpecs,
+  listToolRegistry,
   agentToolsEnabled,
   noteSwitchObservation,
   runAgentTurn,
