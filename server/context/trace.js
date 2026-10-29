@@ -202,6 +202,38 @@ function createTrace({ task, sessionId, ts } = {}) {
       };
     },
 
+    recordPolicy(policy, meta, gate) {
+      if (!policy) return;
+      trace.policy = {
+        schemaVersion: policy.schemaVersion || null,
+        revision: meta && Number.isInteger(meta.revision) ? meta.revision : null,
+        digest: meta && meta.digest ? sanitizeId(meta.digest) : null,
+        mode: sanitizeId(policy.mode),
+        allowedToolCount:
+          policy.tools && Array.isArray(policy.tools.allowedTools)
+            ? policy.tools.allowedTools.length
+            : null,
+        maxRounds: policy.budgets ? policy.budgets.maxRounds : null,
+        maxToolCalls: policy.tools ? policy.tools.maxToolCalls : null,
+        maxTotalMs: policy.budgets ? policy.budgets.maxTotalMs : null,
+        gateReason: gate ? sanitizeId(gate.reason) : null,
+        gateAllowed: gate ? gate.allowed === true : null,
+        corrupted: meta ? meta.corrupted === true : false,
+      };
+    },
+
+    recordAgent(outcome) {
+      if (!outcome) return;
+      trace.agent = {
+        rounds: Number.isInteger(outcome.rounds) ? outcome.rounds : 0,
+        toolCalls: Number.isInteger(outcome.toolCallCount) ? outcome.toolCallCount : 0,
+        readOnlyRetries: Number.isInteger(outcome.readOnlyRetries)
+          ? outcome.readOnlyRetries
+          : 0,
+        stopReason: outcome.stopReason ? sanitizeId(outcome.stopReason) : null,
+      };
+    },
+
     recordBuild(build, inputFit) {
       trace.build = {
         ok: build.ok === true && (!inputFit || inputFit.ok !== false),

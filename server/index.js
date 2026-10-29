@@ -220,10 +220,20 @@ const { stripMoodTags, createMoodTagStripper } = require('./stream-strip');
 const AGENT_NEW_IMAGE_NOTICE = '本次带图，已切换到视觉模型，工具暂不可用';
 
 // Agent 门控的唯一判定入口：reason 只用于诊断和用户提示，不改变互斥规则。
-// 优先级：总开关关闭 > 本次新图 > 模型不支持 tools > 放行。
-function evaluateAgentGate({ switchOn, toolsSupported, hasNewImage }) {
+// 优先级：总开关关闭 > 策略 answer_only > 本次新图 > 模型不支持 tools >
+// 策略没有可用工具 > 放行。策略不能绕过前三道既有门控。
+function evaluateAgentGate({
+  switchOn,
+  toolsSupported,
+  hasNewImage,
+  policyMode = null,
+  policyToolCount = null,
+}) {
   if (!switchOn) {
     return { allowed: false, reason: 'switchOff', notice: null };
+  }
+  if (policyMode === 'answer_only') {
+    return { allowed: false, reason: 'policyAnswerOnly', notice: null };
   }
   if (hasNewImage) {
     return {
@@ -235,7 +245,20 @@ function evaluateAgentGate({ switchOn, toolsSupported, hasNewImage }) {
   if (!toolsSupported) {
     return { allowed: false, reason: 'noToolsCapability', notice: null };
   }
+  if (policyToolCount === 0) {
+    return { allowed: false, reason: 'policyNoTools', notice: null };
+  }
   return { allowed: true, reason: 'allowed', notice: null };
+}
+
+const AGENT_STOP_MESSAGES = Object.freeze({
+  tool_call_budget: 'Agent 已达到工具调用预算，已停止；请缩小任务范围或调整策略后重试。',
+  total_time_budget: 'Agent 已达到执行时间预算，已停止；请缩小任务范围或调整策略后重试。',
+  repeated_tool_failure: 'Agent 连续工具失败，已停止；请检查工具状态或换个方式重试。',
+  client_gone: 'Agent 已停止。',
+});
+function agentStopReply(reason) {
+  return AGENT_STOP_MESSAGES[reason] || 'Agent 已停止。';
 }
 
 // 多模态图片模块：上传校验 / 存储 / 读取 / 表情包索引
@@ -299,6 +322,17 @@ const {
   getMemoryClient,
 } = require('./model-adapter');
 
+// Agent 工作策略：独立于人格，服务端策略文件为唯一事实来源。
+const {
+  DEFAULTS: AGENT_POLICY_DEFAULTS,
+  LIMITS: AGENT_POLICY_LIMITS,
+  getPolicy: getAgentPolicy,
+  getMeta: getAgentPolicyMeta,
+  getPolicyForRequest: getAgentPolicyForRequest,
+  savePolicy: saveAgentPolicy,
+  resetPolicy: resetAgentPolicy,
+} = require('./agent-policy');
+
 // Agent 工具调用（V1）：工具注册、多轮循环与开关判定都在 agent-runtime。
 // 默认关闭，只有 BLUEBIRD_AGENT_TOOLS=1 且模型声明 tools 能力时才启用。
 const {
@@ -306,6 +340,7 @@ const {
   agentToolsEnabled,
   noteSwitchObservation,
   listToolSpecs,
+  listToolMetadata,
   MAX_ROUNDS,
 } = require('./agent-runtime');
 
@@ -2011,6 +2046,48 @@ app.put('/persona', requireAuth, (req, res) => {
   res.json({ config: saved });
 });
 
+// Agent 工作策略：GET 返回服务端策略、默认值、版本摘要与已注册工具；
+// PUT 整体保存或 reset:true 恢复默认。策略文件损坏时由模块安全回退默认并
+// 拒绝不安全覆盖，路由只返回受控错误码。
+app.get('/agent-policy', requireAuth, (req, res) => {
+  try {
+    res.json({
+      policy: getAgentPolicy(),
+      defaults: AGENT_POLICY_DEFAULTS,
+      meta: getAgentPolicyMeta(),
+      limits: AGENT_POLICY_LIMITS,
+      runtimeLimits: { maxRounds: MAX_ROUNDS },
+      availableTools: listToolMetadata(),
+    });
+  } catch (_) {
+    res.status(500).json({ error: '读取 Agent 策略失败', code: 'policy_read_failed' });
+  }
+});
+
+app.put('/agent-policy', requireAuth, (req, res) => {
+  const body = req.body || {};
+  const outcome =
+    body.reset === true
+      ? resetAgentPolicy()
+      : saveAgentPolicy(body.policy !== undefined ? body.policy : body.config);
+
+  if (!outcome.ok) {
+    if (outcome.code === 'policy_file_corrupted') {
+      return res.status(409).json({ error: outcome.error, code: outcome.code });
+    }
+    if (outcome.code === 'invalid_policy') {
+      return res.status(400).json({
+        error: outcome.error,
+        code: outcome.code,
+        details: Array.isArray(outcome.errors) ? outcome.errors : [],
+      });
+    }
+    return res.status(500).json({ error: outcome.error || '保存 Agent 策略失败', code: outcome.code });
+  }
+
+  res.json({ policy: outcome.policy, meta: outcome.meta });
+});
+
 // 记忆库：删除单条记忆。优先用稳定 id，旧的 createdAt + content 定位继续支持。
 app.post('/memory/delete', requireAuth, async (req, res) => {
   try {
@@ -2375,10 +2452,15 @@ async function prepareChatRequest(req) {
 
   // Agent 工具循环会在请求内追加 tool 消息：按工具 schema + 每轮结果预留
   // 输入预算。这是保守上界；轮数仍由 agent-runtime 的 MAX_ROUNDS 控制。
+  const agentPolicyState = getAgentPolicyForRequest();
+  const agentPolicy = agentPolicyState.policy;
+  const agentPolicyMeta = agentPolicyState.meta;
   const agentPossible = evaluateAgentGate({
     switchOn: agentToolsEnabled(),
     toolsSupported: supportsTools(modelTarget.providerId, modelTarget.modelId),
     hasNewImage,
+    policyMode: agentPolicy.mode,
+    policyToolCount: listToolSpecs(agentPolicy).length,
   }).allowed;
   const toolsReserveTokens = agentPossible ? estimateAgentToolsReserve() : 0;
 
@@ -2515,6 +2597,8 @@ async function prepareChatRequest(req) {
       requestMessages,
       systemPrompt,
       personaConfig,
+      agentPolicy,
+      agentPolicyMeta,
       contextTrace,
       contextMeasurement: contextRuntime.measurement,
       contextSummary: contextRuntime.summary,
@@ -2894,9 +2978,14 @@ app.post('/chat', requireAuth, async (req, res) => {
       switchOn: agentSwitchOn,
       toolsSupported: agentToolsSupported,
       hasNewImage: ctx.hasNewImage,
+      policyMode: ctx.agentPolicy.mode,
+      policyToolCount: listToolSpecs(ctx.agentPolicy).length,
     });
     const agentOn = agentGate.allowed;
 
+    if (ctx.contextTrace) {
+      ctx.contextTrace.recordPolicy(ctx.agentPolicy, ctx.agentPolicyMeta, agentGate);
+    }
     monitoring.recordAgentGate({
       path: 'chat',
       switchOn: agentSwitchOn,
@@ -2914,7 +3003,8 @@ app.post('/chat', requireAuth, async (req, res) => {
       `[agent-gate] path=chat provider=${ctx.providerId} model=${ctx.modelId}` +
         ` switch=${agentSwitchOn} toolsCapability=${agentToolsSupported}` +
         ` hasNewImage=${ctx.hasNewImage} includeHistoryImages=${ctx.includeHistoryImages}` +
-        ` hasImage=${ctx.useVision} reason=${agentGate.reason} allowed=${agentOn}`
+        ` hasImage=${ctx.useVision} reason=${agentGate.reason} allowed=${agentOn}` +
+        ` policyMode=${ctx.agentPolicy.mode} policyRevision=${ctx.agentPolicyMeta.revision}`
     );
 
     if (agentOn) {
@@ -2927,6 +3017,7 @@ app.post('/chat', requireAuth, async (req, res) => {
     let completion;
     let rawReply;
     let toolSteps = null;
+    let agentOutcome = null;
     let agentReachedMaxRounds = false;
 
     if (agentOn) {
@@ -2941,9 +3032,11 @@ app.post('/chat', requireAuth, async (req, res) => {
         isClientGone: () => clientGone,
         abortSignal: disconnect.signal,
         messages: ctx.requestMessages,
+        policy: ctx.agentPolicy,
         onRequest: requestMeta => recordSentForContext(ctx, requestMeta),
       });
 
+      agentOutcome = outcome;
       completion = outcome.completion;
       rawReply = outcome.rawReply;
       toolSteps = outcome.toolSteps.length ? outcome.toolSteps : null;
@@ -2953,7 +3046,8 @@ app.post('/chat', requireAuth, async (req, res) => {
 
       console.log(
         `[agent] finished session=${ctx.sessionId} rounds=${outcome.rounds}` +
-          ` tools=${outcome.toolSteps.length}`
+          ` tools=${outcome.toolSteps.length}` +
+          ` stop=${outcome.stopReason || 'none'}`
       );
 
       // Context Engine trace 收尾：把真实工具调用结果写入 trace（结构化、可测试验证）
@@ -2967,6 +3061,7 @@ app.post('/chat', requireAuth, async (req, res) => {
             durationMs: step.durationMs,
           });
         }
+        ctx.contextTrace.recordAgent(outcome);
         emitContextTrace(ctx);
       }
 
@@ -2987,6 +3082,10 @@ app.post('/chat', requireAuth, async (req, res) => {
       });
 
       rawReply = completion.choices?.[0]?.message?.content;
+    }
+
+    if (!rawReply && agentOn && agentOutcome && agentOutcome.stopReason) {
+      rawReply = agentStopReply(agentOutcome.stopReason);
     }
 
     if (!rawReply) {
@@ -3239,9 +3338,14 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
     switchOn: agentSwitchOn,
     toolsSupported: agentToolsSupported,
     hasNewImage: ctx.hasNewImage,
+    policyMode: ctx.agentPolicy.mode,
+    policyToolCount: listToolSpecs(ctx.agentPolicy).length,
   });
   const agentOn = agentGate.allowed;
 
+  if (ctx.contextTrace) {
+    ctx.contextTrace.recordPolicy(ctx.agentPolicy, ctx.agentPolicyMeta, agentGate);
+  }
   monitoring.recordAgentGate({
     path: 'stream',
     switchOn: agentSwitchOn,
@@ -3259,7 +3363,8 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
     `[agent-gate] path=stream provider=${ctx.providerId} model=${ctx.modelId}` +
       ` switch=${agentSwitchOn} toolsCapability=${agentToolsSupported}` +
       ` hasNewImage=${ctx.hasNewImage} includeHistoryImages=${ctx.includeHistoryImages}` +
-      ` hasImage=${ctx.useVision} reason=${agentGate.reason} allowed=${agentOn}`
+      ` hasImage=${ctx.useVision} reason=${agentGate.reason} allowed=${agentOn}` +
+      ` policyMode=${ctx.agentPolicy.mode} policyRevision=${ctx.agentPolicyMeta.revision}`
   );
 
   if (agentOn) {
@@ -3285,11 +3390,15 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
           sendEvent(event);
         },
         messages: ctx.requestMessages,
+        policy: ctx.agentPolicy,
         onRequest: requestMeta => recordSentForContext(ctx, requestMeta),
       });
 
       if (outcome.completion) {
         rawReply = outcome.rawReply;
+        if (!rawReply && outcome.stopReason) {
+          rawReply = agentStopReply(outcome.stopReason);
+        }
         // model 语义与 /chat 一致：始终是本系统实际下发的 ctx.modelId；
         // 供应商回显只写入 upstreamModel，绝不覆盖 model。
         upstreamModel =
@@ -3303,7 +3412,8 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
 
         console.log(
           `[agent] finished (stream) session=${ctx.sessionId}` +
-            ` rounds=${outcome.rounds} tools=${outcome.toolSteps.length}`
+            ` rounds=${outcome.rounds} tools=${outcome.toolSteps.length}` +
+            ` stop=${outcome.stopReason || 'none'}`
         );
 
         // Context Engine trace 收尾（stream 路由）：写入真实工具调用结果
@@ -3317,6 +3427,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
               durationMs: step.durationMs,
             });
           }
+          ctx.contextTrace.recordAgent(outcome);
           emitContextTrace(ctx);
         }
 

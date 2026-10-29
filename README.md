@@ -27,8 +27,8 @@ npx expo start             # Metro :8081
 ## Quality gates
 
 ```bash
-npm test                    # backend: auto-discovers tests/*.test.js (43 files / 1443 checks)
-npm run test:unit -- --ci   # frontend: 8 suites / 117 cases
+npm test                    # backend: auto-discovers tests/*.test.js (44 files / 1491 checks)
+npm run test:unit -- --ci   # frontend: 9 suites / 119 cases
 npx tsc --noEmit            # TypeScript
 npm run lint                # Expo ESLint
 npm run eval:context        # real-model capability eval (needs DEEPSEEK_API_KEY; not in CI)

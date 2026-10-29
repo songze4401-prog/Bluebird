@@ -102,6 +102,36 @@ export type PersonaConfig = {
   messageMode: 'single' | 'auto' | 'frequent'; // 连续消息模式
 };
 
+// Agent 工作策略（GET/PUT /agent-policy 的结构；服务端 agent-policy.js 为准）
+export type AgentPolicyMode = 'answer_only' | 'plan_then_act' | 'bounded_autonomy';
+
+export type AgentPolicyConfig = {
+  schemaVersion: 1;
+  mode: AgentPolicyMode;
+  planning: {
+    generatePlan: boolean;
+    stagedExecution: boolean;
+    resultSummary: boolean;
+  };
+  tools: {
+    allowedTools: string[] | null;
+    maxToolCalls: number;
+    maxReadOnlyRetries: number;
+  };
+  budgets: {
+    maxRounds: number;
+    maxTotalMs: number;
+  };
+};
+
+export type AgentPolicyTool = {
+  name: string;
+  description: string;
+  readOnly: boolean;
+  risk: 'read' | 'reversible_write' | 'high_risk';
+  timeoutMs: number;
+};
+
 // 模型服务商（GET /model-providers 的脱敏视图）
 // 后端永不下发完整 Key：只有 keyConfigured 布尔与脱敏 keyHint
 export type ModelCapabilities = {
