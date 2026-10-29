@@ -5,6 +5,8 @@ require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const express = require('express');
 const cors = require('cors');
+const retrieval = require('./retrieval');
+const { createRetrievalRouter } = require('./retrieval/routes');
 
 // 模型客户端统一由 model-adapter.js 按服务商配置创建（内置 DeepSeek 从
 // DEEPSEEK_API_KEY 派生）。缺 key 时服务照常启动（管理接口可用），
@@ -52,6 +54,9 @@ function rateLimit({ maxPerWindow = 60 } = {}) {
 }
 
 app.use(rateLimit());
+
+// 统一检索：查询只读，摄取/删除/重建写索引；全部复用 Bearer 鉴权与全局限流。
+app.use('/retrieval', createRetrievalRouter({ requireAuth }));
 
 // 定期清理过期限流桶，防止内存无限增长
 setInterval(() => {
@@ -3034,6 +3039,15 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
 
 // 先抢占数据目录锁：已有实例在跑就直接退出，绝不带病启动造成静默覆盖
 acquireSingleInstance({ port: PORT });
+
+// 检索索引初始化失败不阻止聊天服务启动：状态接口会显式返回 degraded，
+// 上下文只降级外部知识块，主链路仍可用。
+const retrievalStatus = retrieval.initialize();
+if (!retrievalStatus.enabled) {
+  console.log('[retrieval] 统一检索已关闭（BLUEBIRD_RETRIEVAL=0）');
+} else {
+  console.log(`[retrieval] 统一检索状态：${retrievalStatus.state || 'unknown'}`);
+}
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   // PORT 为 0 时由操作系统分配空闲端口，日志回显真实端口

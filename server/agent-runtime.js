@@ -29,6 +29,7 @@ const { tagModelMessage } = require('./context/projection');
 const { createChatCompletion } = require('./model-adapter');
 const memorySearchTool = require('./tool-memory-search');
 const memoryRememberTool = require('./tool-memory-remember');
+const knowledgeSearchTool = require('./tool-knowledge-search');
 const { truncateText } = require('./text-utils');
 
 // ---- 可调参数（环境变量，加载时读取；开关除外——开关每请求重读） ----
@@ -162,6 +163,7 @@ function listToolSpecs() {
 // 启动即注册记忆只读检索与受控写入工具。
 registerTool(memorySearchTool.definition);
 registerTool(memoryRememberTool.definition);
+registerTool(knowledgeSearchTool.definition);
 
 // ---- 工具执行 ----
 

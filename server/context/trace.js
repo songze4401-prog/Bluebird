@@ -66,6 +66,15 @@ function createTrace({ task, sessionId, ts } = {}) {
       conflicts: [],
       error: null,
     },
+    knowledge: {
+      status: null,
+      candidates: 0,
+      accepted: 0,
+      skipped: [],
+      error: null,
+      degraded: [],
+      trace: null,
+    },
     build: {
       ok: null,
       error: null,
@@ -156,6 +165,40 @@ function createTrace({ task, sessionId, ts } = {}) {
             }))
           : [],
         error: outcome.error ? sanitizeText(outcome.error) : null,
+      };
+    },
+
+    recordKnowledge(outcome, adjudication) {
+      trace.knowledge = {
+        status: outcome.status || null,
+        candidates: outcome.count || 0,
+        accepted: adjudication ? adjudication.accepted.length : 0,
+        skipped: adjudication
+          ? adjudication.skipped.slice(0, 100).map(item => ({
+              id: sanitizeId(item.id),
+              source: item.source || 'knowledge',
+              stage: item.stage || 'accepted',
+              reason: sanitizeReason(item.reason),
+              ...(Number.isFinite(item.score) ? { score: item.score } : {}),
+              ...(item.against ? { against: sanitizeId(item.against) } : {}),
+            }))
+          : [],
+        error: outcome.error ? sanitizeText(outcome.error) : null,
+        degraded: Array.isArray(outcome.degraded) ? outcome.degraded.slice(0, 20) : [],
+        trace: outcome.trace
+          ? {
+              traceId: sanitizeId(outcome.trace.traceId),
+              channels: (outcome.trace.channels || []).map(channel => ({
+                name: channel.name,
+                status: channel.status,
+                count: channel.count,
+                ...(channel.errorCode ? { errorCode: sanitizeText(channel.errorCode) } : {}),
+              })),
+              fusion: outcome.trace.fusion,
+              packing: outcome.trace.packing,
+              degraded: outcome.trace.degraded || [],
+            }
+          : null,
       };
     },
 
