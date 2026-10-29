@@ -27,8 +27,8 @@ npx expo start             # Metro :8081
 ## Quality gates
 
 ```bash
-npm test                    # backend: auto-discovers tests/*.test.js (39 files / 1344 checks)
-npm run test:unit -- --ci   # frontend: 7 suites / 111 cases
+npm test                    # backend: auto-discovers tests/*.test.js (39 files / 1374 checks)
+npm run test:unit -- --ci   # frontend: 8 suites / 116 cases
 npx tsc --noEmit            # TypeScript
 npm run lint                # Expo ESLint
 npm run eval:context        # real-model capability eval (needs DEEPSEEK_API_KEY; not in CI)
@@ -48,6 +48,7 @@ CI (`.github/workflows/ci.yml`) runs the backend suites, TypeScript, lint, and J
 ## Documentation
 
 - `AGENTS.md` — architecture, data safety, commands, tests, and rules. This is the primary engineering reference.
+- `docs/persona-custom-prompt.md` — the user-authored persona text: field contract, priority order, untrusted-text handling, and validation error codes.
 - `MODEL_ROUTING_RISKS.md` — current status of model-routing risks; the 2026-10-25 original is archived under `docs/archive/`.
 
 ## License

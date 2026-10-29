@@ -100,6 +100,9 @@ export type PersonaConfig = {
   initiative: number; // 主动表达 0-100
   length: number; // 表达长度 0-100
   messageMode: 'single' | 'auto' | 'frequent'; // 连续消息模式
+  // 用户自填的人格提示词：只调表达方式，不授予工具权限（上限见服务端
+  // CUSTOM_PROMPT_MAX_CHARS）。旧配置缺该字段时服务端迁移为 ''。
+  customPrompt: string;
 };
 
 // 模型服务商（GET /model-providers 的脱敏视图）
