@@ -16,6 +16,8 @@ export type StreamOutcome =
   // 一个 delta 都没收到就失败：服务端未开始生成或不支持流式（旧版本 404），
   // 可安全回退到非流式 /chat，不会产生两条不同回复
   | { kind: 'fallback' }
+  // 用户主动停止：不是错误，调用方保留已生成的部分正文并清理生成态
+  | { kind: 'aborted' }
   | { kind: 'error'; message: string };
 
 // 服务端下发的 SSE 事件（判别联合，逐条对照 server/index.js 与 agent-runtime.js）
@@ -89,16 +91,34 @@ export function streamChatRequest(
     // Agent 工具调用的进度事件：tool_start 在跑工具前发，tool_end 带结果。
     // 早于所有 delta 到达，所以客户端能先亮 pill 再逐字出正文。
     onToolEvent?: (event: ToolStreamEvent) => void;
+    // 用户主动停止：调用方应保留已收到的 delta，但不再等待服务器。
+    signal?: AbortSignal;
   }
 ): Promise<StreamOutcome> {
   return new Promise(resolve => {
     let receivedDelta = false;
     let finished = false;
+    let aborted = false;
+    const externalSignal = handlers.signal;
 
     const finish = (outcome: StreamOutcome) => {
       if (finished) return;
       finished = true;
+      if (externalSignal) {
+        externalSignal.removeEventListener('abort', onAbort);
+      }
       resolve(outcome);
+    };
+
+    const onAbort = () => {
+      if (finished) return;
+      aborted = true;
+      try {
+        xhr.abort();
+      } catch {
+        /* xhr 可能尚未 open */
+      }
+      finish({ kind: 'aborted' });
     };
 
     const parser = createSSEParser(event => {
@@ -145,6 +165,14 @@ export function streamChatRequest(
     const xhr = new XMLHttpRequest();
     let processed = 0;
 
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        onAbort();
+      } else {
+        externalSignal.addEventListener('abort', onAbort, { once: true });
+      }
+    }
+
     const consume = () => {
       const text = xhr.responseText || '';
       if (text.length > processed) {
@@ -156,6 +184,7 @@ export function streamChatRequest(
     xhr.onprogress = () => consume();
 
     xhr.onload = () => {
+      if (finished || aborted) return;
       consume(); // 收尾：解析最后到达的字节
 
       if (finished) return; // 已收到 done / error 事件
@@ -195,6 +224,7 @@ export function streamChatRequest(
     };
 
     xhr.onerror = () => {
+      if (finished || aborted) return;
       finish(
         receivedDelta
           ? { kind: 'error', message: '连接Bluebird失败了，再试一次。' }
@@ -203,10 +233,12 @@ export function streamChatRequest(
     };
 
     xhr.ontimeout = () => {
+      if (finished || aborted) return;
       finish({ kind: 'error', message: '连接Bluebird超时了，再试一次。' });
     };
 
     try {
+      if (aborted || finished) return;
       xhr.open('POST', `${process.env.EXPO_PUBLIC_API_URL}${API_PATHS.chatStream}`);
       xhr.setRequestHeader('Content-Type', 'application/json');
       xhr.setRequestHeader('Authorization', `Bearer ${API_TOKEN}`);

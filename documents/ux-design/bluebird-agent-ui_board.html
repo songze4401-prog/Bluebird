@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bluebird — Agent UI / Direction 01</title>
+<style>
+  :root{
+    --canvas:#08090b;
+    --canvas-raised:#0d0f13;
+    --surface:#12151a;
+    --surface-hover:#171b21;
+    --line:rgba(255,255,255,.065);
+    --line-strong:rgba(255,255,255,.12);
+    --text:#f2f3f5;
+    --text-2:#a3a8b2;
+    --text-3:#6c727d;
+    --text-4:#4a505a;
+    --accent:#7e9bff;
+    --accent-soft:rgba(126,155,255,.12);
+    --success:#6fcf97;
+    --warning:#d6b77a;
+    --danger:#e07a7a;
+    --code:#0a0c10;
+    --hair:rgba(255,255,255,.065);
+    --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Roboto","Noto Sans CJK SC","Microsoft YaHei",sans-serif;
+    --mono:"SFMono-Regular",ui-monospace,Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html{background:#050607}
+  body{
+    margin:0;
+    color:var(--text);
+    background:
+      radial-gradient(1200px 500px at 50% -20%,rgba(126,155,255,.06),transparent 70%),
+      #050607;
+    font-family:var(--font);
+    -webkit-font-smoothing:antialiased;
+  }
+  button{font:inherit}
+  .page{max-width:1500px;margin:0 auto;padding:54px 40px 72px}
+  .masthead{display:flex;align-items:flex-end;justify-content:space-between;gap:30px;margin-bottom:52px}
+  .brandline{display:flex;align-items:center;gap:10px;color:var(--text-2);font-size:11px;font-weight:650;letter-spacing:.16em}
+  .brandmark{display:grid;place-items:center;width:24px;height:24px;border:1px solid var(--line-strong);border-radius:50%;color:var(--accent)}
+  .brandmark svg{width:14px;height:14px}
+  .masthead h1{margin:18px 0 8px;font-size:34px;line-height:1.14;font-weight:620;letter-spacing:-.045em;color:#f7f8fa}
+  .masthead h1 span{color:var(--text-3);font-weight:430}
+  .dek{max-width:620px;margin:0;color:var(--text-3);font-size:13px;line-height:1.7}
+  .meta{text-align:right;color:var(--text-4);font-size:10px;line-height:1.9;letter-spacing:.1em;white-space:nowrap}
+  .meta strong{display:block;color:var(--text-2);font-weight:600;letter-spacing:.08em}
+  .board-grid{display:grid;grid-template-columns:repeat(3,330px);gap:44px 30px;justify-content:center;align-items:start}
+  .frame{min-width:0;margin:0}
+  .frame-caption{display:flex;align-items:flex-start;gap:10px;margin:0 0 12px 3px;min-height:34px}
+  .frame-caption .num{color:var(--text-4);font-family:var(--mono);font-size:10px;line-height:16px;letter-spacing:.06em}
+  .frame-caption strong{display:block;color:var(--text-2);font-size:12px;line-height:16px;font-weight:600}
+  .frame-caption small{display:block;margin-top:2px;color:var(--text-4);font-size:10px;line-height:14px;letter-spacing:.02em}
+  .phone{
+    position:relative;width:330px;height:716px;overflow:hidden;
+    display:flex;flex-direction:column;
+    border:1px solid rgba(255,255,255,.09);border-radius:41px;
+    background:var(--canvas);
+    box-shadow:0 28px 80px rgba(0,0,0,.56),0 2px 0 rgba(255,255,255,.025) inset;
+  }
+  .phone::after{content:"";position:absolute;inset:0;border-radius:40px;border:1px solid rgba(255,255,255,.025);pointer-events:none}
+  .island{position:absolute;z-index:30;top:9px;left:50%;width:92px;height:23px;transform:translateX(-50%);border-radius:14px;background:#020303}
+  .status{height:37px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:7px 22px 0;color:#e8eaee;font-size:10px;font-weight:600;letter-spacing:.01em;position:relative;z-index:25}
+  .status .time{padding-left:2px}
+  .status-icons{display:flex;align-items:center;gap:7px;color:#dfe3e8;font-size:9px;font-weight:550}
+  .bars{display:flex;align-items:flex-end;gap:2px;height:11px}
+  .bars i{display:block;width:3px;background:#dfe3e8;border-radius:1px}
+  .bars i:nth-child(1){height:5px}.bars i:nth-child(2){height:8px}.bars i:nth-child(3){height:10px}.bars i:nth-child(4){height:12px}
+  .battery{width:18px;height:9px;border:1px solid rgba(255,255,255,.65);border-radius:2px;position:relative}
+  .battery::after{content:"";position:absolute;right:-3px;top:2px;width:2px;height:4px;background:rgba(255,255,255,.55);border-radius:0 1px 1px 0}
+  .battery::before{content:"";position:absolute;left:1px;top:1px;width:12px;height:5px;background:#dfe3e8;border-radius:1px}
+  .app{min-height:0;flex:1;display:flex;flex-direction:column;position:relative;z-index:1}
+  .nav{height:52px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:0 14px;gap:8px}
+  .nav-left,.nav-right{display:flex;align-items:center;gap:4px;min-width:42px}
+  .nav-right{justify-content:flex-end}
+  .icon-btn{width:40px;height:40px;display:grid;place-items:center;border:0;background:transparent;color:var(--text-2);border-radius:50%;padding:0;transition:opacity .12s ease,background .12s ease}
+  .icon-btn:hover{background:rgba(255,255,255,.045)}
+  .icon-btn:active{opacity:.62}
+  .icon-btn.round{background:var(--surface);color:var(--text);width:34px;height:34px;border:1px solid var(--line)}
+  .icon{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+  .icon.sm{width:16px;height:16px}
+  .icon.xs{width:14px;height:14px}
+  .wordmark{display:flex;align-items:center;gap:8px;font-size:15px;line-height:20px;font-weight:650;letter-spacing:.01em;color:var(--text)}
+  .wordmark .mark{color:var(--accent);display:grid;place-items:center;width:17px;height:17px}
+  .wordmark .mark svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+  .nav-session{font-size:12px;line-height:16px;color:var(--text-2);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:178px;text-align:center}
+  .content{min-height:0;flex:1;overflow-y:auto;overflow-x:hidden;padding:0 20px 18px;scrollbar-width:none}
+  .content::-webkit-scrollbar{display:none}
+  .home{display:flex;flex-direction:column;padding-top:31px;overflow:hidden}
+  .eyebrow{font-size:9.5px;line-height:13px;letter-spacing:.16em;font-weight:650;color:var(--text-4)}
+  .home h1{margin:12px 0 11px;font-size:29px;line-height:1.23;letter-spacing:-.045em;font-weight:610;color:var(--text)}
+  .lead{max-width:250px;margin:0;color:var(--text-3);font-size:12.5px;line-height:1.65}
+  .suggestions{margin-top:27px;border-top:1px solid var(--line)}
+  .suggestion{height:52px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--line);color:var(--text-2);font-size:13px;line-height:18px}
+  .suggestion .s-icon{width:16px;height:16px;color:var(--accent);opacity:.83;flex:none}
+  .suggestion .s-text{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .suggestion .s-arrow{color:var(--text-4);font-size:14px;transition:transform .15s ease,color .15s ease}
+  .suggestion:hover .s-arrow{transform:translate(2px,-2px);color:var(--text-2)}
+  .recent-head{display:flex;align-items:center;justify-content:space-between;margin-top:27px;margin-bottom:2px;color:var(--text-4);font-size:10px;line-height:15px;letter-spacing:.04em}
+  .recent-head span:last-child{color:var(--text-3);letter-spacing:0}
+  .recent-row{padding:13px 0 14px;border-bottom:1px solid var(--line);display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+  .recent-row strong{display:block;color:var(--text-2);font-size:12.5px;line-height:18px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .recent-row small{display:block;margin-top:4px;color:var(--text-4);font-size:10.5px;line-height:15px}
+  .recent-row .tiny-arrow{color:var(--text-4);font-size:13px;padding-top:1px}
+  .dock{flex:none;padding:10px 14px 20px;margin-top:auto;background:var(--canvas)}
+  .model-line{display:flex;align-items:center;gap:6px;margin:0 8px 7px;color:var(--text-3);font-size:10.5px;line-height:15px;white-space:nowrap}
+  .model-line .model-dot{width:5px;height:5px;border-radius:50%;background:var(--accent);opacity:.8}
+  .model-line .chev{color:var(--text-4);font-size:10px;margin-left:1px}
+  .composer{display:flex;align-items:flex-end;gap:6px;min-height:52px;padding:6px 6px 6px 9px;background:var(--surface);border:1px solid var(--line);border-radius:27px}
+  .composer .attach{width:34px;height:38px;display:grid;place-items:center;color:var(--text-3);border:0;background:transparent;padding:0;flex:none}
+  .composer .prompt{min-height:38px;display:flex;align-items:center;flex:1;color:var(--text-4);font-size:13px;line-height:19px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .composer .prompt .caret-input{width:1px;height:16px;background:var(--text-3);margin-left:1px;animation:blink 1.2s steps(1) infinite}
+  .composer .mic{width:34px;height:34px;display:grid;place-items:center;color:var(--text-3);border:0;background:transparent;flex:none;padding:0}
+  .composer .send{width:36px;height:36px;display:grid;place-items:center;border:0;border-radius:50%;background:var(--accent);color:#0a0c10;flex:none;padding:0;transition:background .12s ease,transform .12s ease}
+  .composer .send:active{transform:scale(.96);background:#91a8ff}
+  .composer .send.stop{background:transparent;color:var(--text);border:1px solid var(--line-strong)}
+  .composer .send.stop:active{background:rgba(255,255,255,.06)}
+  .home-indicator{position:absolute;z-index:25;bottom:8px;left:50%;width:103px;height:4px;transform:translateX(-50%);border-radius:99px;background:rgba(245,247,250,.38)}
+  .transcript{display:flex;flex-direction:column;min-height:0;padding-top:13px;overflow:hidden}
+  .msg-user{align-self:flex-end;max-width:82%;text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:7px;padding-top:4px}
+  .msg-meta{font-size:10px;line-height:14px;color:var(--text-4);letter-spacing:.015em}
+  .msg-user p{margin:0;color:var(--text-2);font-size:13.5px;line-height:22px}
+  .agent-run{margin-top:19px;padding:12px 13px 10px;background:var(--surface);border:1px solid var(--line);border-radius:17px}
+  .run-head{display:flex;align-items:center;gap:7px;min-width:0}
+  .run-label{font-size:9px;line-height:13px;font-weight:650;letter-spacing:.14em;color:var(--text-3);white-space:nowrap}
+  .run-state{display:flex;align-items:center;gap:5px;font-size:9.5px;line-height:13px;color:var(--accent);white-space:nowrap}
+  .run-state .pulse{width:5px;height:5px;border-radius:50%;background:var(--accent);animation:pulse 1.45s ease-in-out infinite}
+  .run-state.done{color:var(--success)}
+  .run-state.done .pulse{background:var(--success);animation:none}
+  .run-state.warn{color:var(--warning)}
+  .run-state.warn .pulse{background:var(--warning);animation:none}
+  .run-time{margin-left:auto;color:var(--text-4);font-size:9.5px;line-height:13px;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .run-summary{margin:7px 0 8px;color:var(--text-3);font-size:10.5px;line-height:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .steps{display:flex;flex-direction:column}
+  .step{height:29px;display:flex;align-items:center;gap:8px;min-width:0;color:var(--text-3);font-size:10.5px;line-height:15px}
+  .step .step-icon{width:14px;height:14px;flex:none;display:grid;place-items:center;color:var(--success)}
+  .step .step-icon.run{color:var(--accent)}
+  .step .step-icon.wait{color:var(--warning)}
+  .step .step-label{color:var(--text-2);flex:none;white-space:nowrap}
+  .step .step-tool{color:var(--text-4);font-family:var(--mono);font-size:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .step .step-meta{margin-left:auto;color:var(--text-4);font-size:9.5px;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .run-foot{display:flex;align-items:center;gap:7px;margin-top:7px;padding-top:8px;border-top:1px solid var(--line);color:var(--text-4);font-size:9.5px;line-height:14px}
+  .run-foot .foot-link{margin-left:auto;color:var(--text-3)}
+  .answer{margin-top:22px;max-width:100%}
+  .who-line{display:flex;align-items:center;gap:6px;color:var(--text-4);font-size:9.5px;line-height:14px;letter-spacing:.06em}
+  .who-line .who-dot{width:5px;height:5px;border-radius:50%;background:var(--accent);opacity:.8}
+  .who-line .who-name{color:var(--text-2);font-size:10px;font-weight:650;letter-spacing:.08em}
+  .answer h2{margin:10px 0 8px;color:var(--text);font-size:19px;line-height:27px;letter-spacing:-.02em;font-weight:600}
+  .answer p{margin:0 0 8px;color:#cdd1d8;font-size:13.5px;line-height:22px}
+  .answer .inline-code{font-family:var(--mono);font-size:11.5px;color:#dde1e8;background:var(--code);border:1px solid var(--line);border-radius:4px;padding:1px 4px}
+  .answer ul{margin:5px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:5px}
+  .answer li{position:relative;padding-left:13px;color:#cdd1d8;font-size:13px;line-height:20px}
+  .answer li::before{content:"";position:absolute;left:0;top:8px;width:4px;height:4px;border-radius:50%;background:var(--text-4)}
+  .caret{display:inline-block;width:1.5px;height:16px;margin-left:2px;vertical-align:-3px;background:var(--accent);animation:blink 1s steps(1) infinite}
+  .scroll-pill{position:absolute;left:50%;bottom:128px;transform:translateX(-50%);height:26px;padding:0 11px;display:flex;align-items:center;gap:5px;background:var(--surface);border:1px solid var(--line);border-radius:99px;color:var(--text-3);font-size:9.5px;box-shadow:0 8px 22px rgba(0,0,0,.3)}
+  .sheet-backdrop{position:absolute;inset:0;z-index:4;background:transparent}
+  .dimmed{opacity:.34;filter:saturate(.65)}
+  .dimmed .nav{opacity:.9}
+  .sheet{position:absolute;z-index:8;left:0;right:0;bottom:0;padding:9px 16px 21px;background:var(--canvas-raised);border-top:1px solid var(--line);border-radius:27px 27px 0 0;box-shadow:0 -22px 60px rgba(0,0,0,.46)}
+  .sheet::before{content:"";display:block;width:36px;height:3px;margin:0 auto 13px;border-radius:99px;background:rgba(255,255,255,.18)}
+  .sheet-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+  .sheet-head h2{margin:0;color:var(--text);font-size:18px;line-height:24px;font-weight:600;letter-spacing:-.01em}
+  .sheet-head .sub{margin-top:4px;color:var(--text-3);font-size:10px;line-height:15px}
+  .sheet-close{width:30px;height:30px;display:grid;place-items:center;border:0;background:transparent;color:var(--text-3);padding:0}
+  .timeline{position:relative;margin-top:18px;padding-left:15px}
+  .timeline::before{content:"";position:absolute;left:4px;top:7px;bottom:21px;width:1px;background:var(--line)}
+  .t-step{position:relative;padding:0 0 14px 0}
+  .t-dot{position:absolute;left:-15px;top:5px;width:9px;height:9px;border-radius:50%;background:var(--canvas-raised);border:1px solid var(--text-4)}
+  .t-step.done .t-dot{border-color:var(--success);background:var(--success)}
+  .t-step.run .t-dot{border-color:var(--accent);background:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  .t-step.wait .t-dot{border-color:var(--warning);background:var(--warning)}
+  .t-line{display:flex;align-items:center;gap:7px;min-width:0}
+  .t-line strong{color:var(--text-2);font-size:11.5px;line-height:16px;font-weight:550}
+  .t-line .t-tool{font-family:var(--mono);color:var(--text-4);font-size:9px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .t-line .t-state{margin-left:auto;color:var(--text-4);font-size:9px;white-space:nowrap}
+  .t-desc{margin:3px 0 0 0;color:var(--text-4);font-size:10px;line-height:15px}
+  .code-box{margin:7px 0 0;padding:8px 9px;background:var(--code);border:1px solid var(--line);border-radius:8px;font-family:var(--mono);font-size:9px;line-height:15px;color:#b7bdc9;white-space:pre-wrap;word-break:break-word}
+  .t-actions{display:flex;align-items:center;gap:8px;margin-top:5px}
+  .text-action{border:0;background:transparent;padding:0;color:var(--text-3);font-size:9.5px;line-height:14px;cursor:pointer}
+  .text-action:hover{color:var(--text-2)}
+  .sheet-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:4px;padding-top:12px;border-top:1px solid var(--line);color:var(--text-4);font-size:9.5px;line-height:14px}
+  .sheet-footer .stop-action{color:var(--danger)}
+  .history-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding-top:24px}
+  .history-head h1{margin:0;font-size:28px;line-height:35px;letter-spacing:-.04em;font-weight:610;color:var(--text)}
+  .history-head p{margin:7px 0 0;color:var(--text-3);font-size:11.5px;line-height:17px}
+  .search{margin-top:18px;height:40px;display:flex;align-items:center;gap:9px;padding:0 11px;border:1px solid var(--line);border-radius:22px;background:var(--surface);color:var(--text-4);font-size:11.5px}
+  .search .icon{width:15px;height:15px;color:var(--text-3)}
+  .group-label{margin:22px 0 4px;color:var(--text-4);font-size:9.5px;line-height:14px;letter-spacing:.08em;font-weight:600}
+  .history-list{border-top:1px solid var(--line)}
+  .history-row{position:relative;min-height:57px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line);padding:9px 0}
+  .history-row .row-main{min-width:0;flex:1}
+  .history-row strong{display:block;color:var(--text-2);font-size:12.5px;line-height:18px;font-weight:520;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .history-row p{margin:3px 0 0;color:var(--text-4);font-size:10.5px;line-height:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .history-row time{color:var(--text-4);font-size:9.5px;line-height:14px;white-space:nowrap;font-variant-numeric:tabular-nums}
+  .history-row .row-more{width:26px;height:32px;display:grid;place-items:center;border:0;background:transparent;color:var(--text-4);padding:0;flex:none}
+  .history-row:hover{background:rgba(255,255,255,.018)}
+  .history-hint{margin-top:auto;padding:17px 0 3px;color:var(--text-4);font-size:9.5px;line-height:14px;display:flex;align-items:center;gap:6px}
+  .history-hint .icon{width:12px;height:12px}
+  .settings-scroll{overflow-y:auto;padding-top:17px}
+  .settings-title{margin:0;color:var(--text);font-size:27px;line-height:34px;letter-spacing:-.04em;font-weight:610}
+  .profile{display:flex;align-items:center;gap:11px;margin-top:17px;padding:0 0 13px;border-bottom:1px solid var(--line)}
+  .profile .monogram{width:31px;height:31px;display:grid;place-items:center;border:1px solid var(--line-strong);border-radius:50%;color:var(--text-2);font-size:11px;font-weight:600}
+  .profile strong{display:block;color:var(--text-2);font-size:12.5px;line-height:17px;font-weight:550}
+  .profile small{display:block;margin-top:2px;color:var(--text-4);font-size:9.5px;line-height:14px}
+  .profile .chev{margin-left:auto;color:var(--text-4);font-size:13px}
+  .settings-section{margin-top:19px}
+  .settings-section .group-label{margin:0 0 2px}
+  .setting-row{height:43px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line)}
+  .setting-row .set-label{color:var(--text-2);font-size:11.5px;line-height:16px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .setting-row .set-value{color:var(--text-4);font-size:10px;line-height:14px;white-space:nowrap}
+  .setting-row .chev{color:var(--text-4);font-size:12px;margin-left:2px}
+  .setting-row.danger .set-label{color:var(--danger)}
+  .switch{width:35px;height:21px;border-radius:99px;background:var(--surface-hover);border:1px solid var(--line-strong);position:relative;flex:none}
+  .switch::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:var(--text-4);transition:transform .15s ease,background .15s ease}
+  .switch.on{background:var(--accent-soft);border-color:rgba(126,155,255,.35)}
+  .switch.on::after{transform:translateX(14px);background:var(--accent)}
+  .settings-footer{margin-top:18px;color:var(--text-4);font-size:9px;line-height:14px;letter-spacing:.03em}
+  .tools-intro{padding-top:17px}
+  .tools-intro h1{margin:0;color:var(--text);font-size:27px;line-height:34px;letter-spacing:-.04em;font-weight:610}
+  .tools-intro p{margin:8px 0 0;max-width:277px;color:var(--text-3);font-size:11px;line-height:17px}
+  .tool-status{margin-top:17px;padding:12px 13px;background:var(--surface);border:1px solid var(--line);border-radius:13px;display:flex;align-items:center;gap:9px}
+  .tool-status .status-dot{width:6px;height:6px;border-radius:50%;background:var(--accent);flex:none}
+  .tool-status strong{display:block;color:var(--text-2);font-size:11px;line-height:16px;font-weight:550}
+  .tool-status small{display:block;margin-top:2px;color:var(--text-4);font-size:9.5px;line-height:14px}
+  .tool-status .status-value{margin-left:auto;color:var(--text-3);font-size:9.5px;white-space:nowrap}
+  .tool-list{margin-top:18px;border-top:1px solid var(--line)}
+  .tool-row{min-height:54px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line)}
+  .tool-glyph{width:27px;height:27px;display:grid;place-items:center;border:1px solid var(--line);border-radius:8px;color:var(--text-3);font-family:var(--mono);font-size:9px;flex:none}
+  .tool-glyph.tool-read{color:var(--text-3)}
+  .tool-glyph.tool-write{color:var(--warning)}
+  .tool-glyph.tool-off{color:var(--text-4)}
+  .tool-main{min-width:0;flex:1}
+  .tool-main strong{display:block;color:var(--text-2);font-size:11px;line-height:16px;font-family:var(--mono);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tool-main small{display:block;margin-top:2px;color:var(--text-4);font-size:9.5px;line-height:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tool-state{font-size:9px;line-height:14px;white-space:nowrap}
+  .tool-state.read{color:var(--text-3)}
+  .tool-state.write{color:var(--warning)}
+  .tool-state.off{color:var(--text-4)}
+  .boundary{margin-top:19px}
+  .boundary-row{height:37px;display:flex;align-items:center;border-bottom:1px solid var(--line);color:var(--text-3);font-size:10px;line-height:15px}
+  .boundary-row span:last-child{margin-left:auto;color:var(--text-4);font-size:9.5px}
+  .tools-note{margin-top:15px;color:var(--text-4);font-size:9.5px;line-height:15px;display:flex;gap:7px}
+  .tools-note .icon{width:13px;height:13px;flex:none;margin-top:1px}
+  .tokens{display:flex;justify-content:space-between;gap:28px;margin-top:52px;padding-top:23px;border-top:1px solid var(--line)}
+  .token-group{display:flex;align-items:center;gap:9px;color:var(--text-4);font-size:9.5px;line-height:14px;letter-spacing:.05em}
+  .swatches{display:flex;gap:5px}
+  .swatch{width:17px;height:17px;border-radius:50%;border:1px solid rgba(255,255,255,.13)}
+  .footer-note{margin-top:18px;color:var(--text-4);font-size:9.5px;line-height:15px;display:flex;justify-content:space-between;gap:20px}
+
+  .drawer-scrim{position:absolute;inset:0;z-index:15;background:rgba(0,0,0,.56)}
+  .drawer-panel{position:absolute;z-index:16;left:0;top:0;bottom:0;width:272px;padding:46px 16px 18px;background:#0c0e12;border-right:1px solid var(--line);display:flex;flex-direction:column;box-shadow:18px 0 50px rgba(0,0,0,.32)}
+  .drawer-brand{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 2px 20px}
+  .drawer-brand .wordmark{font-size:15px}
+  .drawer-brand .dr-close{width:30px;height:30px;display:grid;place-items:center;border:0;background:transparent;color:var(--text-3);padding:0}
+  .drawer-profile{display:flex;align-items:center;gap:10px;padding:0 2px 16px;border-bottom:1px solid var(--line)}
+  .drawer-profile .monogram{width:30px;height:30px;display:grid;place-items:center;border:1px solid var(--line-strong);border-radius:50%;color:var(--text-2);font-size:10px;font-weight:600}
+  .drawer-profile strong{display:block;color:var(--text-2);font-size:12px;line-height:16px;font-weight:550}
+  .drawer-profile small{display:block;margin-top:2px;color:var(--text-4);font-size:9px;line-height:13px}
+  .drawer-group{margin:18px 2px 4px;color:var(--text-4);font-size:9px;line-height:13px;letter-spacing:.1em;font-weight:650}
+  .drawer-item{height:41px;display:flex;align-items:center;gap:10px;border-radius:9px;padding:0 8px;color:var(--text-2);font-size:11.5px;line-height:16px;text-decoration:none}
+  .drawer-item:hover{background:rgba(255,255,255,.045)}
+  .drawer-item .d-icon{width:17px;height:17px;display:grid;place-items:center;color:var(--text-3);flex:none}
+  .drawer-item .d-chev{margin-left:auto;color:var(--text-4);font-size:12px}
+  .drawer-item.active{background:var(--accent-soft);color:var(--text)}
+  .drawer-item.active .d-icon{color:var(--accent)}
+  .drawer-item.danger{color:var(--danger)}
+  .drawer-item.danger .d-icon{color:var(--danger)}
+  .drawer-footer{margin-top:auto;padding:15px 2px 2px;border-top:1px solid var(--line);color:var(--text-4);font-size:9px;line-height:13px}
+  @keyframes blink{0%,48%{opacity:1}49%,100%{opacity:0}}
+  @keyframes pulse{0%,100%{opacity:.42}50%{opacity:1}}
+  @media (max-width:1180px){.page{padding:42px 26px 60px}.board-grid{grid-template-columns:repeat(2,330px);gap:38px 26px}.masthead h1{font-size:29px}}
+  @media (max-width:760px){.page{padding:30px 16px 48px}.masthead{display:block;margin-bottom:32px}.meta{text-align:left;margin-top:18px}.board-grid{grid-template-columns:330px;justify-content:center;gap:34px}.tokens{display:block}.token-group{margin-bottom:10px}.footer-note{display:block}.footer-note span{display:block;margin-bottom:4px}}
+  @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}}
+</style>
+</head>
+<body>
+<div class="page">
+  <header class="masthead">
+    <div>
+      <div class="brandline">
+        <span class="brandmark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 15.2c4.5-.4 7.2-3.1 8.6-8.6 1.1 4.6 2.8 7.1 6.4 8.2-3.8.2-6.6 1.8-8.4 5.1-1.2-2.4-3.1-4-6.6-4.7Z"/></svg></span>
+        BLUEBIRD <span style="color:var(--text-4)">/ AGENT UI</span>
+      </div>
+      <h1>Quiet intelligence.<br><span>让界面退后，让工作发生。</span></h1>
+      <p class="dek">Direction 01 · 深色、无气泡、低噪声。把空间留给对话、记忆与 Agent 的执行过程。不是另一个聊天框，而是一台安静的个人智能仪器。</p>
+    </div>
+    <div class="meta"><strong>DESIGN DIRECTION 01</strong>DARK / MOBILE<br>2026.10.30<br>EXPO · RN · TS</div>
+  </header>
+
+  <main class="board-grid">
+
+    <!-- 01 HOME -->
+    <figure class="frame">
+      <figcaption class="frame-caption"><span class="num">01</span><div><strong>对话 · 空白</strong><small>Home / first contact</small></div></figcaption>
+      <div class="phone">
+        <div class="island"></div>
+        <div class="status"><span class="time">18:23</span><span class="status-icons"><span>5G</span><span class="bars"><i></i><i></i><i></i><i></i></span><span class="battery"></span></span></div>
+        <div class="app">
+          <header class="nav">
+            <div class="nav-left"><button class="icon-btn" aria-label="菜单"><svg class="icon" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button></div>
+            <div class="wordmark"><span class="mark"><svg viewBox="0 0 24 24"><path d="M4.5 15.2c4.5-.4 7.2-3.1 8.6-8.6 1.1 4.6 2.8 7.1 6.4 8.2-3.8.2-6.6 1.8-8.4 5.1-1.2-2.4-3.1-4-6.6-4.7Z"/></svg></span>Bluebird</div>
+            <div class="nav-right"><button class="icon-btn round" aria-label="新建对话"><svg class="icon sm" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button></div>
+          </header>
+          <main class="content home">
+            <div class="eyebrow">PRIVATE AGENT</div>
+            <h1>今天，想一起<br>完成什么？</h1>
+            <p class="lead">Blue 会带着你的上下文，检索、思考，并把事情做完。</p>
+            <div class="suggestions">
+              <div class="suggestion"><svg class="s-icon icon" viewBox="0 0 24 24"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"/></svg><span class="s-text">把今天的任务理一遍</span><span class="s-arrow">↗</span></div>
+              <div class="suggestion"><svg class="s-icon icon" viewBox="0 0 24 24"><path d="M5 5.5h14v13H5zM8 9h8M8 12h8M8 15h5"/></svg><span class="s-text">继续评估 Bluebird</span><span class="s-arrow">↗</span></div>
+              <div class="suggestion"><svg class="s-icon icon" viewBox="0 0 24 24"><path d="M6 4h9l3 3v13H6zM15 4v4h4M9 12h6M9 16h4"/></svg><span class="s-text">生成本周简报</span><span class="s-arrow">↗</span></div>
+            </div>
+            <div class="recent-head"><span>最近</span><span>查看全部 ↗</span></div>
+            <div class="recent-row"><div><strong>评估 Bluebird 价值</strong><small>昨天 · 18:22</small></div><span class="tiny-arrow">›</span></div>
+          </main>
+          <div class="dock">
+            <div class="model-line"><span class="model-dot"></span>Bluebird · DeepSeek V3 <span class="chev">⌄</span></div>
+            <div class="composer">
+              <button class="attach" aria-label="添加附件"><svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+              <div class="prompt">问 Blue 任何事</div>
+              <button class="mic" aria-label="语音输入"><svg class="icon" viewBox="0 0 24 24"><rect x="9" y="4" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M9 21h6"/></svg></button>
+              <button class="send" aria-label="发送"><svg class="icon sm" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button>
+            </div>
+          </div>
+        </div>
+        <div class="home-indicator"></div>
+      </div>
+    </figure>
+
+    <!-- 02 CONVERSATION / STREAMING -->
+    <figure class="frame">
+      <figcaption class="frame-caption"><span class="num">02</span><div><strong>对话 · 流式 + Agent</strong><small>Conversation / tool run / evidence</small></div></figcaption>
+      <div class="phone">
+        <div class="island"></div>
+        <div class="status"><span class="time">18:23</span><span class="status-icons"><span>5G</span><span class="bars"><i></i><i></i><i></i><i></i></span><span class="battery"></span></span></div>
+        <div class="app">
+          <header class="nav">
+            <div class="nav-left"><button class="icon-btn" aria-label="菜单"><svg class="icon" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button></div>
+            <div class="nav-session">评估 Bluebird 价值</div>
+            <div class="nav-right"><button class="icon-btn" aria-label="更多"><svg class="icon sm" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button></div>
+          </header>
+          <main class="content transcript">
+            <div class="msg-user"><div class="msg-meta">你 · 18:22</div><p>Bluebird 值得继续投入吗？我想听真实的判断，不要只列优点。</p></div>
+            <section class="agent-run" aria-label="Agent 执行状态">
+              <div class="run-head"><span class="run-label">AGENT RUN</span><span class="run-state"><span class="pulse"></span>运行中</span><span class="run-time">00:08</span></div>
+              <div class="run-summary">正在综合长期记忆与项目上下文…</div>
+              <div class="steps">
+                <div class="step"><span class="step-icon"><svg class="icon xs" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></span><span class="step-label">理解问题</span><span class="step-meta">0.8s</span></div>
+                <div class="step"><span class="step-icon run"><svg class="icon xs" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9"/></svg></span><span class="step-label">检索记忆</span><span class="step-tool">memory_search</span><span class="step-meta">3 条</span></div>
+                <div class="step"><span class="step-icon wait"><span style="width:5px;height:5px;border-radius:50%;background:var(--warning)"></span></span><span class="step-label">组织回答</span><span class="step-meta">等待中</span></div>
+              </div>
+              <div class="run-foot"><span>2 个工具</span><span class="foot-link">展开详情 ↗</span></div>
+            </section>
+            <section class="answer">
+              <div class="who-line"><span class="who-dot"></span><span class="who-name">BLUE</span><span>· 18:23</span></div>
+              <h2>值得，但要把边界做小。</h2>
+              <p>差异点不是“又一个聊天框”，而是<span class="inline-code">记忆 + 工具 + 可解释执行</span>。</p>
+              <ul><li>记忆检索有来源与生命周期，不是黑箱注入。</li><li>Agent 工具可控、可中止、可看到每一步。</li></ul>
+              <p>把信任做成默认值。 <span class="caret"></span></p>
+            </section>
+          </main>
+          <div class="dock">
+            <div class="model-line"><span class="model-dot"></span>DeepSeek V3 · 推理中 <span class="chev">⌄</span></div>
+            <div class="composer">
+              <button class="attach" aria-label="添加附件"><svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+              <div class="prompt">继续和 Blue 说…</div>
+              <button class="mic" aria-label="语音输入"><svg class="icon" viewBox="0 0 24 24"><rect x="9" y="4" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M9 21h6"/></svg></button>
+              <button class="send stop" aria-label="停止生成"><span style="width:9px;height:9px;border-radius:1.5px;background:var(--text)"></span></button>
+            </div>
+          </div>
+        </div>
+        <div class="home-indicator"></div>
+      </div>
+    </figure>
+
+    <!-- 03 AGENT DETAIL -->
+    <figure class="frame">
+      <figcaption class="frame-caption"><span class="num">03</span><div><strong>Agent · 执行详情</strong><small>Truthful status / inspectable tool steps</small></div></figcaption>
+      <div class="phone">
+        <div class="island"></div>
+        <div class="status"><span class="time">18:23</span><span class="status-icons"><span>5G</span><span class="bars"><i></i><i></i><i></i><i></i></span><span class="battery"></span></span></div>
+        <div class="app dimmed">
+          <header class="nav">
+            <div class="nav-left"><button class="icon-btn" aria-label="菜单"><svg class="icon" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button></div>
+            <div class="nav-session">评估 Bluebird 价值</div>
+            <div class="nav-right"><button class="icon-btn" aria-label="更多"><svg class="icon sm" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button></div>
+          </header>
+          <main class="content transcript">
+            <div class="msg-user"><div class="msg-meta">你 · 18:22</div><p>Bluebird 值得继续投入吗？</p></div>
+            <section class="agent-run"><div class="run-head"><span class="run-label">AGENT RUN</span><span class="run-state"><span class="pulse"></span>运行中</span><span class="run-time">00:08</span></div><div class="run-summary">正在综合长期记忆与项目上下文…</div></section>
+            <section class="answer"><div class="who-line"><span class="who-dot"></span><span class="who-name">BLUE</span><span>· 18:23</span></div><h2>值得，但要把边界做小。</h2></section>
+          </main>
+          <div class="dock"><div class="composer"><div class="prompt">继续和 Blue 说…</div><button class="send stop"><span style="width:9px;height:9px;border-radius:1.5px;background:var(--text)"></span></button></div></div>
+        </div>
+        <div class="sheet-backdrop" style="background:rgba(0,0,0,.5)"></div>
+        <section class="sheet" aria-label="Agent 执行详情">
+          <div class="sheet-head"><div><h2>Agent 执行</h2><div class="sub">本次运行 · 00:08 · 2 个工具</div></div><button class="sheet-close" aria-label="关闭"><svg class="icon sm" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+          <div class="timeline">
+            <div class="t-step done"><span class="t-dot"></span><div class="t-line"><strong>思考</strong><span class="t-state">完成 · 1.2s</span></div><p class="t-desc">确认问题边界，排除寒暄与泛泛建议。</p></div>
+            <div class="t-step run"><span class="t-dot"></span><div class="t-line"><strong>检索记忆</strong><span class="t-tool">memory_search</span><span class="t-state">3 条 · 0.4s</span></div><div class="code-box">{ "query": "Bluebird 价值", "sessionId": "default" }</div><div class="t-actions"><button class="text-action">查看 3 条记忆</button><button class="text-action">复制结果</button></div></div>
+            <div class="t-step done"><span class="t-dot"></span><div class="t-line"><strong>读取上下文</strong><span class="t-tool">context_engine</span><span class="t-state">12 条 · 2.1s</span></div><p class="t-desc">记忆、会话摘要与当前问题完成裁决。</p></div>
+            <div class="t-step wait"><span class="t-dot"></span><div class="t-line"><strong>受控写入</strong><span class="t-tool">memory_remember</span><span class="t-state">等待确认</span></div><p class="t-desc">候选仅在用户确认后持久化，不提前宣称已记住。</p></div>
+          </div>
+          <div class="sheet-footer"><span>所有步骤来自真实运行</span><button class="text-action stop-action">停止执行</button></div>
+        </section>
+        <div class="home-indicator"></div>
+      </div>
+    </figure>
+
+    <!-- 04 HISTORY -->
+    <figure class="frame">
+      <figcaption class="frame-caption"><span class="num">04</span><div><strong>历史 · 管理</strong><small>History / search / long-press</small></div></figcaption>
+      <div class="phone">
+        <div class="island"></div>
+        <div class="status"><span class="time">18:23</span><span class="status-icons"><span>5G</span><span class="bars"><i></i><i></i><i></i><i></i></span><span class="battery"></span></span></div>
+        <div class="app">
+          <header class="nav">
+            <div class="nav-left"><button class="icon-btn" aria-label="返回"><svg class="icon" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button></div>
+            <div class="nav-session">历史对话</div>
+            <div class="nav-right"><button class="icon-btn round" aria-label="新建对话"><svg class="icon sm" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button></div>
+          </header>
+          <main class="content transcript" style="padding-top:0">
+            <div class="history-head"><div><h1>对话</h1><p>所有正在发生和已经完成的事。</p></div></div>
+            <div class="search"><svg class="icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg><span>搜索对话</span></div>
+            <div class="group-label">今天</div>
+            <div class="history-list">
+              <div class="history-row"><div class="row-main"><strong>评估 Bluebird 价值</strong><p>值得，但要把边界做小…</p></div><time>18:22</time><button class="row-more" aria-label="更多"><svg class="icon xs" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button></div>
+              <div class="history-row"><div class="row-main"><strong>Agent 工具边界</strong><p>哪些工具可以自动执行，哪些必须确认…</p></div><time>16:08</time><button class="row-more" aria-label="更多"><svg class="icon xs" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button></div>
+              <div class="history-row"><div class="row-main"><strong>Bluebird 记忆系统复盘</strong><p>检索、生命周期和可解释性…</p></div><time>09:41</time><button class="row-more" aria-label="更多"><svg class="icon xs" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button></div>
+            </div>
+            <div class="group-label">昨天</div>
+            <div class="history-list">
+              <div class="history-row"><div class="row-main"><strong>本周产品简报</strong><p>把 7 条零散记录收束成三个动作…</p></div><time>昨天</time><button class="row-more" aria-label="更多"><svg class="icon xs" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button></div>
+              <div class="history-row"><div class="row-main"><strong>模型切换与成本</strong><p>DeepSeek V3 与视觉模型的组合策略…</p></div><time>昨天</time><button class="row-more" aria-label="更多"><svg class="icon xs" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button></div>
+            </div>
+            <div class="group-label">更早</div>
+            <div class="history-list">
+              <div class="history-row"><div class="row-main"><strong>记忆检索质量评估</strong><p>Recall@5 与 MRR 的前后对比…</p></div><time>10月27日</time><button class="row-more" aria-label="更多"><svg class="icon xs" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button></div>
+            </div>
+            <div class="history-hint"><svg class="icon" viewBox="0 0 24 24"><path d="M12 8v4l3 2M12 3a9 9 0 1 0 9 9"/></svg>按住对话可重命名或删除</div>
+          </main>
+        </div>
+        <div class="home-indicator"></div>
+      </div>
+    </figure>
+
+    <!-- 05 SETTINGS -->
+    <figure class="frame">
+      <figcaption class="frame-caption"><span class="num">05</span><div><strong>设置 · 总览</strong><small>Settings / quiet hierarchy</small></div></figcaption>
+      <div class="phone">
+        <div class="island"></div>
+        <div class="status"><span class="time">18:23</span><span class="status-icons"><span>5G</span><span class="bars"><i></i><i></i><i></i><i></i></span><span class="battery"></span></span></div>
+        <div class="app">
+          <header class="nav">
+            <div class="nav-left"><button class="icon-btn" aria-label="返回"><svg class="icon" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button></div>
+            <div class="nav-session">设置</div>
+            <div class="nav-right"><button class="icon-btn" aria-label="关闭"><svg class="icon sm" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+          </header>
+          <main class="content transcript settings-scroll">
+            <h1 class="settings-title">设置</h1>
+            <div class="profile"><span class="monogram">S</span><div><strong>Song ze</strong><small>个人空间 · 本机</small></div><span class="chev">›</span></div>
+            <section class="settings-section"><div class="group-label">模型与上下文</div>
+              <div class="setting-row"><span class="set-label">默认模型</span><span class="set-value">DeepSeek V3</span><span class="chev">›</span></div>
+              <div class="setting-row"><span class="set-label">上下文预算</span><span class="set-value">50K</span><span class="chev">›</span></div>
+              <div class="setting-row"><span class="set-label">流式输出</span><span class="switch on"></span></div>
+            </section>
+            <section class="settings-section"><div class="group-label">Agent</div>
+              <div class="setting-row"><span class="set-label">工具调用</span><span class="set-value">已启用</span><span class="chev">›</span></div>
+              <div class="setting-row"><span class="set-label">Agent 工具</span><span class="set-value">2 个已注册</span><span class="chev">›</span></div>
+              <div class="setting-row"><span class="set-label">最大轮数</span><span class="set-value">3</span></div>
+            </section>
+            <section class="settings-section"><div class="group-label">记忆</div>
+              <div class="setting-row"><span class="set-label">长期记忆</span><span class="switch on"></span></div>
+              <div class="setting-row"><span class="set-label">待确认</span><span class="set-value">3 条</span><span class="chev">›</span></div>
+              <div class="setting-row"><span class="set-label">管理记忆</span><span class="set-value">17 条</span><span class="chev">›</span></div>
+            </section>
+            <section class="settings-section"><div class="group-label">人格</div>
+              <div class="setting-row"><span class="set-label">控制面板</span><span class="set-value">自然 · 温暖</span><span class="chev">›</span></div>
+            </section>
+            <section class="settings-section"><div class="group-label">数据与隐私</div>
+              <div class="setting-row"><span class="set-label">备份</span><span class="set-value">本周已备份</span><span class="chev">›</span></div>
+              <div class="setting-row"><span class="set-label">导出数据</span><span class="chev">›</span></div>
+              <div class="setting-row danger"><span class="set-label">清除当前会话</span><span class="chev">›</span></div>
+            </section>
+            <div class="settings-footer">Bluebird 0.4.1 · 本机数据优先</div>
+          </main>
+        </div>
+        <div class="home-indicator"></div>
+      </div>
+    </figure>
+
+    <!-- 06 AGENT TOOLS -->
+    <figure class="frame">
+      <figcaption class="frame-caption"><span class="num">06</span><div><strong>Agent · 工具边界</strong><small>Agent tools / read-write / safety</small></div></figcaption>
+      <div class="phone">
+        <div class="island"></div>
+        <div class="status"><span class="time">18:23</span><span class="status-icons"><span>5G</span><span class="bars"><i></i><i></i><i></i><i></i></span><span class="battery"></span></span></div>
+        <div class="app">
+          <header class="nav">
+            <div class="nav-left"><button class="icon-btn" aria-label="返回"><svg class="icon" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button></div>
+            <div class="nav-session">Agent 工具</div>
+            <div class="nav-right"></div>
+          </header>
+          <main class="content transcript" style="padding-top:0">
+            <div class="tools-intro"><h1>Agent 工具</h1><p>只在当前会话需要时调用。读取可以自动执行，写入必须经过你的确认。</p></div>
+            <div class="tool-status"><span class="status-dot"></span><div><strong>工具调用已启用</strong><small>由服务端配置控制 · 无图片请求时生效</small></div><span class="status-value">ON</span></div>
+            <div class="tool-list">
+              <div class="tool-row"><span class="tool-glyph tool-read">R</span><div class="tool-main"><strong>memory_search</strong><small>长期记忆 · 只读检索</small></div><span class="tool-state read">已注册</span></div>
+              <div class="tool-row"><span class="tool-glyph tool-write">W</span><div class="tool-main"><strong>memory_remember</strong><small>受控写入 · 需要用户确认</small></div><span class="tool-state write">需确认</span></div>
+              <div class="tool-row"><span class="tool-glyph tool-off">—</span><div class="tool-main"><strong>weather</strong><small>天气查询 · 未接入</small></div><span class="tool-state off">未提供</span></div>
+            </div>
+            <div class="boundary">
+              <div class="group-label">运行边界</div>
+              <div class="boundary-row"><span>最大模型轮数</span><span>3</span></div>
+              <div class="boundary-row"><span>单次工具超时</span><span>5s</span></div>
+              <div class="boundary-row"><span>图片请求</span><span>不启用工具</span></div>
+              <div class="boundary-row"><span>外部网络</span><span>未授权</span></div>
+            </div>
+            <div class="tools-note"><svg class="icon" viewBox="0 0 24 24"><path d="M12 3 4 6v5c0 5 3.4 8.2 8 10 4.6-1.8 8-5 8-10V6l-8-3Z"/><path d="m9 12 2 2 4-4"/></svg><span>工具能力由服务端策略决定。界面不会展示无法执行的开关，也不会把未注册的工具伪装成可用。</span></div>
+          </main>
+        </div>
+        <div class="home-indicator"></div>
+      </div>
+    </figure>
+
+
+    <!-- 07 PRIVACY -->
+    <figure class="frame">
+      <figcaption class="frame-caption"><span class="num">07</span><div><strong>设置 · 数据与隐私</strong><small>Local-first / export / destructive safety</small></div></figcaption>
+      <div class="phone">
+        <div class="island"></div>
+        <div class="status"><span class="time">18:23</span><span class="status-icons"><span>5G</span><span class="bars"><i></i><i></i><i></i><i></i></span><span class="battery"></span></span></div>
+        <div class="app">
+          <header class="nav">
+            <div class="nav-left"><button class="icon-btn" aria-label="返回"><svg class="icon" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button></div>
+            <div class="nav-session">数据与隐私</div>
+            <div class="nav-right"><button class="icon-btn" aria-label="关闭"><svg class="icon sm" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+          </header>
+          <main class="content transcript settings-scroll" style="padding-top:17px">
+            <div class="tools-intro" style="padding-top:0"><h1>数据与隐私</h1><p>对话、记忆与运行记录优先留在本机。清空与导出都需要你明确确认。</p></div>
+            <div class="tool-status"><span class="status-dot"></span><div><strong>本机数据优先</strong><small>服务端数据目录与测试隔离守卫已启用</small></div><span class="status-value">LOCAL</span></div>
+            <section class="settings-section"><div class="group-label">人格</div>
+              <div class="setting-row"><span class="set-label">控制面板</span><span class="set-value">自然 · 温暖</span><span class="chev">›</span></div>
+            </section>
+            <section class="settings-section"><div class="group-label">备份与导出</div>
+              <div class="setting-row"><span class="set-label">最近备份</span><span class="set-value">本周 · 已校验</span><span class="chev">›</span></div>
+              <div class="setting-row"><span class="set-label">导出数据</span><span class="set-value">Markdown + JSON</span><span class="chev">›</span></div>
+            </section>
+            <section class="settings-section"><div class="group-label">本地数据</div>
+              <div class="setting-row"><span class="set-label">长期记忆</span><span class="set-value">17 条 · 仅本机</span><span class="chev">›</span></div>
+              <div class="setting-row"><span class="set-label">Agent 运行记录</span><span class="set-value">不记录正文</span><span class="chev">›</span></div>
+              <div class="setting-row danger"><span class="set-label">清除当前会话</span><span class="chev">›</span></div>
+            </section>
+            <div class="tools-note"><svg class="icon" viewBox="0 0 24 24"><path d="M12 3 4 6v5c0 5 3.4 8.2 8 10 4.6-1.8 8-5 8-10V6l-8-3Z"/><path d="m9 12 2 2 4-4"/></svg><span>导出的备份不包含 API Key；测试与真实数据目录隔离，不会被测试清空。</span></div>
+            <div class="settings-footer">Bluebird 0.4.1 · 数据策略遵循最小权限</div>
+          </main>
+        </div>
+        <div class="home-indicator"></div>
+      </div>
+    </figure>
+
+    <!-- 08 DRAWER -->
+    <figure class="frame">
+      <figcaption class="frame-caption"><span class="num">08</span><div><strong>导航 · 抽屉</strong><small>Navigation / tasks + memory stay reachable</small></div></figcaption>
+      <div class="phone">
+        <div class="island"></div>
+        <div class="status"><span class="time">18:23</span><span class="status-icons"><span>5G</span><span class="bars"><i></i><i></i><i></i><i></i></span><span class="battery"></span></span></div>
+        <div class="app dimmed">
+          <header class="nav">
+            <div class="nav-left"><button class="icon-btn" aria-label="菜单"><svg class="icon" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button></div>
+            <div class="nav-session">评估 Bluebird 价值</div>
+            <div class="nav-right"><button class="icon-btn" aria-label="更多"><svg class="icon sm" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></button></div>
+          </header>
+          <main class="content transcript">
+            <div class="msg-user"><div class="msg-meta">你 · 18:22</div><p>Bluebird 值得继续投入吗？</p></div>
+            <section class="answer"><div class="who-line"><span class="who-dot"></span><span class="who-name">BLUE</span><span>· 18:23</span></div><h2>值得，但要把边界做小。</h2><p>差异点不是又一个聊天框，而是记忆、工具和可解释执行。</p></section>
+          </main>
+          <div class="dock"><div class="composer"><div class="prompt">继续和 Blue 说…</div><button class="send"><svg class="icon sm" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button></div></div>
+        </div>
+        <div class="drawer-scrim"></div>
+        <aside class="drawer-panel" aria-label="导航菜单">
+          <div class="drawer-brand"><div class="wordmark"><span class="mark"><svg viewBox="0 0 24 24"><path d="M4.5 15.2c4.5-.4 7.2-3.1 8.6-8.6 1.1 4.6 2.8 7.1 6.4 8.2-3.8.2-6.6 1.8-8.4 5.1-1.2-2.4-3.1-4-6.6-4.7Z"/></svg></span>Bluebird</div><button class="dr-close" aria-label="关闭菜单"><svg class="icon sm" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+          <div class="drawer-profile"><span class="monogram">S</span><div><strong>Song ze</strong><small>个人空间 · 本机</small></div></div>
+          <div class="drawer-group">空间</div>
+          <a class="drawer-item" href="#"><span class="d-icon"><svg class="icon sm" viewBox="0 0 24 24"><path d="M12 7v5l3 2M12 3a9 9 0 1 0 9 9"/></svg></span>历史对话<span class="d-chev">›</span></a>
+          <a class="drawer-item" href="#"><span class="d-icon"><svg class="icon sm" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="m8 12 2 2 4-4"/></svg></span>任务<span class="d-chev">›</span></a>
+          <a class="drawer-item" href="#"><span class="d-icon"><svg class="icon sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2"/></svg></span>记忆<span class="d-chev">›</span></a>
+          <div class="drawer-group">系统</div>
+          <a class="drawer-item" href="#"><span class="d-icon"><svg class="icon sm" viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg></span>模型<span class="d-chev">›</span></a>
+          <a class="drawer-item" href="#"><span class="d-icon"><svg class="icon sm" viewBox="0 0 24 24"><path d="M12 3 4 6v5c0 5 3.4 8.2 8 10 4.6-1.8 8-5 8-10V6l-8-3Z"/><path d="m9 12 2 2 4-4"/></svg></span>Agent 工具<span class="d-chev">›</span></a>
+          <a class="drawer-item" href="#"><span class="d-icon"><svg class="icon sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4v-.2a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1-2.8-2.8.1-.1A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.6-1H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1 2.8-2.8.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1 2.8 2.8-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4h-.2a1.7 1.7 0 0 0-1.6 1Z"/></svg></span>设置<span class="d-chev">›</span></a>
+          <div class="drawer-footer">Bluebird 0.4.1<br>返回主页 · 本机数据优先</div>
+        </aside>
+        <div class="home-indicator"></div>
+      </div>
+    </figure>
+  </main>
+
+  <footer>
+    <div class="tokens">
+      <div class="token-group"><span class="swatches"><i class="swatch" style="background:#08090b"></i><i class="swatch" style="background:#12151a"></i><i class="swatch" style="background:#7e9bff"></i><i class="swatch" style="background:#6fcf97"></i><i class="swatch" style="background:#d6b77a"></i></span>INK / SURFACE / ACCENT / SUCCESS / WARNING</div>
+      <div class="token-group">DISPLAY 30 · BODY 16/26 · META 11</div>
+      <div class="token-group">HAIRLINE 1PX · RADIUS 18–28 · NO SHADOWS</div>
+    </div>
+    <div class="footer-note"><span>Bluebird Agent UI · Direction 01 · design board</span><span>Nothing decorative without a job.</span></div>
+  </footer>
+</div>
+</body>
+</html>

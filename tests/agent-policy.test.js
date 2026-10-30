@@ -268,6 +268,14 @@ async function main() {
   check('默认读取为 bounded_autonomy', initial.policy.mode === 'bounded_autonomy');
   check('默认 revision 为 0', initial.meta.revision === 0);
   check('读取返回已注册工具元数据', initial.availableTools.some(tool => tool.name === 'echo_test'));
+  check(
+    '读取返回只读运行时开关，前端不能据此改写服务端配置',
+    initial.runtime &&
+      initial.runtime.switchOn === true &&
+      initial.runtime.maxRounds === 3 &&
+      initial.runtime.toolTimeoutDefaultMs > 0 &&
+      initial.runtime.imageRequestsDisableTools === true
+  );
   check('高风险工具在元数据中可见', initial.availableTools.some(tool => tool.risk === 'high_risk'));
 
   const saved = await putPolicy(defaultPolicy({ mode: 'plan_then_act', planning: { generatePlan: true } }));

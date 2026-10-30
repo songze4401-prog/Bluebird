@@ -146,7 +146,7 @@ const createStyles = (theme: Theme) => StyleSheet.create({
     padding: 14,
     marginBottom: 10,
   },
-  // ---- 主题色选择（复用记忆库的容器/卡片样式） ----
+  // ---- 主题色选择（复用 Memory Center 的容器/卡片样式） ----
   themeRow: {
     flexDirection: 'row',
     alignItems: 'center',

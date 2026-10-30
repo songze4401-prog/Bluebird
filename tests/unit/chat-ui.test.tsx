@@ -16,6 +16,7 @@ import { StyleSheet } from 'react-native';
 import { fireEvent, render, screen } from '@testing-library/react-native';
 
 import { ChatBubble } from '../../components/ChatBubble';
+import { ChatWelcome } from '../../components/ChatWelcome';
 import { MessageList } from '../../components/MessageList';
 import { ChatHeader } from '../../components/ChatHeader';
 import { ChatInput } from '../../components/ChatInput';
@@ -24,8 +25,17 @@ import { BottomTabBar } from '../../components/BottomTabBar';
 import { TasksPanel } from '../../components/TasksPanel';
 import { ToolCallPillRow } from '../../components/ToolCallPill';
 import { CHAT_LAYOUT, CHAT_TYPE } from '../../lib/design';
-import type { Attachment, Message, ToolStepView } from '../../lib/types';
-import { getTheme } from '../../theme';
+import type {
+  Attachment,
+  Message,
+  SessionMeta,
+  ToolStepView,
+} from '../../lib/types';
+import {
+  DEFAULT_THEME_ID,
+  DEFAULT_THEME_MODE,
+  getTheme,
+} from '../../theme';
 
 const theme = getTheme('light', 'blue');
 
@@ -38,6 +48,34 @@ const createdAt = (() => {
 
 const noop = () => {};
 
+describe('主题默认值', () => {
+  it('默认浅色模式 + 蓝色强调', () => {
+    expect(DEFAULT_THEME_MODE).toBe('light');
+    expect(DEFAULT_THEME_ID).toBe('blue');
+
+    const fallback = getTheme();
+    expect(fallback.mode).toBe('light');
+    expect(fallback.accentId).toBe('blue');
+  });
+});
+
+const drawerSessions: SessionMeta[] = [
+  {
+    id: 's-current',
+    title: '当前对话',
+    createdAt,
+    updatedAt: createdAt,
+    messageCount: 2,
+  },
+  {
+    id: 's-memory',
+    title: '关于记忆',
+    createdAt,
+    updatedAt: createdAt,
+    messageCount: 5,
+  },
+];
+
 type BubbleExtra = Partial<{
   previous: Message;
   isLast: boolean;
@@ -46,6 +84,8 @@ type BubbleExtra = Partial<{
   onRecall: (message: Message) => void;
   onRetry: (text?: string, attachments?: Attachment[]) => void;
   onContinue: () => void;
+  onOpenActions: (message: Message) => void;
+  isFavorite: boolean;
 }>;
 
 function bubbleProps(item: Message, extra: BubbleExtra = {}) {
@@ -103,8 +143,8 @@ const flatten = (node: RenderNode) =>
     unknown
   >;
 
-describe('ChatBubble 无气泡排版', () => {
-  it('助手正文与所在列都不带底色 / 圆角 / 描边（设计图是平铺文字，不是气泡）', async () => {
+describe('ChatBubble 排版：助手平铺、用户气泡', () => {
+  it('助手正文与所在列都不带底色 / 圆角 / 描边（平铺文字，不是气泡）', async () => {
     await render(
       <ChatBubble
         {...bubbleProps({
@@ -146,7 +186,7 @@ describe('ChatBubble 无气泡排版', () => {
     });
   });
 
-  it('用户消息列同样没有气泡底（右对齐纯文字）', async () => {
+  it('用户消息带右对齐白色气泡（轻描边、圆角、阴影）', async () => {
     await render(
       <ChatBubble
         {...bubbleProps({
@@ -158,16 +198,18 @@ describe('ChatBubble 无气泡排版', () => {
       />
     );
 
-    const row = screen.getByTestId('chat-row') as unknown as RenderNode;
-
     expect(screen.getByTestId('chat-row').props.style).toContainEqual(
       expect.objectContaining({ justifyContent: 'flex-end' })
     );
 
-    const style = flatten(childNodes(row)[0]);
+    const bubble = screen.getByTestId('user-bubble') as unknown as RenderNode;
+    const style = flatten(bubble);
 
-    expect(style.backgroundColor).toBeUndefined();
-    expect(style.borderWidth).toBeUndefined();
+    expect(style.backgroundColor).toBe(theme.surface);
+    expect(style.borderWidth).toBeGreaterThan(0);
+    expect(style.borderRadius).toBe(22);
+    expect(style.shadowOpacity).toBeGreaterThan(0);
+    expect(screen.getByText('帮我查下天气')).toBeTruthy();
   });
 
   it('who-line 渲染名字与带秒时间戳', async () => {
@@ -183,7 +225,7 @@ describe('ChatBubble 无气泡排版', () => {
       />
     );
 
-    expect(screen.getByText('Bluebird')).toBeTruthy();
+    expect(screen.getByText('BLUE')).toBeTruthy();
     expect(screen.getByText('09:08:07')).toBeTruthy();
   });
 
@@ -259,7 +301,9 @@ describe('工具 pill 显示真实执行结果', () => {
       />
     );
 
-    expect(screen.getByText('调用工具 · 检索记忆')).toBeTruthy();
+    expect(screen.getByText('AGENT RUN')).toBeTruthy();
+    expect(screen.getByText('检索记忆')).toBeTruthy();
+    expect(screen.getByText('已完成')).toBeTruthy();
   });
 
   it('未登记的工具名原样显示，不留空', async () => {
@@ -294,15 +338,17 @@ describe('Agent 新图互斥提示', () => {
 });
 
 describe('原有交互没被改版吃掉', () => {
-  it('用户消息长按触发 onRecall 并带上原消息', async () => {
-    const onRecall = jest.fn();
+  it('用户消息长按打开统一操作面板并带上原消息', async () => {
+    const onOpenActions = jest.fn();
     const item: Message = { id: 'u1', role: 'user', content: '撤回我', createdAt };
 
-    await render(<ChatBubble {...bubbleProps(item, { onRecall })} />);
+    await render(
+      <ChatBubble {...bubbleProps(item, { onOpenActions })} />
+    );
 
-    await fireEvent(screen.getByLabelText('长按撤回这条消息'), 'longPress');
+    await fireEvent(screen.getByLabelText('长按打开消息操作'), 'longPress');
 
-    expect(onRecall).toHaveBeenCalledWith(item);
+    expect(onOpenActions).toHaveBeenCalledWith(item);
   });
 
   it('历史还有更早页时显示「加载更早消息」，点击触发翻页回调', async () => {
@@ -421,7 +467,7 @@ describe('原有交互没被改版吃掉', () => {
     expect(screen.queryByLabelText(/当前模型/)).toBeNull();
   });
 
-  it('「＋」打开加号面板；空输入不出现发送按钮，有内容才出现', async () => {
+  it('「＋」打开加号面板；空输入发送禁用，有内容才可发送', async () => {
     const onPlus = jest.fn();
     const onSend = jest.fn();
 
@@ -438,7 +484,11 @@ describe('原有交互没被改版吃掉', () => {
 
     await fireEvent.press(screen.getByLabelText('更多功能'));
     expect(onPlus).toHaveBeenCalled();
-    expect(screen.queryByLabelText('发送')).toBeNull();
+    expect(screen.getByLabelText('发送').props.accessibilityState.disabled).toBe(
+      true
+    );
+    await fireEvent.press(screen.getByLabelText('发送'));
+    expect(onSend).not.toHaveBeenCalled();
 
     await rerender(
       <ChatInput
@@ -455,8 +505,9 @@ describe('原有交互没被改版吃掉', () => {
     expect(onSend).toHaveBeenCalled();
   });
 
-  it('发送进行中发送按钮禁用（防重复提交）', async () => {
+  it('发送进行中显示停止按钮，发送入口不重复提交', async () => {
     const onSend = jest.fn();
+    const onStop = jest.fn();
 
     await render(
       <ChatInput
@@ -465,10 +516,13 @@ describe('原有交互没被改版吃掉', () => {
         onChangeText={noop}
         sending
         onSend={onSend}
+        onStop={onStop}
       />
     );
 
-    await fireEvent.press(screen.getByLabelText('发送'));
+    expect(screen.queryByLabelText('发送')).toBeNull();
+    await fireEvent.press(screen.getByLabelText('停止生成'));
+    expect(onStop).toHaveBeenCalled();
     expect(onSend).not.toHaveBeenCalled();
   });
 
@@ -517,9 +571,8 @@ describe('顶部栏与设置抽屉', () => {
     await fireEvent.press(screen.getByLabelText('打开设置'));
     await fireEvent.press(screen.getByLabelText('新建对话'));
     await fireEvent.press(screen.getByLabelText('历史对话'));
-    await fireEvent.press(screen.getByLabelText('更多设置'));
 
-    expect(onOpenDrawer).toHaveBeenCalledTimes(2);
+    expect(onOpenDrawer).toHaveBeenCalledTimes(1);
     expect(onNewChat).toHaveBeenCalled();
     expect(onOpenHistory).toHaveBeenCalled();
   });
@@ -541,8 +594,12 @@ describe('顶部栏与设置抽屉', () => {
     expect(onNewChat).not.toHaveBeenCalled();
   });
 
-  it('抽屉把分散的功能收在一处，并且每项目标明确', async () => {
+  it('抽屉用卡片面板承载真实功能与最近对话', async () => {
     const onOpenMemory = jest.fn();
+    const onOpenTasks = jest.fn();
+    const onOpenModels = jest.fn();
+    const onOpenAgentTools = jest.fn();
+    const onSelectSession = jest.fn();
     const onClearHistory = jest.fn();
 
     await render(
@@ -551,41 +608,65 @@ describe('顶部栏与设置抽屉', () => {
         onClose={noop}
         theme={theme}
         mood="calm"
+        sessions={drawerSessions}
+        currentSessionId="s-current"
+        loadingSessions={false}
+        onSelectSession={onSelectSession}
         onOpenHistory={noop}
         onNewChat={noop}
-        onReturnHome={noop}
         onOpenMemory={onOpenMemory}
         onOpenControlPanel={noop}
-        onOpenModels={noop}
+        onOpenAgentTools={onOpenAgentTools}
+        onOpenTasks={onOpenTasks}
+        onOpenModels={onOpenModels}
         onOpenThemePicker={noop}
         onSelectMode={noop}
         onClearHistory={onClearHistory}
       />
     );
 
-    // 用户要求：不知道放哪的模块都放进这个抽屉
-    expect(screen.getByText('记忆库')).toBeTruthy();
-    expect(screen.getByText('控制面板')).toBeTruthy();
-    expect(screen.getByText('模型')).toBeTruthy();
-    expect(screen.getByText('历史对话')).toBeTruthy();
+    expect(screen.getByText('个人空间')).toBeTruthy();
+    expect(screen.getByText('最近对话')).toBeTruthy();
+    expect(screen.getByText('Bluebird Agent')).toBeTruthy();
+    expect(screen.getByText('当前对话')).toBeTruthy();
+    expect(screen.getByText('关于记忆')).toBeTruthy();
 
-    await fireEvent.press(screen.getByLabelText('记忆库'));
+    await fireEvent.press(screen.getByLabelText('Memory Center'));
     expect(onOpenMemory).toHaveBeenCalled();
+
+    await fireEvent.press(screen.getByLabelText('任务'));
+    expect(onOpenTasks).toHaveBeenCalled();
+
+    await fireEvent.press(screen.getByLabelText('模型'));
+    expect(onOpenModels).toHaveBeenCalled();
+
+    await fireEvent.press(screen.getByLabelText('Agent 工具'));
+    expect(onOpenAgentTools).toHaveBeenCalled();
+
+    await fireEvent.press(screen.getByLabelText('打开会话 关于记忆'));
+    expect(onSelectSession).toHaveBeenCalledWith('s-memory');
+
+    // 当前对话已在屏幕上：只收抽屉，不重复拉历史
+    await fireEvent.press(screen.getByLabelText('打开会话 当前对话'));
+    expect(onSelectSession).toHaveBeenCalledTimes(1);
 
     await fireEvent.press(screen.getByLabelText('清理当前会话'));
     expect(onClearHistory).toHaveBeenCalled();
   });
 
-  it('visible=false 时不渲染任何抽屉内容（不拦截触摸）', async () => {
+  it('底栏搜索只过滤真实的会话列表', async () => {
     await render(
       <SettingsDrawer
-        visible={false}
+        visible
         onClose={noop}
         theme={theme}
         mood="calm"
+        sessions={drawerSessions}
+        currentSessionId="s-current"
+        loadingSessions={false}
+        onSelectSession={noop}
         onOpenHistory={noop}
         onNewChat={noop}
-        onReturnHome={noop}
         onOpenMemory={noop}
         onOpenControlPanel={noop}
         onOpenModels={noop}
@@ -595,7 +676,84 @@ describe('顶部栏与设置抽屉', () => {
       />
     );
 
-    expect(screen.queryByText('记忆库')).toBeNull();
+    await fireEvent.changeText(screen.getByLabelText('搜索对话'), '关于');
+
+    expect(screen.getByText('关于记忆')).toBeTruthy();
+    expect(screen.queryByText('当前对话')).toBeNull();
+
+    await fireEvent.changeText(screen.getByLabelText('搜索对话'), '不存在');
+
+    expect(screen.getByText('没有匹配的对话')).toBeTruthy();
+  });
+
+  it('visible=false 时不渲染任何抽屉内容（不拦截触摸）', async () => {
+    await render(
+      <SettingsDrawer
+        visible={false}
+        onClose={noop}
+        theme={theme}
+        mood="calm"
+        sessions={drawerSessions}
+        currentSessionId="s-current"
+        onSelectSession={noop}
+        onOpenHistory={noop}
+        onNewChat={noop}
+        onOpenMemory={noop}
+        onOpenControlPanel={noop}
+        onOpenModels={noop}
+        onOpenThemePicker={noop}
+        onSelectMode={noop}
+        onClearHistory={noop}
+      />
+    );
+
+    expect(screen.queryByText('Memory Center')).toBeNull();
+  });
+
+  it('新对话首屏合并主页排版，入口只接真实回调', async () => {
+    const onResumeRecent = jest.fn();
+    const onOpenHistory = jest.fn();
+    const onOpenMemory = jest.fn();
+
+    await render(
+      <ChatWelcome
+        theme={theme}
+        recentTitle="关于记忆"
+        onResumeRecent={onResumeRecent}
+        onOpenHistory={onOpenHistory}
+        onOpenMemory={onOpenMemory}
+      />
+    );
+
+    expect(screen.getByText(/今天，想一起/)).toBeTruthy();
+    expect(screen.getByText('回到「关于记忆」')).toBeTruthy();
+
+    await fireEvent.press(screen.getByLabelText('继续上次对话'));
+    expect(onResumeRecent).toHaveBeenCalled();
+
+    await fireEvent.press(screen.getByLabelText('历史聊天'));
+    expect(onOpenHistory).toHaveBeenCalled();
+
+    await fireEvent.press(screen.getByLabelText('Memory Center'));
+    expect(onOpenMemory).toHaveBeenCalled();
+  });
+
+  it('没有可继续的会话时禁用首屏继续入口', async () => {
+    const onResumeRecent = jest.fn();
+
+    await render(
+      <ChatWelcome
+        theme={theme}
+        onResumeRecent={onResumeRecent}
+        onOpenHistory={noop}
+        onOpenMemory={noop}
+      />
+    );
+
+    expect(screen.getByText('还没有可以继续的对话')).toBeTruthy();
+
+    await fireEvent.press(screen.getByLabelText('继续上次对话'));
+    expect(onResumeRecent).not.toHaveBeenCalled();
   });
 });
 

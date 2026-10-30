@@ -31,7 +31,7 @@ export function useThemePreference(): ThemePreferenceApi {
   const [themeMode, setThemeMode] = useState<ThemeMode>(DEFAULT_THEME_MODE);
   const [themeId, setThemeId] = useState<ThemeId>(DEFAULT_THEME_ID);
 
-  // 启动时读取本地保存的主题；读不到就用默认（浅色 + 黑色强调）
+  // 启动时读取本地保存的主题；读不到就用默认（浅色 + 蓝色强调）
   useEffect(() => {
     let cancelled = false;
 

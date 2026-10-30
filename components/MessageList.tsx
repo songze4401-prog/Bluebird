@@ -6,6 +6,7 @@ import React, {
   useState,
 } from 'react';
 import {
+  ActivityIndicator,
   View,
   Text,
   TouchableOpacity,
@@ -19,7 +20,7 @@ import { AT_BOTTOM_DISTANCE, FOLLOW_RESUME_DISTANCE } from '../lib/constants';
 import { CHAT_LAYOUT, CHAT_TYPE } from '../lib/design';
 
 import { ChatBubble } from './ChatBubble';
-import { ToolCallPillRow } from './ToolCallPill';
+import { AgentRunBlock } from './AgentRunBlock';
 
 // 自动跟随的三态状态机（放在 ref 里：只影响「要不要滚」，不参与渲染）。
 // - follow：贴底跟随，新消息到达即滚到底
@@ -65,6 +66,9 @@ export function MessageList({
   onRecall,
   onRetry,
   onContinue,
+  onOpenActions,
+  isFavorite,
+  emptyState,
 }: {
   theme: Theme;
   messages: Message[];
@@ -84,6 +88,10 @@ export function MessageList({
   onRecall: (message: Message) => void;
   onRetry: (text?: string, attachments?: Attachment[]) => void;
   onContinue: () => void;
+  onOpenActions?: (message: Message) => void;
+  isFavorite?: (message: Message) => boolean;
+  /** 空会话首屏：由 App 注入合并后的主页入口 */
+  emptyState?: React.ReactElement;
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);
 
@@ -197,6 +205,9 @@ export function MessageList({
       // 若这批内容刚刚被消息效应贴过底（首屏的常见路径），则不重复滚。
       if (lastScrolledMessagesRef.current !== current) scrollToEndOnce(false);
     } else {
+      // 空白新对话：回到列表顶部，避免继承上一个会话的滚动位置，
+      // 把首屏的品牌区和标题藏在视口外。
+      flatListRef.current?.scrollToOffset({ offset: 0, animated: false });
       // 历史还没到：等它到达时由下面的「消息变化」效应贴底
       sessionScrollPendingRef.current = true;
     }
@@ -237,6 +248,8 @@ export function MessageList({
         autoScrollState.current = 'follow';
         setPendingNewCount(0);
         setShowScrollToBottom(false);
+        // 清空或新建后回到顶部，让首屏标题从头显示
+        flatListRef.current?.scrollToOffset({ offset: 0, animated: false });
       }
 
       return;
@@ -383,13 +396,32 @@ export function MessageList({
             onRecall={onRecall}
             onRetry={onRetry}
             onContinue={onContinue}
+            onOpenActions={onOpenActions}
+            isFavorite={isFavorite ? isFavorite(item) : false}
           />
         )}
+        ListEmptyComponent={
+          loadingHistory ? (
+            <View style={styles.emptyState}>
+              <ActivityIndicator color={theme.accent} />
+              <Text style={styles.emptyHint}>正在读取对话…</Text>
+            </View>
+          ) : (
+            emptyState ?? (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyTitle}>开始和 Blue 说第一句话</Text>
+                <Text style={styles.emptyHint}>
+                  你的记忆、工具和上下文会在需要时安静地接上。
+                </Text>
+              </View>
+            )
+          )
+        }
         ListFooterComponent={
           sending ? (
             <View style={styles.footer}>
               {/* 在途工具 pill：tool_start 到达即出现，done 后由消息上的权威 toolSteps 接手 */}
-              <ToolCallPillRow theme={theme} steps={liveToolSteps} />
+              <AgentRunBlock theme={theme} steps={liveToolSteps} compact />
 
               <Text style={styles.typingText}>Bluebird 正在输入…</Text>
             </View>
@@ -464,7 +496,28 @@ const createStyles = (theme: Theme) =>
       color: theme.chatMuted,
       fontSize: CHAT_TYPE.meta,
     },
+    emptyState: {
+      flex: 1,
+      minHeight: 220,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: 24,
+    },
+    emptyTitle: {
+      color: theme.chatText,
+      fontSize: 17,
+      lineHeight: 24,
+      fontWeight: '600',
+    },
+    emptyHint: {
+      marginTop: 8,
+      color: theme.chatMuted,
+      fontSize: 12,
+      lineHeight: 19,
+      textAlign: 'center',
+    },
     messages: {
+      flexGrow: 1,
       paddingHorizontal: CHAT_LAYOUT.gutter,
       paddingTop: CHAT_LAYOUT.threadTopPad,
       // 首条消息自带 turnGap，这里减掉，避免顶部空档翻倍

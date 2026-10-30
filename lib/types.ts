@@ -49,6 +49,8 @@ export type ToolStepView = {
   ok: boolean;
   summary: string;
   running: boolean;
+  // 落盘摘要带真实耗时；流式现场态没有该字段
+  durationMs?: number;
 };
 
 // SSE 的工具进度事件（服务端 agent-runtime.js 的 onToolEvent 载荷）。
@@ -82,6 +84,8 @@ export type Message = {
   agentNotice?: string;
   // Agent 工具调用摘要（仅 assistant）：设计图里的「调用工具」pill
   toolSteps?: ToolStepView[];
+  // 用户主动停止后保留的本地部分回复；服务端未落盘，刷新后可能消失
+  stopped?: boolean;
 };
 
 // 会话元数据（与 GET /sessions 返回结构一致）

@@ -120,6 +120,13 @@ export type AgentPolicyResponse = {
     maxAllowedTools: number;
   };
   runtimeLimits: { maxRounds: number };
+  // 服务端只读运行状态：全局开关由环境变量控制，前端不得伪造可写开关。
+  runtime?: {
+    switchOn: boolean;
+    maxRounds: number;
+    toolTimeoutDefaultMs: number;
+    imageRequestsDisableTools: boolean;
+  };
   availableTools: AgentPolicyTool[];
 };
 
@@ -139,6 +146,14 @@ export type PersonaResponse = {
 export type PersonaSaveResponse = { config: PersonaConfig };
 
 // ---- 记忆 ----
+export type MemoryContribution = {
+  sessionId?: string | null;
+  sourceQuote: string;
+  createdAt?: string | null;
+  messageId?: string;
+  sourceType?: string;
+};
+
 export type MemoryItem = {
   // 稳定 id：更正/删除优先用它定位（旧的 createdAt + content 定位仍受支持）
   id?: string;
@@ -152,7 +167,9 @@ export type MemoryItem = {
   supersededBy?: string | null;
   supersedes?: string | null;
   sourceQuote?: string;
+  contributions?: MemoryContribution[];
   pendingReason?: string;
+  pendingAt?: string | null;
   pendingTargetId?: string | null;
   eventAt?: string | null;
   condition?: string | null;
@@ -167,7 +184,26 @@ export type MemoryItem = {
   updatedAt?: string;
 };
 
-export type MemoryListResponse = { memories: MemoryItem[] };
+export type MemoryListResponse = {
+  memories: MemoryItem[];
+  scope?: 'active' | 'all';
+};
+
+export type MemoryWriteAttempt = {
+  at: string;
+  sessionId?: string | null;
+  written: boolean;
+  action: string;
+  reason?: string | null;
+  id?: string | null;
+  supersededId?: string | null;
+  decision?: string;
+  status?: string;
+  targetId?: string | null;
+  errorCode?: string;
+};
+
+export type MemoryWriteAttemptsResponse = { attempts: MemoryWriteAttempt[] };
 
 export type MemoryLifecycleResponse = {
   ok: true;
