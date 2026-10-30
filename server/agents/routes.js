@@ -11,6 +11,8 @@ const credentials = require('./credentials');
 const sessions = require('./sessions');
 const tasks = require('./tasks');
 const runtime = require('./runtime');
+const approvals = require('./approvals');
+const permissions = require('./permissions');
 const { describeAgentError } = require('./errors');
 
 function sendError(res, error) {
@@ -38,7 +40,9 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
       pathName === '/agents' ||
       pathName.startsWith('/agents/') ||
       pathName === '/agent-tasks' ||
-      pathName.startsWith('/agent-tasks/');
+      pathName.startsWith('/agent-tasks/') ||
+      pathName === '/agent-approvals' ||
+      pathName.startsWith('/agent-approvals/');
     if (!isAgentPath) return next();
     return requireAuth(req, res, next);
   });
@@ -216,16 +220,24 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
       };
       const controller = new AbortController();
       res.on('close', () => controller.abort());
-      send('meta', { botId, sessionId: body.sessionId || null, stream: 'final_text' });
+      send('meta', { botId, sessionId: body.sessionId || null, stream: 'token' });
 
+      let deltaCount = 0;
       try {
         const result = await runtime.chat(botId, {
           sessionId: body.sessionId,
           message: body.message,
           signal: controller.signal,
+          stream: true,
+          onDelta: delta => {
+            deltaCount += 1;
+            send('delta', { delta });
+          },
           onToolEvent: event => send(event.type, event),
         });
-        send('delta', { delta: result.message.content });
+        if (!deltaCount && result.message.content) {
+          send('delta', { delta: result.message.content });
+        }
         send('done', result);
       } catch (error) {
         const info = describeAgentError(error);
@@ -259,6 +271,102 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
         limit: req.query.limit,
       });
       res.json({ events });
+    })
+  );
+
+  router.get(
+    '/agents/:botId/permissions',
+    route(async (req, res) => {
+      res.json({ permission: permissions.getPermissionProfile(req.params.botId) });
+    })
+  );
+
+  router.post(
+    '/agents/:botId/approvals',
+    route(async (req, res) => {
+      const body = req.body || {};
+      const approval = approvals.createApproval({
+        botId: req.params.botId,
+        operation: body.operation,
+        payload: body.payload,
+        taskId: body.taskId,
+        sessionId: body.sessionId,
+        requestedBy: body.requestedBy,
+      });
+      audit(req, 'agent.approval.request', {
+        target: 'agent_approval',
+        sessionId: approval.sessionId,
+        reason: approval.operation,
+      });
+      res.status(201).json({ approval });
+    })
+  );
+
+  router.get(
+    '/agents/:botId/approvals',
+    route(async (req, res) => {
+      res.json({
+        approvals: approvals.listApprovals(req.params.botId, {
+          limit: req.query.limit,
+          status: typeof req.query.status === 'string' ? req.query.status : null,
+        }),
+      });
+    })
+  );
+
+  router.get(
+    '/agent-approvals/:approvalId',
+    route(async (req, res) => {
+      const approval = approvals.getApproval(req.params.approvalId);
+      if (!approval) {
+        return res.status(404).json({ error: '审批不存在', code: 'approval_not_found' });
+      }
+      res.json({ approval });
+    })
+  );
+
+  router.post(
+    '/agent-approvals/:approvalId/approve',
+    route(async (req, res) => {
+      const approval = approvals.approve(req.params.approvalId, {
+        reason: req.body && req.body.reason,
+      });
+      audit(req, 'agent.approval.approve', {
+        target: 'agent_approval',
+        sessionId: approval.sessionId,
+        reason: approval.operation,
+      });
+      res.json({ approval });
+    })
+  );
+
+  router.post(
+    '/agent-approvals/:approvalId/reject',
+    route(async (req, res) => {
+      const approval = approvals.reject(req.params.approvalId, {
+        reason: req.body && req.body.reason,
+      });
+      audit(req, 'agent.approval.reject', {
+        target: 'agent_approval',
+        result: 'denied',
+        sessionId: approval.sessionId,
+        reason: req.body && req.body.reason ? String(req.body.reason).slice(0, 120) : 'rejected',
+      });
+      res.json({ approval });
+    })
+  );
+
+  router.post(
+    '/agent-approvals/:approvalId/execute',
+    route(async (req, res) => {
+      const approval = await approvals.execute(req.params.approvalId);
+      audit(req, 'agent.approval.execute', {
+        target: 'agent_approval',
+        result: approval.status === 'completed' ? 'success' : 'failed',
+        sessionId: approval.sessionId,
+        reason: approval.errorCode || approval.operation,
+      });
+      res.json({ approval });
     })
   );
 

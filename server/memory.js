@@ -2886,6 +2886,409 @@ async function archiveMemory(id) {
   });
 }
 
+// ---- 显式维护服务（供审批执行器与 Memory Center 使用） ----
+// 这些方法不替代自动写入决策；它们只在用户已批准的前提下修改现有条目，
+// 并复用同一份内存状态、写队列与原子落盘规则。
+function maintenanceKeywords(value) {
+  if (!Array.isArray(value)) return null;
+  return [...new Set(
+    value
+      .filter(item => typeof item === 'string')
+      .map(item => item.trim())
+      .filter(Boolean)
+  )].slice(0, 5);
+}
+
+function maintenanceDate(value) {
+  if (value === null || value === '') return null;
+  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) return undefined;
+  return value;
+}
+
+async function updateMemory({
+  id,
+  content,
+  type,
+  keywords,
+  confidence,
+  validFrom,
+  validTo,
+  condition,
+  actor = 'user',
+} = {}) {
+  const targetId = cleanText(id);
+  if (!targetId) return { updated: 0, reason: 'invalid' };
+  if (
+    content === undefined &&
+    type === undefined &&
+    keywords === undefined &&
+    confidence === undefined &&
+    validFrom === undefined &&
+    validTo === undefined &&
+    condition === undefined
+  ) {
+    return { updated: 0, reason: 'no_changes' };
+  }
+
+  return enqueueWrite(async () => {
+    const current = Array.isArray(memories) ? memories : [];
+    const index = current.findIndex(item => item && item.id === targetId);
+    if (index < 0) return { updated: 0, reason: 'not-found' };
+
+    const item = current[index];
+    const status = item.status || STATUS_ACTIVE;
+    if (status !== STATUS_ACTIVE) {
+      return { updated: 0, reason: 'invalid-state' };
+    }
+
+    const updated = { ...item };
+    if (content !== undefined) {
+      const value = cleanText(content);
+      if (!value || value.length > 100) return { updated: 0, reason: 'invalid_content' };
+      updated.content = value;
+    }
+    if (type !== undefined) {
+      if (!ALLOWED_TYPES.has(type)) return { updated: 0, reason: 'type_not_allowed' };
+      updated.type = type;
+    }
+    if (keywords !== undefined) {
+      const value = maintenanceKeywords(keywords);
+      if (value === null) return { updated: 0, reason: 'invalid_keywords' };
+      updated.keywords = value;
+    }
+    if (confidence !== undefined) {
+      const value = Number(confidence);
+      if (!Number.isFinite(value) || value < 0 || value > 1) {
+        return { updated: 0, reason: 'invalid_confidence' };
+      }
+      updated.confidence = value;
+    }
+    if (validFrom !== undefined) {
+      const value = maintenanceDate(validFrom);
+      if (value === undefined) return { updated: 0, reason: 'invalid_valid_from' };
+      updated.validFrom = value || updated.validFrom;
+    }
+    if (validTo !== undefined) {
+      const value = maintenanceDate(validTo);
+      if (value === undefined) return { updated: 0, reason: 'invalid_valid_to' };
+      updated.validTo = value;
+    }
+    if (condition !== undefined) {
+      const value = cleanText(condition);
+      if (value.length > 80) return { updated: 0, reason: 'condition_too_long' };
+      updated.condition = value || null;
+    }
+
+    const now = new Date().toISOString();
+    updated.updatedAt = now;
+    updated.lastDecision = {
+      action: 'update',
+      reason: 'approved_update',
+      at: now,
+      actor,
+      sourceType: 'user',
+    };
+
+    const next = current.slice();
+    next[index] = updated;
+    await saveMemories(next);
+    memories = next;
+    return { updated: 1, reason: 'ok', id: targetId, status: STATUS_ACTIVE };
+  });
+}
+
+async function mergeMemories({
+  targetId,
+  sourceIds,
+  content,
+  keywords,
+  actor = 'user',
+} = {}) {
+  const target = cleanText(targetId);
+  const sources = [...new Set(
+    (Array.isArray(sourceIds) ? sourceIds : [])
+      .filter(item => typeof item === 'string')
+      .map(item => item.trim())
+      .filter(Boolean)
+  )].filter(item => item !== target);
+
+  if (!target || !sources.length) return { updated: 0, reason: 'invalid' };
+  if (content !== undefined) {
+    const value = cleanText(content);
+    if (!value || value.length > 100) return { updated: 0, reason: 'invalid_content' };
+  }
+  const extraKeywords = keywords === undefined ? [] : maintenanceKeywords(keywords);
+  if (extraKeywords === null) return { updated: 0, reason: 'invalid_keywords' };
+
+  return enqueueWrite(async () => {
+    const current = Array.isArray(memories) ? memories : [];
+    const targetIndex = current.findIndex(item => item && item.id === target);
+    if (targetIndex < 0) return { updated: 0, reason: 'not-found' };
+
+    const targetItem = current[targetIndex];
+    if ((targetItem.status || STATUS_ACTIVE) !== STATUS_ACTIVE) {
+      return { updated: 0, reason: 'invalid-state' };
+    }
+
+    const sourceIndexes = [];
+    const sourceItems = [];
+    for (const sourceId of sources) {
+      const index = current.findIndex(item => item && item.id === sourceId);
+      if (index < 0) return { updated: 0, reason: 'source_not_found', sourceId };
+      const item = current[index];
+      if ((item.status || STATUS_ACTIVE) !== STATUS_ACTIVE) {
+        return { updated: 0, reason: 'source_not_active', sourceId };
+      }
+      if (item.type !== targetItem.type) {
+        return { updated: 0, reason: 'type_mismatch', sourceId };
+      }
+      sourceIndexes.push(index);
+      sourceItems.push(item);
+    }
+
+    const now = new Date().toISOString();
+    let contributions = Array.isArray(targetItem.contributions)
+      ? targetItem.contributions.map(item => ({ ...item }))
+      : [];
+    let mergedKeywords = Array.isArray(targetItem.keywords)
+      ? targetItem.keywords.slice(0, 5)
+      : [];
+    let confidence = Number(targetItem.confidence) || 0;
+
+    for (const item of sourceItems) {
+      contributions = mergeContributions(contributions, item.contributions);
+      for (const keyword of Array.isArray(item.keywords) ? item.keywords : []) {
+        if (!mergedKeywords.includes(keyword) && mergedKeywords.length < 5) {
+          mergedKeywords.push(keyword);
+        }
+      }
+      confidence = Math.max(confidence, Number(item.confidence) || 0);
+    }
+    for (const keyword of extraKeywords) {
+      if (!mergedKeywords.includes(keyword) && mergedKeywords.length < 5) {
+        mergedKeywords.push(keyword);
+      }
+    }
+
+    const next = current.slice();
+    next[targetIndex] = {
+      ...targetItem,
+      content: content !== undefined ? cleanText(content) : targetItem.content,
+      keywords: mergedKeywords,
+      confidence,
+      contributions,
+      updatedAt: now,
+      lastDecision: {
+        action: 'merge',
+        reason: 'approved_merge',
+        at: now,
+        actor,
+        sourceType: 'user',
+      },
+    };
+
+    for (const index of sourceIndexes) {
+      const item = next[index];
+      next[index] = {
+        ...item,
+        status: STATUS_SUPERSEDED,
+        validTo: item.validTo || now,
+        supersededBy: target,
+        updatedAt: now,
+        lastDecision: {
+          action: 'merge_source',
+          reason: 'merged_into_target',
+          at: now,
+          actor,
+          sourceType: 'user',
+        },
+      };
+    }
+
+    await saveMemories(next);
+    memories = next;
+    return {
+      updated: 1,
+      reason: 'ok',
+      id: target,
+      merged: sources.length,
+      supersededIds: sources,
+    };
+  });
+}
+
+async function supersedeMemory({ id, replacement, actor = 'user' } = {}) {
+  const targetId = cleanText(id);
+  const source = replacement && typeof replacement === 'object' ? replacement : null;
+  if (!targetId || !source) return { updated: 0, reason: 'invalid' };
+
+  const content = cleanText(source.content);
+  if (!content || content.length > 100) return { updated: 0, reason: 'invalid_content' };
+  if (source.type !== undefined && !ALLOWED_TYPES.has(source.type)) {
+    return { updated: 0, reason: 'type_not_allowed' };
+  }
+  if (
+    source.confidence !== undefined &&
+    (!Number.isFinite(Number(source.confidence)) ||
+      Number(source.confidence) < 0 ||
+      Number(source.confidence) > 1)
+  ) {
+    return { updated: 0, reason: 'invalid_confidence' };
+  }
+  const newKeywords = source.keywords === undefined ? null : maintenanceKeywords(source.keywords);
+  if (newKeywords === null && source.keywords !== undefined) {
+    return { updated: 0, reason: 'invalid_keywords' };
+  }
+  const validFrom = source.validFrom === undefined ? null : maintenanceDate(source.validFrom);
+  const validTo = source.validTo === undefined ? null : maintenanceDate(source.validTo);
+  if (validFrom === undefined) return { updated: 0, reason: 'invalid_valid_from' };
+  if (validTo === undefined) return { updated: 0, reason: 'invalid_valid_to' };
+
+  return enqueueWrite(async () => {
+    const current = Array.isArray(memories) ? memories : [];
+    const index = current.findIndex(item => item && item.id === targetId);
+    if (index < 0) return { updated: 0, reason: 'not-found' };
+    const target = current[index];
+    if (!canTransition(target.status || STATUS_ACTIVE, STATUS_SUPERSEDED)) {
+      return { updated: 0, reason: 'invalid-state' };
+    }
+
+    const now = new Date().toISOString();
+    const newId = issuedId();
+    const replacementEntry = {
+      id: newId,
+      status: STATUS_ACTIVE,
+      content,
+      type: source.type || target.type,
+      keywords: newKeywords === null
+        ? Array.isArray(target.keywords) ? target.keywords.slice(0, 5) : []
+        : newKeywords,
+      confidence:
+        source.confidence !== undefined
+          ? Number(source.confidence)
+          : Number(target.confidence) || 0.9,
+      validFrom: validFrom || now,
+      validTo: validTo || null,
+      supersededBy: null,
+      supersedes: targetId,
+      contributions: Array.isArray(target.contributions)
+        ? target.contributions.map(item => ({ ...item }))
+        : [],
+      createdAt: now,
+      updatedAt: now,
+      sourceType: 'user',
+      intent: 'maintenance',
+      eventAt: cleanText(source.eventAt) || null,
+      condition: cleanText(source.condition) || null,
+      lastDecision: {
+        action: 'supersede',
+        reason: 'approved_supersede',
+        at: now,
+        actor,
+        sourceType: 'user',
+      },
+    };
+
+    const next = current.slice();
+    next[index] = {
+      ...target,
+      status: STATUS_SUPERSEDED,
+      validTo: target.validTo || now,
+      supersededBy: newId,
+      updatedAt: now,
+      lastDecision: {
+        action: 'supersede',
+        reason: 'replaced_by_approved_entry',
+        at: now,
+        actor,
+        sourceType: 'user',
+      },
+    };
+    next.push(replacementEntry);
+    trimToCapacity(next);
+    await saveMemories(next);
+    memories = next;
+
+    return {
+      updated: 1,
+      reason: 'ok',
+      id: newId,
+      supersededId: targetId,
+      status: STATUS_ACTIVE,
+    };
+  });
+}
+
+async function withdrawMemory({ id, sessionId = null, actor = 'user' } = {}) {
+  const targetId = cleanText(id);
+  const targetSession = cleanText(sessionId);
+  if (!targetId) return { withdrawn: 0, reason: 'invalid' };
+
+  return enqueueWrite(async () => {
+    const current = Array.isArray(memories) ? memories : [];
+    const index = current.findIndex(item => item && item.id === targetId);
+    if (index < 0) return { withdrawn: 0, reason: 'not-found' };
+
+    const item = current[index];
+    if ((item.status || STATUS_ACTIVE) !== STATUS_ACTIVE) {
+      return { withdrawn: 0, reason: 'invalid-state' };
+    }
+
+    const contributions = Array.isArray(item.contributions) ? item.contributions : [];
+    const kept = targetSession
+      ? contributions.filter(contribution => contribution.sessionId !== targetSession)
+      : [];
+    const removedContributions = contributions.length - kept.length;
+    if (!removedContributions) {
+      return { withdrawn: 0, reason: 'no-match' };
+    }
+
+    const now = new Date().toISOString();
+    const next = current.slice();
+    if (kept.length) {
+      next[index] = {
+        ...item,
+        contributions: kept,
+        updatedAt: now,
+        lastDecision: {
+          action: 'withdraw',
+          reason: 'withdrawn_session_contributions',
+          at: now,
+          actor,
+          sourceType: 'user',
+        },
+      };
+    } else {
+      next[index] = {
+        ...item,
+        status: STATUS_ARCHIVED,
+        contributions: [],
+        validTo: item.validTo || now,
+        updatedAt: now,
+        lastDecision: {
+          action: 'withdraw',
+          reason: 'withdrawn_all_contributions',
+          at: now,
+          actor,
+          sourceType: 'user',
+        },
+      };
+    }
+
+    await saveMemories(next);
+    memories = next;
+    return {
+      withdrawn: 1,
+      reason: 'ok',
+      id: targetId,
+      removedContributions,
+      archived: kept.length === 0,
+      status: kept.length ? STATUS_ACTIVE : STATUS_ARCHIVED,
+    };
+  });
+}
+
+
 // 写后自检：把磁盘上的记忆库重新读一遍，与内存做「定位字段」指纹比较。
 // 只比较 id / status / validFrom / 每条贡献的会话归属，不比较正文——
 // 正文只影响展示，定位字段才决定「这条记忆属于谁、还能不能被撤回/更正」。
@@ -2988,6 +3391,10 @@ module.exports = {
   confirmPending,
   rejectPending,
   archiveMemory,
+  updateMemory,
+  mergeMemories,
+  supersedeMemory,
+  withdrawMemory,
   deleteMemory,
   buildMemoryContext,
   searchMemories,

@@ -680,6 +680,8 @@ export type AgentSummary = {
   entrypoints: string[];
   permissionProfileId: string;
   toolAllowlist: string[];
+  availableTools: string[];
+  permission: AgentPermissionProfile;
   status: 'enabled' | 'disabled' | 'degraded';
   statusReason: string | null;
   enabled: boolean;
@@ -695,6 +697,38 @@ export type AgentSummary = {
   lastActivityAt: string | null;
   updatedAt: string;
 };
+
+export type AgentPermissionProfile = {
+  profileId: string;
+  mode: 'single_user' | string;
+  actorId: string;
+  allowedOperations: string[];
+  approvalRequired: string[];
+  extensionPoint: { multiUser: boolean; aclResolver: string };
+};
+
+export type AgentApproval = {
+  approvalId: string;
+  botId: string;
+  taskId: string | null;
+  sessionId: string | null;
+  operation: string;
+  payload: Record<string, unknown>;
+  risk: string;
+  status: 'pending' | 'approved' | 'rejected' | 'executing' | 'completed' | 'failed';
+  requestedBy: string;
+  requestedAt: string;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  executedBy: string | null;
+  executedAt: string | null;
+  reason: string | null;
+  errorCode: string | null;
+  result: Record<string, unknown> | null;
+};
+
+export type AgentApprovalsResponse = { approvals: AgentApproval[] };
+export type AgentApprovalResponse = { approval: AgentApproval };
 
 export type AgentsResponse = { agents: AgentSummary[] };
 export type AgentResponse = { agent: AgentSummary };
@@ -808,6 +842,9 @@ export type AgentTask = {
     | 'cancelled'
     | 'timed_out';
   cancelRequested: boolean;
+  attempts: number;
+  maxAttempts: number;
+  recoveredAt: string | null;
   createdAt: string;
   updatedAt: string;
   startedAt: string | null;

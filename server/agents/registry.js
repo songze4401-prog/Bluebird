@@ -10,6 +10,7 @@ const { listSessions } = require('./sessions');
 const { listEvents } = require('./tasks');
 const { findProvider } = require('../api-configs');
 const { AgentError } = require('./errors');
+const permissions = require('./permissions');
 
 function credentialFor(config, credentials) {
   if (!config.modelProfile.credentialId) return null;
@@ -64,6 +65,8 @@ function buildAgent(botId) {
     entrypoints: [...manifest.entrypoints],
     permissionProfileId: config.permissionProfileId,
     toolAllowlist: [...config.toolAllowlist],
+    availableTools: [...manifest.toolAllowlist],
+    permission: permissions.getPermissionProfile(botId),
     status: evaluated.status,
     statusReason: evaluated.reason,
     enabled: config.enabled,

@@ -220,6 +220,81 @@ function buildToolSummary(result) {
   return result.ok ? '执行成功' : result.error || '执行失败';
 }
 
+// 把 OpenAI 兼容流式响应收束成与一次性 completion 相同的结构；
+// 文本增量实时交给 onDelta，工具调用参数只在本地累积，不发送给客户端。
+async function consumeCompletionStream(stream, onDelta) {
+  let content = '';
+  const calls = new Map();
+  let finishReason = null;
+
+  for await (const chunk of stream) {
+    const choice = chunk && Array.isArray(chunk.choices) ? chunk.choices[0] : null;
+    if (!choice) continue;
+    const delta = choice.delta || {};
+    if (typeof delta.content === 'string' && delta.content) {
+      content += delta.content;
+      if (typeof onDelta === 'function') {
+        try {
+          onDelta(delta.content);
+        } catch (_) {
+          // 客户端写失败不应破坏模型流；调用方用 abortSignal 终止。
+        }
+      }
+    }
+    if (Array.isArray(delta.tool_calls)) {
+      for (const part of delta.tool_calls) {
+        const index = Number.isInteger(part.index) ? part.index : 0;
+        const current = calls.get(index) || {
+          id: '',
+          type: 'function',
+          function: { name: '', arguments: '' },
+        };
+        if (part.id && !current.id) current.id = part.id;
+        if (part.function) {
+          if (typeof part.function.name === 'string' && part.function.name) {
+            if (!current.function.name) current.function.name = part.function.name;
+            else if (current.function.name !== part.function.name) {
+              current.function.name += part.function.name;
+            }
+          }
+          if (typeof part.function.arguments === 'string') {
+            current.function.arguments += part.function.arguments;
+          }
+        }
+        calls.set(index, current);
+      }
+    }
+    if (choice.finish_reason) finishReason = choice.finish_reason;
+  }
+
+  const toolCalls = [...calls.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([index, call], order) => ({
+      id: call.id || `stream_call_${index}_${order}`,
+      type: 'function',
+      function: {
+        name: call.function.name,
+        arguments: call.function.arguments || '{}',
+      },
+    }))
+    .filter(call => call.function.name);
+
+  return {
+    choices: [
+      {
+        index: 0,
+        finish_reason: finishReason || (toolCalls.length ? 'tool_calls' : 'stop'),
+        message: {
+          role: 'assistant',
+          content: content || null,
+          ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+        },
+      },
+    ],
+    usage: null,
+  };
+}
+
 /**
  * 执行单个工具调用。rawArgs 为模型给的原始 arguments（已 JSON.parse，
  * parse 失败时传 null）。返回结构化结果，绝不抛出。
@@ -494,6 +569,8 @@ async function runAgentTurn({
   onRequest,
   onToolResult,
   credentialKey = null,
+  stream = false,
+  onDelta = null,
 }) {
   logSwitchIfChanged();
 
@@ -577,7 +654,7 @@ async function runAgentTurn({
     }
 
     const remainingMs = Math.max(1000, maxTotalMs - (Date.now() - startedAt));
-    completion = await createChatCompletion({
+    const completionRequest = {
       providerId,
       modelId,
       messages: conversation,
@@ -587,9 +664,14 @@ async function runAgentTurn({
       monitoringRound: round,
       credentialKey,
       signal: abortSignal,
+      stream,
       // 末轮/预算耗尽轮强制无 tools：模型只能产出文本，从结构上终结循环
       ...(isFinalRound ? {} : { tools: specs, tool_choice: 'auto' }),
-    });
+    };
+    completion = await createChatCompletion(completionRequest);
+    if (stream) {
+      completion = await consumeCompletionStream(completion, onDelta);
+    }
 
     const message =
       completion &&

@@ -8,7 +8,7 @@
 
 import { API_TOKEN } from '../constants';
 
-const API_BASE = process.env.EXPO_PUBLIC_API_URL ?? '';
+export const API_BASE = process.env.EXPO_PUBLIC_API_URL ?? '';
 
 // 各接口的超时预算（毫秒）。默认 15s，聊天/流式/上传保留原有 60s，
 // presence 保留原有 10s —— 大模型生成与 base64 上传都需要更长的窗口。

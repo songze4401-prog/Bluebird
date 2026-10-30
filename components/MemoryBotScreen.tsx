@@ -20,6 +20,8 @@ import type {
   AgentChatMessage,
   AgentChatResponse,
   AgentEvent,
+  AgentApproval,
+  AgentApprovalsResponse,
   AgentEventsResponse,
   AgentResponse,
   AgentSession,
@@ -32,6 +34,7 @@ import type {
 } from '../lib/api/types';
 import type { ModelProvider } from '../lib/types';
 import { MarkdownMessage } from './MarkdownMessage';
+import { emptyAgentMessage, sendAgentChatStream } from '../lib/agent-stream';
 
 type Tab = 'chat' | 'config' | 'activity';
 
@@ -73,6 +76,11 @@ export function MemoryBotScreen({
   const [messages, setMessages] = useState<AgentChatMessage[]>([]);
   const [tasks, setTasks] = useState<AgentTask[]>([]);
   const [events, setEvents] = useState<AgentEvent[]>([]);
+  const [approvals, setApprovals] = useState<AgentApproval[]>([]);
+  const [taskGoal, setTaskGoal] = useState('');
+  const [taskType, setTaskType] = useState('memory.search');
+  const [taskBusy, setTaskBusy] = useState(false);
+  const [approvalBusy, setApprovalBusy] = useState('');
   const [input, setInput] = useState('');
   const [keyInput, setKeyInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -94,13 +102,14 @@ export function MemoryBotScreen({
     setLoading(true);
     setError('');
     try {
-      const [agentRes, configRes, sessionsRes, tasksRes, eventsRes, providersRes] =
+      const [agentRes, configRes, sessionsRes, tasksRes, eventsRes, approvalsRes, providersRes] =
         await Promise.all([
           apiFetch(API_PATHS.agent('memory')),
           apiFetch(API_PATHS.agentConfig('memory')),
           apiFetch(API_PATHS.agentSessions('memory')),
           apiFetch(API_PATHS.agentTasks('memory', 20)),
           apiFetch(API_PATHS.agentEvents('memory', 30)),
+          apiFetch(API_PATHS.agentApprovals('memory', 50)),
           apiFetch(API_PATHS.modelProviders),
         ]);
       if (!agentRes.ok || !configRes.ok) throw new Error('agent');
@@ -115,6 +124,9 @@ export function MemoryBotScreen({
       const eventsData = eventsRes.ok
         ? ((await eventsRes.json()) as AgentEventsResponse)
         : { events: [] };
+      const approvalsData = approvalsRes.ok
+        ? ((await approvalsRes.json()) as AgentApprovalsResponse)
+        : { approvals: [] };
       const providerData = providersRes.ok
         ? ((await providersRes.json()) as { providers?: ModelProvider[] })
         : {};
@@ -125,6 +137,7 @@ export function MemoryBotScreen({
       setSessions(sessionsData.sessions || []);
       setTasks(tasksData.tasks || []);
       setEvents(eventsData.events || []);
+      setApprovals(approvalsData.approvals || []);
 
       const preferred =
         sessionId && sessionsData.sessions.some(item => item.id === sessionId)
@@ -152,14 +165,16 @@ export function MemoryBotScreen({
   }, [visible, load]);
 
   const refreshActivity = useCallback(async () => {
-    const [tasksRes, eventsRes, sessionsRes] = await Promise.all([
+    const [tasksRes, eventsRes, sessionsRes, approvalsRes] = await Promise.all([
       apiFetch(API_PATHS.agentTasks('memory', 20)),
       apiFetch(API_PATHS.agentEvents('memory', 30)),
       apiFetch(API_PATHS.agentSessions('memory')),
+      apiFetch(API_PATHS.agentApprovals('memory', 50)),
     ]);
     if (tasksRes.ok) setTasks(((await tasksRes.json()) as AgentTasksResponse).tasks || []);
     if (eventsRes.ok) setEvents(((await eventsRes.json()) as AgentEventsResponse).events || []);
     if (sessionsRes.ok) setSessions(((await sessionsRes.json()) as AgentSessionsResponse).sessions || []);
+    if (approvalsRes.ok) setApprovals(((await approvalsRes.json()) as AgentApprovalsResponse).approvals || []);
   }, []);
 
   const send = async () => {
@@ -168,18 +183,22 @@ export function MemoryBotScreen({
     setSending(true);
     setError('');
     setNotice('');
-    const localId = `local-${Date.now()}`;
+    const localUserId = `local-${Date.now()}`;
+    const streamId = `stream-${Date.now()}`;
     setMessages(prev => [
       ...prev,
       {
-        id: localId,
+        id: localUserId,
         role: 'user',
         content: text,
         createdAt: new Date().toISOString(),
       },
+      emptyAgentMessage(streamId),
     ]);
     setInput('');
-    try {
+
+    const fallback = async () => {
+      setMessages(prev => prev.filter(message => message.id !== streamId));
       const response = await apiFetch(API_PATHS.agentChat('memory'), {
         method: 'POST',
         body: JSON.stringify({ sessionId, message: text }),
@@ -189,13 +208,61 @@ export function MemoryBotScreen({
       setSessionId(data.sessionId);
       setMessages(prev => [...prev, data.message]);
       await refreshActivity();
-      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
+    };
+
+    try {
+      const outcome = await sendAgentChatStream('memory', { sessionId, message: text }, {
+        onDelta: delta => {
+          setMessages(prev =>
+            prev.map(message =>
+              message.id === streamId
+                ? { ...message, content: `${message.content}${delta}` }
+                : message
+            )
+          );
+          setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 20);
+        },
+        onToolEvent: event => {
+          if (event.type !== 'tool_end') return;
+          setMessages(prev =>
+            prev.map(message => {
+              if (message.id !== streamId) return message;
+              const steps = Array.isArray(message.toolSteps) ? message.toolSteps : [];
+              const nextStep = {
+                name: event.name,
+                ok: event.ok === true,
+                summary: event.summary || (event.ok ? '执行成功' : '执行失败'),
+                durationMs: 0,
+              };
+              return {
+                ...message,
+                toolSteps: [...steps.filter(step => step.name !== event.name), nextStep],
+              };
+            })
+          );
+        },
+      });
+
+      if (outcome.kind === 'done') {
+        setSessionId(outcome.data.sessionId);
+        setMessages(prev =>
+          prev.map(message => (message.id === streamId ? outcome.data.message : message))
+        );
+        await refreshActivity();
+      } else if (outcome.kind === 'fallback') {
+        await fallback();
+      } else if (outcome.kind === 'aborted') {
+        setError('流式请求已取消');
+      } else {
+        setError(outcome.message);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '发送失败');
     } finally {
       setSending(false);
     }
   };
+
 
   const createSession = async () => {
     setSaving(true);
@@ -335,6 +402,84 @@ export function MemoryBotScreen({
     }
   };
 
+  const toggleTool = (name: string) => {
+    if (!config) return;
+    const selected = config.toolAllowlist.includes(name);
+    setConfig({
+      ...config,
+      toolAllowlist: selected
+        ? config.toolAllowlist.filter(item => item !== name)
+        : [...config.toolAllowlist, name],
+    });
+  };
+
+  const createTask = async () => {
+    const goal = taskGoal.trim();
+    if (!goal || taskBusy) return;
+    setTaskBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const response = await apiFetch(API_PATHS.agentTaskCreate, {
+        method: 'POST',
+        body: JSON.stringify({
+          botId: 'memory',
+          taskType,
+          goal,
+          allowedTools: config?.toolAllowlist,
+          deadlineMs: 60000,
+        }),
+      });
+      const data = (await response.json()) as { error?: string };
+      if (!response.ok) throw new Error(data.error || '创建任务失败');
+      setTaskGoal('');
+      await refreshActivity();
+      setNotice('任务已提交，进度来自服务端任务状态。');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '创建任务失败');
+    } finally {
+      setTaskBusy(false);
+    }
+  };
+
+  const actOnApproval = async (
+    approval: AgentApproval,
+    action: 'approve' | 'reject' | 'execute'
+  ) => {
+    if (approvalBusy) return;
+    setApprovalBusy(approval.approvalId);
+    setError('');
+    setNotice('');
+    try {
+      const path =
+        action === 'approve'
+          ? API_PATHS.agentApprovalApprove(approval.approvalId)
+          : action === 'reject'
+            ? API_PATHS.agentApprovalReject(approval.approvalId)
+            : API_PATHS.agentApprovalExecute(approval.approvalId);
+      const response = await apiFetch(path, {
+        method: 'POST',
+        body: JSON.stringify(
+          action === 'reject' ? { reason: '用户拒绝' } : {}
+        ),
+      });
+      const data = (await response.json()) as { error?: string; approval?: AgentApproval };
+      if (!response.ok) throw new Error(data.error || '审批操作失败');
+      await refreshActivity();
+      setNotice(
+        action === 'execute'
+          ? '审批操作已执行，结果来自记忆服务。'
+          : action === 'approve'
+            ? '审批已批准，尚未执行。'
+            : '审批已拒绝。'
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '审批操作失败');
+    } finally {
+      setApprovalBusy('');
+    }
+  };
+
   const selectedProvider =
     providers.find(item => item.id === config?.modelProfile.providerId) || null;
 
@@ -362,6 +507,14 @@ export function MemoryBotScreen({
               key={item}
               style={[styles.tab, tab === item && styles.tabActive]}
               onPress={() => setTab(item)}
+              accessibilityRole="button"
+              accessibilityLabel={
+                item === 'chat'
+                  ? '独立对话页签'
+                  : item === 'config'
+                    ? '模型与 Key页签'
+                    : '任务与事件页签'
+              }
             >
               <Text style={[styles.tabText, tab === item && styles.tabTextActive]}>
                 {item === 'chat' ? '独立对话' : item === 'config' ? '模型与 Key' : '任务与事件'}
@@ -600,12 +753,56 @@ export function MemoryBotScreen({
                   />
                 </View>
 
+                <Text style={styles.sectionTitle}>Prompt</Text>
+                <Text style={styles.sectionHint}>
+                  只影响 Memory Bot 的系统指令；不会写入会话消息或运行事件。
+                </Text>
+                <TextInput
+                  style={styles.promptInput}
+                  value={config.prompt.systemPrompt}
+                  onChangeText={value =>
+                    setConfig({ ...config, prompt: { ...config.prompt, systemPrompt: value } })
+                  }
+                  multiline
+                  maxLength={8000}
+                  textAlignVertical="top"
+                  placeholder="Memory Bot 的系统 Prompt"
+                  placeholderTextColor={theme.textMuted}
+                />
+
+                <Text style={styles.fieldLabel}>工具白名单</Text>
+                <View style={styles.toolGrid}>
+                  {(agent?.availableTools || []).map(name => {
+                    const selected = config.toolAllowlist.includes(name);
+                    return (
+                      <TouchableOpacity
+                        key={name}
+                        style={[styles.toolChip, selected && styles.toolChipSelected]}
+                        onPress={() => toggleTool(name)}
+                      >
+                        <Text
+                          style={[
+                            styles.toolChipText,
+                            selected && styles.toolChipTextSelected,
+                          ]}
+                        >
+                          {selected ? '✓ ' : ''}
+                          {name}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                <Text style={styles.toolHint}>
+                  只能缩小 Manifest 声明的工具集合；维护类操作不在这里，需走人工审批。
+                </Text>
+
                 <TouchableOpacity
                   style={styles.primaryButton}
                   onPress={() => void saveConfig()}
                   disabled={saving}
                 >
-                  <Text style={styles.primaryButtonText}>{saving ? '保存中…' : '保存模型配置'}</Text>
+                  <Text style={styles.primaryButtonText}>{saving ? '保存中…' : '保存配置'}</Text>
                 </TouchableOpacity>
 
                 <Text style={styles.sectionTitle}>独立 API Key</Text>
@@ -660,6 +857,47 @@ export function MemoryBotScreen({
           </ScrollView>
         ) : (
           <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+            <Text style={styles.sectionTitle}>创建委派任务</Text>
+            <Text style={styles.sectionHint}>
+              任务由主控提交、Memory Bot 执行；状态和结果只来自服务端任务存储。
+            </Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.choiceRow}>
+              {(agent?.acceptedTaskTypes || ['memory.search']).map(type => (
+                <TouchableOpacity
+                  key={type}
+                  style={[styles.choice, taskType === type && styles.choiceSelected]}
+                  onPress={() => setTaskType(type)}
+                >
+                  <Text
+                    style={[
+                      styles.choiceText,
+                      taskType === type && styles.choiceTextSelected,
+                    ]}
+                  >
+                    {type}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <TextInput
+              style={styles.taskInput}
+              value={taskGoal}
+              onChangeText={setTaskGoal}
+              placeholder="任务目标，例如：整理我关于咖啡的长期记忆"
+              placeholderTextColor={theme.textMuted}
+              maxLength={2000}
+              editable={!taskBusy}
+            />
+            <TouchableOpacity
+              style={[styles.secondaryButton, styles.taskSubmit]}
+              onPress={() => void createTask()}
+              disabled={taskBusy || !taskGoal.trim()}
+            >
+              <Text style={styles.secondaryButtonText}>
+                {taskBusy ? '提交中…' : '提交任务'}
+              </Text>
+            </TouchableOpacity>
+
             <View style={styles.activityHead}>
               <Text style={styles.sectionTitle}>任务</Text>
               <TouchableOpacity onPress={() => void refreshActivity()}>
@@ -684,6 +922,71 @@ export function MemoryBotScreen({
                   <Text style={styles.taskMeta}>
                     {task.taskId} · {task.completedAt || task.createdAt}
                   </Text>
+                </View>
+              ))
+            )}
+
+            <Text style={styles.sectionTitle}>人工审批</Text>
+            <Text style={styles.sectionHint}>
+              高风险记忆维护必须先申请；未批准不能执行，执行结果来自记忆服务。
+            </Text>
+            {approvals.length === 0 ? (
+              <Text style={styles.hint}>暂无审批申请。</Text>
+            ) : (
+              approvals.map(approval => (
+                <View key={approval.approvalId} style={styles.approvalCard}>
+                  <View style={styles.taskHead}>
+                    <Text style={styles.taskType}>
+                      {approval.operation} · {approval.risk}
+                    </Text>
+                    <Text style={styles.taskStatus}>{approval.status}</Text>
+                  </View>
+                  <Text style={styles.taskMeta}>
+                    {String(
+                      approval.payload.id ||
+                        approval.payload.targetId ||
+                        approval.approvalId
+                    )}
+                  </Text>
+                  {approvalPreview(approval) ? (
+                    <Text style={styles.taskSummary} numberOfLines={3}>
+                      {approvalPreview(approval)}
+                    </Text>
+                  ) : null}
+                  {approval.result ? (
+                    <Text style={styles.taskSummary} numberOfLines={2}>
+                      {JSON.stringify(approval.result)}
+                    </Text>
+                  ) : null}
+                  <View style={styles.approvalActions}>
+                    {approval.status === 'pending' && (
+                      <>
+                        <TouchableOpacity
+                          style={styles.secondaryButton}
+                          onPress={() => void actOnApproval(approval, 'approve')}
+                          disabled={!!approvalBusy}
+                        >
+                          <Text style={styles.secondaryButtonText}>批准</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={styles.dangerButton}
+                          onPress={() => void actOnApproval(approval, 'reject')}
+                          disabled={!!approvalBusy}
+                        >
+                          <Text style={styles.dangerButtonText}>拒绝</Text>
+                        </TouchableOpacity>
+                      </>
+                    )}
+                    {approval.status === 'approved' && (
+                      <TouchableOpacity
+                        style={styles.primaryButtonSmall}
+                        onPress={() => void actOnApproval(approval, 'execute')}
+                        disabled={!!approvalBusy}
+                      >
+                        <Text style={styles.primaryButtonText}>执行</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
                 </View>
               ))
             )}
@@ -713,6 +1016,19 @@ export function MemoryBotScreen({
       </SafeAreaView>
     </Modal>
   );
+}
+
+function approvalPreview(approval: AgentApproval): string {
+  const payload = approval.payload || {};
+  const replacement = payload.replacement as Record<string, unknown> | undefined;
+  const content =
+    (replacement && typeof replacement.content === 'string' ? replacement.content : '') ||
+    (typeof payload.content === 'string' ? payload.content : '');
+  if (content) return content.slice(0, 180);
+  const target = typeof payload.targetId === 'string' ? payload.targetId : '';
+  const sources = Array.isArray(payload.sourceIds) ? payload.sourceIds.join(', ') : '';
+  if (target || sources) return `目标：${target || '—'}${sources ? `；来源：${sources}` : ''}`;
+  return typeof payload.id === 'string' ? `目标：${payload.id}` : '';
 }
 
 function LabeledInput({
@@ -918,6 +1234,39 @@ const createStyles = (theme: Theme) =>
       color: theme.textBody,
       fontSize: 13,
     },
+    promptInput: {
+      marginTop: 8,
+      minHeight: 128,
+      borderRadius: 14,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.borderStrong,
+      backgroundColor: theme.surface,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      color: theme.textBody,
+      fontSize: 12,
+      lineHeight: 19,
+    },
+    toolGrid: {
+      marginTop: 8,
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 8,
+    },
+    toolChip: {
+      paddingHorizontal: 11,
+      paddingVertical: 8,
+      borderRadius: 999,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.borderStrong,
+    },
+    toolChipSelected: {
+      backgroundColor: theme.accent,
+      borderColor: theme.accent,
+    },
+    toolChipText: { color: theme.textMuted, fontSize: 10, fontFamily: 'monospace' },
+    toolChipTextSelected: { color: '#fff' },
+    toolHint: { marginTop: 7, color: theme.textMuted, fontSize: 10, lineHeight: 15 },
     primaryButton: {
       marginTop: 20,
       height: 44,
@@ -989,6 +1338,35 @@ const createStyles = (theme: Theme) =>
     hint: { marginTop: 12, color: theme.textMuted, fontSize: 11 },
     activityHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-end' },
     refreshLink: { color: theme.accent, fontSize: 11 },
+    taskInput: {
+      marginTop: 10,
+      borderRadius: 14,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.borderStrong,
+      backgroundColor: theme.surface,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      color: theme.textBody,
+      fontSize: 12,
+    },
+    taskSubmit: { marginTop: 8, flex: 0 },
+    approvalCard: {
+      marginTop: 10,
+      padding: 13,
+      borderRadius: 14,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+    },
+    approvalActions: { flexDirection: 'row', gap: 8, marginTop: 10 },
+    primaryButtonSmall: {
+      flex: 1,
+      height: 36,
+      borderRadius: 12,
+      backgroundColor: theme.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
     taskCard: {
       marginTop: 10,
       padding: 13,

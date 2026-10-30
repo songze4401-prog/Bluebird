@@ -2,7 +2,7 @@
 
 日期：2026-10-31
 目标来源：Notion《Bluebird Memory Bot｜首只专业 Agent 技术架构》
-状态：首期骨架、独立凭证、双入口 Runtime、任务/事件与工作台已落地；完整记忆维护工具集与多用户 ACL 仍未实现，见第 7 节。
+状态：首期骨架、独立凭证、双入口 Runtime、持久任务队列、Token 级流式、记忆维护服务、人工审批、权限扩展点与工作台已落地；多用户 ACL 与分布式队列仍未实现，见第 9 节。
 
 ## 1. Step 0 基线审计
 
@@ -31,19 +31,24 @@
 ## 2. 模块与数据
 
 ```text
+server/memory.js              # 既有记忆引擎；新增显式维护方法，不改自动决策/提取
+server/memory-service.js      # 维护服务门面：参数白名单、执行、结果摘要
 server/agents/
-  manifest.js      # 仅 Memory Bot 的稳定 Manifest
-  registry.js      # 注册、状态计算、可运行性检查
-  config.js        # 独立模型/Prompt/工具配置（无 Key）
-  credentials.js   # AES-256-GCM 凭证库、脱敏、验证
-  sessions.js      # Bot 独立会话
-  tasks.js         # 任务状态机 + 安全事件
-  runtime.js       # 直接对话与委派共用执行循环
-  routes.js        # /agents、/agent-tasks API
-  errors.js        # 受控错误码
+  manifest.js                 # 仅 Memory Bot 的稳定 Manifest
+  registry.js                 # 注册、状态计算、可运行性检查
+  config.js                   # 独立模型/Prompt/工具配置（无 Key）
+  credentials.js              # AES-256-GCM 凭证库、脱敏、验证
+  sessions.js                 # Bot 独立会话
+  tasks.js                    # 任务状态机、队列查询、安全事件
+  runtime.js                  # 双入口 Runtime + 持久任务队列调度
+  approvals.js                # 申请/待审批/批准/拒绝/执行/失败恢复
+  permissions.js              # 单用户权限检查 + 未来 ACL 扩展点
+  routes.js                   # /agents、/agent-tasks、/agent-approvals API
+  errors.js                   # 受控错误码
 components/
   AgentTeamScreen.tsx
   MemoryBotScreen.tsx
+lib/agent-stream.ts           # XHR SSE 客户端（token delta / 工具事件）
 ```
 
 数据文件（`BLUEBIRD_DATA_DIR/agents/`）：
@@ -54,12 +59,13 @@ components/
 | `agent-credentials.json` | `credentialId/providerId/keyHint/iv/tag/ciphertext` | AES-256-GCM；密文落盘 |
 | `agent-vault.key` | 本地主密钥（未配置 env 时生成） | 尽力 chmod 0600；不提交 |
 | `agent-sessions.json` | botId + sessionId + messages | 与主控会话分离 |
-| `agent-tasks.json` | 任务状态、目标、结构化结果 | 不进事件；API 仅鉴权后可读 |
+| `agent-tasks.json` | 状态、目标、结构化结果、attempts、recoveredAt | 队列事实来源；事件不含正文 |
 | `agent-events.json` | 安全事件 | 只允许状态/工具/耗时/错误码等白名单字段 |
+| `agent-approvals.json` | 审批 operation/payload/status/decision/result | chmod 0600；不写事件正文 |
 
 主密钥优先取 `BLUEBIRD_AGENT_VAULT_KEY`（64 位十六进制）；未配置时生成 `agents/agent-vault.key`。Vault 解密同时校验 `botId + credentialId + providerId` 的 AAD，跨 Bot 读取直接拒绝。
 
-## 3. 双入口 Runtime
+## 3. 双入口 Runtime、队列与流式
 
 ```text
 用户直接对话 ─┐
@@ -67,67 +73,120 @@ components/
 主控委派任务 ─┘                         │
                                         ├─ Bot 独立模型 + 加密 Key
                                         ├─ botId + sessionId 隔离
-                                        └─ 任务状态/安全事件
+                                        └─ 持久任务队列 / 安全事件
 ```
 
 - 直接对话：创建/恢复 Bot 会话，追加用户消息；调用同一 Runtime；保存用户与助手消息、工具摘要。
-- 委派任务：`POST /agent-tasks` 创建 queued 任务；后台执行 accepted → running → completed/failed/cancelled/timed_out；结果包含摘要、工具摘要、记忆/知识 ID、变更与 `requiresConfirmation`。
+- 委派任务：`POST /agent-tasks` 创建 queued 任务；持久化队列按 `BLUEBIRD_AGENT_TASK_CONCURRENCY`（默认 2，1–4）并发执行；状态为 accepted → running → completed/failed/cancelled/timed_out。
+- 队列恢复：服务启动时把 crash 时停在 accepted/running 的任务重新入队并记录 `task.recovered`；`waiting_approval` 不自动执行。队列是单进程持久化调度，不引入分布式队列。
+- 失败处理：模型/工具/审批失败写入 `errorCode` 与终态，队列继续下一个任务；`BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS` >1 时只对只读任务（未启用 `memory_remember`）的瞬时模型错误尝试重试，写入任务不自动重试，避免重复操作。
 - 取消：`POST /agent-tasks/:taskId/cancel` 标记取消并中止模型/工具调用；终态任务不可回写。
-- 流式入口：`POST /agents/:botId/chat/stream` 返回 SSE；`meta`/`tool_start`/`tool_end`/`delta`/`done`/`error`。当前文本 delta 在完整回复后发送（final-only），不是逐 token 流；不把它描述成 token 级流式。
+- 流式：`POST /agents/:botId/chat/stream` 使用真实 Token 级 delta（来自 Provider 流式响应），保留 `tool_start`/`tool_end` 状态事件；工具轮不把参数或内部推理下发。UI 通过 XHR SSE 逐字渲染，并保留工具摘要。
 
-## 4. API
+## 4. 人工审批与权限
+
+```text
+维护申请 pending → approved / rejected
+                         ↓
+                    execute（仅 approved）
+                         ↓
+              memory-service → memory.js → completed / failed
+```
+
+- 所有维护操作（update/merge/supersede/archive/withdraw/delete）默认要求审批；`permissions.checkOperation` 在未批准时返回 `approval_required`。
+- 审批记录保存 operation、payload、风险级别、请求人、决定人、时间、执行人、结果/错误码；完整事件为 `approval.requested` / `approval.resolved`。
+- `approved` 只是批准决定，**不能**直接执行；必须调用 `execute`。执行器再次做权限检查，并只调用 `memory-service`。
+- 执行失败、记忆目标不存在、生命周期不允许等都会落为 `failed` 并保留受控 `errorCode`；不伪造 completed。
+- 当前是单用户模式：`permissions.js` 固定 `local-owner`，但保留 `extensionPoint`（多用户关闭、ACL 解析入口名称）；未来替换为真实用户/角色解析时不改 Runtime/审批执行器。
+- 高风险维护操作没有注册为模型工具；模型只能检索/候选写入，维护申请由已鉴权 API/UI 发起，避免模型自主触发不可逆操作。
+- 既有 Memory Center 的用户主动操作（例如用户在记忆详情里点归档/删除并确认）保留原有直接语义；本审批闭环约束的是 Memory Bot/自动维护路径，不把用户自己的操作再套一层审批。两者都不绕开 `memory.js` 的生命周期与落盘规则。
+
+## 5. 记忆维护稳定接口
+
+`server/memory-service.js` 是唯一维护门面；`server/memory.js` 内新增方法复用既有内存状态、写队列、状态/有效期与原子落盘：
+
+| 操作 | 行为 | 状态/审计 |
+|---|---|---|
+| update | 更新现有 active 条目内容/类型/关键词/置信度/有效期/条件 | 保留 id 与 contributions，`lastDecision.action=update` |
+| merge | 把一个或多个同类型 active 来源合并到目标；贡献取并集，关键词/置信度合并 | 来源标为 superseded、记录 supersededBy；目标是 active |
+| supersede | 创建替换条目，旧条目标为 superseded | 新条目继承旧条目贡献；保留历史 |
+| archive | 归档 active 条目 | `status=archived`，validTo 写入 |
+| withdraw | 按会话摘除贡献；仍有其他贡献则保留条目，否则归档；不是物理删除 | `lastDecision.action=withdraw` |
+| delete | 物理删除条目 | 仅通过审批执行器调用 |
+
+参数只接受白名单字段；未知字段、非法类型/时间/置信度、跨类型 merge、来源不存在等返回明确错误，不静默降级。
+
+## 6. API
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/agents` | 列出真实注册的 Bot 与状态 |
+| GET | `/agents` | 列出真实注册的 Bot 与状态、工具白名单、权限模式 |
 | GET | `/agents/:botId` | Bot 详情、模型、脱敏凭证 |
-| GET/PUT | `/agents/:botId/config` | 读/写独立配置；`credentialId` 只能走凭证接口 |
+| GET/PUT | `/agents/:botId/config` | 读/写独立模型、Prompt、工具白名单；`credentialId` 只能走凭证接口 |
 | POST | `/agents/:botId/credentials` | 加密保存/替换 Key，返回 keyHint |
 | POST | `/agents/:botId/credentials/verify` | 真实 `/models` 探测；不记录 Key |
 | DELETE | `/agents/:botId/credentials/:credentialId` | 删除 Key，并清空引用 |
 | POST/GET | `/agents/:botId/sessions` | 创建/列出 Bot 会话 |
 | GET/DELETE | `/agents/:botId/sessions/:sessionId` | 读取/删除 Bot 会话 |
 | POST | `/agents/:botId/chat` | 非流式直接对话 |
-| POST | `/agents/:botId/chat/stream` | SSE（final-only 文本 + 工具事件） |
+| POST | `/agents/:botId/chat/stream` | SSE；真实 token delta + 工具/状态事件 |
 | GET | `/agents/:botId/events` | 安全事件 |
+| GET | `/agents/:botId/permissions` | 单用户权限配置与扩展点 |
+| POST/GET | `/agents/:botId/approvals` | 创建/列出审批申请 |
+| GET | `/agent-approvals/:approvalId` | 审批详情 |
+| POST | `/agent-approvals/:approvalId/approve` | 批准（不等于执行） |
+| POST | `/agent-approvals/:approvalId/reject` | 拒绝 |
+| POST | `/agent-approvals/:approvalId/execute` | 仅 approved 可执行 |
 | POST | `/agent-tasks` | 主控提交任务（202 + queued） |
 | GET | `/agent-tasks?botId=memory` | 任务列表 |
 | GET | `/agent-tasks/:taskId` | 任务状态/结果 |
 | POST | `/agent-tasks/:taskId/cancel` | 取消任务 |
 
-所有接口复用 Bearer 鉴权与全局限流。凭证创建/验证/删除、配置更新、任务创建/取消写监控审计；审计不包含 Key、Prompt 或记忆正文。
+所有接口复用 Bearer 鉴权与全局限流。凭证、配置、审批、任务写监控审计；审计/事件不包含 Key、Prompt、记忆正文或模型推理。
 
-## 5. 安全边界
+## 7. 安全边界
 
 - Key 只通过 HTTPS/本地回环服务端接口提交；Vault 只存密文；读取接口只返回 `keyHint`。
 - 模型调用时服务端按 `credentialId` 解密并注入 Provider 客户端；不进入 Prompt、工具参数、事件或普通日志。
 - 主控默认 Key 不会被 Bot 借用：测试 stub 拒绝全局 Key，Bot 调用必须使用自己的 Key。
 - 跨 Bot 凭证读取被拒绝；首期一个 Bot 只保留一个活动凭证，替换时删除旧密文。
 - Bot 会话与主控会话物理分离，Bot 会话不会出现在 `/sessions` / `/history`。
-- 事件字段白名单；任务结果中的记忆/知识只保留 ID，不把正文写入事件。
-- 任务目标/上下文会存于任务文件供用户查看，但不进入事件；不把 Key 或内部推理写进任务。
-- `agents.json` / Vault / sessions / tasks / events 损坏时显式报错并拒绝覆盖，不静默重建。
+- 维护操作未批准不能执行；执行器只调用 `memory-service`，不能直接改写记忆文件。
+- 事件字段白名单；任务结果中的记忆/知识只保留 ID，不把正文写入事件；审批 payload 存于审批文件，不写事件。
+- `agents.json` / Vault / sessions / tasks / events / approvals 损坏时显式报错并拒绝覆盖，不静默重建。
+- 单用户权限检查显式保留扩展点；没有多用户 ACL 时不宣称支持多租户。
 
-## 6. 测试
+## 8. 测试
 
-- `node tests/memory-bot.test.js`：6 项，覆盖 Registry 状态、AES-256-GCM 密文/重启解密、脱敏、真实 `/models` 验证、Bot 会话、独立 Key 的真实工具循环、任务完成/取消、HTTP API 与 SSE。
-- `npx jest tests/unit/memory-bot-screen.test.tsx`：2 项，覆盖团队页真实状态/预留位、工作台会话/回复/脱敏凭证。
-- 既有后端 46 个测试文件（1547 项）+ 前端 18 套（164 项）保持通过（全量结果见交付报告）。
-- Expo Web export 成功；浏览器 DOM 核对：左侧抽屉出现“Agent 团队”，团队页显示真实 Memory Bot 的“待配置/未绑定模型/未配置凭证”，工作台“独立对话 / 模型与 Key / 任务与事件”三页签可切换，配置页展示真实服务商列表、脱敏 Key 状态与加密保存入口。该次浏览器核对使用未配置模型的临时 API，因此没有把对话成功当作已验证；Bot 对话由真实 HTTP stub provider 的后端测试覆盖。
+- `node tests/memory-bot.test.js`：7 项，覆盖 Registry、AES-256-GCM 密文/重启解密、真实 `/models` 验证、Bot 会话、独立 Key 工具循环、任务/审批 API、token SSE/工具事件、并发队列/恢复/失败隔离。
+- `node tests/memory-maintenance.test.js`：5 项，覆盖 update/merge/supersede/archive/withdraw/delete、维护门面白名单、审批闭环、事件不含正文、权限拒绝。
+- `npx jest tests/unit/memory-bot-screen.test.tsx`：3 项，覆盖团队页、工作台/流式回退、Prompt/工具白名单、任务表单、审批操作。
+- 全量：`npm test` 47 个后端文件 / 1553 项；Jest 18 套 / 165 项；覆盖率校验 backend 1553/1553、runner 1332/1332、frontend 165/165；tsc/lint 通过（以最终交付命令输出为准）。
+- Expo Web export 成功；浏览器 DOM 核对：Agent 团队入口、真实 Memory Bot 状态、工作台三页签、配置页真实服务商/脱敏 Key、任务与审批入口可渲染。该次浏览器核对未配置真实聊天模型，因此 Bot 对话质量由真实 HTTP stub Provider 测试覆盖，不把浏览器渲染当作模型质量验证。
 
-## 7. 尚未实现 / 边界
+## 9. 尚未实现 / 边界
 
-1. **记忆维护工具不完整**：Bot 当前只暴露 `memory_search`、`memory_remember`、`knowledge_search`；`get/list/explainRetrieval`、`merge/update/supersede/archive/withdraw/delete` 需要现有记忆引擎补齐稳定服务函数与审批协议，首期未伪造这些工具。
-2. **人工审批协议**：没有 `approval.requested/resolved` 的执行闭环；危险/不可逆操作不注册为 Bot 工具。
-3. **任务执行器**：单进程 `setImmediate` 执行，无持久队列、重启恢复或并发配额；进程重启后停留在 running 的任务不会自动续跑。
-4. **多用户 ACL**：当前是单用户本地部署；`botId + sessionId` 已隔离，但没有多用户身份与文档 ACL。
-5. **流式文本**：SSE 的文本 delta 是 full-text final-only；工具/状态事件是真实事件，不能宣称 token 级流式。
-6. **UI 范围**：工作台提供独立对话、模型/Key 配置、任务与事件；Prompt 编辑、工具白名单编辑、任务创建表单未放入 UI，仍可通过 API 完成。
-7. **其他 Bot**：只注册 Memory Bot；Research/Coding/Browser 等保持“预留 · 未注册”，不显示假在线。
+1. **多用户 ACL**：仍是单用户本地部署；`botId + sessionId` 已隔离，`permissions.js` 保留扩展点，但无用户身份/文档 ACL。
+2. **分布式任务队列**：持久化队列是单进程；没有跨进程 worker、分布式锁或重启后保留 in-flight 模型连接。
+3. **自动重试**：默认 `maxAttempts=1`；只有显式提高 `BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS` 且任务未启用 `memory_remember` 时，才对瞬时模型错误重试。有副作用的维护/写入任务不自动重试；失败会显式落库并继续队列。
+4. **审批发起 UI**：审批申请由 API/主控创建；工作台提供审批列表、批准/拒绝/执行，未提供完整的维护申请表单。
+5. **其他 Bot**：只注册 Memory Bot；Research/Coding/Browser 等保持“预留 · 未注册”。
+6. **记忆维护模型工具**：维护操作只通过已鉴权审批接口执行，没有注册为模型可自行调用的工具；这是防止模型自主触发不可逆操作的安全边界。
 
-## 8. 关键决策
+## 10. 关键决策
 
-- 不修改主控默认模型、主控会话或既有记忆生命周期；新增模块做增量接入。
-- 不复用 `api-keys.json` 明文存储 Bot Key；独立 Vault 加密是安全边界，不是可选优化。
-- 不在没有稳定服务函数时包装不存在的记忆维护能力；UI/文档明确显示缺口。
-- 首期不引入微服务、分布式队列或多租户；模块化单体与现有 Express 部署一致。
+- 不修改主控默认模型、主控会话或既有记忆自动决策；维护方法复用同一份状态/落盘规则。
+- 不在没有审批的情况下执行高风险维护；不把 pending/approved 当作 completed。
+- 不复用 `api-keys.json` 明文存储 Bot Key；独立 Vault 加密是安全边界。
+- 首期不引入微服务、分布式队列或多租户；模块化单体、持久化 JSON 与现有 Express 部署一致。
+- 流式输出只在 Provider 真正返回流时发送 token delta；工具调用参数与内部推理不下发。
+
+## 11. 本轮推进顺序（P0 → P1 → P2）
+
+| 阶段 | 实际实现 | 验收证据 |
+|---|---|---|
+| P0 记忆维护 + 人工审批 | `memory.updateMemory/mergeMemories/supersedeMemory/withdrawMemory` + `archive/delete` 复用；`memory-service` 白名单；`approvals` 状态机与 API | `tests/memory-maintenance.test.js` 5 项；审批 API 前后状态测试 |
+| P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；Provider token delta；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 7 项；SSE/tool event 测试；Jest 3 项 UI 测试 |
+| P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验 |
+
+“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1553/1553、nodeSuite 221/221、runner 1332/1332、frontend 165/165、CI 47/47。

@@ -105,7 +105,67 @@ const providerServer = http.createServer((req, res) => {
 
     const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
     const hasToolResult = messages.some(message => message.role === 'tool');
+
+    const sse = payload => res.write(`data: ${JSON.stringify(payload)}
+
+`);
+    const sendStreamText = () => {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache',
+      });
+      for (const text of ['这是 ', '流式 ', '回复。']) {
+        sse({ choices: [{ index: 0, delta: { content: text }, finish_reason: null }] });
+      }
+      sse({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
+      res.end('data: [DONE]\n\n');
+    };
+    const sendStreamTool = () => {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache',
+      });
+      sse({
+        choices: [{
+          index: 0,
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: 'call_stream',
+              type: 'function',
+              function: { name: 'memory_search', arguments: '' },
+            }],
+          },
+          finish_reason: null,
+        }],
+      });
+      sse({
+        choices: [{
+          index: 0,
+          delta: {
+            tool_calls: [{
+              index: 0,
+              function: { arguments: '{"query":"咖啡","limit":3}' },
+            }],
+          },
+          finish_reason: null,
+        }],
+      });
+      sse({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] });
+      res.end('data: [DONE]\n\n');
+    };
+
+    if (parsed.stream) {
+      if (providerMode === 'stream-tool' && !hasToolResult) sendStreamTool();
+      else sendStreamText();
+      return;
+    }
+
     const respond = () => {
+      if (providerMode === 'fail') {
+        jsonResponse(res, 500, { error: 'provider_failed' });
+        return;
+      }
       if (providerMode === 'tool-first' && !hasToolResult) {
         jsonResponse(
           res,
@@ -404,6 +464,81 @@ test('主控委派：任务状态、结构化结果与取消', async () => {
   );
 });
 
+test('持久任务队列：并发限制、失败隔离与重启恢复', async () => {
+  providerMode = 'text';
+  responseDelayMs = 180;
+  assert.equal(runtime.getQueueStats().concurrency, 2);
+
+  const goals = ['队列任务 A', '队列任务 B', '队列任务 C'];
+  const created = goals.map(goal =>
+    tasks.createTask({
+      botId: 'memory',
+      taskType: 'memory.search',
+      goal,
+      allowedTools: ['memory_search'],
+      deadlineMs: 20000,
+    })
+  );
+  created.forEach(task => runtime.startTask(task.taskId));
+
+  let maxActive = 0;
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const stats = runtime.getQueueStats();
+    maxActive = Math.max(maxActive, stats.active);
+    const finished = created.map(task => tasks.getTask(task.taskId));
+    if (finished.every(task => task && tasks.isTerminalStatus(task.status))) break;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  const finished = created.map(task => tasks.getTask(task.taskId));
+  assert.ok(finished.every(task => task.status === 'completed'));
+  assert.ok(maxActive <= 2);
+  assert.ok(maxActive >= 1);
+  assert.equal(runtime.getQueueStats().active, 0);
+
+  const interrupted = tasks.createTask({
+    botId: 'memory',
+    taskType: 'memory.search',
+    goal: '重启恢复任务',
+    allowedTools: ['memory_search'],
+    deadlineMs: 20000,
+  });
+  tasks.updateTask(interrupted.taskId, { status: 'running' });
+  responseDelayMs = 0;
+  // 模拟进程重启：清空内存缓存，从 agent-tasks.json 重新加载 interrupted 状态。
+  tasks.reloadForTests();
+  const recovered = runtime.initializeTaskQueue();
+  assert.ok(recovered.recovered >= 1);
+  const recoveredTask = await waitForTask(interrupted.taskId);
+  assert.equal(recoveredTask.status, 'completed');
+  assert.ok(recoveredTask.attempts >= 1);
+
+  providerMode = 'fail';
+  const failing = tasks.createTask({
+    botId: 'memory',
+    taskType: 'memory.search',
+    goal: '失败任务',
+    allowedTools: ['memory_search'],
+    deadlineMs: 20000,
+  });
+  runtime.startTask(failing.taskId);
+  const failedTask = await waitForTask(failing.taskId);
+  assert.equal(failedTask.status, 'failed');
+  assert.ok(String(failedTask.errorCode).startsWith('model_'));
+
+  providerMode = 'text';
+  const afterFailure = tasks.createTask({
+    botId: 'memory',
+    taskType: 'memory.search',
+    goal: '失败后的队列任务',
+    allowedTools: ['memory_search'],
+    deadlineMs: 20000,
+  });
+  runtime.startTask(afterFailure.taskId);
+  assert.equal((await waitForTask(afterFailure.taskId)).status, 'completed');
+  providerMode = 'text';
+});
+
 test('HTTP API：鉴权由外层注入，配置/凭证/会话/任务均走真实接口', async () => {
   const agents = await api('/agents');
   assert.equal(agents.status, 200);
@@ -455,6 +590,7 @@ test('HTTP API：鉴权由外层注入，配置/凭证/会话/任务均走真实
   assert.equal(chat.json.ok, true);
   assert.ok(!JSON.stringify(chat.json).includes('bot-replacement-key'));
 
+  providerMode = 'stream-text';
   const streamResponse = await fetch(apiBase + '/agents/memory/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -464,9 +600,24 @@ test('HTTP API：鉴权由外层注入，配置/凭证/会话/任务均走真实
   const streamText = await streamResponse.text();
   assert.ok(streamText.includes('"type":"meta"'));
   assert.ok(streamText.includes('"type":"delta"'));
+  assert.ok(streamText.includes('这是 '));
+  assert.ok(streamText.includes('流式 '));
   assert.ok(streamText.includes('"type":"done"'));
   assert.ok(!streamText.includes('bot-replacement-key'));
 
+  providerMode = 'stream-tool';
+  const toolStream = await fetch(apiBase + '/agents/memory/chat/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, message: '检索咖啡记忆' }),
+  });
+  const toolStreamText = await toolStream.text();
+  assert.ok(toolStreamText.includes('"type":"tool_start"'));
+  assert.ok(toolStreamText.includes('"type":"tool_end"'));
+  assert.ok(toolStreamText.includes('"type":"delta"'));
+  assert.ok(toolStreamText.includes('"type":"done"'));
+
+  providerMode = 'text';
   const task = await api('/agent-tasks', {
     method: 'POST',
     body: {
@@ -480,6 +631,39 @@ test('HTTP API：鉴权由外层注入，配置/凭证/会话/任务均走真实
   assert.equal(task.status, 202);
   const finished = await waitForTask(task.json.task.taskId);
   assert.equal(finished.status, 'completed');
+
+  const approval = await api('/agents/memory/approvals', {
+    method: 'POST',
+    body: {
+      operation: 'update',
+      payload: { id: 'm-memory-bot-test', content: '用户喜欢冷萃咖啡' },
+    },
+  });
+  assert.equal(approval.status, 201);
+  assert.equal(approval.json.approval.status, 'pending');
+  const approvalId = approval.json.approval.approvalId;
+
+  const beforeApprove = await api(`/agent-approvals/${approvalId}/execute`, {
+    method: 'POST',
+    body: {},
+  });
+  assert.equal(beforeApprove.status, 409);
+
+  const approved = await api(`/agent-approvals/${approvalId}/approve`, {
+    method: 'POST',
+    body: {},
+  });
+  assert.equal(approved.status, 200);
+  assert.equal(approved.json.approval.status, 'approved');
+
+  const executed = await api(`/agent-approvals/${approvalId}/execute`, {
+    method: 'POST',
+    body: {},
+  });
+  assert.equal(executed.status, 200);
+  assert.equal(executed.json.approval.status, 'completed');
+  assert.equal(executed.json.approval.result.ok, true);
+  assert.ok(!JSON.stringify(executed.json).includes('bot-replacement-key'));
 
   const events = await api('/agents/memory/events?limit=20');
   assert.equal(events.status, 200);

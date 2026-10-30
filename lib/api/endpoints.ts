@@ -42,8 +42,21 @@ export const API_PATHS = {
     `/agents/${encodeURIComponent(botId)}/chat`,
   agentEvents: (botId: string, limit = 30) =>
     `/agents/${encodeURIComponent(botId)}/events?limit=${limit}`,
+  agentPermissions: (botId: string) =>
+    `/agents/${encodeURIComponent(botId)}/permissions`,
+  agentApprovals: (botId: string, limit = 50) =>
+    `/agents/${encodeURIComponent(botId)}/approvals?limit=${limit}`,
+  agentApproval: (approvalId: string) =>
+    `/agent-approvals/${encodeURIComponent(approvalId)}`,
+  agentApprovalApprove: (approvalId: string) =>
+    `/agent-approvals/${encodeURIComponent(approvalId)}/approve`,
+  agentApprovalReject: (approvalId: string) =>
+    `/agent-approvals/${encodeURIComponent(approvalId)}/reject`,
+  agentApprovalExecute: (approvalId: string) =>
+    `/agent-approvals/${encodeURIComponent(approvalId)}/execute`,
   agentTasks: (botId: string, limit = 20) =>
     `/agent-tasks?botId=${encodeURIComponent(botId)}&limit=${limit}`,
+  agentTaskCreate: '/agent-tasks',
   agentTask: (taskId: string) =>
     `/agent-tasks/${encodeURIComponent(taskId)}`,
   agentTaskCancel: (taskId: string) =>

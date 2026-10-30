@@ -11,6 +11,17 @@ jest.mock('../../lib/api/client', () => ({
   apiFetch: jest.fn(),
 }));
 
+jest.mock('../../lib/agent-stream', () => ({
+  sendAgentChatStream: jest.fn(async () => ({ kind: 'fallback' })),
+  emptyAgentMessage: (id: string) => ({
+    id,
+    role: 'assistant',
+    content: '',
+    createdAt: '2026-10-30T00:00:00.000Z',
+    toolSteps: [],
+  }),
+}));
+
 const mockedFetch = apiFetch as unknown as jest.Mock;
 const theme = getTheme('light', 'blue');
 
@@ -33,6 +44,15 @@ const agent = {
   entrypoints: ['direct_chat', 'delegated_task'],
   permissionProfileId: 'memory-bot-default',
   toolAllowlist: ['memory_search'],
+  availableTools: ['memory_search', 'memory_remember', 'knowledge_search'],
+  permission: {
+    profileId: 'memory-bot-default',
+    mode: 'single_user',
+    actorId: 'local-owner',
+    allowedOperations: ['update', 'merge', 'supersede', 'archive', 'withdraw', 'delete'],
+    approvalRequired: ['update', 'merge', 'supersede', 'archive', 'withdraw', 'delete'],
+    extensionPoint: { multiUser: false, aclResolver: 'permissions.checkOperation' },
+  },
   status: 'enabled',
   statusReason: null,
   enabled: true,
@@ -119,6 +139,31 @@ describe('Memory Bot UI', () => {
       }
       if (path === '/agent-tasks?botId=memory&limit=20') return jsonResponse({ tasks: [] });
       if (path === '/agents/memory/events?limit=30') return jsonResponse({ events: [] });
+      if (path === '/agents/memory/approvals?limit=50') {
+        return jsonResponse({
+          approvals: [
+            {
+              approvalId: 'appr_1',
+              botId: 'memory',
+              taskId: null,
+              sessionId: null,
+              operation: 'update',
+              payload: { id: 'mem-a' },
+              risk: 'medium',
+              status: 'approved',
+              requestedBy: 'agent',
+              requestedAt: '2026-10-30T00:00:00.000Z',
+              decidedBy: 'local-owner',
+              decidedAt: '2026-10-30T00:00:00.000Z',
+              executedBy: null,
+              executedAt: null,
+              reason: null,
+              errorCode: null,
+              result: null,
+            },
+          ],
+        });
+      }
       if (path === '/model-providers') {
         return jsonResponse({
           providers: [
@@ -190,5 +235,83 @@ describe('Memory Bot UI', () => {
       expect(screen.getByText('你偏好拿铁咖啡。')).toBeTruthy();
     });
     expect(screen.queryByText('sk-***abcd')).toBeTruthy();
+  });
+
+  it('配置页可编辑 Prompt/工具白名单，任务页展示真实任务与审批操作', async () => {
+    mockedFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/agents/memory') return jsonResponse({ agent });
+      if (path === '/agents/memory/config') return jsonResponse({ config, agent });
+      if (path === '/agents/memory/sessions' && (!init || init.method !== 'POST')) {
+        return jsonResponse({ sessions: [session] });
+      }
+      if (path === '/agent-tasks?botId=memory&limit=20') return jsonResponse({ tasks: [] });
+      if (path === '/agents/memory/events?limit=30') return jsonResponse({ events: [] });
+      if (path === '/agents/memory/approvals?limit=50') {
+        return jsonResponse({
+          approvals: [
+            {
+              approvalId: 'appr_1',
+              botId: 'memory',
+              taskId: null,
+              sessionId: null,
+              operation: 'update',
+              payload: { id: 'mem-a' },
+              risk: 'medium',
+              status: 'approved',
+              requestedBy: 'agent',
+              requestedAt: '2026-10-30T00:00:00.000Z',
+              decidedBy: 'local-owner',
+              decidedAt: '2026-10-30T00:00:00.000Z',
+              executedBy: null,
+              executedAt: null,
+              reason: null,
+              errorCode: null,
+              result: null,
+            },
+          ],
+        });
+      }
+      if (path === '/model-providers') {
+        return jsonResponse({
+          providers: [
+            {
+              id: 'p1',
+              name: 'Test Provider',
+              type: 'openai-compatible',
+              baseUrl: 'https://example.test',
+              builtin: false,
+              enabled: true,
+              keyConfigured: true,
+              keyHint: 'sk-***abcd',
+              models: [{ id: 'bot-test-model', name: 'Bot', enabled: true, capabilities: { tools: true, vision: false } }],
+            },
+          ],
+        });
+      }
+      if (path === '/agents/memory/sessions/s1') {
+        return jsonResponse({ session, messages: [] });
+      }
+      return jsonResponse({ error: 'not_found' }, 404);
+    });
+
+    await render(<MemoryBotScreen visible onClose={() => {}} theme={theme} />);
+    await waitFor(() => expect(screen.getByText('咖啡记忆')).toBeTruthy());
+
+    await fireEvent.press(screen.getByLabelText('模型与 Key页签'));
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText('Memory Bot 的系统 Prompt')).toBeTruthy();
+      expect(screen.getByText(/memory_search/)).toBeTruthy();
+      expect(screen.getByText('memory_remember')).toBeTruthy();
+    });
+
+    await fireEvent.press(screen.getByLabelText('任务与事件页签'));
+    await waitFor(() => {
+      expect(
+        screen.getByPlaceholderText('任务目标，例如：整理我关于咖啡的长期记忆')
+      ).toBeTruthy();
+      expect(screen.getByText('update · medium')).toBeTruthy();
+      expect(screen.getByText('目标：mem-a')).toBeTruthy();
+      expect(screen.getByText('执行')).toBeTruthy();
+    });
   });
 });

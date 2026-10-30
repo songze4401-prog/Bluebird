@@ -19,6 +19,44 @@ const MAX_USER_MESSAGE = 4000;
 const HISTORY_MESSAGES = 24;
 const MAX_TASK_TOOLS = 6;
 const activeRuns = new Map();
+const TASK_CONCURRENCY = Math.min(
+  4,
+  Math.max(1, Number(process.env.BLUEBIRD_AGENT_TASK_CONCURRENCY) || 2)
+);
+let scheduling = false;
+
+function scheduleTaskQueue() {
+  if (scheduling) return;
+  scheduling = true;
+  try {
+    while (activeRuns.size < TASK_CONCURRENCY) {
+      const next = tasks.nextQueuedTask();
+      if (!next) break;
+      runTask(next.taskId).catch(error => {
+        console.warn(
+          `[agent-queue] task=${next.taskId} code=${
+            (error && error.code) || 'agent_task_failed'
+          }`
+        );
+        try {
+          const task = tasks.getRawTask(next.taskId);
+          if (task && !tasks.isTerminalStatus(task.status)) {
+            tasks.updateTask(next.taskId, {
+              status: 'failed',
+              completedAt: new Date().toISOString(),
+              errorCode: (error && error.code) || 'agent_task_failed',
+            });
+          }
+        } catch (_) {
+          // 存储损坏时保持显式失败日志，避免队列无限重试同一任务。
+        }
+        scheduleTaskQueue();
+      });
+    }
+  } finally {
+    scheduling = false;
+  }
+}
 
 function safeEvent(botId, eventType, payload = {}, context = {}) {
   try {
@@ -145,6 +183,8 @@ async function execute({
   mode = 'direct_chat',
   signal = null,
   onToolEvent = null,
+  stream = false,
+  onDelta = null,
 }) {
   const { config, model } = assertRunnable(botId);
   const manifest = getManifest(botId);
@@ -175,6 +215,8 @@ async function execute({
       isClientGone: signal ? () => signal.aborted : undefined,
       abortSignal: signal,
       credentialKey,
+      stream,
+      onDelta,
       onRequest: ({ round }) => {
         safeEvent(
           botId,
@@ -305,7 +347,14 @@ function requireText(value, label, max) {
   return text;
 }
 
-async function chat(botId, { sessionId = null, message, signal = null, onToolEvent = null } = {}) {
+async function chat(botId, {
+  sessionId = null,
+  message,
+  signal = null,
+  onToolEvent = null,
+  stream = false,
+  onDelta = null,
+} = {}) {
   const text = requireText(message, '消息', MAX_USER_MESSAGE);
   let session = sessionId ? sessions.getSession(botId, sessionId) : null;
   if (sessionId && !session) {
@@ -333,6 +382,8 @@ async function chat(botId, { sessionId = null, message, signal = null, onToolEve
     mode: 'direct_chat',
     signal,
     onToolEvent,
+    stream,
+    onDelta,
   });
 
   const reply = typeof result.rawReply === 'string' ? result.rawReply.trim() : '';
@@ -374,7 +425,10 @@ async function runTask(taskId) {
   activeRuns.set(task.taskId, controller);
 
   try {
-    tasks.updateTask(task.taskId, { status: 'accepted' });
+    tasks.updateTask(task.taskId, {
+      status: 'accepted',
+      attempts: (Number.isInteger(task.attempts) ? task.attempts : 0) + 1,
+    });
     safeEvent(task.botId, 'task.accepted', { status: 'accepted', taskType: task.taskType }, {
       taskId: task.taskId,
     });
@@ -450,9 +504,32 @@ async function runTask(taskId) {
     const cancelled =
       latest.cancelRequested || (error && error.code === 'cancelled');
     const timedOut = error && error.code === 'model_timeout';
-    const status = cancelled ? 'cancelled' : timedOut ? 'timed_out' : 'failed';
     const errorCode =
       (error && error.code) || (timedOut ? 'model_timeout' : 'agent_failed');
+    const attempts = Number.isInteger(latest.attempts) ? latest.attempts : 0;
+    const maxAttempts = Number.isInteger(latest.maxAttempts) ? latest.maxAttempts : 1;
+    const retryable =
+      !cancelled &&
+      !latest.allowedTools.includes('memory_remember') &&
+      ['model_connection', 'model_rate_limit', 'model_timeout'].includes(errorCode) &&
+      attempts < maxAttempts;
+
+    if (retryable) {
+      tasks.updateTask(task.taskId, {
+        status: 'queued',
+        recoveredAt: new Date().toISOString(),
+        errorCode,
+      });
+      safeEvent(
+        task.botId,
+        'task.recovered',
+        { status: 'queued', errorCode, mode: 'retry' },
+        { taskId: task.taskId }
+      );
+      return;
+    }
+
+    const status = cancelled ? 'cancelled' : timedOut ? 'timed_out' : 'failed';
     tasks.updateTask(task.taskId, {
       status,
       completedAt: new Date().toISOString(),
@@ -470,19 +547,45 @@ async function runTask(taskId) {
     );
   } finally {
     activeRuns.delete(task.taskId);
+    scheduleTaskQueue();
   }
 }
 
 function startTask(taskId) {
   setImmediate(() => {
-    runTask(taskId).catch(error => {
-      console.warn(
-        `[agent-task] run failed task=${taskId} code=${
-          (error && error.code) || 'agent_task_failed'
-        }`
-      );
-    });
+    const task = tasks.getTask(taskId);
+    if (task && !tasks.isTerminalStatus(task.status)) {
+      scheduleTaskQueue();
+    }
   });
+}
+
+function initializeTaskQueue() {
+  const recovered = tasks.recoverInterrupted();
+  for (const taskId of recovered.taskIds || []) {
+    const task = tasks.getRawTask(taskId);
+    if (!task) continue;
+    safeEvent(
+      task.botId,
+      'task.recovered',
+      { status: 'queued', mode: 'queue_recovery' },
+      { taskId }
+    );
+  }
+  scheduleTaskQueue();
+  return {
+    recovered: recovered.recovered,
+    queued: tasks.queuedCount(),
+    concurrency: TASK_CONCURRENCY,
+  };
+}
+
+function getQueueStats() {
+  return {
+    concurrency: TASK_CONCURRENCY,
+    active: activeRuns.size,
+    queued: tasks.queuedCount(),
+  };
 }
 
 function cancelTask(taskId) {
@@ -497,6 +600,7 @@ function cancelTask(taskId) {
   const controller = activeRuns.get(taskId);
   if (controller) controller.abort();
   safeEvent(task.botId, 'task.cancelled', { status: 'cancelled' }, { taskId });
+  setImmediate(scheduleTaskQueue);
   return tasks.getTask(taskId);
 }
 
@@ -506,6 +610,8 @@ module.exports = {
   startTask,
   cancelTask,
   runTask,
+  initializeTaskQueue,
+  getQueueStats,
   allowedToolsFor,
   buildPolicy,
 };

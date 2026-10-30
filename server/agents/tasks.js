@@ -41,6 +41,7 @@ const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'timed_out']);
 const EVENT_TYPES = Object.freeze([
   'task.created',
   'task.accepted',
+  'task.recovered',
   'task.started',
   'model.requested',
   'model.completed',
@@ -229,6 +230,9 @@ function publicTask(task, { includeResult = true } = {}) {
     deadlineMs: task.deadlineMs,
     status: task.status,
     cancelRequested: task.cancelRequested === true,
+    attempts: Number.isInteger(task.attempts) ? task.attempts : 0,
+    maxAttempts: Number.isInteger(task.maxAttempts) ? task.maxAttempts : 1,
+    recoveredAt: task.recoveredAt || null,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     startedAt: task.startedAt,
@@ -306,6 +310,9 @@ function createTask({
     deadlineMs: cleanDeadline,
     status: 'queued',
     cancelRequested: false,
+    attempts: 0,
+    maxAttempts: Math.min(3, Math.max(1, Number(process.env.BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS) || 1)),
+    recoveredAt: null,
     createdAt: t,
     updatedAt: t,
     startedAt: null,
@@ -359,6 +366,9 @@ function updateTask(taskId, patch = {}) {
   }
   if (patch.cancelRequested !== undefined) {
     task.cancelRequested = patch.cancelRequested === true;
+  }
+  if (Number.isInteger(patch.attempts) && patch.attempts >= 0) {
+    task.attempts = patch.attempts;
   }
   if (patch.startedAt !== undefined) task.startedAt = patch.startedAt;
   if (patch.completedAt !== undefined) task.completedAt = patch.completedAt;
@@ -423,6 +433,42 @@ function isTerminalStatus(status) {
   return TERMINAL.has(status);
 }
 
+function nextQueuedTask() {
+  const current = loadTasks();
+  return (
+    Object.values(current.tasks)
+      .filter(task => task.status === 'queued' && task.cancelRequested !== true)
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))[0] ||
+    null
+  );
+}
+
+function queuedCount() {
+  return Object.values(loadTasks().tasks).filter(
+    task => task.status === 'queued' && task.cancelRequested !== true
+  ).length;
+}
+
+// 进程重启恢复：crash 时停在 accepted/running 的任务重新入队；
+// waiting_approval 不自动执行，交给人工审批。
+function recoverInterrupted() {
+  const current = loadTasks();
+  const now = nowIso();
+  let recovered = 0;
+  const taskIds = [];
+  for (const task of Object.values(current.tasks)) {
+    if (task.status === 'accepted' || task.status === 'running') {
+      task.status = 'queued';
+      task.recoveredAt = now;
+      task.updatedAt = now;
+      recovered += 1;
+      taskIds.push(task.taskId);
+    }
+  }
+  if (recovered) saveTasks();
+  return { recovered, taskIds, queued: queuedCount() };
+}
+
 function reloadForTests() {
   taskCache = null;
   eventCache = null;
@@ -441,5 +487,8 @@ module.exports = {
   listEvents,
   safePayload,
   isTerminalStatus,
+  nextQueuedTask,
+  queuedCount,
+  recoverInterrupted,
   reloadForTests,
 };
