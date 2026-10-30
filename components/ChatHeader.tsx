@@ -34,6 +34,7 @@ export function ChatHeader({
     <View style={styles.bar}>
       <View style={styles.left}>
         <TouchableOpacity
+          style={styles.iconButton}
           onPress={onOpenDrawer}
           activeOpacity={0.6}
           hitSlop={8}
@@ -86,11 +87,10 @@ const createStyles = (theme: Theme) =>
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
-      // 实测：设计图顶栏下方没有任何分隔线
       backgroundColor: 'transparent',
     },
     left: {
-      width: 44,
+      width: 84,
       flexDirection: 'row',
       alignItems: 'center',
       flexShrink: 0,
@@ -98,20 +98,22 @@ const createStyles = (theme: Theme) =>
     sessionTitle: {
       flex: 1,
       color: theme.chatText,
-      fontSize: 14,
-      lineHeight: 19,
-      fontWeight: '500',
+      fontSize: 16,
+      lineHeight: 21,
+      fontWeight: '600',
       textAlign: 'center',
-      marginHorizontal: 8,
+      marginHorizontal: 10,
     },
     right: {
+      width: 84,
       flexDirection: 'row',
       alignItems: 'center',
+      justifyContent: 'flex-end',
+      gap: 8,
       flexShrink: 0,
     },
     burger: {
-      width: 18,
-      marginRight: 14,
+      width: 16,
       gap: 4,
     },
     burgerLine: {
@@ -119,21 +121,25 @@ const createStyles = (theme: Theme) =>
       borderRadius: 1,
       backgroundColor: theme.chatText,
     },
-    name: {
-      color: theme.chatText,
-      fontSize: 16,
-      fontWeight: '600',
-      letterSpacing: 0.2,
-    },
     iconButton: {
-      marginLeft: 16,
-      paddingHorizontal: 4,
-      paddingVertical: 6,
+      width: CHAT_LAYOUT.controlSize,
+      height: CHAT_LAYOUT.controlSize,
+      borderRadius: CHAT_LAYOUT.controlSize / 2,
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 3 },
+      shadowOpacity: theme.mode === 'dark' ? 0.2 : 0.05,
+      shadowRadius: 6,
+      elevation: 1,
     },
     icon: {
       color: theme.chatText,
-      fontSize: 18,
-      lineHeight: 22,
+      fontSize: 19,
+      lineHeight: 23,
     },
     iconDim: {
       color: theme.chatMuted,

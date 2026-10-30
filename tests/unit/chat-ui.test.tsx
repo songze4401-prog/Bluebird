@@ -31,7 +31,11 @@ import type {
   SessionMeta,
   ToolStepView,
 } from '../../lib/types';
-import { getTheme } from '../../theme';
+import {
+  DEFAULT_THEME_ID,
+  DEFAULT_THEME_MODE,
+  getTheme,
+} from '../../theme';
 
 const theme = getTheme('light', 'blue');
 
@@ -43,6 +47,17 @@ const createdAt = (() => {
 })();
 
 const noop = () => {};
+
+describe('主题默认值', () => {
+  it('默认浅色模式 + 蓝色强调', () => {
+    expect(DEFAULT_THEME_MODE).toBe('light');
+    expect(DEFAULT_THEME_ID).toBe('blue');
+
+    const fallback = getTheme();
+    expect(fallback.mode).toBe('light');
+    expect(fallback.accentId).toBe('blue');
+  });
+});
 
 const drawerSessions: SessionMeta[] = [
   {
@@ -128,8 +143,8 @@ const flatten = (node: RenderNode) =>
     unknown
   >;
 
-describe('ChatBubble 无气泡排版', () => {
-  it('助手正文与所在列都不带底色 / 圆角 / 描边（设计图是平铺文字，不是气泡）', async () => {
+describe('ChatBubble 排版：助手平铺、用户气泡', () => {
+  it('助手正文与所在列都不带底色 / 圆角 / 描边（平铺文字，不是气泡）', async () => {
     await render(
       <ChatBubble
         {...bubbleProps({
@@ -171,7 +186,7 @@ describe('ChatBubble 无气泡排版', () => {
     });
   });
 
-  it('用户消息列同样没有气泡底（右对齐纯文字）', async () => {
+  it('用户消息带右对齐白色气泡（轻描边、圆角、阴影）', async () => {
     await render(
       <ChatBubble
         {...bubbleProps({
@@ -183,16 +198,18 @@ describe('ChatBubble 无气泡排版', () => {
       />
     );
 
-    const row = screen.getByTestId('chat-row') as unknown as RenderNode;
-
     expect(screen.getByTestId('chat-row').props.style).toContainEqual(
       expect.objectContaining({ justifyContent: 'flex-end' })
     );
 
-    const style = flatten(childNodes(row)[0]);
+    const bubble = screen.getByTestId('user-bubble') as unknown as RenderNode;
+    const style = flatten(bubble);
 
-    expect(style.backgroundColor).toBeUndefined();
-    expect(style.borderWidth).toBeUndefined();
+    expect(style.backgroundColor).toBe(theme.surface);
+    expect(style.borderWidth).toBeGreaterThan(0);
+    expect(style.borderRadius).toBe(22);
+    expect(style.shadowOpacity).toBeGreaterThan(0);
+    expect(screen.getByText('帮我查下天气')).toBeTruthy();
   });
 
   it('who-line 渲染名字与带秒时间戳', async () => {

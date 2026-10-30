@@ -737,7 +737,7 @@ const createStyles = (theme: Theme) =>
     bannerSubtitle: {
       marginTop: 3,
       color: theme.textOnAccent,
-      opacity: 0.72,
+      opacity: 0.86,
       fontSize: 10.5,
       lineHeight: 15,
     },

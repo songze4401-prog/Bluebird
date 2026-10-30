@@ -74,31 +74,32 @@ export const MODE_PALETTES: Record<ThemeMode, ModePalette> = {
     chatMuted: '#6c727d',
   },
   light: {
-    background: '#f4f5f7',
+    // 2026-10-30 浅色基准：暖白画布 + 白色卡片，与左侧抽屉同一材质。
+    // 聊天页不再用纯白铺底，卡片和气泡才有可见的体积。
+    background: '#f5f3ee',
     surface: '#ffffff',
-    surfaceAlt: '#eceef2',
-    border: '#e0e4ea',
-    borderStrong: '#ccd3dc',
-    textPrimary: '#14181e',
-    textBody: '#232a33',
-    textSecondary: '#5d6673',
-    textMuted: '#8b94a1',
+    surfaceAlt: '#eeebe4',
+    border: '#e5e0d6',
+    borderStrong: '#d6d0c4',
+    textPrimary: '#1c1b18',
+    textBody: '#2b2a26',
+    textSecondary: '#6b665e',
+    textMuted: '#979188',
     textOnAccent: '#ffffff',
     bubbleIncoming: '#ffffff',
-    bubbleIncomingBorder: '#e3e7ed',
-    avatarBg: '#eef1f5',
-    online: '#2f9e5a',
-    warning: '#9a6b1f',
-    danger: '#c0392b',
-    dangerBorder: 'rgba(192,57,43,0.45)',
-    scrim: 'rgba(0,0,0,0.3)',
-    // 以下六项全部取自设计图实测像素值（1080px 截图 ÷ 2.66 缩放）
-    chatBg: '#ffffff',
-    pill: '#f2f3f5',
-    pillText: '#61656b',
-    hairline: '#eeeeee',
-    chatText: '#17181a',
-    chatMuted: '#9b9ea3',
+    bubbleIncomingBorder: '#e5e0d6',
+    avatarBg: '#eeebe4',
+    online: '#2f8a52',
+    warning: '#8a5d18',
+    danger: '#b23a2f',
+    dangerBorder: 'rgba(178,58,47,0.42)',
+    scrim: 'rgba(28,26,22,0.32)',
+    chatBg: '#f5f3ee',
+    pill: '#eeebe4',
+    pillText: '#5f5b53',
+    hairline: 'rgba(40,36,30,0.08)',
+    chatText: '#1c1b18',
+    chatMuted: '#948f86',
   },
 };
 
@@ -106,8 +107,8 @@ export const MODE_PALETTES: Record<ThemeMode, ModePalette> = {
 export type AccentSet = {
   accent: string; // 强调文字 / 图标
   accentBorder: string; // 强调描边
-  bubble: string; // 用户消息气泡底 / 次级强调底
-  sendButton: string; // 发送按钮底
+  bubble: string; // 深强调底（强调型卡片备用）
+  sendButton: string; // 发送按钮底（与强调色同步加深）
 };
 
 export type AccentTheme = {
@@ -122,114 +123,114 @@ export const THEMES: AccentTheme[] = [
     id: 'black',
     label: '黑色',
     dark: {
-      accent: '#d9c7a1',
-      accentBorder: 'rgba(217,199,161,0.45)',
-      bubble: '#2f3d55',
-      sendButton: '#303846',
+      accent: '#c2ad82',
+      accentBorder: 'rgba(194,173,130,0.50)',
+      bubble: '#28364b',
+      sendButton: '#c2ad82',
     },
     light: {
-      accent: '#3a4250',
-      accentBorder: 'rgba(58,66,80,0.28)',
-      bubble: '#3a4250',
-      sendButton: '#3a4250',
+      accent: '#2f3540',
+      accentBorder: 'rgba(47,53,64,0.32)',
+      bubble: '#2f3540',
+      sendButton: '#2f3540',
     },
   },
   {
     id: 'blue',
     label: '蓝色',
     dark: {
-      accent: '#7e9bff',
-      accentBorder: 'rgba(126,155,255,0.42)',
-      bubble: '#1c2740',
-      sendButton: '#7e9bff',
+      accent: '#6382ea',
+      accentBorder: 'rgba(99,130,234,0.50)',
+      bubble: '#172137',
+      sendButton: '#6382ea',
     },
     light: {
-      // 按设计图实测：Bluebird 名字 #5884C5、发送按钮与选中标签 #8AB2E3。
-      // 只重调蓝色一档，其余六套强调色保持原值（设计图仅给了蓝色浅色一套）。
-      accent: '#5884c5',
-      accentBorder: 'rgba(88,132,197,0.28)',
-      bubble: '#2f6bb0',
-      sendButton: '#8ab2e3',
+      // 2026-10-30：全站强调色加深，浅色蓝从 #5884c5 收深到 #3566a8，
+      // 发送按钮与选中态共用同一强调色，避免浅色按钮在白卡上发灰。
+      accent: '#3566a8',
+      accentBorder: 'rgba(53,102,168,0.32)',
+      bubble: '#2a5a96',
+      sendButton: '#3566a8',
     },
   },
   {
     id: 'purple',
     label: '紫色',
     dark: {
-      accent: '#b9a3e3',
-      accentBorder: 'rgba(185,163,227,0.45)',
-      bubble: '#443a63',
-      sendButton: '#5a4a7d',
+      accent: '#a58bda',
+      accentBorder: 'rgba(165,139,218,0.50)',
+      bubble: '#3a3058',
+      sendButton: '#a58bda',
     },
     light: {
-      accent: '#6b4fa8',
-      accentBorder: 'rgba(107,79,168,0.28)',
-      bubble: '#6b4fa8',
-      sendButton: '#7a5cbb',
+      accent: '#5a3f96',
+      accentBorder: 'rgba(90,63,150,0.32)',
+      bubble: '#5a3f96',
+      sendButton: '#5a3f96',
     },
   },
   {
     id: 'green',
     label: '绿色',
     dark: {
-      accent: '#8ad4a6',
-      accentBorder: 'rgba(138,212,166,0.45)',
-      bubble: '#2c5040',
-      sendButton: '#33614a',
+      accent: '#6fbd8c',
+      accentBorder: 'rgba(111,189,140,0.50)',
+      bubble: '#244536',
+      sendButton: '#6fbd8c',
     },
     light: {
-      accent: '#2e7d51',
-      accentBorder: 'rgba(46,125,81,0.28)',
-      bubble: '#2e7d51',
-      sendButton: '#35915e',
+      accent: '#276a46',
+      accentBorder: 'rgba(39,106,70,0.32)',
+      bubble: '#276a46',
+      sendButton: '#276a46',
     },
   },
   {
     id: 'pink',
     label: '粉色',
     dark: {
-      accent: '#f0a8c0',
-      accentBorder: 'rgba(240,168,192,0.45)',
-      bubble: '#5c3346',
-      sendButton: '#7a4259',
+      accent: '#de8fa9',
+      accentBorder: 'rgba(222,143,169,0.50)',
+      bubble: '#4f2a3b',
+      sendButton: '#de8fa9',
     },
     light: {
-      accent: '#b5456f',
-      accentBorder: 'rgba(181,69,111,0.28)',
-      bubble: '#b5456f',
-      sendButton: '#c6527c',
+      accent: '#9d3b60',
+      accentBorder: 'rgba(157,59,96,0.32)',
+      bubble: '#9d3b60',
+      sendButton: '#9d3b60',
     },
   },
   {
     id: 'orange',
     label: '橙色',
     dark: {
-      accent: '#f0b478',
-      accentBorder: 'rgba(240,180,120,0.45)',
-      bubble: '#5c4230',
-      sendButton: '#7a5638',
+      accent: '#dda05f',
+      accentBorder: 'rgba(221,160,95,0.50)',
+      bubble: '#503822',
+      sendButton: '#dda05f',
     },
     light: {
-      accent: '#b5702e',
-      accentBorder: 'rgba(181,112,46,0.28)',
-      bubble: '#b5702e',
-      sendButton: '#c67d35',
+      accent: '#9f5f25',
+      accentBorder: 'rgba(159,95,37,0.32)',
+      bubble: '#9f5f25',
+      sendButton: '#9f5f25',
     },
   },
   {
     id: 'white',
     label: '白色/灰色',
     dark: {
-      accent: '#e6e7ea',
-      accentBorder: 'rgba(230,231,234,0.4)',
-      bubble: '#3f4249',
-      sendButton: '#4a4d55',
+      accent: '#cfd2d8',
+      accentBorder: 'rgba(207,210,216,0.45)',
+      bubble: '#34373d',
+      sendButton: '#cfd2d8',
     },
     light: {
-      accent: '#4a5058',
-      accentBorder: 'rgba(74,80,88,0.28)',
-      bubble: '#4a5058',
-      sendButton: '#565d66',
+      accent: '#3d434b',
+      accentBorder: 'rgba(61,67,75,0.32)',
+      bubble: '#3d434b',
+      sendButton: '#3d434b',
     },
   },
 ];
@@ -241,11 +242,10 @@ export type Theme = ModePalette &
     accentLabel: string;
   };
 
-// 默认强调色改为蓝色：设计图（ui6 白底版）是蓝色一档的浅色渲染，
-// 首启视觉需要直接对上设计图。已保存过主题偏好的用户不受影响
-// （useThemePreference 读到的本地值优先）。
+// 2026-10-30：默认浅色 + 蓝色强调，与左侧抽屉的暖白卡片材质一致。
+// 强调色整体加深；已保存过主题偏好的用户不受影响（useThemePreference 的本地值优先）。
 export const DEFAULT_THEME_ID: ThemeId = 'blue';
-export const DEFAULT_THEME_MODE: ThemeMode = 'dark';
+export const DEFAULT_THEME_MODE: ThemeMode = 'light';
 
 /** 强调色的本地持久化键（沿用历史键名，不破坏已保存的偏好） */
 export const THEME_STORAGE_KEY = 'bluebird.theme';

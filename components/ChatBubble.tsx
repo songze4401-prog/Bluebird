@@ -26,13 +26,21 @@ function BubbleAttachments({
   attachments,
   styles,
   alignEnd,
+  flush,
 }: {
   attachments: Attachment[];
   styles: ReturnType<typeof createStyles>;
   alignEnd?: boolean;
+  flush?: boolean;
 }) {
   return (
-    <View style={[styles.attachmentStack, alignEnd && styles.attachmentEnd]}>
+    <View
+      style={[
+        styles.attachmentStack,
+        flush && styles.attachmentFlush,
+        alignEnd && styles.attachmentEnd,
+      ]}
+    >
       {attachments.map(att =>
         att.expired ? (
           // 仓库条目已被物理删除（GET /history 标注）：图片不可达，显示占位
@@ -196,17 +204,19 @@ export function ChatBubble({
             {!!timeText && <Text style={styles.time}>{timeText}</Text>}
           </View>
 
-          {!!item.attachments?.length && (
-            <BubbleAttachments
-              attachments={item.attachments}
-              styles={styles}
-              alignEnd
-            />
-          )}
+          <View style={styles.userBubble} testID="user-bubble">
+            {!!item.attachments?.length && (
+              <BubbleAttachments
+                attachments={item.attachments}
+                styles={styles}
+                flush
+              />
+            )}
 
-          {!!item.content && (
-            <Text style={[styles.text, styles.textAfterTs]}>{item.content}</Text>
-          )}
+            {!!item.content && (
+              <Text style={styles.userText}>{item.content}</Text>
+            )}
+          </View>
         </TouchableOpacity>
       ) : (
         <Pressable
@@ -300,9 +310,8 @@ const createStyles = (theme: Theme) =>
     rowEnd: {
       justifyContent: 'flex-end',
     },
-    // 定宽 86%：流式正文持续变长，宽度恒定可避免整块内容左右抖
     userColumn: {
-      width: '86%',
+      maxWidth: '86%',
       alignItems: 'flex-end',
     },
     assistantColumn: {
@@ -317,6 +326,24 @@ const createStyles = (theme: Theme) =>
       flexDirection: 'row',
       alignItems: 'center',
       gap: 5,
+      marginBottom: 6,
+      paddingRight: 2,
+    },
+    // 用户消息气泡：与抽屉卡片同一套白色材质和轻描边，靠阴影和圆角起体积。
+    userBubble: {
+      maxWidth: '100%',
+      paddingHorizontal: 14,
+      paddingVertical: 11,
+      borderRadius: 22,
+      gap: 8,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.borderStrong,
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 5 },
+      shadowOpacity: theme.mode === 'dark' ? 0.3 : 0.06,
+      shadowRadius: 12,
+      elevation: 2,
     },
     favoriteStar: {
       color: theme.accent,
@@ -342,7 +369,7 @@ const createStyles = (theme: Theme) =>
       color: theme.chatMuted,
       fontSize: CHAT_TYPE.meta,
       fontVariant: ['tabular-nums'],
-      // who-line 里的时间与名字基线对齐；单独成行时由 tsToText 控制下方间距
+      // who-line 里的时间与名字基线对齐
       marginBottom: 0,
     },
     text: {
@@ -351,9 +378,12 @@ const createStyles = (theme: Theme) =>
       lineHeight: CHAT_TYPE.bodyLine,
       marginTop: CHAT_LAYOUT.nameToText,
     },
-    // 用户消息是「时间戳 → 正文」，实测间距 12dp（助手是 who-line → 正文 10dp）
-    textAfterTs: {
-      marginTop: CHAT_LAYOUT.tsToText,
+    // 气泡内正文不带上边距：间距交给气泡 padding 与 gap
+    userText: {
+      color: theme.chatText,
+      fontSize: CHAT_TYPE.body,
+      lineHeight: CHAT_TYPE.bodyLine,
+      flexShrink: 1,
     },
     stoppedNote: {
       color: theme.textMuted,
@@ -372,6 +402,9 @@ const createStyles = (theme: Theme) =>
     attachmentStack: {
       gap: 8,
       marginTop: CHAT_LAYOUT.nameToText,
+    },
+    attachmentFlush: {
+      marginTop: 0,
     },
     attachmentEnd: {
       alignItems: 'flex-end',

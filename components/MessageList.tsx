@@ -205,6 +205,9 @@ export function MessageList({
       // 若这批内容刚刚被消息效应贴过底（首屏的常见路径），则不重复滚。
       if (lastScrolledMessagesRef.current !== current) scrollToEndOnce(false);
     } else {
+      // 空白新对话：回到列表顶部，避免继承上一个会话的滚动位置，
+      // 把首屏的品牌区和标题藏在视口外。
+      flatListRef.current?.scrollToOffset({ offset: 0, animated: false });
       // 历史还没到：等它到达时由下面的「消息变化」效应贴底
       sessionScrollPendingRef.current = true;
     }
@@ -245,6 +248,8 @@ export function MessageList({
         autoScrollState.current = 'follow';
         setPendingNewCount(0);
         setShowScrollToBottom(false);
+        // 清空或新建后回到顶部，让首屏标题从头显示
+        flatListRef.current?.scrollToOffset({ offset: 0, animated: false });
       }
 
       return;

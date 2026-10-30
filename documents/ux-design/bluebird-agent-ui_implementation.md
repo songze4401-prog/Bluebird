@@ -9,7 +9,7 @@
 | 设计稿 | 实现 |
 |---|---|
 | 01 空白对话 | `components/ChatWelcome.tsx` 合并进聊天首屏，不再有独立主页路由 |
-| 02 正常对话 / 流式 / Agent 执行 | `ChatBubble`、`MarkdownMessage`、`AgentRunBlock`、`ChatInput` |
+| 02 正常对话 / 流式 / Agent 执行 | `ChatBubble`（用户白色气泡、助手平铺正文）、`MarkdownMessage`、`AgentRunBlock`、`ChatInput`（大圆角输入卡片） |
 | 03 Agent 执行详情 | `AgentRunBlock` 内底部 Sheet，展示真实 `toolSteps` 摘要 |
 | 04 历史 | `HistoryScreen` 分组、搜索、长按/更多操作 |
 | 05 设置 | `SettingsScreen` 分区与只读状态 |
@@ -25,15 +25,17 @@
 - **Agent 状态**：`GET /agent-policy` 增加只读 `runtime`（switchOn / maxRounds / timeout / 图片请求策略）；`AgentToolsScreen` 只展示，不提供可写开关。
 - **导航**：聊天页移除底部标签栏；任务、记忆、模型、Agent 工具、设置、监控均保留在抽屉/设置页。
 - **入口与首屏（2026-10-30 调整）**：删除独立主页路由，启动即新对话；原主页排版合并进 `ChatWelcome`。启动时优先复用最近一个空白会话，没有才 `POST /sessions`，已在空白对话时再点“新建”不再新增空会话。抽屉改为卡片面板，最近对话直接消费 `/sessions`，底栏搜索只过滤该列表。
+- **浅色对话界面（2026-10-30 调整）**：默认模式改为浅色，默认强调色为蓝色；浅色画布改为暖白 `#f5f3ee`，卡片统一白色 + 轻描边 + 柔和阴影。7 套强调色（明暗两档）整体加深，发送按钮与强调色同步。顶栏改为 38dp 圆形卡片按钮；新对话首屏增加品牌火花、品牌胶囊和三张真实入口卡；用户消息使用右对齐白色气泡，助手正文保持平铺；输入区改为大圆角卡片（输入行 + 控件行：加号、模型、语音、发送）。新建/清空对话时列表回到顶部，避免首屏继承上一会话的滚动位置。
 
 ## 3. 验证
 
 - `npm test`：44 个后端文件 / 1524 项通过
-- `npm run test:unit -- --ci`：15 suites / 141 tests 通过
+- `npm run test:unit -- --ci`：15 suites / 142 tests 通过
 - `npx tsc --noEmit`：通过
 - `npm run lint`：通过
-- `node scripts/verify-test-coverage.js`：backend 1524/1524、nodeSuite 221/221、runner 1303/1303、frontend 141/141、CI 覆盖 44/44
-- Expo Web export 成功；浏览器 DOM / 计算样式核对：新对话首屏、卡片抽屉、搜索过滤、深浅色切换、真实会话切换、空白会话复用。
+- `node scripts/verify-test-coverage.js`：backend 1524/1524、nodeSuite 221/221、runner 1303/1303、frontend 142/142、CI 覆盖 44/44
+- 7 套强调色对比度校验：浅色强调色对画布 ≥4.58、白字对强调色 ≥5.08；深色强调色对深色画布 ≥5.61、深字对强调色 ≥5.61。
+- Expo Web export 成功；浏览器 DOM / 计算样式核对：默认浅色、深色回切、品牌火花与入口卡、用户气泡、输入卡片控件行、卡片抽屉、搜索过滤、真实会话切换、空白会话复用、新建后回到首屏顶部。
 
 ## 4. 未接通 / 限制
 
