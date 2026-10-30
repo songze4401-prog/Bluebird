@@ -599,6 +599,7 @@ describe('顶部栏与设置抽屉', () => {
     const onOpenTasks = jest.fn();
     const onOpenModels = jest.fn();
     const onOpenAgentTools = jest.fn();
+    const onOpenAgentTeam = jest.fn();
     const onSelectSession = jest.fn();
     const onClearHistory = jest.fn();
 
@@ -617,6 +618,7 @@ describe('顶部栏与设置抽屉', () => {
         onOpenMemory={onOpenMemory}
         onOpenControlPanel={noop}
         onOpenAgentTools={onOpenAgentTools}
+        onOpenAgentTeam={onOpenAgentTeam}
         onOpenTasks={onOpenTasks}
         onOpenModels={onOpenModels}
         onOpenThemePicker={noop}
@@ -642,6 +644,9 @@ describe('顶部栏与设置抽屉', () => {
 
     await fireEvent.press(screen.getByLabelText('Agent 工具'));
     expect(onOpenAgentTools).toHaveBeenCalled();
+
+    await fireEvent.press(screen.getByLabelText('Agent 团队'));
+    expect(onOpenAgentTeam).toHaveBeenCalled();
 
     await fireEvent.press(screen.getByLabelText('打开会话 关于记忆'));
     expect(onSelectSession).toHaveBeenCalledWith('s-memory');

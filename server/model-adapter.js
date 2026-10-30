@@ -249,7 +249,7 @@ async function assertPublicUrl(rawUrl) {
  * 输入：{ providerId?, modelId?, wantVision? }（缺省用配置默认值）。
  * 返回 { providerId, modelId, model, provider } 或抛出 ModelCallError。
  */
-function resolveTarget({ providerId, modelId, wantVision = false } = {}) {
+function resolveTarget({ providerId, modelId, wantVision = false, keyOverride = null } = {}) {
   const defaults = getDefaults();
 
   const pid = providerId || defaults.providerId;
@@ -272,7 +272,7 @@ function resolveTarget({ providerId, modelId, wantVision = false } = {}) {
     throw new ModelCallError('capability', `模型 ${mid} 未声明视觉能力`);
   }
 
-  const key = getProviderKey(provider.id);
+  const key = keyOverride || getProviderKey(provider.id);
   if (!key) {
     // 兼容旧文案：默认走内置 DeepSeek 且未配 key 时，保持与改造前逐字
     // 一致的 500 提示（既有测试与用户手册都依赖这段文案）。
@@ -286,11 +286,11 @@ function resolveTarget({ providerId, modelId, wantVision = false } = {}) {
     throw new ModelCallError('not_configured', `服务商未配置 API Key：${provider.id}`);
   }
 
-  return { providerId: provider.id, modelId: model.id, model, provider };
+  return { providerId: provider.id, modelId: model.id, model, provider, key };
 }
 
 // 视觉目标解析：优先显式指定；否则取默认服务商里第一个声明 vision 的启用模型。
-function resolveVisionTarget({ providerId, modelId } = {}) {
+function resolveVisionTarget({ providerId, modelId, keyOverride = null } = {}) {
   const defaults = getDefaults();
   const pid = providerId || defaults.providerId;
   const provider = findProvider(pid);
@@ -302,7 +302,9 @@ function resolveVisionTarget({ providerId, modelId } = {}) {
     throw new ModelCallError('not_configured', `服务商已禁用：${pid}`);
   }
 
-  if (modelId) return resolveTarget({ providerId: pid, modelId, wantVision: true });
+  if (modelId) {
+    return resolveTarget({ providerId: pid, modelId, wantVision: true, keyOverride });
+  }
 
   // 未显式指定模型：优先沿用用户选中的默认模型（若它声明了视觉能力）。
   // 否则用户切到默认的视觉模型后，带图请求仍会被换成「第一个视觉模型」，
@@ -313,14 +315,14 @@ function resolveVisionTarget({ providerId, modelId } = {}) {
     : null;
 
   if (preferredModel && preferredModel.capabilities?.vision === true) {
-    return resolveTarget({ providerId: pid, modelId: preferredModel.id, wantVision: true });
+    return resolveTarget({ providerId: pid, modelId: preferredModel.id, wantVision: true, keyOverride });
   }
 
   const visionModel = provider.models.find(
     m => m.enabled !== false && m.capabilities && m.capabilities.vision === true
   );
   if (visionModel) {
-    return resolveTarget({ providerId: pid, modelId: visionModel.id, wantVision: true });
+    return resolveTarget({ providerId: pid, modelId: visionModel.id, wantVision: true, keyOverride });
   }
 
   // 默认服务商没有视觉模型：明确失败，不静默降级到不认图的模型
@@ -399,12 +401,14 @@ async function createChatCompletion({
   tools,
   tool_choice,
   monitoringRound = 1,
+  credentialKey = null,
+  signal = null,
 }) {
   const target = wantVision
-    ? resolveVisionTarget({ providerId, modelId })
-    : resolveTarget({ providerId, modelId, wantVision: false });
+    ? resolveVisionTarget({ providerId, modelId, keyOverride: credentialKey })
+    : resolveTarget({ providerId, modelId, wantVision: false, keyOverride: credentialKey });
 
-  const key = getProviderKey(target.providerId);
+  const key = target.key;
   const startedAt = Date.now();
   const monitor = monitoring.beginModelCall({
     providerId: target.providerId,
@@ -427,7 +431,10 @@ async function createChatCompletion({
         ...(tools ? { tools } : {}),
         ...(tool_choice ? { tool_choice } : {}),
       },
-      { timeout }
+      {
+        timeout,
+        ...(signal && typeof signal === 'object' ? { signal } : {}),
+      }
     );
   } catch (error) {
     const normalized = normalizeSdkError(error, key);
@@ -534,9 +541,9 @@ function wrapMonitoredStream(stream, monitor, startedAt) {
  * 返回 true；未声明/未知一律 false——绝不仅因 OpenAI 兼容接口就假定支持。
  * 目标解析失败（服务商/模型不存在）同样返回 false（安全默认）。
  */
-function supportsTools(providerId, modelId) {
+function supportsTools(providerId, modelId, { keyOverride = null } = {}) {
   try {
-    const target = resolveTarget({ providerId, modelId });
+    const target = resolveTarget({ providerId, modelId, keyOverride });
     return Boolean(
       target.model.capabilities && target.model.capabilities.tools === true
     );
@@ -617,7 +624,7 @@ function classifyError(error) {
 const TEST_TIMEOUT_MS = 5000;
 const TEST_MAX_BODY_BYTES = 64 * 1024;
 
-async function testProviderConnection(providerId) {
+async function testProviderConnection(providerId, { keyOverride = null } = {}) {
   const started = Date.now();
 
   let provider;
@@ -635,7 +642,7 @@ async function testProviderConnection(providerId) {
     return { ok: false, ...info, latencyMs: Date.now() - started };
   }
 
-  const key = getProviderKey(provider.id);
+  const key = keyOverride || getProviderKey(provider.id);
   if (!key) {
     const info = classifyError(new ModelCallError('not_configured', '未配置 API Key'));
     return { ok: false, ...info, latencyMs: Date.now() - started };

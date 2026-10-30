@@ -352,6 +352,19 @@ test('向量回填入口：未鉴权 401，未配置 Embedding 时明确 409', a
   assert.equal(unavailable.json.reason, 'not_configured');
 });
 
+test('Memory Bot API：公开根路径不受影响，/agents 复用 Bearer 鉴权', async () => {
+  const root = await req('/', { token: '' });
+  assert.equal(root.status, 200);
+
+  const unauth = await req('/agents', { token: '' });
+  assert.equal(unauth.status, 401);
+
+  const agents = await req('/agents');
+  assert.equal(agents.status, 200);
+  assert.equal(agents.json.agents.length, 1);
+  assert.equal(agents.json.agents[0].botId, 'memory');
+});
+
 test('方法约束：POST /retrieval/status 返回 405', async () => {
   const response = await req('/retrieval/status', { method: 'POST', body: {} });
   assert.equal(response.status, 405);

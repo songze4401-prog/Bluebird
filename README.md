@@ -2,6 +2,8 @@
 
 Bluebird（云岫）是一个单用户、本地优先的个人 AI 陪伴应用：Expo / React Native 客户端 + 本机 Express API + 本地 JSON/图片数据目录。它没有云端多租户、数据库或微服务；会话、长期记忆、情绪、人格、在线状态、模型配置和附件都保存在运行 API 的机器上。
 
+首期专业 Agent 为 Memory Bot：独立 Manifest/Registry/配置、AES-256-GCM 加密凭证、独立 Bot 会话、直接对话与主控委派共用 Runtime、任务/事件 API 和真实工作台。实现边界与未完成项见 [`docs/memory-bot.md`](docs/memory-bot.md)。
+
 ## Stack
 
 - Client: React Native 0.88 / Expo 58 / TypeScript；单入口 `App.tsx`，无 Expo Router。
@@ -27,8 +29,8 @@ npx expo start             # Metro :8081
 ## Quality gates
 
 ```bash
-npm test                    # backend: auto-discovers tests/*.test.js (45 files / 1540 checks)
-npm run test:unit -- --ci   # frontend: 17 suites / 162 cases
+npm test                    # backend: auto-discovers tests/*.test.js (46 files / 1547 checks)
+npm run test:unit -- --ci   # frontend: 18 suites / 164 cases
 npx tsc --noEmit            # TypeScript
 npm run lint                # Expo ESLint
 npm run eval:context        # real-model capability eval (needs DEEPSEEK_API_KEY; not in CI)

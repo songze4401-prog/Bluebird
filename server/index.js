@@ -7,6 +7,7 @@ const express = require('express');
 const cors = require('cors');
 const retrieval = require('./retrieval');
 const { createRetrievalRouter } = require('./retrieval/routes');
+const { createAgentRouter } = require('./agents/routes');
 
 // 生产级可观测性：独立模块 + 只读查询 API。记录失败绝不影响主业务；
 // BLUEBIRD_MONITORING=0 可关闭，前端会显示 disabled 而不是健康。
@@ -67,6 +68,8 @@ app.use(rateLimit());
 
 // 统一检索：查询只读，摄取/删除/重建写索引；全部复用 Bearer 鉴权与全局限流。
 app.use('/retrieval', createRetrievalRouter({ requireAuth }));
+// Memory Bot：独立配置/凭证/会话/任务；写操作复用 Bearer 鉴权与全局限流。
+app.use(createAgentRouter({ requireAuth, auditAction }));
 // 只读监控 API：复用现有 Bearer 鉴权与全局限流；没有任何写接口。
 app.use('/monitoring', createMonitoringRouter({ requireAuth }));
 

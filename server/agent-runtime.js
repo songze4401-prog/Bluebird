@@ -492,6 +492,8 @@ async function runAgentTurn({
   abortSignal,
   onToolEvent,
   onRequest,
+  onToolResult,
+  credentialKey = null,
 }) {
   logSwitchIfChanged();
 
@@ -583,6 +585,8 @@ async function runAgentTurn({
       maxTokens,
       timeout: Math.min(timeout, remainingMs),
       monitoringRound: round,
+      credentialKey,
+      signal: abortSignal,
       // 末轮/预算耗尽轮强制无 tools：模型只能产出文本，从结构上终结循环
       ...(isFinalRound ? {} : { tools: specs, tool_choice: 'auto' }),
     });
@@ -736,6 +740,20 @@ async function runAgentTurn({
           ...(result.deduped ? { deduped: true } : {}),
           summary,
         });
+      }
+
+      if (typeof onToolResult === 'function') {
+        try {
+          onToolResult({
+            name: toolName,
+            callId: normalized.id,
+            ok: result.ok === true,
+            durationMs: Date.now() - startedAtTool,
+            result,
+          });
+        } catch (_) {
+          /* 证据回调失败不影响工具结果转发 */
+        }
       }
 
       toolSteps.push({

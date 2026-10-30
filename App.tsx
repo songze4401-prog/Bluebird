@@ -36,6 +36,8 @@ import { HistoryScreen } from './components/HistoryScreen';
 import { ControlPanelScreen } from './components/ControlPanelScreen';
 import { SettingsScreen } from './components/SettingsScreen';
 import { AgentToolsScreen } from './components/AgentToolsScreen';
+import { AgentTeamScreen } from './components/AgentTeamScreen';
+import { MemoryBotScreen } from './components/MemoryBotScreen';
 import { MonitoringScreen } from './components/MonitoringScreen';
 import { ModelScreen } from './components/ModelScreen';
 import { PlusPanel } from './components/PlusPanel';
@@ -69,6 +71,8 @@ export default function App() {
   const [monitoringOpen, setMonitoringOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentToolsOpen, setAgentToolsOpen] = useState(false);
+  const [agentTeamOpen, setAgentTeamOpen] = useState(false);
+  const [memoryBotOpen, setMemoryBotOpen] = useState(false);
   const [actionMessage, setActionMessage] = useState<Message | null>(null);
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
   const [hiddenMessageIds, setHiddenMessageIds] = useState<Set<string>>(
@@ -425,6 +429,10 @@ export default function App() {
           setDrawerOpen(false);
           setAgentToolsOpen(true);
         }}
+        onOpenAgentTeam={() => {
+          setDrawerOpen(false);
+          setAgentTeamOpen(true);
+        }}
         onOpenSettings={() => {
           setDrawerOpen(false);
           setSettingsOpen(true);
@@ -523,6 +531,10 @@ export default function App() {
           setSettingsOpen(false);
           setAgentToolsOpen(true);
         }}
+        onOpenAgentTeam={() => {
+          setSettingsOpen(false);
+          setAgentTeamOpen(true);
+        }}
         onOpenMonitoring={() => {
           setSettingsOpen(false);
           setMonitoringOpen(true);
@@ -544,6 +556,26 @@ export default function App() {
         onOpenAdvanced={() => {
           setAgentToolsOpen(false);
           setPanelOpen(true);
+        }}
+      />
+
+      <AgentTeamScreen
+        visible={agentTeamOpen}
+        onClose={() => setAgentTeamOpen(false)}
+        theme={theme}
+        onOpenBot={() => {
+          setAgentTeamOpen(false);
+          setMemoryBotOpen(true);
+        }}
+      />
+
+      <MemoryBotScreen
+        visible={memoryBotOpen}
+        onClose={() => setMemoryBotOpen(false)}
+        theme={theme}
+        onOpenMemory={() => {
+          setMemoryBotOpen(false);
+          setMemoryOpen(true);
         }}
       />
 
