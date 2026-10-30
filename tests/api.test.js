@@ -134,6 +134,23 @@ function snapshotRealData() {
   return snap;
 }
 
+// 真实数据目录可能同时被本机正在运行的 Bluebird 实例写入（开发者开着 dev server）。
+// 那种情况下 md5 变化无法归因到本测试，会把别人的正常写入误判成测试泄漏。
+// 用 .bluebird.lock 里的 pid 探测外部实例是否存活；存活就跳过 md5 比对并写明原因，
+// 「测试不碰真实目录」由守卫 1（独立 BLUEBIRD_DATA_DIR）保证。
+function liveInstanceHoldLock() {
+  try {
+    const raw = fs.readFileSync(path.join(REAL_DATA_DIR, '.bluebird.lock'), 'utf8');
+    const parsed = JSON.parse(raw);
+    const pid = Number(parsed && parsed.pid);
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    process.kill(pid, 0); // 只探测进程是否存在，不发信号
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function diffSnapshot(before, after) {
   const changed = [];
   const names = new Set([...Object.keys(before), ...Object.keys(after)]);
@@ -335,11 +352,17 @@ async function waitReady() {
   }
 
   // 守卫 2（后置）：确认整轮跑下来真实数据目录一个字节都没变。
-  const changed = diffSnapshot(snapshotBefore, snapshotRealData());
+  // 有外部实例在跑时跳过 md5 比对（无法归因），隔离仍由守卫 1 保证。
+  const concurrentWriter = liveInstanceHoldLock();
+  const changed = concurrentWriter ? [] : diffSnapshot(snapshotBefore, snapshotRealData());
   check(
-    '跑完后真实 server/data/ 未被改动',
+    '跑完后真实 server/data/ 未被本测试改动',
     changed.length === 0,
-    changed.length ? `变动：${changed.join('、')}` : ''
+    concurrentWriter
+      ? '检测到外部 Bluebird 实例占用真实目录，已跳过 md5 比对（测试使用独立数据目录）'
+      : changed.length
+        ? `变动：${changed.join('、')}`
+        : ''
   );
   if (changed.length) {
     origLog('  ⚠ 数据隔离可能已失效，请检查 BLUEBIRD_DATA_DIR 是否生效。');

@@ -138,6 +138,47 @@ BLUEBIRD_RETRIEVAL_EMBEDDING_VERSION=v1
 - 模型升级后需调用 `POST /retrieval/rebuild` 重建向量（不静默混用）；
 - Provider 不可用时自动降级到词法/精确，不使聊天失败。
 
+## 7.1 神经检索升级（2026-10-30）
+
+### 模型选型（可替换）
+
+| 预设 | 模型 | 维度 | 参考价（每百万 token） | 选择理由 |
+| --- | --- | --- | --- | --- |
+| `dashscope` | 阿里云 text-embedding-v3 | 1024 | ≈ $0.07 | 中文语义稳定、国内直连、按量计费 |
+| `siliconflow` | BAAI/bge-m3 | 1024 | ≈ $0.01 | 多语言/中文好、成本最低 |
+| `openai` | text-embedding-3-small | 1536 | ≈ $0.02 | 通用基线，便于对照 |
+
+配置只写 `BLUEBIRD_RETRIEVAL_EMBEDDING_PROVIDER` + `..._API_KEY`；`BASE_URL` / `MODEL` / `DIMENSION`
+显式设置时优先（可指向自建或代理）。响应维度与配置不一致时**直接失败**
+（`embedding_dimension_mismatch`），不截断、不填充。
+
+### 当前环境实测（重要）
+
+- DeepSeek 只有 `deepseek-flash` / `deepseek-v4-pro` 两个聊天模型，`POST /embeddings` 返回 **404**；
+- 本机没有 DashScope / 智谱 / OpenAI / 硅基流动凭据，没有 Ollama，也没有 torch/transformers 与本地模型缓存。
+
+**结论：真实神经 Embedding 调用未验证（阻塞：无凭据）**。向量通道在未配置时显式 `unavailable`，
+检索自动降级为词法 + 精确 + 重排；`npm run eval:retrieval` 会打印 `vector channel: unavailable (...)`，
+不把降级结果当作向量能力通过。配置任一预设的 key 后，同一套代码即可启用向量通道，无需改逻辑。
+
+### 混合检索与重排
+
+流水线：BM25 词法 + 精确符号/路径 + 可选向量召回 → RRF 融合 → 去重 → 策略门（来源/作用域/状态/有效期/
+时效/可追溯/注入风险）→ **候选重排** → 多样性与预算打包。
+
+重排是纯本地确定性计算，不调用外部服务（控制成本与延迟）：
+
+```
+score = Σ w_i × signal_i / Σ w_i        （向量不可用时 w_vector 自动剔除并重新归一）
+signals: rrf（相对最高分归一）/ lexical / vector 余弦 / recency / graph
+默认权重: rrf 0.5, lexical 0.15, vector 0.2, recency 0.1, graph 0.05
+```
+
+- **时效性**：`recency` 按 `updatedAt` 做半衰期衰减（默认 30 天，下限 0.15，老记忆不直接沉底）；
+  另有硬过滤 `BLUEBIRD_RETRIEVAL_MAX_AGE_DAYS`，只对 `web` 生效（长期记忆/文档不受影响）。
+- **记忆图谱**：候选之间共享 ≥ `GRAPH_MIN_OVERLAP`（默认 2）个 `metadata.keywords` 视为一条边，
+  度数归一后作为 `graph` 信号。复用既有记忆关键词，不新增存储。
+
 ## 8. 存储与生命周期
 
 - 嵌入式单文件 `retrieval/index.json`（`BLUEBIRD_DATA_DIR/retrieval/`），通过 `atomic-write` 原子替换；内存倒排索引从 chunks 重建。

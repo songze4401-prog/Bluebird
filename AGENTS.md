@@ -163,7 +163,7 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-Forty-four files, 1524 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
+Forty-four files, 1531 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
 node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js tests/monitoring.test.js   # node:test suites (221)
@@ -201,7 +201,7 @@ node tests/memory-retrieval.test.js       # 47 — filters, hybrid scoring, budg
 node tests/memory-semantic.test.js        # 54 — concept synonym/cross-language recall, hybrid ranking, semantic budgets
 node tests/memory-session-isolation.test.js # 15
 node tests/memory-startup-lock.test.js    # 31
-node tests/retrieval.test.js              # 25 — unified retrieval: contract/store lifecycle, five source connectors, hybrid fusion, policy gate, vector provider, context/Agent integration
+node tests/retrieval.test.js              # 30 — unified retrieval: contract/store lifecycle, five source connectors, hybrid fusion, policy gate, vector provider, context/Agent integration
 node tests/retrieval-api.test.js          # 10 — live HTTP: auth/405, document/code/web ingest -> search -> delete, session isolation, rebuild/consistency
 node tests/monitoring-api.test.js         # 38 — monitoring API + real HTTP/context/agent/SSE/persistence instrumentation (model SDK stubbed)
 ```
