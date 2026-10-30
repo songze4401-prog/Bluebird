@@ -16,6 +16,14 @@ import type { Theme } from '../theme';
 import type { SessionMeta } from '../lib/types';
 import { formatMessageTime } from '../lib/utils';
 
+// 空白会话统一显示「新对话」，与顶栏、抽屉保持一致；
+// 服务端的「新会话」只是占位标题，不对用户暴露。
+function sessionDisplayTitle(item: SessionMeta): string {
+  if (item.messageCount === 0) return '新对话';
+
+  return item.title || '未命名会话';
+}
+
 // 历史聊天：分组列表 + 本地搜索 + 删除/长按管理。
 // 数据仍由 App 的 useSessionList 注入，组件不直接请求 /sessions。
 export function HistoryScreen({
@@ -97,7 +105,9 @@ export function HistoryScreen({
   };
 
   const openRowMenu = (item: SessionMeta) => {
-    Alert.alert(item.title || '未命名会话', '选择操作', [
+    const title = sessionDisplayTitle(item);
+
+    Alert.alert(title, '选择操作', [
       { text: '取消', style: 'cancel' },
       {
         text: '重命名（暂未开放）',
@@ -107,7 +117,7 @@ export function HistoryScreen({
       {
         text: '删除',
         style: 'destructive',
-        onPress: () => confirmDelete(item.id, item.title),
+        onPress: () => confirmDelete(item.id, title),
       },
     ]);
   };
@@ -199,6 +209,7 @@ export function HistoryScreen({
                 <Text style={styles.groupLabel}>{group.label}</Text>
                 {group.data.map(item => {
                   const current = item.id === currentSessionId;
+                  const title = sessionDisplayTitle(item);
                   return (
                     <TouchableOpacity
                       key={item.id}
@@ -207,13 +218,13 @@ export function HistoryScreen({
                       onPress={() => onSelectSession(item.id)}
                       onLongPress={() => openRowMenu(item)}
                       delayLongPress={350}
-                      accessibilityLabel={`打开会话 ${item.title || '未命名会话'}`}
+                      accessibilityLabel={`打开会话 ${title}`}
                     >
                       <View style={styles.rowMain}>
                         <View style={styles.rowTitleLine}>
                           {current && <View style={styles.currentDot} />}
                           <Text style={styles.rowTitle} numberOfLines={1}>
-                            {item.title || '未命名会话'}
+                            {title}
                           </Text>
                         </View>
                         <Text style={styles.rowMeta} numberOfLines={1}>

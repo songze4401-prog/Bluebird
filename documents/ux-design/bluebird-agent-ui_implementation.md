@@ -8,14 +8,14 @@
 
 | 设计稿 | 实现 |
 |---|---|
-| 01 空白对话 | `components/HomeScreen.tsx` + `components/MessageList.tsx` 空状态 |
+| 01 空白对话 | `components/ChatWelcome.tsx` 合并进聊天首屏，不再有独立主页路由 |
 | 02 正常对话 / 流式 / Agent 执行 | `ChatBubble`、`MarkdownMessage`、`AgentRunBlock`、`ChatInput` |
 | 03 Agent 执行详情 | `AgentRunBlock` 内底部 Sheet，展示真实 `toolSteps` 摘要 |
 | 04 历史 | `HistoryScreen` 分组、搜索、长按/更多操作 |
 | 05 设置 | `SettingsScreen` 分区与只读状态 |
 | 06 Agent 工具边界 | `AgentToolsScreen` 读取 `/agent-policy` 的 runtime + availableTools |
 | 07 数据与隐私 | `SettingsScreen` 的“数据与隐私”分区 |
-| 08 导航抽屉 | `SettingsDrawer` 分组导航，任务/记忆入口保留 |
+| 08 导航抽屉 | `SettingsDrawer` 卡片面板：个人空间、2×2 功能卡、Agent 主色横幅、真实最近对话、外观、底栏搜索/设置/新建 |
 
 ## 2. 本轮工程缺口
 
@@ -24,15 +24,16 @@
 - **消息操作**：`MessageActionSheet` 统一长按菜单，复制使用 RN Clipboard，分享使用系统 Share，收藏持久化到 AsyncStorage（本机），用户消息删除走既有 `/history/recall`，AI 消息仅本机隐藏并明确提示服务端删除未开放。
 - **Agent 状态**：`GET /agent-policy` 增加只读 `runtime`（switchOn / maxRounds / timeout / 图片请求策略）；`AgentToolsScreen` 只展示，不提供可写开关。
 - **导航**：聊天页移除底部标签栏；任务、记忆、模型、Agent 工具、设置、监控均保留在抽屉/设置页。
+- **入口与首屏（2026-10-30 调整）**：删除独立主页路由，启动即新对话；原主页排版合并进 `ChatWelcome`。启动时优先复用最近一个空白会话，没有才 `POST /sessions`，已在空白对话时再点“新建”不再新增空会话。抽屉改为卡片面板，最近对话直接消费 `/sessions`，底栏搜索只过滤该列表。
 
 ## 3. 验证
 
 - `npm test`：44 个后端文件 / 1524 项通过
-- `npm run test:unit -- --ci`：15 suites / 138 tests 通过
+- `npm run test:unit -- --ci`：15 suites / 141 tests 通过
 - `npx tsc --noEmit`：通过
 - `npm run lint`：通过
-- `node scripts/verify-test-coverage.js`：backend 1524/1524、nodeSuite 221/221、runner 1303/1303、frontend 138/138、CI 覆盖 44/44
-- Expo Web export 成功；浏览器 DOM 核对首页、抽屉、设置、Agent 工具页可达。
+- `node scripts/verify-test-coverage.js`：backend 1524/1524、nodeSuite 221/221、runner 1303/1303、frontend 141/141、CI 覆盖 44/44
+- Expo Web export 成功；浏览器 DOM / 计算样式核对：新对话首屏、卡片抽屉、搜索过滤、深浅色切换、真实会话切换、空白会话复用。
 
 ## 4. 未接通 / 限制
 

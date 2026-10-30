@@ -28,10 +28,10 @@ import { createAppStyles } from './app-styles';
 
 import { ChatInput } from './components/ChatInput';
 import { ChatHeader } from './components/ChatHeader';
+import { ChatWelcome } from './components/ChatWelcome';
 import { MessageList } from './components/MessageList';
 import { MemoryScreen } from './components/MemoryScreen';
 import { ThemeScreen } from './components/ThemeScreen';
-import { HomeScreen } from './components/HomeScreen';
 import { HistoryScreen } from './components/HistoryScreen';
 import { ControlPanelScreen } from './components/ControlPanelScreen';
 import { SettingsScreen } from './components/SettingsScreen';
@@ -54,7 +54,7 @@ import { useAttachments } from './hooks/useAttachments';
 
 export default function App() {
   // ---- 页面与弹层（纯 UI 状态，不进任何 hook）----
-  const [screen, setScreen] = useState<'home' | 'chat'>('home');
+  // 没有独立主页：进入应用即新对话，主页内容合并进聊天首屏（ChatWelcome）。
   // 底部标签栏选中的「同一屏内容」：对话 / 任务。
   // 记忆是独立的全屏弹层（它自己取数、有自己的返回），不占这个状态，
   // 否则点「对话」还得先把弹层关掉，两个来源会互相覆盖。
@@ -162,29 +162,45 @@ export default function App() {
     onEnterChat: () => {
       setHistoryOpen(false);
       setTab('chat');
-      setScreen('chat');
     },
   });
 
-  // 启动：先选「最近更新的会话」（/sessions 已按 updatedAt 倒序），
-  // 再读它的历史；/sessions 不可用时退回默认会话单历史模式（与旧行为等价）。
-  // 只在挂载时跑一次：这条链路决定初始会话，之后一律由用户操作驱动，
-  // 不能随 sessionId 变化重跑（否则会覆盖用户正在看的会话）。
+  // 启动：进入应用默认新开对话，不再恢复最近会话。
+  // 复用最近一个空白会话作为草稿，避免每次启动都堆出一个新的空会话；
+  // 没有空白会话时才调用 POST /sessions 新建。
+  // 只在挂载时跑一次，之后一律由用户操作驱动。
   useEffect(() => {
     let cancelled = false;
 
     const bootstrap = async () => {
       const sessions = await refreshSessions();
 
-      // 明确传 sessionId：新后端命中该会话，旧后端忽略未知 query 参数
-      const resumeSessionId = sessions?.[0]?.id || DEFAULT_SESSION_ID;
+      if (cancelled) return;
 
-      await chat.loadHistory(resumeSessionId);
+      const draftSession = sessions?.find(item => item.messageCount === 0);
+
+      if (draftSession) {
+        setCurrentSessionId(draftSession.id);
+        chat.resetMessages();
+        chat.markHistoryLoaded();
+        return;
+      }
+
+      // force 跳过“历史加载中”闸门；silent 避免启动阶段网络问题弹阻断框。
+      const created = await actions.createNewChat({
+        force: true,
+        silent: true,
+      });
 
       if (cancelled) return;
 
-      setCurrentSessionId(resumeSessionId);
       chat.markHistoryLoaded();
+
+      if (!created) {
+        // 服务不可用：保持空白新对话，不把任何旧会话的内容混进来。
+        setCurrentSessionId(DEFAULT_SESSION_ID);
+        chat.resetMessages();
+      }
     };
 
     void bootstrap();
@@ -242,8 +258,52 @@ export default function App() {
     [favoriteIds]
   );
 
-  const currentSessionTitle =
-    sessionList.sessions.find(item => item.id === currentSessionId)?.title || '';
+  const currentSessionMeta = sessionList.sessions.find(
+    item => item.id === currentSessionId
+  );
+
+  // 空白会话（含刚新建、尚未发消息）在顶栏统一显示「新对话」，
+  // 不暴露服务端的「新会话」占位标题。
+  // 以本地消息为准：服务端列表不会在每条消息后刷新 messageCount。
+  const hasLocalMessages = chat.messages.some(
+    item => !item.id.startsWith('welcome-')
+  );
+  const isBlankSession =
+    !hasLocalMessages &&
+    (!chat.loadingHistory ||
+      !currentSessionMeta ||
+      currentSessionMeta.messageCount === 0);
+
+  const currentSessionTitle = isBlankSession
+    ? '新对话'
+    : currentSessionMeta?.title || '';
+
+  const recentSession = useMemo(
+    () =>
+      sessionList.sessions.find(
+        item => item.id !== currentSessionId && item.messageCount > 0
+      ) ?? null,
+    [currentSessionId, sessionList.sessions]
+  );
+
+  const resumeRecentChat = () => {
+    if (!recentSession) return;
+
+    void actions.selectSession(recentSession.id);
+  };
+
+  // 已经在空白新对话里时，「新建」只需回到对话页，不再堆一个空会话。
+  // 编辑中的输入内容也原样保留。
+  const startNewChat = () => {
+    if (actions.busy) return;
+
+    setHistoryOpen(false);
+    setTab('chat');
+
+    if (isBlankSession) return;
+
+    void actions.createNewChat();
+  };
 
   const historyProps = {
     theme,
@@ -254,97 +314,92 @@ export default function App() {
     onRefresh: () => void refreshSessions(),
     onSelectSession: actions.selectSession,
     onDeleteSession: actions.deleteSession,
-    onNewChat: () => {
-      setTab('chat');
-      void actions.createNewChat();
-    },
+    onNewChat: startNewChat,
   };
 
   return (
     <View style={{ flex: 1 }}>
-      {screen === 'home' ? (
-        <HomeScreen
-          onOpenMenu={() => setDrawerOpen(true)}
-          onContinue={() => {
-            setTab('chat');
-            setScreen('chat');
-          }}
-          onNewChat={() => {
-            setTab('chat');
-            void actions.createNewChat();
-          }}
-          onHistory={openChatHistory}
-          creatingChat={actions.creatingSession}
-        />
-      ) : (
-        <SafeAreaView style={styles.container}>
-          <KeyboardAvoidingView style={styles.keyboardArea} behavior="padding">
-        <ChatHeader
-          theme={theme}
-          onOpenDrawer={() => setDrawerOpen(true)}
-          onNewChat={() => {
-            setTab('chat');
-            void actions.createNewChat();
-          }}
-          onOpenHistory={openChatHistory}
-          sessionTitle={currentSessionTitle}
-          creatingChat={actions.creatingSession}
-        />
-
-        {tab === 'tasks' ? (
-          // 任务页：后端没有任务接口，这里只放真实空状态，不画假卡片
-          <TasksPanel theme={theme} />
-        ) : (
-          <MessageList
+      <SafeAreaView style={styles.container}>
+        <KeyboardAvoidingView style={styles.keyboardArea} behavior="padding">
+          <ChatHeader
             theme={theme}
-            messages={visibleMessages}
-            sessionId={currentSessionId}
-            loadingHistory={chat.loadingHistory || chat.loadingOlder}
-            loadingOlder={chat.loadingOlder}
-            hasMoreHistory={chat.hasMoreHistory}
-            onLoadOlder={chat.loadOlderHistory}
-            sending={chat.sending}
-            continuing={chat.continuing}
-            liveToolSteps={chat.liveToolSteps}
-            onRecall={chat.recallMessage}
-            onRetry={chat.sendMessage}
-            onContinue={() => void chat.sendContinuation()}
-            onOpenActions={setActionMessage}
-            isFavorite={isFavorite}
+            onOpenDrawer={() => setDrawerOpen(true)}
+            onNewChat={startNewChat}
+            onOpenHistory={openChatHistory}
+            sessionTitle={tab === 'tasks' ? '任务' : currentSessionTitle}
+            creatingChat={actions.creatingSession}
           />
-        )}
 
-        {/* 输入区随页切换：任务页不是聊天，不放发送框 */}
-        {tab === 'chat' && (
-          <ChatInput
-            theme={theme}
-            value={input}
-            onChangeText={setInput}
-            sending={chat.sending || chat.continuing}
-            onStop={chat.stopGeneration}
-            loadingHistory={chat.loadingHistory}
-            uploadingImage={attachments.uploadingImage}
-            pendingAttachments={attachments.pendingAttachments}
-            onRemoveAttachment={attachments.removeAttachment}
-            onSend={() => void chat.sendMessage()}
-            onPlus={() => {
-              Keyboard.dismiss();
-              setPlusOpen(true);
-            }}
-            modelLabel={selectedModelLabel}
-            onOpenModels={() => setModelsOpen(true)}
-          />
-        )}
-          </KeyboardAvoidingView>
-        </SafeAreaView>
-      )}
+          {tab === 'tasks' ? (
+            // 任务页：后端没有任务接口，这里只放真实空状态，不画假卡片
+            <TasksPanel theme={theme} />
+          ) : (
+            <MessageList
+              theme={theme}
+              messages={visibleMessages}
+              sessionId={currentSessionId}
+              loadingHistory={chat.loadingHistory || chat.loadingOlder}
+              loadingOlder={chat.loadingOlder}
+              hasMoreHistory={chat.hasMoreHistory}
+              onLoadOlder={chat.loadOlderHistory}
+              sending={chat.sending}
+              continuing={chat.continuing}
+              liveToolSteps={chat.liveToolSteps}
+              onRecall={chat.recallMessage}
+              onRetry={chat.sendMessage}
+              onContinue={() => void chat.sendContinuation()}
+              onOpenActions={setActionMessage}
+              isFavorite={isFavorite}
+              emptyState={
+                <ChatWelcome
+                  theme={theme}
+                  recentTitle={recentSession?.title}
+                  onResumeRecent={resumeRecentChat}
+                  onOpenHistory={openChatHistory}
+                  onOpenMemory={() => setMemoryOpen(true)}
+                />
+              }
+            />
+          )}
 
-      {/* 设置抽屉：☰ / ⋮ 的目的地，历史·记忆·控制面板·模型·主题·清理都从这里进 */}
+          {/* 输入区随页切换：任务页不是聊天，不放发送框 */}
+          {tab === 'chat' && (
+            <ChatInput
+              theme={theme}
+              value={input}
+              onChangeText={setInput}
+              sending={chat.sending || chat.continuing}
+              onStop={chat.stopGeneration}
+              loadingHistory={chat.loadingHistory}
+              uploadingImage={attachments.uploadingImage}
+              pendingAttachments={attachments.pendingAttachments}
+              onRemoveAttachment={attachments.removeAttachment}
+              onSend={() => void chat.sendMessage()}
+              onPlus={() => {
+                Keyboard.dismiss();
+                setPlusOpen(true);
+              }}
+              modelLabel={selectedModelLabel}
+              onOpenModels={() => setModelsOpen(true)}
+            />
+          )}
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+
+      {/* 设置抽屉：☰ 的唯一目的地，最近对话与全部功能入口都在这里 */}
       <SettingsDrawer
         visible={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         theme={theme}
         mood={chat.mood}
+        sessions={sessionList.sessions}
+        currentSessionId={currentSessionId}
+        loadingSessions={sessionList.loading}
+        sessionsError={sessionList.error}
+        onSelectSession={sessionId => {
+          setDrawerOpen(false);
+          void actions.selectSession(sessionId);
+        }}
         creatingChat={actions.creatingSession}
         onOpenHistory={() => {
           setDrawerOpen(false);
@@ -352,12 +407,7 @@ export default function App() {
         }}
         onNewChat={() => {
           setDrawerOpen(false);
-          setTab('chat');
-          void actions.createNewChat();
-        }}
-        onReturnHome={() => {
-          setDrawerOpen(false);
-          setScreen('home');
+          startNewChat();
         }}
         onOpenMemory={() => {
           setDrawerOpen(false);
@@ -381,12 +431,10 @@ export default function App() {
         }}
         onOpenTasks={() => {
           setDrawerOpen(false);
-          setScreen('chat');
           setTab('tasks');
         }}
         onOpenChat={() => {
           setDrawerOpen(false);
-          setScreen('chat');
           setTab('chat');
         }}
         onOpenModels={() => {

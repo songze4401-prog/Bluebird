@@ -68,6 +68,7 @@ export function MessageList({
   onContinue,
   onOpenActions,
   isFavorite,
+  emptyState,
 }: {
   theme: Theme;
   messages: Message[];
@@ -89,6 +90,8 @@ export function MessageList({
   onContinue: () => void;
   onOpenActions?: (message: Message) => void;
   isFavorite?: (message: Message) => boolean;
+  /** 空会话首屏：由 App 注入合并后的主页入口 */
+  emptyState?: React.ReactElement;
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);
 
@@ -399,12 +402,14 @@ export function MessageList({
               <Text style={styles.emptyHint}>正在读取对话…</Text>
             </View>
           ) : (
-            <View style={styles.emptyState}>
-              <Text style={styles.emptyTitle}>开始和 Blue 说第一句话</Text>
-              <Text style={styles.emptyHint}>
-                你的记忆、工具和上下文会在需要时安静地接上。
-              </Text>
-            </View>
+            emptyState ?? (
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyTitle}>开始和 Blue 说第一句话</Text>
+                <Text style={styles.emptyHint}>
+                  你的记忆、工具和上下文会在需要时安静地接上。
+                </Text>
+              </View>
+            )
           )
         }
         ListFooterComponent={
@@ -507,6 +512,7 @@ const createStyles = (theme: Theme) =>
       textAlign: 'center',
     },
     messages: {
+      flexGrow: 1,
       paddingHorizontal: CHAT_LAYOUT.gutter,
       paddingTop: CHAT_LAYOUT.threadTopPad,
       // 首条消息自带 turnGap，这里减掉，避免顶部空档翻倍

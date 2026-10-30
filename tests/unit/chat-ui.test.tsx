@@ -16,6 +16,7 @@ import { StyleSheet } from 'react-native';
 import { fireEvent, render, screen } from '@testing-library/react-native';
 
 import { ChatBubble } from '../../components/ChatBubble';
+import { ChatWelcome } from '../../components/ChatWelcome';
 import { MessageList } from '../../components/MessageList';
 import { ChatHeader } from '../../components/ChatHeader';
 import { ChatInput } from '../../components/ChatInput';
@@ -24,7 +25,12 @@ import { BottomTabBar } from '../../components/BottomTabBar';
 import { TasksPanel } from '../../components/TasksPanel';
 import { ToolCallPillRow } from '../../components/ToolCallPill';
 import { CHAT_LAYOUT, CHAT_TYPE } from '../../lib/design';
-import type { Attachment, Message, ToolStepView } from '../../lib/types';
+import type {
+  Attachment,
+  Message,
+  SessionMeta,
+  ToolStepView,
+} from '../../lib/types';
 import { getTheme } from '../../theme';
 
 const theme = getTheme('light', 'blue');
@@ -37,6 +43,23 @@ const createdAt = (() => {
 })();
 
 const noop = () => {};
+
+const drawerSessions: SessionMeta[] = [
+  {
+    id: 's-current',
+    title: '当前对话',
+    createdAt,
+    updatedAt: createdAt,
+    messageCount: 2,
+  },
+  {
+    id: 's-memory',
+    title: '关于记忆',
+    createdAt,
+    updatedAt: createdAt,
+    messageCount: 5,
+  },
+];
 
 type BubbleExtra = Partial<{
   previous: Message;
@@ -554,8 +577,12 @@ describe('顶部栏与设置抽屉', () => {
     expect(onNewChat).not.toHaveBeenCalled();
   });
 
-  it('抽屉把分散的功能收在一处，并且每项目标明确', async () => {
+  it('抽屉用卡片面板承载真实功能与最近对话', async () => {
     const onOpenMemory = jest.fn();
+    const onOpenTasks = jest.fn();
+    const onOpenModels = jest.fn();
+    const onOpenAgentTools = jest.fn();
+    const onSelectSession = jest.fn();
     const onClearHistory = jest.fn();
 
     await render(
@@ -564,29 +591,82 @@ describe('顶部栏与设置抽屉', () => {
         onClose={noop}
         theme={theme}
         mood="calm"
+        sessions={drawerSessions}
+        currentSessionId="s-current"
+        loadingSessions={false}
+        onSelectSession={onSelectSession}
         onOpenHistory={noop}
         onNewChat={noop}
-        onReturnHome={noop}
         onOpenMemory={onOpenMemory}
         onOpenControlPanel={noop}
-        onOpenModels={noop}
+        onOpenAgentTools={onOpenAgentTools}
+        onOpenTasks={onOpenTasks}
+        onOpenModels={onOpenModels}
         onOpenThemePicker={noop}
         onSelectMode={noop}
         onClearHistory={onClearHistory}
       />
     );
 
-    // 用户要求：不知道放哪的模块都放进这个抽屉
-    expect(screen.getByText('记忆库')).toBeTruthy();
-    expect(screen.getByText('控制面板')).toBeTruthy();
-    expect(screen.getByText('模型')).toBeTruthy();
-    expect(screen.getByText('历史对话')).toBeTruthy();
+    expect(screen.getByText('个人空间')).toBeTruthy();
+    expect(screen.getByText('最近对话')).toBeTruthy();
+    expect(screen.getByText('Bluebird Agent')).toBeTruthy();
+    expect(screen.getByText('当前对话')).toBeTruthy();
+    expect(screen.getByText('关于记忆')).toBeTruthy();
 
     await fireEvent.press(screen.getByLabelText('记忆库'));
     expect(onOpenMemory).toHaveBeenCalled();
 
+    await fireEvent.press(screen.getByLabelText('任务'));
+    expect(onOpenTasks).toHaveBeenCalled();
+
+    await fireEvent.press(screen.getByLabelText('模型'));
+    expect(onOpenModels).toHaveBeenCalled();
+
+    await fireEvent.press(screen.getByLabelText('Agent 工具'));
+    expect(onOpenAgentTools).toHaveBeenCalled();
+
+    await fireEvent.press(screen.getByLabelText('打开会话 关于记忆'));
+    expect(onSelectSession).toHaveBeenCalledWith('s-memory');
+
+    // 当前对话已在屏幕上：只收抽屉，不重复拉历史
+    await fireEvent.press(screen.getByLabelText('打开会话 当前对话'));
+    expect(onSelectSession).toHaveBeenCalledTimes(1);
+
     await fireEvent.press(screen.getByLabelText('清理当前会话'));
     expect(onClearHistory).toHaveBeenCalled();
+  });
+
+  it('底栏搜索只过滤真实的会话列表', async () => {
+    await render(
+      <SettingsDrawer
+        visible
+        onClose={noop}
+        theme={theme}
+        mood="calm"
+        sessions={drawerSessions}
+        currentSessionId="s-current"
+        loadingSessions={false}
+        onSelectSession={noop}
+        onOpenHistory={noop}
+        onNewChat={noop}
+        onOpenMemory={noop}
+        onOpenControlPanel={noop}
+        onOpenModels={noop}
+        onOpenThemePicker={noop}
+        onSelectMode={noop}
+        onClearHistory={noop}
+      />
+    );
+
+    await fireEvent.changeText(screen.getByLabelText('搜索对话'), '关于');
+
+    expect(screen.getByText('关于记忆')).toBeTruthy();
+    expect(screen.queryByText('当前对话')).toBeNull();
+
+    await fireEvent.changeText(screen.getByLabelText('搜索对话'), '不存在');
+
+    expect(screen.getByText('没有匹配的对话')).toBeTruthy();
   });
 
   it('visible=false 时不渲染任何抽屉内容（不拦截触摸）', async () => {
@@ -596,9 +676,11 @@ describe('顶部栏与设置抽屉', () => {
         onClose={noop}
         theme={theme}
         mood="calm"
+        sessions={drawerSessions}
+        currentSessionId="s-current"
+        onSelectSession={noop}
         onOpenHistory={noop}
         onNewChat={noop}
-        onReturnHome={noop}
         onOpenMemory={noop}
         onOpenControlPanel={noop}
         onOpenModels={noop}
@@ -609,6 +691,52 @@ describe('顶部栏与设置抽屉', () => {
     );
 
     expect(screen.queryByText('记忆库')).toBeNull();
+  });
+
+  it('新对话首屏合并主页排版，入口只接真实回调', async () => {
+    const onResumeRecent = jest.fn();
+    const onOpenHistory = jest.fn();
+    const onOpenMemory = jest.fn();
+
+    await render(
+      <ChatWelcome
+        theme={theme}
+        recentTitle="关于记忆"
+        onResumeRecent={onResumeRecent}
+        onOpenHistory={onOpenHistory}
+        onOpenMemory={onOpenMemory}
+      />
+    );
+
+    expect(screen.getByText(/今天，想一起/)).toBeTruthy();
+    expect(screen.getByText('回到「关于记忆」')).toBeTruthy();
+
+    await fireEvent.press(screen.getByLabelText('继续上次对话'));
+    expect(onResumeRecent).toHaveBeenCalled();
+
+    await fireEvent.press(screen.getByLabelText('历史聊天'));
+    expect(onOpenHistory).toHaveBeenCalled();
+
+    await fireEvent.press(screen.getByLabelText('记忆库'));
+    expect(onOpenMemory).toHaveBeenCalled();
+  });
+
+  it('没有可继续的会话时禁用首屏继续入口', async () => {
+    const onResumeRecent = jest.fn();
+
+    await render(
+      <ChatWelcome
+        theme={theme}
+        onResumeRecent={onResumeRecent}
+        onOpenHistory={noop}
+        onOpenMemory={noop}
+      />
+    );
+
+    expect(screen.getByText('还没有可以继续的对话')).toBeTruthy();
+
+    await fireEvent.press(screen.getByLabelText('继续上次对话'));
+    expect(onResumeRecent).not.toHaveBeenCalled();
   });
 });
 
