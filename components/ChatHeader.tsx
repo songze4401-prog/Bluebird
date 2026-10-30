@@ -8,11 +8,10 @@ import { CHAT_LAYOUT } from '../lib/design';
 // 与重构前的差别：心情 Emoji 移到每条助手的 who-line（设计图如此），
 // 「● 在线」与共享时钟移进设置抽屉，原来的 160px 绝对定位下拉换成抽屉。
 //
-// 四个入口的语义（设计图未标注，按下述约定实现，已在交付说明里标为假设）：
+// 三个入口的语义（设计图未标注，按下述约定实现，已在交付说明里标为假设）：
 //   ☰ → 设置抽屉（用户明确要求：三个杠打开是设置 + 历史对话）
 //   ＋ → 新建对话
 //   ⌕ → 历史对话
-//   ⋮ → 设置抽屉（「更多」的备用入口，与 ☰ 同一目的地）
 export function ChatHeader({
   theme,
   onOpenDrawer,
@@ -73,14 +72,6 @@ export function ChatHeader({
           <Text style={styles.icon}>⌕</Text>
         </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.iconButton}
-          onPress={onOpenDrawer}
-          activeOpacity={0.6}
-          accessibilityLabel="更多设置"
-        >
-          <Text style={styles.icon}>⋮</Text>
-        </TouchableOpacity>
       </View>
     </View>
   );

@@ -531,9 +531,8 @@ describe('顶部栏与设置抽屉', () => {
     await fireEvent.press(screen.getByLabelText('打开设置'));
     await fireEvent.press(screen.getByLabelText('新建对话'));
     await fireEvent.press(screen.getByLabelText('历史对话'));
-    await fireEvent.press(screen.getByLabelText('更多设置'));
 
-    expect(onOpenDrawer).toHaveBeenCalledTimes(2);
+    expect(onOpenDrawer).toHaveBeenCalledTimes(1);
     expect(onNewChat).toHaveBeenCalled();
     expect(onOpenHistory).toHaveBeenCalled();
   });

@@ -16,7 +16,7 @@ import { APP_VERSION, MOOD_LABEL } from '../lib/constants';
 import { CHAT_LAYOUT, CHAT_TYPE } from '../lib/design';
 import { SharedTime } from './SharedTime';
 
-// 设置抽屉：☰ / ⋮ 从左侧滑出的总入口。
+// 设置抽屉：☰ 从左侧滑出的总入口。
 // 承载原顶栏下拉菜单的全部功能（记忆库 / 模式 / 主题色 / 控制面板 / 模型 /
 // 清理当前会话），并按用户要求把「历史对话」也放进来；其余没有明确归属的
 // 模块（返回主页、新建对话、当前心情、共享时钟、版本）同样收在这里。
@@ -74,12 +74,6 @@ export function SettingsDrawer({
       onRequestClose={onClose}
     >
       <View style={styles.root}>
-        <Pressable
-          style={styles.scrim}
-          onPress={onClose}
-          accessibilityLabel="关闭设置"
-        />
-
         <SafeAreaView style={styles.panel} edges={['top', 'bottom', 'left']}>
           <View style={styles.header}>
             <Text style={styles.title}>Bluebird</Text>
@@ -216,6 +210,12 @@ export function SettingsDrawer({
             </View>
           </ScrollView>
         </SafeAreaView>
+
+        <Pressable
+          style={styles.scrim}
+          onPress={onClose}
+          accessibilityLabel="关闭设置"
+        />
       </View>
     </Modal>
   );
