@@ -215,13 +215,14 @@ function createEmbeddingProvider(cfg) {
     return last || { ok: false, errorCode: 'embedding_failed' };
   }
 
-  async function embedDocuments(texts) {
+  async function embedWithPrefix(texts, prefix) {
     if (!available) {
       return { ok: false, errorCode: reason || 'embedding_unavailable' };
     }
 
+    const safePrefix = typeof prefix === 'string' ? prefix : '';
     const inputs = (Array.isArray(texts) ? texts : []).map(value =>
-      truncateInput(normalizeContent(value))
+      truncateInput(`${safePrefix}${normalizeContent(value)}`)
     );
     if (!inputs.length) return { ok: true, vectors: [], usage: null };
 
@@ -264,8 +265,12 @@ function createEmbeddingProvider(cfg) {
     };
   }
 
+  async function embedDocuments(texts) {
+    return embedWithPrefix(texts, config.documentPrefix || '');
+  }
+
   async function embedQuery(text) {
-    const result = await embedDocuments([text]);
+    const result = await embedWithPrefix([text], config.queryPrefix || '');
     if (!result.ok) return result;
     return { ok: true, vector: result.vectors[0], usage: result.usage };
   }

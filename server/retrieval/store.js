@@ -575,6 +575,73 @@ function createStore(config) {
     return { count: vectors.size, model, version, dimension };
   }
 
+  // 增量写入：同模型版本/维度时只补缺失或更新的 chunk；元数据不一致时
+  // 丢弃旧向量后整体换成新模型向量，绝不把新旧维度/版本混在同一个索引里。
+  function mergeVectors({ model, version, dimension, entries }) {
+    load();
+    if (
+      typeof model !== 'string' ||
+      !model ||
+      typeof version !== 'string' ||
+      !version ||
+      !Number.isInteger(dimension) ||
+      dimension <= 0 ||
+      dimension > 4096
+    ) {
+      const error = new Error('invalid_vector_meta');
+      error.code = 'invalid_vector_meta';
+      throw error;
+    }
+
+    const previous = state.vectorState;
+    const sameMeta =
+      previous.model === model &&
+      previous.version === version &&
+      previous.dimension === dimension;
+    const vectors = sameMeta ? new Map(previous.vectors) : new Map();
+    let added = 0;
+
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      const chunkId = entry && entry.chunkId;
+      if (!state.chunks.has(chunkId)) continue;
+      if (!vectors.has(chunkId) && vectors.size >= limits.maxVectorChunks) {
+        continue;
+      }
+
+      const vector = entry.vector;
+      if (
+        !Array.isArray(vector) ||
+        vector.length !== dimension ||
+        !vector.every(value => typeof value === 'number' && Number.isFinite(value))
+      ) {
+        continue;
+      }
+
+      if (!vectors.has(chunkId)) added += 1;
+      vectors.set(chunkId, vector);
+    }
+
+    for (const chunkId of [...vectors.keys()]) {
+      if (!state.chunks.has(chunkId)) vectors.delete(chunkId);
+    }
+
+    const next = { model, version, dimension, vectors };
+    commit({
+      chunks: state.chunks,
+      sources: state.sources,
+      vectorState: next,
+      reason: 'vectors_merge',
+    });
+    return {
+      count: vectors.size,
+      added,
+      reset: !sameMeta,
+      model,
+      version,
+      dimension,
+    };
+  }
+
   function clearVectors() {
     load();
     if (!state.vectorState.vectors.size && !state.vectorState.model) {
@@ -710,6 +777,7 @@ function createStore(config) {
     getVector,
     vectorMeta,
     replaceVectors,
+    mergeVectors,
     clearVectors,
     pruneMissingSources,
     consistency,

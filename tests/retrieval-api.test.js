@@ -107,6 +107,12 @@ test('鉴权与只读入口：无 token 401，状态接口可用', async () => {
   assert.equal(status.json.counts.chunks, 0);
   assert.ok(status.json.capabilities);
   assert.equal(status.json.capabilities.scope.mode, 'single_user');
+  assert.equal(status.json.capabilities.reranker, false);
+  assert.equal(status.json.capabilities.signalRerank, true);
+  assert.equal(status.json.vectorCoverage.current, false);
+  assert.equal(status.json.vectorCoverage.total, 0);
+  assert.equal(status.json.reranker.available, false);
+  assert.equal(status.json.reranker.reason, 'not_configured');
 });
 
 test('查询参数错误：空 query、缺少 session、未知 session、非法来源', async () => {
@@ -330,6 +336,20 @@ test('重建与一致性：重建不改变索引语义，一致性接口可用',
   assert.equal(consistency.status, 200);
   assert.equal(consistency.json.ok, true);
   assert.ok(Array.isArray(consistency.json.issues));
+});
+
+test('向量回填入口：未鉴权 401，未配置 Embedding 时明确 409', async () => {
+  const unauth = await req('/retrieval/vectors/backfill', {
+    method: 'POST',
+    token: '',
+  });
+  assert.equal(unauth.status, 401);
+
+  const unavailable = await req('/retrieval/vectors/backfill', { method: 'POST' });
+  assert.equal(unavailable.status, 409);
+  assert.equal(unavailable.json.ok, false);
+  assert.equal(unavailable.json.status, 'unavailable');
+  assert.equal(unavailable.json.reason, 'not_configured');
 });
 
 test('方法约束：POST /retrieval/status 返回 405', async () => {

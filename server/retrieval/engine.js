@@ -706,7 +706,7 @@ function emptyTrace(plan) {
   };
 }
 
-async function executeSearch({ store, embedding, config, plan }) {
+async function executeSearch({ store, embedding, reranker, config, plan }) {
   if (!config.enabled) {
     return fail('retrieval_disabled', '统一检索未启用', 'disabled');
   }
@@ -728,13 +728,90 @@ async function executeSearch({ store, embedding, config, plan }) {
   trace.channels = channels.channels;
   trace.embedding = embedding.stats();
 
+  const neuralRerankerAvailable = Boolean(reranker && reranker.available);
+  const poolLimit = neuralRerankerAvailable
+    ? Math.max(plan.limit, Number(reranker.topN) || 20)
+    : plan.limit;
+  const fusionPlan =
+    poolLimit === plan.limit ? plan : { ...plan, limit: poolLimit };
+
   const fusion = fuseResults({
     lexical: channels.lexicalResults,
     exact: channels.exactResults,
     vector: channels.vectorResults,
     config,
-    plan,
+    plan: fusionPlan,
   });
+
+  let finalSelected = fusion.selected.slice(0, plan.limit);
+  let neuralRerank = {
+    applied: false,
+    reason: neuralRerankerAvailable
+      ? 'not_attempted'
+      : (reranker && reranker.reason) || 'not_configured',
+  };
+
+  if (neuralRerankerAvailable && fusion.selected.length > 1) {
+    const candidates = fusion.selected.slice(0, poolLimit);
+
+    try {
+      const outcome = await reranker.rerank({
+        query: plan.query,
+        documents: candidates.map(entry => entry.chunk.content),
+      });
+
+      if (outcome.ok && Array.isArray(outcome.scores) && outcome.scores.length) {
+        const byIndex = new Map(
+          outcome.scores.map(item => [item.index, item.score])
+        );
+        const ordered = candidates
+          .map((entry, index) => ({
+            entry,
+            index,
+            score: byIndex.has(index) ? byIndex.get(index) : null,
+          }))
+          .sort((a, b) => {
+            const left = a.score === null ? -Infinity : a.score;
+            const right = b.score === null ? -Infinity : b.score;
+            if (left !== right) return right - left;
+            return a.index - b.index;
+          });
+        const scored = ordered.filter(item => item.score !== null);
+        const unscored = ordered.filter(item => item.score === null);
+
+        finalSelected = [...scored, ...unscored]
+          .map(item => item.entry)
+          .slice(0, plan.limit);
+
+        neuralRerank = {
+          applied: true,
+          provider: reranker.stats().provider,
+          model: outcome.model || reranker.model,
+          version: outcome.version || reranker.version,
+          candidates: candidates.length,
+          scored: outcome.scores.length,
+          latencyMs: outcome.latencyMs || null,
+          usage: outcome.usage || null,
+        };
+      } else {
+        neuralRerank = {
+          applied: false,
+          attempted: true,
+          errorCode: outcome.errorCode || 'reranker_failed',
+        };
+        trace.degraded.push('reranker_failed');
+      }
+    } catch (error) {
+      neuralRerank = {
+        applied: false,
+        attempted: true,
+        errorCode:
+          (error && error.code) || error && error.name || 'reranker_failed',
+      };
+      trace.degraded.push('reranker_failed');
+    }
+  }
+
   trace.fusion = {
     candidates: fusion.ranked.length,
     deduped: fusion.deduped.length,
@@ -742,16 +819,17 @@ async function executeSearch({ store, embedding, config, plan }) {
     policyAccepted: fusion.accepted.length,
     policyRejected: fusion.rejected.length,
     diversityDropped: fusion.diversity.length,
-    ranked: fusion.selected.length,
+    ranked: finalSelected.length,
     rerank: fusion.rerank,
   };
+  trace.neuralRerank = neuralRerank;
   trace.policy = {
     accepted: fusion.accepted.length,
     rejected: fusion.rejected.length,
     reasons: countReasons(fusion.rejected),
   };
 
-  const packed = packEvidence(fusion.selected, plan);
+  const packed = packEvidence(finalSelected, plan);
   trace.packing = {
     selected: packed.evidence.length,
     dropped: packed.dropped.length,

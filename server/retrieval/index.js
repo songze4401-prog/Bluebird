@@ -14,6 +14,7 @@ const sessions = require('../sessions');
 const { config } = require('./config');
 const { createStore } = require('./store');
 const { createEmbeddingProvider } = require('./embedding');
+const { createRerankerProvider } = require('./reranker');
 const engine = require('./engine');
 const { collectMemoryChunks, sourceIdsForMemory } = require('./connectors/memory');
 const { collectConversationChunks } = require('./connectors/conversation');
@@ -25,6 +26,7 @@ const { isInside } = require('./security');
 
 const store = createStore(config);
 const embedding = createEmbeddingProvider(config.embedding);
+const reranker = createRerankerProvider(config.reranker);
 
 const syncState = {
   memory: { signature: null, status: 'never', lastAt: null, errorCode: null },
@@ -332,9 +334,27 @@ async function search(options = {}) {
     sync.conversation = syncConversation(sessionId);
   }
 
+  let vectorSync = null;
+  try {
+    vectorSync = await ensureVectorCoverage({ reason: 'search' });
+  } catch (error) {
+    vectorSync = {
+      status: 'failed',
+      errorCode:
+        (error && error.code) || error && error.name || 'vector_sync_failed',
+      count: 0,
+    };
+  }
+
   let result;
   try {
-    result = await engine.executeSearch({ store, embedding, config, plan });
+    result = await engine.executeSearch({
+      store,
+      embedding,
+      reranker,
+      config,
+      plan,
+    });
   } catch (error) {
     return failure((error && error.code) || 'retrieval_failed', {
       status: 'failed',
@@ -345,12 +365,20 @@ async function search(options = {}) {
   }
   if (result.ok && result.trace) {
     result.trace.sync = sync;
+    result.trace.vectorSync = vectorSync;
     for (const [name, outcome] of Object.entries(sync)) {
       if (outcome.status === 'failed') {
         result.trace.degraded.push(`${name}_sync_failed`);
       } else if (outcome.status === 'disabled') {
         result.trace.degraded.push(`${name}_disabled`);
       }
+    }
+    if (vectorSync && vectorSync.status === 'failed') {
+      result.trace.degraded.push(
+        `vector_sync_${vectorSync.errorCode || 'failed'}`
+      );
+    } else if (vectorSync && vectorSync.truncated) {
+      result.trace.degraded.push('vector_sync_truncated');
     }
     result.trace.degraded = [...new Set(result.trace.degraded)];
   }
@@ -419,6 +447,7 @@ async function ingestInternal({ type, inputPath, url, title } = {}) {
       chunks: outcome.chunks.length,
       ...(outcome.stats ? { stats: outcome.stats } : {}),
       ...(outcome.truncated !== undefined ? { truncated: outcome.truncated } : {}),
+      vector: await safeEnsureVectorCoverage(`${type}_ingest`),
     };
   } catch (error) {
     return failure((error && error.code) || 'ingest_failed');
@@ -516,6 +545,7 @@ async function refreshSourceInternal(sourceId, { url } = {}) {
       source: result.source || outcome.source,
       chunks: outcome.chunks.length,
       changed: result.changed,
+      vector: await safeEnsureVectorCoverage('web_refresh'),
     };
   }
 
@@ -585,6 +615,7 @@ async function refreshSourceInternal(sourceId, { url } = {}) {
       source: result.source || outcome.source,
       chunks: outcome.chunks.length,
       changed: result.changed,
+      vector: await safeEnsureVectorCoverage('document_refresh'),
     };
   }
 
@@ -633,6 +664,7 @@ async function refreshSourceInternal(sourceId, { url } = {}) {
     source: result.source || outcome.source,
     chunks: outcome.chunks.length,
     changed: result.changed,
+    vector: await safeEnsureVectorCoverage('code_refresh'),
   };
 }
 
@@ -690,6 +722,7 @@ async function refreshAllExternalInternal() {
     skipped,
     failed,
     results,
+    vector: await safeEnsureVectorCoverage('external_refresh'),
   };
 }
 
@@ -699,6 +732,149 @@ function refreshSource(sourceId, options) {
 
 function refreshAllExternal() {
   return enqueueMutation(() => refreshAllExternalInternal());
+}
+
+async function ensureVectorCoverage({ reason = 'incremental' } = {}) {
+  const stats = embedding.stats();
+
+  if (!stats.available) {
+    return {
+      status: 'unavailable',
+      reason: stats.reason || 'embedding_unavailable',
+      count: 0,
+    };
+  }
+
+  const maxVectors = Number(config.limits.maxVectorChunks) || 0;
+  if (maxVectors <= 0) {
+    return { status: 'disabled', reason: 'vector_limit_zero', count: 0 };
+  }
+
+  const all = store.allChunks();
+  if (!all.length) {
+    return { status: 'no_result', count: 0, total: 0 };
+  }
+
+  const meta = store.vectorMeta();
+  const metaMatches =
+    meta.model === stats.model &&
+    meta.version === stats.version &&
+    meta.dimension === stats.dimension;
+  const missing = all.filter(
+    chunk => !metaMatches || !store.getVector(chunk.chunkId)
+  );
+
+  if (!missing.length) {
+    return {
+      status: 'unchanged',
+      count: 0,
+      total: all.length,
+      embedded: metaMatches ? meta.count : 0,
+      model: stats.model,
+      version: stats.version,
+      dimension: stats.dimension,
+    };
+  }
+
+  // 元数据失配时旧向量会在 mergeVectors 中整体作废，容量从 0 重新计算；
+  // 元数据一致时只补剩余容量，避免把“容量已满”误报成覆盖完整。
+  const capacity = metaMatches
+    ? Math.max(0, maxVectors - meta.count)
+    : maxVectors;
+  const target = missing.slice(0, capacity);
+
+  if (!target.length) {
+    return {
+      status: 'ok',
+      reason,
+      count: 0,
+      total: all.length,
+      embedded: metaMatches ? meta.count : 0,
+      missing: missing.length,
+      truncated: true,
+      reset: false,
+      model: stats.model,
+      version: stats.version,
+      dimension: stats.dimension,
+    };
+  }
+
+  let embedded;
+
+  try {
+    embedded = await embedding.embedDocuments(target.map(chunk => chunk.content));
+  } catch (error) {
+    return {
+      status: 'failed',
+      errorCode:
+        (error && error.code) || error && error.name || 'embedding_failed',
+      count: 0,
+      total: all.length,
+      missing: missing.length,
+    };
+  }
+
+  if (!embedded.ok) {
+    return {
+      status: 'failed',
+      errorCode: embedded.errorCode || 'embedding_failed',
+      count: 0,
+      total: all.length,
+      missing: missing.length,
+    };
+  }
+
+  try {
+    const merged = store.mergeVectors({
+      model: stats.model,
+      version: stats.version,
+      dimension: stats.dimension,
+      entries: target.map((chunk, index) => ({
+        chunkId: chunk.chunkId,
+        vector: embedded.vectors[index],
+      })),
+    });
+
+    return {
+      status: 'ok',
+      reason,
+      count: target.length,
+      total: all.length,
+      embedded: merged.count,
+      missing: Math.max(0, missing.length - target.length),
+      truncated: target.length < missing.length,
+      reset: merged.reset,
+      model: stats.model,
+      version: stats.version,
+      dimension: stats.dimension,
+    };
+  } catch (error) {
+    return {
+      status: 'failed',
+      errorCode:
+        (error && error.code) || error && error.name || 'vector_store_failed',
+      count: 0,
+      total: all.length,
+      missing: missing.length,
+    };
+  }
+}
+
+async function safeEnsureVectorCoverage(reason) {
+  try {
+    return await ensureVectorCoverage({ reason });
+  } catch (error) {
+    return {
+      status: 'failed',
+      errorCode:
+        (error && error.code) || error && error.name || 'vector_sync_failed',
+      count: 0,
+    };
+  }
+}
+
+function backfillVectors() {
+  return enqueueMutation(() => ensureVectorCoverage({ reason: 'backfill' }));
 }
 
 async function rebuildVectors() {
@@ -811,6 +987,21 @@ function getStatus() {
     };
   }
 
+  const embeddingStats = embedding.stats();
+  const vectorCurrent =
+    embeddingStats.available === true &&
+    stats.vectorMeta.model === embeddingStats.model &&
+    stats.vectorMeta.version === embeddingStats.version &&
+    stats.vectorMeta.dimension === embeddingStats.dimension;
+  const vectorCoverage = {
+    total: stats.chunks,
+    embedded: vectorCurrent ? stats.vectors : 0,
+    missing: vectorCurrent
+      ? Math.max(0, stats.chunks - stats.vectors)
+      : stats.chunks,
+    current: vectorCurrent,
+  };
+
   return {
     ok: true,
     enabled: true,
@@ -821,6 +1012,7 @@ function getStatus() {
       vectors: stats.vectors,
       sourcesByType: stats.sourcesByType,
     },
+    vectorCoverage,
     storage: {
       fileBytes: stats.bytes,
       generation: stats.generation,
@@ -834,6 +1026,7 @@ function getStatus() {
     lexical: stats.lexical,
     vector: stats.vectorMeta,
     embedding: embedding.stats(),
+    reranker: reranker.stats(),
     sync: {
       memory: syncState.memory,
       conversations: syncState.conversations.size,
@@ -900,7 +1093,8 @@ function publicCapabilities() {
     exact: true,
     vector: embeddingStats.available,
     vectorReason: embeddingStats.reason,
-    reranker: false,
+    reranker: reranker.available,
+    signalRerank: config.rerank.enabled,
     queryRewrite: false,
     asOfValidityFilter: true,
     historicalMemory: false,
@@ -1026,6 +1220,7 @@ module.exports = {
   refreshSource,
   refreshAllExternal,
   rebuild,
+  backfillVectors,
   getStatus,
   getSources,
   getSource,
@@ -1033,4 +1228,5 @@ module.exports = {
   describeError,
   store,
   embedding,
+  reranker,
 };

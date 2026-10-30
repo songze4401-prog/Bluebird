@@ -34,6 +34,11 @@ function readString(raw, fallback) {
   return typeof raw === 'string' && raw.trim() ? raw.trim() : fallback;
 }
 
+// 前缀中的空白有语义（E5 的 "query: " / "passage: "），不能 trim。
+function readRawString(raw, fallback) {
+  return typeof raw === 'string' ? raw : fallback;
+}
+
 const DATA_ROOT = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
   : path.join(__dirname, '..', 'data');
@@ -128,6 +133,37 @@ const resolvedPrice = readInt(
   0,
   1000000,
   'BLUEBIRD_RETRIEVAL_EMBEDDING_PRICE_PER_MILLION'
+);
+
+const rerankerProvider = readString(
+  process.env.BLUEBIRD_RETRIEVAL_RERANKER_PROVIDER,
+  ''
+);
+const rerankerBaseUrl = readString(
+  process.env.BLUEBIRD_RETRIEVAL_RERANKER_BASE_URL,
+  ''
+);
+const rerankerModel = readString(
+  process.env.BLUEBIRD_RETRIEVAL_RERANKER_MODEL,
+  ''
+);
+const rerankerVersion = readString(
+  process.env.BLUEBIRD_RETRIEVAL_RERANKER_VERSION,
+  'v1'
+);
+const rerankerTimeoutMs = readInt(
+  process.env.BLUEBIRD_RETRIEVAL_RERANKER_TIMEOUT_MS,
+  8000,
+  500,
+  60000,
+  'BLUEBIRD_RETRIEVAL_RERANKER_TIMEOUT_MS'
+);
+const rerankerTopN = readInt(
+  process.env.BLUEBIRD_RETRIEVAL_RERANKER_TOP_N,
+  20,
+  2,
+  50,
+  'BLUEBIRD_RETRIEVAL_RERANKER_TOP_N'
 );
 
 const config = {
@@ -351,6 +387,15 @@ const config = {
     model: resolvedModel,
     apiKey: readString(process.env.BLUEBIRD_RETRIEVAL_EMBEDDING_API_KEY, ''),
     version: readString(process.env.BLUEBIRD_RETRIEVAL_EMBEDDING_VERSION, 'v1'),
+    // 检索型模型（如 multilingual-e5）要求 query/passage 前缀，原样保留空白。
+    queryPrefix: readRawString(
+      process.env.BLUEBIRD_RETRIEVAL_EMBEDDING_QUERY_PREFIX,
+      ''
+    ),
+    documentPrefix: readRawString(
+      process.env.BLUEBIRD_RETRIEVAL_EMBEDDING_DOCUMENT_PREFIX,
+      ''
+    ),
     dimension: resolvedDimension,
     // 每百万 token 的美元单价（整数缩放了 1000 倍存储，避免浮点 env 解析）；
     // 只用于成本估算展示，不参与检索逻辑。
@@ -377,6 +422,18 @@ const config = {
       'BLUEBIRD_RETRIEVAL_EMBEDDING_CACHE_MAX'
     ),
   }),
+
+  // 可选 cross-encoder reranker：Cohere/Jina 兼容 POST /rerank。
+  // provider 为空时保持现有确定性 reranker，不假装神经重排已启用。
+  reranker: Object.freeze({
+    provider: rerankerProvider,
+    baseUrl: rerankerBaseUrl,
+    model: rerankerModel,
+    version: rerankerVersion,
+    apiKey: readString(process.env.BLUEBIRD_RETRIEVAL_RERANKER_API_KEY, ''),
+    timeoutMs: rerankerTimeoutMs,
+    topN: rerankerTopN,
+  }),
 };
 
 Object.freeze(config.limits);
@@ -384,6 +441,7 @@ Object.freeze(config.fusion);
 Object.freeze(config.rerank.weights);
 Object.freeze(config.rerank);
 Object.freeze(config.embedding);
+Object.freeze(config.reranker);
 Object.freeze(config);
 
 module.exports = { config };

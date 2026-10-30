@@ -41,7 +41,8 @@
     "eval:memory": "node tests/memory-eval/run-eval.js",
     "eval:semantic": "node tests/memory-semantic-eval.js --assert",
     "eval:context": "node scripts/context-capability-eval.js",
-    "eval:retrieval": "node tests/retrieval-eval.js --assert"
+    "eval:retrieval": "node tests/retrieval-eval.js --assert",
+    "eval:embedding": "node tests/embedding-open-domain-eval.js"
   },
   "private": true,
   "jest": {

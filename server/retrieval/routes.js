@@ -3,8 +3,8 @@
  *
  * 读接口：GET /retrieval/status、/sources、/sources/:id、/consistency
  * 查询接口：POST /retrieval/search（不修改业务源数据；按需幂等刷新派生索引）
- * 管理接口：POST /retrieval/ingest、POST /retrieval/sync、DELETE /retrieval/sources/:id、
- *           POST /retrieval/rebuild（写索引，必须 Bearer 鉴权）
+ * 管理接口：POST /retrieval/ingest、POST /retrieval/sync、POST /retrieval/vectors/backfill、
+ *           DELETE /retrieval/sources/:id、POST /retrieval/rebuild（写索引，必须 Bearer 鉴权）
  *
  * 所有接口复用全局限流；错误只回受控短码，不回显文件内容、URL 参数或上游响应。
  */
@@ -191,6 +191,26 @@ function createRetrievalRouter({ requireAuth }) {
       res.json(result);
     } catch (_) {
       res.status(500).json({ ok: false, code: 'delete_failed', error: '删除索引来源失败' });
+    }
+  });
+
+  // 只补齐缺失/失效向量的向量回填：不重建来源索引，不改变词法索引。
+  router.post('/vectors/backfill', async (req, res) => {
+    try {
+      const result = await retrieval.backfillVectors();
+      if (result.status === 'failed') {
+        return res.status(500).json({ ok: false, ...result });
+      }
+      if (result.status === 'unavailable' || result.status === 'disabled') {
+        return res.status(409).json({ ok: false, ...result });
+      }
+      res.json({ ok: true, ...result });
+    } catch (_) {
+      res.status(500).json({
+        ok: false,
+        status: 'failed',
+        errorCode: 'vector_backfill_failed',
+      });
     }
   });
 

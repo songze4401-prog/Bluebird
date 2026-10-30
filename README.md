@@ -27,12 +27,13 @@ npx expo start             # Metro :8081
 ## Quality gates
 
 ```bash
-npm test                    # backend: auto-discovers tests/*.test.js (44 files / 1531 checks)
+npm test                    # backend: auto-discovers tests/*.test.js (45 files / 1540 checks)
 npm run test:unit -- --ci   # frontend: 17 suites / 162 cases
 npx tsc --noEmit            # TypeScript
 npm run lint                # Expo ESLint
 npm run eval:context        # real-model capability eval (needs DEEPSEEK_API_KEY; not in CI)
 npm run eval:retrieval      # fixed-corpus unified retrieval eval (lexical/exact; no external model)
+npm run eval:embedding      # real embedding + hybrid + reranker open-domain eval (needs a real embedding/reranker service; not in CI)
 ```
 
 CI (`.github/workflows/ci.yml`) runs the backend suites, TypeScript, lint, and Jest on Node 22, plus the runtime test-coverage verifier and two data-isolation tripwires that ensure tests never read or write the real `server/data`.
