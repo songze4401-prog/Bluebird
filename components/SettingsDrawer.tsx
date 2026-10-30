@@ -174,8 +174,8 @@ export function SettingsDrawer({
                   theme={theme}
                   styles={styles}
                   glyph="◈"
-                  label="记忆库"
-                  hint="长期记忆与检索"
+                  label="Memory Center"
+                  hint="记忆管理中心"
                   onPress={() => runAndClose(onOpenMemory)}
                 />
               </View>

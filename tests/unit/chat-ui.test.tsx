@@ -631,7 +631,7 @@ describe('顶部栏与设置抽屉', () => {
     expect(screen.getByText('当前对话')).toBeTruthy();
     expect(screen.getByText('关于记忆')).toBeTruthy();
 
-    await fireEvent.press(screen.getByLabelText('记忆库'));
+    await fireEvent.press(screen.getByLabelText('Memory Center'));
     expect(onOpenMemory).toHaveBeenCalled();
 
     await fireEvent.press(screen.getByLabelText('任务'));
@@ -707,7 +707,7 @@ describe('顶部栏与设置抽屉', () => {
       />
     );
 
-    expect(screen.queryByText('记忆库')).toBeNull();
+    expect(screen.queryByText('Memory Center')).toBeNull();
   });
 
   it('新对话首屏合并主页排版，入口只接真实回调', async () => {
@@ -734,7 +734,7 @@ describe('顶部栏与设置抽屉', () => {
     await fireEvent.press(screen.getByLabelText('历史聊天'));
     expect(onOpenHistory).toHaveBeenCalled();
 
-    await fireEvent.press(screen.getByLabelText('记忆库'));
+    await fireEvent.press(screen.getByLabelText('Memory Center'));
     expect(onOpenMemory).toHaveBeenCalled();
   });
 

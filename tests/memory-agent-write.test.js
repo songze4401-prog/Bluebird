@@ -360,6 +360,24 @@ function check(name, cond, extra = '') {
     JSON.stringify({ archived: archived.json, visible: visible.json })
   );
 
+  const allView = await req('/memory?scope=all');
+  check(
+    'scope=all 只读视图包含归档条目',
+    allView.status === 200 &&
+      allView.json.scope === 'all' &&
+      allView.json.memories.some(
+        item => item.id === activeId && item.status === 'archived'
+      ),
+    JSON.stringify(allView.json)
+  );
+
+  const badScope = await req('/memory?scope=recent');
+  check(
+    '非法 scope 返回 400，不退化成默认列表',
+    badScope.status === 400,
+    JSON.stringify({ status: badScope.status, body: badScope.json })
+  );
+
   console.log(`\n通过 ${passed} 项，失败 ${failed} 项`);
 
   try {

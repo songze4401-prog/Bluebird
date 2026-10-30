@@ -58,7 +58,7 @@ export function ChatWelcome({
         />
         <ActionRow
           styles={styles}
-          label="记忆库"
+          label="Memory Center"
           hint="看看 Blue 已经记住了什么"
           glyph="↗"
           onPress={onOpenMemory}

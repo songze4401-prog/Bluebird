@@ -16,6 +16,7 @@
 | 06 Agent 工具边界 | `AgentToolsScreen` 读取 `/agent-policy` 的 runtime + availableTools |
 | 07 数据与隐私 | `SettingsScreen` 的“数据与隐私”分区 |
 | 08 导航抽屉 | `SettingsDrawer` 卡片面板：个人空间、2×2 功能卡、Agent 主色横幅、真实最近对话、外观、底栏搜索/设置/新建 |
+| 09 Memory Center | `MemoryCenterScreen` 四分区：概览 / 管理 / 图谱 / 生命周期；详见 `memory-center_implementation.md` |
 
 ## 2. 本轮工程缺口
 
@@ -26,16 +27,17 @@
 - **导航**：聊天页移除底部标签栏；任务、记忆、模型、Agent 工具、设置、监控均保留在抽屉/设置页。
 - **入口与首屏（2026-10-30 调整）**：删除独立主页路由，启动即新对话；原主页排版合并进 `ChatWelcome`。启动时优先复用最近一个空白会话，没有才 `POST /sessions`，已在空白对话时再点“新建”不再新增空会话。抽屉改为卡片面板，最近对话直接消费 `/sessions`，底栏搜索只过滤该列表。
 - **浅色对话界面（2026-10-30 调整）**：默认模式改为浅色，默认强调色为蓝色；浅色画布改为暖白 `#f5f3ee`，卡片统一白色 + 轻描边 + 柔和阴影。7 套强调色（明暗两档）整体加深，发送按钮与强调色同步。顶栏改为 38dp 圆形卡片按钮；新对话首屏沿用上一版编辑式排版（眉题、主标题、说明、三行真实入口），不引入品牌徽章或入口卡；用户消息使用右对齐白色气泡，助手正文保持平铺；输入区改为大圆角卡片（输入行 + 控件行：加号、模型、语音、发送）。新建/清空对话时列表回到顶部，避免首屏继承上一会话的滚动位置。
+- **Memory Center（2026-10-30 新增）**：原 `MemoryScreen` 替换为四分区记忆管理中心。新增只读 `GET /memory?scope=all`（复用 `getMemories` 的 include 选项，不改引擎），接入 `write-attempts`、确认、拒绝、归档、删除、清空；搜索/分类在客户端基于真实数据完成。重复/冲突检测与图谱为本地确定性推导，未接入的编辑、单条撤回、完整审计、回答调用记忆 ID、神经嵌入均在界面明确标注。详见 `memory-center_implementation.md`。
 
 ## 3. 验证
 
-- `npm test`：44 个后端文件 / 1524 项通过
-- `npm run test:unit -- --ci`：15 suites / 142 tests 通过
+- `npm test`：44 个后端文件 / 1526 项通过
+- `npm run test:unit -- --ci`：17 suites / 162 tests 通过
 - `npx tsc --noEmit`：通过
 - `npm run lint`：通过
-- `node scripts/verify-test-coverage.js`：backend 1524/1524、nodeSuite 221/221、runner 1303/1303、frontend 142/142、CI 覆盖 44/44
+- `node scripts/verify-test-coverage.js`：backend 1526/1526、nodeSuite 221/221、runner 1305/1305、frontend 162/162、CI 覆盖 44/44
 - 7 套强调色对比度校验：浅色强调色对画布 ≥4.58、白字对强调色 ≥5.08；深色强调色对深色画布 ≥5.61、深字对强调色 ≥5.61。
-- Expo Web export 成功；浏览器 DOM / 计算样式核对：默认浅色、深色回切、新对话首屏排版、用户气泡、输入卡片控件行、卡片抽屉、搜索过滤、真实会话切换、空白会话复用、新建后回到首屏顶部。
+- Expo Web export 成功；浏览器 DOM / 计算样式核对：默认浅色、深色回切、新对话首屏排版、用户气泡、输入卡片控件行、卡片抽屉、搜索过滤、真实会话切换、空白会话复用、新建后回到首屏顶部；Memory Center 另用隔离后端核对四分区与真实接口。
 
 ## 4. 未接通 / 限制
 
@@ -46,3 +48,4 @@
 - 收藏只在当前设备本地保存，不跨设备同步。
 - Markdown 为展示子集，不支持完整 CommonMark/HTML；不引入 WebView 或第三方渲染器。
 - 停止生成后的部分回复只保留在本机，不写入服务端历史；再次发送前不会进入模型上下文。
+- Memory Center 的编辑、单条撤回、完整事件审计、回答调用记忆 ID、神经/向量图谱未接入；界面均有明确提示，详见 `memory-center_implementation.md`。

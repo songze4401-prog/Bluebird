@@ -30,7 +30,7 @@ import { ChatInput } from './components/ChatInput';
 import { ChatHeader } from './components/ChatHeader';
 import { ChatWelcome } from './components/ChatWelcome';
 import { MessageList } from './components/MessageList';
-import { MemoryScreen } from './components/MemoryScreen';
+import { MemoryCenterScreen } from './components/MemoryCenterScreen';
 import { ThemeScreen } from './components/ThemeScreen';
 import { HistoryScreen } from './components/HistoryScreen';
 import { ControlPanelScreen } from './components/ControlPanelScreen';
@@ -463,7 +463,7 @@ export default function App() {
         busy={chat.sending || attachments.uploadingImage}
       />
 
-      <MemoryScreen
+      <MemoryCenterScreen
         visible={memoryOpen}
         onClose={() => setMemoryOpen(false)}
         theme={theme}

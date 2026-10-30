@@ -139,7 +139,8 @@ export function SettingsScreen({
             <Row
               theme={theme}
               styles={styles}
-              label="管理记忆"
+              label="Memory Center"
+              value="记忆管理中心"
               onPress={onOpenMemory}
             />
             <Row
