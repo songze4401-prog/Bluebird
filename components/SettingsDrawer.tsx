@@ -34,6 +34,10 @@ export function SettingsDrawer({
   onOpenMemory,
   onOpenControlPanel,
   onOpenMonitoring,
+  onOpenAgentTools,
+  onOpenSettings,
+  onOpenTasks,
+  onOpenChat,
   onOpenModels,
   onOpenThemePicker,
   onSelectMode,
@@ -50,6 +54,10 @@ export function SettingsDrawer({
   onOpenMemory: () => void;
   onOpenControlPanel: () => void;
   onOpenMonitoring?: () => void;
+  onOpenAgentTools?: () => void;
+  onOpenSettings?: () => void;
+  onOpenTasks?: () => void;
+  onOpenChat?: () => void;
   onOpenModels: () => void;
   onOpenThemePicker: () => void;
   onSelectMode: (mode: ThemeMode) => void;
@@ -74,7 +82,7 @@ export function SettingsDrawer({
 
         <SafeAreaView style={styles.panel} edges={['top', 'bottom', 'left']}>
           <View style={styles.header}>
-            <Text style={styles.title}>设置</Text>
+            <Text style={styles.title}>Bluebird</Text>
 
             <TouchableOpacity
               onPress={onClose}
@@ -108,13 +116,23 @@ export function SettingsDrawer({
             contentContainerStyle={styles.list}
             showsVerticalScrollIndicator={false}
           >
-            <Text style={styles.groupLabel}>会话</Text>
+            <Text style={styles.groupLabel}>空间</Text>
+
+            <DrawerItem
+              theme={theme}
+              label="对话"
+              onPress={onOpenChat || onOpenHistory}
+            />
 
             <DrawerItem
               theme={theme}
               label="历史对话"
               onPress={onOpenHistory}
             />
+
+            {onOpenTasks && (
+              <DrawerItem theme={theme} label="任务" onPress={onOpenTasks} />
+            )}
 
             <DrawerItem
               theme={theme}
@@ -125,7 +143,7 @@ export function SettingsDrawer({
 
             <DrawerItem theme={theme} label="返回主页" onPress={onReturnHome} />
 
-            <Text style={styles.groupLabel}>功能模块</Text>
+            <Text style={styles.groupLabel}>系统</Text>
 
             <DrawerItem
               theme={theme}
@@ -149,6 +167,22 @@ export function SettingsDrawer({
 
             <DrawerItem theme={theme} label="模型" onPress={onOpenModels} />
 
+            {onOpenAgentTools && (
+              <DrawerItem
+                theme={theme}
+                label="Agent 工具"
+                onPress={onOpenAgentTools}
+              />
+            )}
+
+            {onOpenSettings && (
+              <DrawerItem
+                theme={theme}
+                label="设置"
+                onPress={onOpenSettings}
+              />
+            )}
+
             <DrawerItem
               theme={theme}
               label="主题色"
@@ -168,7 +202,7 @@ export function SettingsDrawer({
               />
             ))}
 
-            <Text style={styles.groupLabel}>当前会话</Text>
+            <Text style={styles.groupLabel}>数据</Text>
 
             <DrawerItem
               theme={theme}
@@ -246,11 +280,11 @@ const createStyles = (theme: Theme) =>
       backgroundColor: theme.scrim,
     },
     panel: {
-      width: '78%',
-      maxWidth: 320,
-      backgroundColor: theme.surface,
-      borderRightWidth: 1,
-      borderRightColor: theme.borderStrong,
+      width: '72%',
+      maxWidth: 300,
+      backgroundColor: theme.background,
+      borderRightWidth: StyleSheet.hairlineWidth,
+      borderRightColor: theme.border,
     },
     header: {
       height: CHAT_LAYOUT.topBarHeight,
@@ -261,8 +295,8 @@ const createStyles = (theme: Theme) =>
     },
     title: {
       color: theme.textPrimary,
-      fontSize: 19,
-      fontWeight: '700',
+      fontSize: 16,
+      fontWeight: '600',
     },
     close: {
       color: theme.textSecondary,
@@ -271,13 +305,11 @@ const createStyles = (theme: Theme) =>
       paddingHorizontal: 4,
     },
     statusCard: {
-      marginHorizontal: 14,
-      marginBottom: 6,
-      padding: 14,
-      borderRadius: 14,
-      backgroundColor: theme.avatarBg,
-      borderWidth: 1,
-      borderColor: theme.borderStrong,
+      marginHorizontal: 18,
+      marginBottom: 4,
+      paddingVertical: 13,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: theme.border,
       flexDirection: 'row',
       alignItems: 'center',
     },
@@ -315,7 +347,7 @@ const createStyles = (theme: Theme) =>
       paddingBottom: 4,
     },
     item: {
-      minHeight: 48,
+      minHeight: 46,
       paddingHorizontal: 18,
       flexDirection: 'row',
       alignItems: 'center',

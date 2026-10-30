@@ -3,6 +3,7 @@ import {
   View,
   Text,
   TouchableOpacity,
+  Pressable,
   StyleSheet,
   Image as RNImage,
 } from 'react-native';
@@ -15,9 +16,10 @@ import {
   imageUrl,
   stickerImageUrl,
 } from '../lib/uploads';
-import { formatMessageTime, moodEmoji, parseStickerMarkers } from '../lib/utils';
+import { formatMessageTime, parseStickerMarkers } from '../lib/utils';
 import { CHAT_LAYOUT, CHAT_TYPE } from '../lib/design';
-import { ToolCallPillRow } from './ToolCallPill';
+import { AgentRunBlock } from './AgentRunBlock';
+import { MarkdownMessage } from './MarkdownMessage';
 
 // 附件（图片 / 表情包）：渲染在正文上方，经服务端鉴权路由读取真实图片。
 function BubbleAttachments({
@@ -141,6 +143,8 @@ export function ChatBubble({
   onRecall,
   onRetry,
   onContinue,
+  onOpenActions,
+  isFavorite = false,
 }: {
   theme: Theme;
   item: Message;
@@ -151,6 +155,8 @@ export function ChatBubble({
   onRecall: (message: Message) => void;
   onRetry: (text?: string, attachments?: Attachment[]) => void;
   onContinue: () => void;
+  onOpenActions?: (message: Message) => void;
+  isFavorite?: boolean;
 }) {
   const styles = useMemo(() => createStyles(theme), [theme]);
 
@@ -182,10 +188,13 @@ export function ChatBubble({
         <TouchableOpacity
           style={styles.userColumn}
           activeOpacity={1}
-          onLongPress={() => onRecall(item)}
-          accessibilityLabel="长按撤回这条消息"
+          onLongPress={() => (onOpenActions ? onOpenActions(item) : onRecall(item))}
+          accessibilityLabel="长按打开消息操作"
         >
-          {!!timeText && <Text style={styles.time}>{timeText}</Text>}
+          <View style={styles.userMeta}>
+            {isFavorite && <Text style={styles.favoriteStar}>★</Text>}
+            {!!timeText && <Text style={styles.time}>{timeText}</Text>}
+          </View>
 
           {!!item.attachments?.length && (
             <BubbleAttachments
@@ -200,33 +209,46 @@ export function ChatBubble({
           )}
         </TouchableOpacity>
       ) : (
-        <View style={styles.assistantColumn}>
+        <Pressable
+          style={styles.assistantColumn}
+          onLongPress={() => onOpenActions?.(item)}
+          delayLongPress={350}
+          accessibilityLabel="长按打开消息操作"
+        >
           {/* who-line：名字用强调色，表情是当前心情，时间是这条自己的时间戳 */}
           <View style={styles.whoLine}>
-            <Text style={styles.name}>Bluebird</Text>
+            <View style={styles.whoDot} />
+            <Text style={styles.name}>BLUE</Text>
 
-            <Text style={styles.mood}>{moodEmoji(item.mood)}</Text>
-
+            {isFavorite && <Text style={styles.favoriteStar}>★</Text>}
             {!!timeText && <Text style={styles.time}>{timeText}</Text>}
           </View>
 
           {!!item.toolSteps?.length && (
-            <ToolCallPillRow theme={theme} steps={item.toolSteps} />
+            <AgentRunBlock theme={theme} steps={item.toolSteps} />
           )}
 
           {!!item.attachments?.length && (
             <BubbleAttachments attachments={item.attachments} styles={styles} />
           )}
 
-          {!!item.content && (
-            <AssistantContent
-              content={item.content}
-              segments={item.segments}
-              styles={styles}
-            />
-          )}
+          {!!item.content &&
+            (item.segments?.some(segment => segment.type === 'sticker') ||
+            (!item.segments && /\[sticker:[^\]]+\]/.test(item.content)) ? (
+              <AssistantContent
+                content={item.content}
+                segments={item.segments}
+                styles={styles}
+              />
+            ) : (
+              <MarkdownMessage content={item.content} theme={theme} />
+            ))}
 
           {/* 图片触发了视觉能力路由：如实说明实际使用的模型（后端结果） */}
+          {!!item.stopped && (
+            <Text style={styles.stoppedNote}>已停止生成 · 本机保留的部分回复</Text>
+          )}
+
           {!!item.modelNote && (
             <Text style={styles.modelNote}>{item.modelNote}</Text>
           )}
@@ -263,7 +285,7 @@ export function ChatBubble({
               </TouchableOpacity>
             </View>
           )}
-        </View>
+        </Pressable>
       )}
     </View>
   );
@@ -291,15 +313,29 @@ const createStyles = (theme: Theme) =>
       flexDirection: 'row',
       alignItems: 'center',
     },
-    name: {
-      color: theme.accent,
-      fontSize: CHAT_TYPE.name,
-      fontWeight: '700',
-      marginRight: 8,
+    userMeta: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
     },
-    mood: {
-      fontSize: 17,
-      lineHeight: 22,
+    favoriteStar: {
+      color: theme.accent,
+      fontSize: 10,
+      lineHeight: 14,
+    },
+    whoDot: {
+      width: 5,
+      height: 5,
+      borderRadius: 3,
+      backgroundColor: theme.accent,
+      marginRight: 6,
+      opacity: 0.85,
+    },
+    name: {
+      color: theme.textSecondary,
+      fontSize: 11,
+      fontWeight: '600',
+      letterSpacing: 0.8,
       marginRight: 8,
     },
     time: {
@@ -318,6 +354,12 @@ const createStyles = (theme: Theme) =>
     // 用户消息是「时间戳 → 正文」，实测间距 12dp（助手是 who-line → 正文 10dp）
     textAfterTs: {
       marginTop: CHAT_LAYOUT.tsToText,
+    },
+    stoppedNote: {
+      color: theme.textMuted,
+      fontSize: 11,
+      lineHeight: 16,
+      marginTop: 7,
     },
     // 模型路由提示：弱化的小字，附在正文下方，不参与正文排版
     modelNote: {

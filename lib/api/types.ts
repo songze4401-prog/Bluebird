@@ -120,6 +120,13 @@ export type AgentPolicyResponse = {
     maxAllowedTools: number;
   };
   runtimeLimits: { maxRounds: number };
+  // 服务端只读运行状态：全局开关由环境变量控制，前端不得伪造可写开关。
+  runtime?: {
+    switchOn: boolean;
+    maxRounds: number;
+    toolTimeoutDefaultMs: number;
+    imageRequestsDisableTools: boolean;
+  };
   availableTools: AgentPolicyTool[];
 };
 

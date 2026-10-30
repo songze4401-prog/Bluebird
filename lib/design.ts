@@ -8,7 +8,7 @@
 
 export const CHAT_LAYOUT = {
   /** 顶部栏高度（实测：☰/Bluebird 字形带 y 716..755，上下各留约 16dp） */
-  topBarHeight: 48,
+  topBarHeight: 52,
   /** 聊天页与底部 dock 的左右内边距（实测 52px） */
   gutter: 20,
   /** 消息流顶部留白（实测：顶栏字形带底 755 → 首个时间戳 840，共 85px） */
@@ -47,16 +47,16 @@ export const CHAT_LAYOUT = {
 
 export const CHAT_TYPE = {
   /** 顶部品牌名 */
-  title: 20,
+  title: 16,
   /** 消息正文 */
   body: 16,
-  bodyLine: 24,
+  bodyLine: 26,
   /** 助手消息的「Bluebird」名字 */
-  name: 15,
+  name: 12,
   /** 时间戳 */
-  meta: 12,
+  meta: 11,
   /** 工具 pill / 模型 pill 内文字 */
-  pill: 13,
+  pill: 11,
   /** 标签栏文字 */
   tabLabel: 11,
 } as const;

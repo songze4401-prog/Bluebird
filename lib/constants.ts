@@ -57,6 +57,8 @@ export const REPLY_PACING = {
 // 未登记的名字一律原样显示——宁可露出英文内部名，也不给没跑过的工具编一个中文名。
 export const TOOL_LABEL: Record<string, string> = {
   memory_search: '检索记忆',
+  memory_remember: '写入记忆',
+  knowledge_search: '检索知识',
 };
 
 export function toolLabel(name: string): string {

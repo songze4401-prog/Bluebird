@@ -46,6 +46,8 @@ type BubbleExtra = Partial<{
   onRecall: (message: Message) => void;
   onRetry: (text?: string, attachments?: Attachment[]) => void;
   onContinue: () => void;
+  onOpenActions: (message: Message) => void;
+  isFavorite: boolean;
 }>;
 
 function bubbleProps(item: Message, extra: BubbleExtra = {}) {
@@ -183,7 +185,7 @@ describe('ChatBubble 无气泡排版', () => {
       />
     );
 
-    expect(screen.getByText('Bluebird')).toBeTruthy();
+    expect(screen.getByText('BLUE')).toBeTruthy();
     expect(screen.getByText('09:08:07')).toBeTruthy();
   });
 
@@ -259,7 +261,9 @@ describe('工具 pill 显示真实执行结果', () => {
       />
     );
 
-    expect(screen.getByText('调用工具 · 检索记忆')).toBeTruthy();
+    expect(screen.getByText('AGENT RUN')).toBeTruthy();
+    expect(screen.getByText('检索记忆')).toBeTruthy();
+    expect(screen.getByText('已完成')).toBeTruthy();
   });
 
   it('未登记的工具名原样显示，不留空', async () => {
@@ -294,15 +298,17 @@ describe('Agent 新图互斥提示', () => {
 });
 
 describe('原有交互没被改版吃掉', () => {
-  it('用户消息长按触发 onRecall 并带上原消息', async () => {
-    const onRecall = jest.fn();
+  it('用户消息长按打开统一操作面板并带上原消息', async () => {
+    const onOpenActions = jest.fn();
     const item: Message = { id: 'u1', role: 'user', content: '撤回我', createdAt };
 
-    await render(<ChatBubble {...bubbleProps(item, { onRecall })} />);
+    await render(
+      <ChatBubble {...bubbleProps(item, { onOpenActions })} />
+    );
 
-    await fireEvent(screen.getByLabelText('长按撤回这条消息'), 'longPress');
+    await fireEvent(screen.getByLabelText('长按打开消息操作'), 'longPress');
 
-    expect(onRecall).toHaveBeenCalledWith(item);
+    expect(onOpenActions).toHaveBeenCalledWith(item);
   });
 
   it('历史还有更早页时显示「加载更早消息」，点击触发翻页回调', async () => {
@@ -421,7 +427,7 @@ describe('原有交互没被改版吃掉', () => {
     expect(screen.queryByLabelText(/当前模型/)).toBeNull();
   });
 
-  it('「＋」打开加号面板；空输入不出现发送按钮，有内容才出现', async () => {
+  it('「＋」打开加号面板；空输入发送禁用，有内容才可发送', async () => {
     const onPlus = jest.fn();
     const onSend = jest.fn();
 
@@ -438,7 +444,11 @@ describe('原有交互没被改版吃掉', () => {
 
     await fireEvent.press(screen.getByLabelText('更多功能'));
     expect(onPlus).toHaveBeenCalled();
-    expect(screen.queryByLabelText('发送')).toBeNull();
+    expect(screen.getByLabelText('发送').props.accessibilityState.disabled).toBe(
+      true
+    );
+    await fireEvent.press(screen.getByLabelText('发送'));
+    expect(onSend).not.toHaveBeenCalled();
 
     await rerender(
       <ChatInput
@@ -455,8 +465,9 @@ describe('原有交互没被改版吃掉', () => {
     expect(onSend).toHaveBeenCalled();
   });
 
-  it('发送进行中发送按钮禁用（防重复提交）', async () => {
+  it('发送进行中显示停止按钮，发送入口不重复提交', async () => {
     const onSend = jest.fn();
+    const onStop = jest.fn();
 
     await render(
       <ChatInput
@@ -465,10 +476,13 @@ describe('原有交互没被改版吃掉', () => {
         onChangeText={noop}
         sending
         onSend={onSend}
+        onStop={onStop}
       />
     );
 
-    await fireEvent.press(screen.getByLabelText('发送'));
+    expect(screen.queryByLabelText('发送')).toBeNull();
+    await fireEvent.press(screen.getByLabelText('停止生成'));
+    expect(onStop).toHaveBeenCalled();
     expect(onSend).not.toHaveBeenCalled();
   });
 

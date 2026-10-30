@@ -1,26 +1,28 @@
 import React, { useMemo } from 'react';
 import {
-  View,
-  Text,
-  TouchableOpacity,
   ScrollView,
   StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-// 固定欢迎主页：只提供三个入口（继续聊天 / 新建聊天 / 历史聊天）。
-// 视觉按需求固定为「深空蓝黑 + 蓝色微光」的简洁科幻风格，
-// 刻意不随主题变化（主页是固定的品牌落地页，聊天页才跟随主题）。
+import { APP_VERSION } from '../lib/constants';
+
+// 固定品牌入口：深色、编辑式排版、只保留三个真实入口。
+// 不展示假的历史/假的任务；会话列表仍由 App 的 /sessions 数据源负责。
 export function HomeScreen({
   onContinue,
   onNewChat,
   onHistory,
+  onOpenMenu,
   creatingChat,
 }: {
   onContinue: () => void;
   onNewChat: () => void;
   onHistory: () => void;
-  // 新建会话请求进行中：禁用按钮防连点，避免创建出多余的空会话
+  onOpenMenu?: () => void;
   creatingChat?: boolean;
 }) {
   const styles = useMemo(() => createStyles(), []);
@@ -28,171 +30,227 @@ export function HomeScreen({
 
   return (
     <View style={styles.container}>
-      {/* 深空背景层：基底渐变 + 两处低亮度蓝色光晕，均为静态层、不拦截触摸 */}
-      <View pointerEvents="none" style={styles.base} />
-      <View pointerEvents="none" style={styles.glowCool} />
-      <View pointerEvents="none" style={styles.glowWarm} />
-
-      {/* ScrollView + flexGrow 保证：高屏留白充足、主体居中略偏上，
-          小屏可滚动，不会被挤出屏幕；上下再叠加系统安全区 inset。 */}
       <ScrollView
-        style={styles.scroll}
         contentContainerStyle={[
           styles.content,
           {
-            paddingTop: insets.top + 16,
+            paddingTop: insets.top + 20,
             paddingBottom: insets.bottom + 28,
           },
         ]}
         showsVerticalScrollIndicator={false}
         bounces={false}
       >
-        <View style={styles.spacerTop} />
-
-        {/* 品牌语：一句一行、左对齐、不带标点（参考堆叠式排版效果） */}
-        <Text style={styles.brandLines}>
-          你好{'\n'}
-          我是 Blue{'\n'}
-          也许我们来自不同的世界{'\n'}
-          但现在我们共享一个频道{'\n'}
-          欢迎回来
-        </Text>
-
-        <View style={styles.actions}>
-          <TouchableOpacity
-            style={styles.primaryButton}
-            onPress={onContinue}
-            activeOpacity={0.82}
-          >
-            <Text style={styles.primaryLabel}>继续聊天</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.outlineButton}
-            onPress={onNewChat}
-            disabled={creatingChat}
-            activeOpacity={0.82}
-          >
-            <Text style={styles.outlineLabel}>
-              {creatingChat ? '正在新建…' : '新建聊天'}
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.outlineButton}
-            onPress={onHistory}
-            activeOpacity={0.82}
-          >
-            <Text style={styles.outlineLabel}>历史聊天</Text>
-          </TouchableOpacity>
+        <View style={styles.header}>
+          <View style={styles.headerLeft}>
+            {onOpenMenu && (
+              <TouchableOpacity
+                onPress={onOpenMenu}
+                style={styles.menu}
+                hitSlop={8}
+                accessibilityLabel="打开菜单"
+              >
+                <View style={styles.menuLine} />
+                <View style={styles.menuLine} />
+                <View style={styles.menuLine} />
+              </TouchableOpacity>
+            )}
+            <Text style={styles.wordmark}>Bluebird</Text>
+          </View>
+          <Text style={styles.headerMeta}>PRIVATE AGENT</Text>
         </View>
 
-        <View style={styles.spacerBottom} />
+        <View style={styles.hero}>
+          <Text style={styles.eyebrow}>悄悄记住，认真完成</Text>
+          <Text style={styles.title}>今天，想一起{'\n'}完成什么？</Text>
+          <Text style={styles.lead}>
+            Blue 会带着你的上下文，检索、思考，并把事情做完。
+          </Text>
+        </View>
+
+        <View style={styles.actions}>
+          <ActionRow
+            styles={styles}
+            label="继续聊天"
+            hint="回到最近的对话"
+            glyph="↗"
+            onPress={onContinue}
+          />
+          <ActionRow
+            styles={styles}
+            label={creatingChat ? '正在新建…' : '新建聊天'}
+            hint="从一个干净的上下文开始"
+            glyph="＋"
+            disabled={creatingChat}
+            onPress={onNewChat}
+          />
+          <ActionRow
+            styles={styles}
+            label="历史聊天"
+            hint="查看、继续或管理过去的对话"
+            glyph="↗"
+            onPress={onHistory}
+          />
+        </View>
+
+        <View style={styles.footer}>
+          <Text style={styles.footerText}>Bluebird {APP_VERSION}</Text>
+          <Text style={styles.footerText}>本机数据优先</Text>
+        </View>
       </ScrollView>
     </View>
   );
 }
 
-// 样式固定（不依赖主题）：主页是品牌落地页，颜色即需求指定的深空蓝黑方案
+function ActionRow({
+  styles,
+  label,
+  hint,
+  glyph,
+  disabled,
+  onPress,
+}: {
+  styles: ReturnType<typeof createStyles>;
+  label: string;
+  hint: string;
+  glyph: string;
+  disabled?: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <TouchableOpacity
+      style={[styles.action, disabled && styles.actionDisabled]}
+      onPress={onPress}
+      disabled={disabled}
+      activeOpacity={0.65}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+    >
+      <View style={styles.actionMain}>
+        <Text style={styles.actionLabel}>{label}</Text>
+        <Text style={styles.actionHint}>{hint}</Text>
+      </View>
+      <Text style={styles.actionGlyph}>{glyph}</Text>
+    </TouchableOpacity>
+  );
+}
+
 const createStyles = () =>
   StyleSheet.create({
     container: {
       flex: 1,
-      backgroundColor: '#070810',
-    },
-    // ---- 背景层 ----
-    base: {
-      position: 'absolute',
-      top: 0,
-      right: 0,
-      bottom: 0,
-      left: 0,
-      experimental_backgroundImage:
-        'linear-gradient(180deg, #0e1119 0%, #0a0c11 45%, #070810 100%)',
-    },
-    glowCool: {
-      position: 'absolute',
-      top: 0,
-      right: 0,
-      bottom: 0,
-      left: 0,
-      experimental_backgroundImage:
-        'radial-gradient(ellipse 95% 60% at 18% 0%, rgba(62,94,156,0.30) 0%, rgba(62,94,156,0.12) 45%, rgba(62,94,156,0) 75%)',
-    },
-    glowWarm: {
-      position: 'absolute',
-      top: 0,
-      right: 0,
-      bottom: 0,
-      left: 0,
-      experimental_backgroundImage:
-        'radial-gradient(ellipse 90% 55% at 100% 100%, rgba(58,121,194,0.22) 0%, rgba(58,121,194,0.08) 45%, rgba(58,121,194,0) 75%)',
-    },
-    // ---- 内容 ----
-    scroll: {
-      flex: 1,
+      backgroundColor: '#08090b',
     },
     content: {
       flexGrow: 1,
+      paddingHorizontal: 20,
+    },
+    header: {
+      height: 52,
+      flexDirection: 'row',
       alignItems: 'center',
-      paddingHorizontal: 28,
+      justifyContent: 'space-between',
     },
-    // 上小下大的弹性留白：主体整体居中略偏上，入口区落在中下部
-    spacerTop: {
+    headerLeft: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+    },
+    menu: {
+      width: 22,
+      height: 28,
+      justifyContent: 'center',
+      gap: 4,
+    },
+    menuLine: {
+      height: 1.5,
+      borderRadius: 1,
+      backgroundColor: '#a3a8b2',
+    },
+    wordmark: {
+      color: '#f2f3f5',
+      fontSize: 16,
+      lineHeight: 21,
+      fontWeight: '600',
+      letterSpacing: 0.1,
+    },
+    headerMeta: {
+      color: '#4a505a',
+      fontSize: 9,
+      lineHeight: 13,
+      fontWeight: '600',
+      letterSpacing: 1.3,
+    },
+    hero: {
       flex: 1,
+      justifyContent: 'center',
+      paddingBottom: 30,
     },
-    // 底部强制至少留出 72，避免入口贴近屏幕底边
-    spacerBottom: {
-      flex: 1.5,
-      minHeight: 72,
-    },
-    // 品牌语堆叠：统一字号、左对齐、行距紧凑，标点全部省去
-    brandLines: {
-      width: '100%',
-      marginTop: 12,
-      fontSize: 27,
-      fontWeight: '700',
-      lineHeight: 42,
+    eyebrow: {
+      color: '#6c727d',
+      fontSize: 10,
+      lineHeight: 14,
       letterSpacing: 1,
-      textAlign: 'left',
-      color: '#f0f3f8',
+      marginBottom: 14,
+    },
+    title: {
+      maxWidth: 300,
+      color: '#f2f3f5',
+      fontSize: 34,
+      lineHeight: 42,
+      fontWeight: '600',
+      letterSpacing: -1.1,
+    },
+    lead: {
+      maxWidth: 290,
+      marginTop: 16,
+      color: '#a3a8b2',
+      fontSize: 14,
+      lineHeight: 23,
     },
     actions: {
-      width: '100%',
-      marginTop: 44,
-      gap: 14,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: 'rgba(255,255,255,0.065)',
     },
-    primaryButton: {
-      height: 54,
-      borderRadius: 27,
+    action: {
+      minHeight: 66,
+      flexDirection: 'row',
       alignItems: 'center',
-      justifyContent: 'center',
-      backgroundColor: '#2f6bb0',
-      shadowColor: '#3a79c2',
-      shadowOpacity: 0.4,
-      shadowRadius: 14,
-      shadowOffset: { width: 0, height: 4 },
-      elevation: 4,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: 'rgba(255,255,255,0.065)',
     },
-    primaryLabel: {
+    actionDisabled: {
+      opacity: 0.45,
+    },
+    actionMain: {
+      flex: 1,
+      gap: 4,
+    },
+    actionLabel: {
+      color: '#f2f3f5',
+      fontSize: 15,
+      lineHeight: 21,
+      fontWeight: '500',
+    },
+    actionHint: {
+      color: '#4a505a',
+      fontSize: 11,
+      lineHeight: 16,
+    },
+    actionGlyph: {
+      color: '#7e9bff',
       fontSize: 17,
-      fontWeight: '600',
-      color: '#ffffff',
-      letterSpacing: 1,
+      lineHeight: 22,
     },
-    outlineButton: {
-      height: 54,
-      borderRadius: 27,
-      alignItems: 'center',
-      justifyContent: 'center',
-      backgroundColor: 'rgba(19,25,38,0.72)',
-      borderWidth: 1,
-      borderColor: 'rgba(138,182,232,0.30)',
+    footer: {
+      marginTop: 28,
+      flexDirection: 'row',
+      justifyContent: 'space-between',
     },
-    outlineLabel: {
-      fontSize: 17,
-      fontWeight: '600',
-      color: '#cfe0f4',
-      letterSpacing: 1,
+    footerText: {
+      color: '#4a505a',
+      fontSize: 9,
+      lineHeight: 13,
+      letterSpacing: 0.3,
     },
   });

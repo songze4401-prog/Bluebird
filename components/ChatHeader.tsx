@@ -2,7 +2,7 @@ import React, { useMemo } from 'react';
 import { Text, TouchableOpacity, View, StyleSheet } from 'react-native';
 
 import type { Theme } from '../theme';
-import { CHAT_LAYOUT, CHAT_TYPE } from '../lib/design';
+import { CHAT_LAYOUT } from '../lib/design';
 
 // 顶部栏（设计图 .topbar）：☰ + Bluebird | ＋ ⌕ ，无描边、无头像、无在线状态。
 // 与重构前的差别：心情 Emoji 移到每条助手的 who-line（设计图如此），
@@ -18,12 +18,14 @@ export function ChatHeader({
   onOpenDrawer,
   onNewChat,
   onOpenHistory,
+  sessionTitle,
   creatingChat,
 }: {
   theme: Theme;
   onOpenDrawer: () => void;
   onNewChat: () => void;
   onOpenHistory: () => void;
+  sessionTitle?: string;
   // 新建会话请求进行中：禁用入口防连点，避免创建出多余的空会话
   creatingChat?: boolean;
 }) {
@@ -45,11 +47,11 @@ export function ChatHeader({
             <View style={styles.burgerLine} />
           </View>
         </TouchableOpacity>
-
-        <Text style={styles.name} numberOfLines={1}>
-          Bluebird
-        </Text>
       </View>
+
+      <Text style={styles.sessionTitle} numberOfLines={1}>
+        {sessionTitle || 'Bluebird'}
+      </Text>
 
       <View style={styles.right}>
         <TouchableOpacity
@@ -97,9 +99,19 @@ const createStyles = (theme: Theme) =>
       backgroundColor: 'transparent',
     },
     left: {
+      width: 44,
       flexDirection: 'row',
       alignItems: 'center',
-      flexShrink: 1,
+      flexShrink: 0,
+    },
+    sessionTitle: {
+      flex: 1,
+      color: theme.chatText,
+      fontSize: 14,
+      lineHeight: 19,
+      fontWeight: '500',
+      textAlign: 'center',
+      marginHorizontal: 8,
     },
     right: {
       flexDirection: 'row',
@@ -118,8 +130,8 @@ const createStyles = (theme: Theme) =>
     },
     name: {
       color: theme.chatText,
-      fontSize: CHAT_TYPE.title,
-      fontWeight: '700',
+      fontSize: 16,
+      fontWeight: '600',
       letterSpacing: 0.2,
     },
     iconButton: {
@@ -129,8 +141,8 @@ const createStyles = (theme: Theme) =>
     },
     icon: {
       color: theme.chatText,
-      fontSize: 20,
-      lineHeight: 24,
+      fontSize: 18,
+      lineHeight: 22,
     },
     iconDim: {
       color: theme.chatMuted,

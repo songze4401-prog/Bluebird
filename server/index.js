@@ -343,6 +343,7 @@ const {
   listToolSpecs,
   listToolMetadata,
   MAX_ROUNDS,
+  TOOL_TIMEOUT_DEFAULT,
 } = require('./agent-runtime');
 
 // Context Runtime v3：唯一上下文链路（无兼容双路径）。
@@ -2092,6 +2093,13 @@ app.get('/agent-policy', requireAuth, (req, res) => {
       meta: getAgentPolicyMeta(),
       limits: AGENT_POLICY_LIMITS,
       runtimeLimits: { maxRounds: MAX_ROUNDS },
+      runtime: {
+        // 只读状态：UI 可以展示，不能通过本接口改写服务端环境开关。
+        switchOn: agentToolsEnabled(),
+        maxRounds: MAX_ROUNDS,
+        toolTimeoutDefaultMs: TOOL_TIMEOUT_DEFAULT,
+        imageRequestsDisableTools: true,
+      },
       availableTools: listToolMetadata(),
     });
   } catch (_) {

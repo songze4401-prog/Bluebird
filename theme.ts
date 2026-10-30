@@ -30,6 +30,7 @@ export type ModePalette = {
   bubbleIncomingBorder: string;
   avatarBg: string; // 头像底 / 徽章底
   online: string; // 在线状态（语义绿，不随主题变）
+  warning: string; // 等待/需确认（语义琥珀，不随主题变）
   danger: string; // 危险操作（语义红，不随主题变）
   dangerBorder: string;
   scrim: string; // 遮罩
@@ -46,30 +47,31 @@ export type ModePalette = {
 
 export const MODE_PALETTES: Record<ThemeMode, ModePalette> = {
   dark: {
-    background: '#0b0d12',
-    surface: '#181c25',
-    surfaceAlt: '#0e1016',
-    border: '#20242d',
-    borderStrong: '#303642',
-    textPrimary: '#f0f0f0',
-    textBody: '#eeeeee',
-    textSecondary: '#8b93a3',
-    textMuted: '#777777',
-    textOnAccent: '#ffffff',
-    bubbleIncoming: '#161c28',
-    bubbleIncomingBorder: '#232b3a',
-    avatarBg: '#202735',
-    online: '#7fd18b',
-    danger: '#e08a8a',
-    dangerBorder: 'rgba(224,138,138,0.5)',
-    scrim: 'rgba(0,0,0,0.55)',
-    // 深色模式没有设计图，按既有深色材质就近取值，保证两套模式同源
-    chatBg: '#0b0d12',
-    pill: '#181c25',
-    pillText: '#a8b0be',
-    hairline: '#20242d',
-    chatText: '#eeeeee',
-    chatMuted: '#8b93a3',
+    // Quiet Instrument 深色基准：近黑画布、低对比表面、单一蓝色强调。
+    background: '#08090b',
+    surface: '#12151a',
+    surfaceAlt: '#0d0f13',
+    border: '#1a1d23',
+    borderStrong: '#262a32',
+    textPrimary: '#f2f3f5',
+    textBody: '#d5d8de',
+    textSecondary: '#a3a8b2',
+    textMuted: '#6c727d',
+    textOnAccent: '#08090b',
+    bubbleIncoming: '#12151a',
+    bubbleIncomingBorder: '#1a1d23',
+    avatarBg: '#171b21',
+    online: '#6fcf97',
+    warning: '#d6b77a',
+    danger: '#e07a7a',
+    dangerBorder: 'rgba(224,122,122,0.5)',
+    scrim: 'rgba(0,0,0,0.62)',
+    chatBg: '#08090b',
+    pill: '#12151a',
+    pillText: '#a3a8b2',
+    hairline: 'rgba(255,255,255,0.065)',
+    chatText: '#f2f3f5',
+    chatMuted: '#6c727d',
   },
   light: {
     background: '#f4f5f7',
@@ -86,6 +88,7 @@ export const MODE_PALETTES: Record<ThemeMode, ModePalette> = {
     bubbleIncomingBorder: '#e3e7ed',
     avatarBg: '#eef1f5',
     online: '#2f9e5a',
+    warning: '#9a6b1f',
     danger: '#c0392b',
     dangerBorder: 'rgba(192,57,43,0.45)',
     scrim: 'rgba(0,0,0,0.3)',
@@ -135,10 +138,10 @@ export const THEMES: AccentTheme[] = [
     id: 'blue',
     label: '蓝色',
     dark: {
-      accent: '#8ab6e8',
-      accentBorder: 'rgba(138,182,232,0.45)',
-      bubble: '#2b4a6f',
-      sendButton: '#2f5b86',
+      accent: '#7e9bff',
+      accentBorder: 'rgba(126,155,255,0.42)',
+      bubble: '#1c2740',
+      sendButton: '#7e9bff',
     },
     light: {
       // 按设计图实测：Bluebird 名字 #5884C5、发送按钮与选中标签 #8AB2E3。
@@ -242,7 +245,7 @@ export type Theme = ModePalette &
 // 首启视觉需要直接对上设计图。已保存过主题偏好的用户不受影响
 // （useThemePreference 读到的本地值优先）。
 export const DEFAULT_THEME_ID: ThemeId = 'blue';
-export const DEFAULT_THEME_MODE: ThemeMode = 'light';
+export const DEFAULT_THEME_MODE: ThemeMode = 'dark';
 
 /** 强调色的本地持久化键（沿用历史键名，不破坏已保存的偏好） */
 export const THEME_STORAGE_KEY = 'bluebird.theme';

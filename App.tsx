@@ -11,16 +11,19 @@
 //   - 消息变换规则   → lib/chat-messages（纯函数）
 // 本文件只剩页面路由、弹层开关，以及启动引导（bootstrap）的时序。
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import {
   View,
   KeyboardAvoidingView,
   Keyboard,
+  Alert,
 } from 'react-native';
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
 import { DEFAULT_SESSION_ID } from './lib/constants';
-import type { Attachment } from './lib/types';
+import type { Attachment, Message } from './lib/types';
 import { createAppStyles } from './app-styles';
 
 import { ChatInput } from './components/ChatInput';
@@ -31,12 +34,14 @@ import { ThemeScreen } from './components/ThemeScreen';
 import { HomeScreen } from './components/HomeScreen';
 import { HistoryScreen } from './components/HistoryScreen';
 import { ControlPanelScreen } from './components/ControlPanelScreen';
+import { SettingsScreen } from './components/SettingsScreen';
+import { AgentToolsScreen } from './components/AgentToolsScreen';
 import { MonitoringScreen } from './components/MonitoringScreen';
 import { ModelScreen } from './components/ModelScreen';
 import { PlusPanel } from './components/PlusPanel';
 import { SettingsDrawer } from './components/SettingsDrawer';
-import { BottomTabBar, type ChatTab } from './components/BottomTabBar';
 import { TasksPanel } from './components/TasksPanel';
+import { MessageActionSheet } from './components/MessageActionSheet';
 
 import { usePresence } from './lib/presence';
 import { useChatSession } from './hooks/useChatSession';
@@ -53,7 +58,7 @@ export default function App() {
   // 底部标签栏选中的「同一屏内容」：对话 / 任务。
   // 记忆是独立的全屏弹层（它自己取数、有自己的返回），不占这个状态，
   // 否则点「对话」还得先把弹层关掉，两个来源会互相覆盖。
-  const [tab, setTab] = useState<ChatTab>('chat');
+  const [tab, setTab] = useState<'chat' | 'tasks'>('chat');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
@@ -62,6 +67,13 @@ export default function App() {
   const [plusOpen, setPlusOpen] = useState(false);
   const [themePickerOpen, setThemePickerOpen] = useState(false);
   const [monitoringOpen, setMonitoringOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [agentToolsOpen, setAgentToolsOpen] = useState(false);
+  const [actionMessage, setActionMessage] = useState<Message | null>(null);
+  const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
+  const [hiddenMessageIds, setHiddenMessageIds] = useState<Set<string>>(
+    new Set()
+  );
 
   // ---- 当前会话 id（组合状态：聊天请求与历史列表都要用）----
   // 会话 id 不落本地存储，以服务端 /sessions 为权威。
@@ -73,6 +85,47 @@ export default function App() {
 
   const { theme, selectMode, selectTheme } = useThemePreference();
   const styles = useMemo(() => createAppStyles(theme), [theme]);
+
+  useEffect(() => {
+    let cancelled = false;
+    AsyncStorage.getItem('bluebird.favoriteMessages')
+      .then(raw => {
+        if (cancelled || !raw) return;
+        const ids = JSON.parse(raw);
+        if (Array.isArray(ids)) setFavoriteIds(new Set(ids.filter(Boolean)));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggleFavorite = (message: Message) => {
+    setFavoriteIds(prev => {
+      const next = new Set(prev);
+      if (next.has(message.id)) next.delete(message.id);
+      else next.add(message.id);
+      void AsyncStorage.setItem(
+        'bluebird.favoriteMessages',
+        JSON.stringify([...next])
+      ).catch(() => {});
+      return next;
+    });
+  };
+
+  const deleteMessage = (message: Message) => {
+    if (message.role === 'user') {
+      chat.recallMessage(message);
+      return;
+    }
+
+    const key = `${currentSessionId}:${message.id}`;
+    setHiddenMessageIds(prev => new Set(prev).add(key));
+    Alert.alert(
+      '已从本机视图隐藏',
+      '服务端尚未提供删除单条 AI 回复的接口；刷新或重新进入会话后可能恢复显示。'
+    );
+  };
 
   const { streamingEnabled, setStreaming } = useStreamingPreference();
   const { selectedModel, selectedModelLabel, refreshModelSelection } =
@@ -108,6 +161,7 @@ export default function App() {
     setCurrentSessionId,
     onEnterChat: () => {
       setHistoryOpen(false);
+      setTab('chat');
       setScreen('chat');
     },
   });
@@ -148,17 +202,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 标签栏「记忆」：直接开全屏弹层，不写 tab —— 记忆弹层自带取数与返回，
-  // 若也进 tab 状态，点「对话」时会出现「弹层还开着但选中项已变」的错位。
-  const handleTabChange = (next: ChatTab) => {
-    if (next === 'memory') {
-      setMemoryOpen(true);
-      return;
-    }
-
-    setTab(next);
-  };
-
   // 历史聊天：打开列表弹层，并让列表刷新一次（服务端为权威）
   const openChatHistory = () => {
     if (actions.busy) return;
@@ -186,6 +229,22 @@ export default function App() {
     void attachments.pickImage(source);
   };
 
+  const visibleMessages = useMemo(
+    () =>
+      chat.messages.filter(
+        message => !hiddenMessageIds.has(`${currentSessionId}:${message.id}`)
+      ),
+    [chat.messages, currentSessionId, hiddenMessageIds]
+  );
+
+  const isFavorite = useCallback(
+    (message: Message) => favoriteIds.has(message.id),
+    [favoriteIds]
+  );
+
+  const currentSessionTitle =
+    sessionList.sessions.find(item => item.id === currentSessionId)?.title || '';
+
   const historyProps = {
     theme,
     currentSessionId,
@@ -195,47 +254,40 @@ export default function App() {
     onRefresh: () => void refreshSessions(),
     onSelectSession: actions.selectSession,
     onDeleteSession: actions.deleteSession,
+    onNewChat: () => {
+      setTab('chat');
+      void actions.createNewChat();
+    },
   };
 
-  if (screen === 'home') {
-    return (
-      <>
+  return (
+    <View style={{ flex: 1 }}>
+      {screen === 'home' ? (
         <HomeScreen
-          onContinue={() => setScreen('chat')}
-          onNewChat={actions.createNewChat}
+          onOpenMenu={() => setDrawerOpen(true)}
+          onContinue={() => {
+            setTab('chat');
+            setScreen('chat');
+          }}
+          onNewChat={() => {
+            setTab('chat');
+            void actions.createNewChat();
+          }}
           onHistory={openChatHistory}
           creatingChat={actions.creatingSession}
         />
-
-        <HistoryScreen
-          visible={historyOpen}
-          onClose={() => setHistoryOpen(false)}
-          {...historyProps}
-        />
-      </>
-    );
-  }
-
-  return (
-    <SafeAreaView style={styles.container}>
-      {/* 基础聊天背景（仅深色模式）。
-          必须放在 KeyboardAvoidingView 之前、并让 KAV 不设背景，
-          否则 KAV 的不透明底会把光晕整层盖住。
-          各层 pointerEvents="none"，不拦截任何触摸。 */}
-      {theme.mode === 'dark' && (
-        <>
-          <View pointerEvents="none" style={styles.chatBase} />
-          <View pointerEvents="none" style={styles.chatGlowCool} />
-          <View pointerEvents="none" style={styles.chatGlowWarm} />
-        </>
-      )}
-
-      <KeyboardAvoidingView style={styles.keyboardArea} behavior="padding">
+      ) : (
+        <SafeAreaView style={styles.container}>
+          <KeyboardAvoidingView style={styles.keyboardArea} behavior="padding">
         <ChatHeader
           theme={theme}
           onOpenDrawer={() => setDrawerOpen(true)}
-          onNewChat={actions.createNewChat}
+          onNewChat={() => {
+            setTab('chat');
+            void actions.createNewChat();
+          }}
           onOpenHistory={openChatHistory}
+          sessionTitle={currentSessionTitle}
           creatingChat={actions.creatingSession}
         />
 
@@ -245,7 +297,7 @@ export default function App() {
         ) : (
           <MessageList
             theme={theme}
-            messages={chat.messages}
+            messages={visibleMessages}
             sessionId={currentSessionId}
             loadingHistory={chat.loadingHistory || chat.loadingOlder}
             loadingOlder={chat.loadingOlder}
@@ -257,6 +309,8 @@ export default function App() {
             onRecall={chat.recallMessage}
             onRetry={chat.sendMessage}
             onContinue={() => void chat.sendContinuation()}
+            onOpenActions={setActionMessage}
+            isFavorite={isFavorite}
           />
         )}
 
@@ -266,7 +320,8 @@ export default function App() {
             theme={theme}
             value={input}
             onChangeText={setInput}
-            sending={chat.sending}
+            sending={chat.sending || chat.continuing}
+            onStop={chat.stopGeneration}
             loadingHistory={chat.loadingHistory}
             uploadingImage={attachments.uploadingImage}
             pendingAttachments={attachments.pendingAttachments}
@@ -280,11 +335,9 @@ export default function App() {
             onOpenModels={() => setModelsOpen(true)}
           />
         )}
-      </KeyboardAvoidingView>
-
-      {/* 标签栏留在 KeyboardAvoidingView 之外：Android 用 adjustResize，
-          窗口本身缩小，放在外面才不会被 KAV 的 padding 再顶一次 */}
-      <BottomTabBar theme={theme} active={tab} onChange={handleTabChange} />
+          </KeyboardAvoidingView>
+        </SafeAreaView>
+      )}
 
       {/* 设置抽屉：☰ / ⋮ 的目的地，历史·记忆·控制面板·模型·主题·清理都从这里进 */}
       <SettingsDrawer
@@ -299,7 +352,8 @@ export default function App() {
         }}
         onNewChat={() => {
           setDrawerOpen(false);
-          actions.createNewChat();
+          setTab('chat');
+          void actions.createNewChat();
         }}
         onReturnHome={() => {
           setDrawerOpen(false);
@@ -316,6 +370,24 @@ export default function App() {
         onOpenMonitoring={() => {
           setDrawerOpen(false);
           setMonitoringOpen(true);
+        }}
+        onOpenAgentTools={() => {
+          setDrawerOpen(false);
+          setAgentToolsOpen(true);
+        }}
+        onOpenSettings={() => {
+          setDrawerOpen(false);
+          setSettingsOpen(true);
+        }}
+        onOpenTasks={() => {
+          setDrawerOpen(false);
+          setScreen('chat');
+          setTab('tasks');
+        }}
+        onOpenChat={() => {
+          setDrawerOpen(false);
+          setScreen('chat');
+          setTab('chat');
         }}
         onOpenModels={() => {
           setDrawerOpen(false);
@@ -380,11 +452,68 @@ export default function App() {
         onSelect={selectTheme}
       />
 
+      <SettingsScreen
+        visible={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        theme={theme}
+        modelLabel={selectedModelLabel}
+        streamingEnabled={streamingEnabled}
+        onToggleStreaming={setStreaming}
+        onOpenModels={() => {
+          setSettingsOpen(false);
+          setModelsOpen(true);
+        }}
+        onOpenMemory={() => {
+          setSettingsOpen(false);
+          setMemoryOpen(true);
+        }}
+        onOpenControlPanel={() => {
+          setSettingsOpen(false);
+          setPanelOpen(true);
+        }}
+        onOpenAgentTools={() => {
+          setSettingsOpen(false);
+          setAgentToolsOpen(true);
+        }}
+        onOpenMonitoring={() => {
+          setSettingsOpen(false);
+          setMonitoringOpen(true);
+        }}
+        onOpenTheme={() => {
+          setSettingsOpen(false);
+          setThemePickerOpen(true);
+        }}
+        onClearHistory={() => {
+          setSettingsOpen(false);
+          chat.clearHistory();
+        }}
+      />
+
+      <AgentToolsScreen
+        visible={agentToolsOpen}
+        onClose={() => setAgentToolsOpen(false)}
+        theme={theme}
+        onOpenAdvanced={() => {
+          setAgentToolsOpen(false);
+          setPanelOpen(true);
+        }}
+      />
+
+      <MessageActionSheet
+        visible={!!actionMessage}
+        message={actionMessage}
+        theme={theme}
+        isFavorite={!!actionMessage && isFavorite(actionMessage)}
+        onClose={() => setActionMessage(null)}
+        onToggleFavorite={toggleFavorite}
+        onDelete={deleteMessage}
+      />
+
       <HistoryScreen
         visible={historyOpen}
         onClose={() => setHistoryOpen(false)}
         {...historyProps}
       />
-    </SafeAreaView>
+    </View>
   );
 }

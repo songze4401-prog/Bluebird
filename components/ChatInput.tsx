@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import {
+  Alert,
   View,
   Text,
   TextInput,
@@ -24,6 +25,7 @@ export function ChatInput({
   onChangeText,
   sending,
   onSend,
+  onStop,
   loadingHistory,
   pendingAttachments = [],
   onRemoveAttachment,
@@ -37,6 +39,8 @@ export function ChatInput({
   onChangeText: (text: string) => void;
   sending: boolean;
   onSend: () => void;
+  // 用户主动停止生成；仅 sending 时生效
+  onStop?: () => void;
   // 会话历史加载中：发送会带错上下文，先禁用
   loadingHistory?: boolean;
   // 已上传待发送的图片附件（点 × 移除）
@@ -119,7 +123,7 @@ export function ChatInput({
         <TextInput
           value={value}
           onChangeText={onChangeText}
-          placeholder="输入消息"
+          placeholder={sending ? '继续和 Blue 说…' : '问 Blue 任何事'}
           placeholderTextColor={theme.chatMuted}
           cursorColor={theme.accent}
           selectionColor={theme.accentBorder}
@@ -127,19 +131,41 @@ export function ChatInput({
           multiline
         />
 
-        {canSend && (
-          // 有输入内容或待发送图片：右侧出现圆形发送按钮（向上箭头）
+        <TouchableOpacity
+          style={styles.micButton}
+          onPress={() =>
+            Alert.alert('语音输入', '该能力尚未接入当前版本，暂未开放。')
+          }
+          activeOpacity={0.7}
+          accessibilityLabel="语音输入（暂未开放）"
+        >
+          <View style={styles.micGlyph}>
+            <View style={styles.micCapsule} />
+            <View style={styles.micStem} />
+          </View>
+        </TouchableOpacity>
+
+        {sending ? (
+          <TouchableOpacity
+            style={[styles.sendButton, styles.stopButton]}
+            onPress={onStop}
+            activeOpacity={0.75}
+            accessibilityLabel="停止生成"
+          >
+            <View style={styles.stopGlyph} />
+          </TouchableOpacity>
+        ) : (
           <TouchableOpacity
             style={[
               styles.sendButton,
-              sendDisabled && styles.sendButtonDisabled,
+              (!canSend || sendDisabled) && styles.sendButtonDisabled,
             ]}
             onPress={onSend}
-            disabled={sendDisabled}
+            disabled={!canSend || sendDisabled}
             activeOpacity={0.75}
             accessibilityLabel="发送"
           >
-            <Text style={styles.sendText}>{sending ? '···' : '↑'}</Text>
+            <Text style={styles.sendText}>↑</Text>
           </TouchableOpacity>
         )}
       </View>
@@ -232,6 +258,8 @@ const createStyles = (theme: Theme) =>
       minHeight: CHAT_LAYOUT.capsuleHeight,
       borderRadius: CHAT_LAYOUT.capsuleHeight / 2,
       backgroundColor: theme.pill,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
       flexDirection: 'row',
       alignItems: 'center',
       paddingLeft: CHAT_LAYOUT.capsuleInset + 4,
@@ -271,6 +299,41 @@ const createStyles = (theme: Theme) =>
       backgroundColor: theme.sendButton,
       alignItems: 'center',
       justifyContent: 'center',
+    },
+    micButton: {
+      width: 32,
+      height: 34,
+      alignItems: 'center',
+      justifyContent: 'center',
+      flexShrink: 0,
+    },
+    micGlyph: {
+      width: 12,
+      height: 18,
+      alignItems: 'center',
+    },
+    micCapsule: {
+      width: 7,
+      height: 11,
+      borderWidth: 1.4,
+      borderColor: theme.chatMuted,
+      borderRadius: 4,
+    },
+    micStem: {
+      width: 1.4,
+      height: 5,
+      backgroundColor: theme.chatMuted,
+    },
+    stopButton: {
+      backgroundColor: 'transparent',
+      borderWidth: 1,
+      borderColor: theme.borderStrong,
+    },
+    stopGlyph: {
+      width: 9,
+      height: 9,
+      borderRadius: 2,
+      backgroundColor: theme.chatText,
     },
     sendText: {
       color: theme.textOnAccent,
