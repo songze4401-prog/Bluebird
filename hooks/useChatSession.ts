@@ -111,6 +111,8 @@ export type ChatSessionApi = {
     extras?: ChatSendExtras
   ) => Promise<void>;
   sendContinuation: () => Promise<void>;
+  // 用户主动停止当前回复/续写；保留已收到的部分正文，不再等待服务器
+  stopGeneration: () => void;
   // stale=true：结果已被更新的请求取代，调用方不得据此改会话或弹错
   loadHistory: (
     sessionId: string
@@ -146,6 +148,10 @@ export function useChatSession({
   const [sending, setSending] = useState(false);
   const [continuing, setContinuing] = useState(false);
   const [mood, setMood] = useState('calm');
+
+  // 当前聊天请求的中断控制器：流式与非流式共用，停止按钮只操作这一条
+  const abortRef = useRef<AbortController | null>(null);
+  const userAbortRef = useRef(false);
 
   // 本轮在途的 Agent 工具调用（仅流式、仅 sending 期间有值）。
   // 刻意不进 messages：工具轮在 delta 之前跑完，此时还没有对应的 assistant
@@ -342,6 +348,9 @@ export function useChatSession({
     onError: (message: string) => void;
   }): Promise<void> => {
     const { requestSessionId, payload, retry, localUserId } = options;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    userAbortRef.current = false;
 
     // 服务端 id 落地：撤回需要稳定 id，用服务端返回的 id 替换本地临时 id
     const applyServerUserId = (serverUserId: string) => {
@@ -370,6 +379,7 @@ export function useChatSession({
         let streamMode: StreamMode = 'auto';
 
         const outcome = await streamChatRequest(payload, {
+          signal: controller.signal,
           onMeta: meta => {
             if (
               meta.messageMode === 'single' ||
@@ -436,6 +446,28 @@ export function useChatSession({
           return;
         }
 
+        if (outcome.kind === 'aborted') {
+          if (sessionIdRef.current === requestSessionId) {
+            if (streamedText) {
+              // 保留已经生成的部分，换成一条本地停止消息；不伪造服务端 id
+              setMessages(prev =>
+                reconcileStreamDone(prev, streamTempId, [
+                  {
+                    id: `stopped-${makeLocalId()}-ai`,
+                    role: 'assistant',
+                    content: streamedText,
+                    createdAt: streamCreatedAt,
+                    stopped: true,
+                  },
+                ])
+              );
+            } else {
+              setMessages(prev => removeStreamBubble(prev, streamTempId));
+            }
+          }
+          return;
+        }
+
         if (outcome.kind === 'error') {
           options.onStreamError(outcome.message, streamTempId);
           return;
@@ -452,6 +484,7 @@ export function useChatSession({
         // 超时由 apiFetch 统一负责（此处保留原有 60s 预算）
         timeoutMs: TIMEOUTS.chat,
         body: JSON.stringify(payload),
+        signal: controller.signal,
       });
 
       const data = (await readJsonResponse(response)) as ChatResponse;
@@ -480,9 +513,13 @@ export function useChatSession({
         setMessages(prev => [...prev, ...bubbles]);
       }
     } catch (error) {
+      // 用户主动停止：不显示错误、不追加错误气泡
+      if (userAbortRef.current && controller.signal.aborted) return;
       console.error(error);
       options.onError(toErrorMessage(error));
     } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+      userAbortRef.current = false;
       // 本轮结束：实时工具 pill 收起。done 分支里服务端权威 toolSteps 已挂到
       // 最后一条 assistant 消息上，继续显示会造成「同一件事出现两次」。
       setLiveToolSteps(prev =>
@@ -537,7 +574,10 @@ export function useChatSession({
 
     // welcome 是纯本地展示消息，不进模型上下文
     const past = messagesState.filter(
-      item => !item.retryText && !item.id.startsWith('welcome-')
+      item =>
+        !item.retryText &&
+        !item.stopped &&
+        !item.id.startsWith('welcome-')
     );
     const history = (isRetry ? past.slice(0, -1) : past)
       .slice(-HISTORY_CONTEXT_LIMIT)
@@ -647,7 +687,12 @@ export function useChatSession({
     reportInteraction(requestSessionId);
 
     const history = messagesState
-      .filter(item => !item.retryText && !item.id.startsWith('welcome-'))
+      .filter(
+        item =>
+          !item.retryText &&
+          !item.stopped &&
+          !item.id.startsWith('welcome-')
+      )
       .slice(-HISTORY_CONTEXT_LIMIT)
       .map(item => ({ role: item.role, content: item.content }));
 
@@ -685,6 +730,15 @@ export function useChatSession({
       setContinuing(false);
     }
   };
+
+  // 主动停止当前生成：只中止本次请求，保留已到 delta 的本地部分回复。
+  // 真正的清理发生在 runChat 的 finally（abortRef / liveToolSteps / sending）。
+  const stopGeneration = useCallback(() => {
+    const controller = abortRef.current;
+    if (!controller || controller.signal.aborted) return;
+    userAbortRef.current = true;
+    controller.abort();
+  }, []);
 
   const clearHistory = () => {
     Alert.alert(
@@ -794,6 +848,7 @@ export function useChatSession({
     liveToolSteps: activeToolSteps,
     sendMessage,
     sendContinuation,
+    stopGeneration,
     loadHistory,
     loadOlderHistory,
     hasMoreHistory,

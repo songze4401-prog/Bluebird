@@ -311,6 +311,51 @@ describe('发送守卫', () => {
     expect(mockApiFetch).not.toHaveBeenCalled();
   });
 
+  it('stopGeneration 中止在途请求、清空 sending，且不追加错误气泡', async () => {
+    let rejectRequest: ((reason?: unknown) => void) | null = null;
+
+    mockApiFetch.mockImplementationOnce(
+      (_path: string, init: { signal?: AbortSignal }) =>
+        new Promise<Response>((_resolve, reject) => {
+          rejectRequest = reject;
+          const abort = () => {
+            const error = new Error('aborted');
+            error.name = 'AbortError';
+            reject(error);
+          };
+          if (init.signal?.aborted) abort();
+          else init.signal?.addEventListener('abort', abort, { once: true });
+        })
+    );
+
+    const hook = await setup();
+
+    await act(async () => {
+      hook.result.current.markHistoryLoaded();
+    });
+
+    let sendingPromise: Promise<void> | null = null;
+
+    await act(async () => {
+      sendingPromise = hook.result.current.sendMessage();
+    });
+
+    expect(hook.result.current.sending).toBe(true);
+
+    await act(async () => {
+      hook.result.current.stopGeneration();
+      await sendingPromise;
+    });
+
+    expect(hook.result.current.sending).toBe(false);
+    expect(
+      hook.result.current.messages.some(
+        message => message.role === 'assistant' && message.retryText
+      )
+    ).toBe(false);
+    expect(rejectRequest).not.toBeNull();
+  });
+
   it('有文字时发出 /chat，并用服务端 id 替换本地临时 id', async () => {
     mockApiFetch.mockImplementationOnce(() =>
       Promise.resolve(

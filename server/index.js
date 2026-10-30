@@ -343,6 +343,7 @@ const {
   listToolSpecs,
   listToolMetadata,
   MAX_ROUNDS,
+  TOOL_TIMEOUT_DEFAULT,
 } = require('./agent-runtime');
 
 // Context Runtime v3：唯一上下文链路（无兼容双路径）。
@@ -1856,10 +1857,29 @@ app.post('/memory/clear-session', requireAuth, async (req, res) => {
   }
 });
 
-// 记忆库：读取当前全部长期记忆（只读，不重置内存数组）
+// 记忆库：读取当前全部长期记忆（只读，不重置内存数组）。
+// scope=all 是只读审计视图：复用 getMemories 已有的 include* 选项，
+// 返回 pending / archived / superseded，不改变默认 /memory 的“当前有效”语义。
 app.get('/memory', requireAuth, (req, res) => {
   try {
-    res.json({ memories: getMemories() });
+    const rawScope = req.query.scope;
+
+    if (rawScope !== undefined && rawScope !== 'all') {
+      return res.status(400).json({ error: 'scope 只支持 all' });
+    }
+
+    const includeAll = rawScope === 'all';
+
+    res.json({
+      memories: includeAll
+        ? getMemories({
+            includeSuperseded: true,
+            includeArchived: true,
+            includePending: true,
+          })
+        : getMemories(),
+      scope: includeAll ? 'all' : 'active',
+    });
   } catch (error) {
     console.error('Memory API Error:', error);
     res.status(500).json({ error: '读取长期记忆失败' });
@@ -2092,6 +2112,13 @@ app.get('/agent-policy', requireAuth, (req, res) => {
       meta: getAgentPolicyMeta(),
       limits: AGENT_POLICY_LIMITS,
       runtimeLimits: { maxRounds: MAX_ROUNDS },
+      runtime: {
+        // 只读状态：UI 可以展示，不能通过本接口改写服务端环境开关。
+        switchOn: agentToolsEnabled(),
+        maxRounds: MAX_ROUNDS,
+        toolTimeoutDefaultMs: TOOL_TIMEOUT_DEFAULT,
+        imageRequestsDisableTools: true,
+      },
       availableTools: listToolMetadata(),
     });
   } catch (_) {

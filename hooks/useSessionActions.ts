@@ -17,6 +17,7 @@ import type {
   CreateSessionResponse,
   DeleteSessionResponse,
 } from '../lib/api/types';
+import type { SessionMeta } from '../lib/types';
 import { readJsonResponse } from '../lib/utils';
 import { DEFAULT_SESSION_ID } from '../lib/constants';
 import type { ChatSessionApi } from './useChatSession';
@@ -26,7 +27,12 @@ export type SessionActionsApi = {
   // 任一聊天/会话请求进行中：用于禁用入口，防连点与并发串会话
   busy: boolean;
   creatingSession: boolean;
-  createNewChat: () => Promise<void>;
+  createNewChat: (options?: {
+    // 启动引导专用：跳过「历史加载中」闸门
+    force?: boolean;
+    // 启动引导专用：失败不弹阻断对话框
+    silent?: boolean;
+  }) => Promise<SessionMeta | null>;
   // 选中会话并加载历史；失败时提示且不切会话
   selectSession: (sessionId: string) => Promise<void>;
   // 删除会话：删的是当前会话时退回默认会话；成功后重拉列表
@@ -52,9 +58,12 @@ export function useSessionActions({
   const busy =
     creatingSession || chat.sending || chat.continuing || chat.loadingHistory;
 
-  // 新建聊天：点击即创建独立会话（POST /sessions），进入空的聊天页
-  const createNewChat = async () => {
-    if (busy) return;
+  // 新建聊天：点击即创建独立会话（POST /sessions），进入空的聊天页。
+  // 启动引导会以 force + silent 调用，避免被历史加载闸门挡住或在弱网时弹框。
+  const createNewChat = async (
+    options: { force?: boolean; silent?: boolean } = {}
+  ): Promise<SessionMeta | null> => {
+    if (busy && !options.force) return null;
 
     setCreatingSession(true);
 
@@ -72,15 +81,24 @@ export function useSessionActions({
 
       setCurrentSessionId(data.session.id);
       chat.resetMessages();
+      // 新会话要立刻出现在抽屉与历史列表；刷新失败不阻塞进入新对话。
+      void sessionList.refresh();
       onEnterChat();
+
+      return data.session;
     } catch (error) {
       console.error('Create session error:', error);
-      Alert.alert(
-        '新建聊天失败',
-        error instanceof Error && error.message.includes('新建会话失败')
-          ? error.message
-          : '暂时无法连接会话服务，请稍后再试。'
-      );
+
+      if (!options.silent) {
+        Alert.alert(
+          '新建聊天失败',
+          error instanceof Error && error.message.includes('新建会话失败')
+            ? error.message
+            : '暂时无法连接会话服务，请稍后再试。'
+        );
+      }
+
+      return null;
     } finally {
       setCreatingSession(false);
     }

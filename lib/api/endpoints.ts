@@ -25,12 +25,15 @@ export const API_PATHS = {
 
   // 记忆
   memory: '/memory',
+  // 只读审计视图：包含 pending / archived / superseded，供 Memory Center 使用
+  memoryAll: '/memory?scope=all',
   memoryDelete: '/memory/delete',
   memoryClear: '/memory/clear',
   memoryPending: '/memory/pending',
   memoryConfirm: '/memory/confirm',
   memoryReject: '/memory/reject',
   memoryArchive: '/memory/archive',
+  memoryWriteAttempts: '/memory/write-attempts',
 
   // 附件上传
   uploads: '/uploads/image',

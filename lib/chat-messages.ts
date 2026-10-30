@@ -88,6 +88,7 @@ export function toToolStepViews(
     ok: step.ok === true,
     summary: typeof step.summary === 'string' ? step.summary : '',
     running: false,
+    ...(Number.isFinite(step.durationMs) ? { durationMs: step.durationMs } : {}),
   }));
 }
 
