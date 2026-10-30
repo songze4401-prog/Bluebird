@@ -1,6 +1,6 @@
 name: CI
 
-# 回归兜底：后端 44 个测试文件（1531 项）+ 前端 17 套单元测试（162 项）+ tsc --noEmit + Expo lint。
+# 回归兜底：后端 45 个测试文件（1540 项）+ 前端 17 套单元测试（162 项）+ tsc --noEmit + Expo lint。
 # 触发范围：main、workbuddy/**、qoder/** 分支的 push、针对 main 的 PR、手动触发。
 # 测试命令与 AGENTS.md「Tests」小节保持一致——新增测试文件时同步更新本文件，
 # 否则新文件不会被运行（静默漏测）；覆盖验证脚本会比对 CI 清单与 tests/ 实际文件。
@@ -49,10 +49,10 @@ jobs:
 
       # 逐文件单独跑（AGENTS.md 约定）。某个套件失败也跑完其余套件，
       # 最后统一以非零退出码结束，方便一次看全失败面。
-      - name: 自定义 runner 三十七套（逐文件单独跑，共 1310 项）
+      - name: 自定义 runner 三十八套（逐文件单独跑，共 1319 项）
         run: |
           fail=0
-          for f in api atomic-write chat-persist corruption-contract data-events emotion-decay-global memory-session-scope session-scope-e2e sessions-recovery sessions presence time-gap persona chat-stream multimodal sticker-repo model-providers model-routing agent-policy agent-tools context-engine-e2e delete-semantics memory-agent-write memory-api-recall memory-context-injection memory-eval-baseline memory-id-migration memory-id-order memory-lifecycle-decisions memory-restart memory-retrieval memory-semantic memory-session-isolation memory-startup-lock retrieval retrieval-api monitoring-api; do
+          for f in api atomic-write chat-persist corruption-contract data-events emotion-decay-global memory-session-scope session-scope-e2e sessions-recovery sessions presence time-gap persona chat-stream multimodal sticker-repo model-providers model-routing agent-policy agent-tools context-engine-e2e delete-semantics memory-agent-write memory-api-recall memory-context-injection memory-eval-baseline memory-id-migration memory-id-order memory-lifecycle-decisions memory-restart memory-retrieval memory-semantic memory-session-isolation memory-startup-lock retrieval retrieval-api retrieval-embeddings monitoring-api; do
             echo "::group::node tests/$f.test.js"
             node "tests/$f.test.js" || fail=1
             echo "::endgroup::"
