@@ -657,3 +657,216 @@ export type MonitoringHealthResponse = {
   capabilities?: Record<string, unknown>;
   query_layer?: { calls: number; errors: number; last_query_at: string | null };
 };
+
+// ---- Memory Bot ----
+export type AgentCredentialSummary = {
+  credentialId: string;
+  botId: string;
+  providerId: string;
+  keyHint: string;
+  createdAt: string;
+  updatedAt: string;
+  lastVerifiedAt?: string | null;
+  lastVerifyOk?: boolean | null;
+};
+
+export type AgentSummary = {
+  botId: string;
+  displayName: string;
+  version: string;
+  description: string;
+  capabilities: string[];
+  acceptedTaskTypes: string[];
+  entrypoints: string[];
+  permissionProfileId: string;
+  toolAllowlist: string[];
+  availableTools: string[];
+  permission: AgentPermissionProfile;
+  status: 'enabled' | 'disabled' | 'degraded';
+  statusReason: string | null;
+  enabled: boolean;
+  model: {
+    providerId: string;
+    modelId: string;
+    temperature: number;
+    maxTokens: number;
+    timeoutMs: number;
+  };
+  credential: AgentCredentialSummary | null;
+  sessionsCount: number;
+  lastActivityAt: string | null;
+  updatedAt: string;
+};
+
+export type AgentPermissionProfile = {
+  profileId: string;
+  mode: 'single_user' | string;
+  actorId: string;
+  allowedOperations: string[];
+  approvalRequired: string[];
+  extensionPoint: { multiUser: boolean; aclResolver: string };
+};
+
+export type AgentApproval = {
+  approvalId: string;
+  botId: string;
+  taskId: string | null;
+  sessionId: string | null;
+  operation: string;
+  payload: Record<string, unknown>;
+  risk: string;
+  status: 'pending' | 'approved' | 'rejected' | 'executing' | 'completed' | 'failed';
+  requestedBy: string;
+  requestedAt: string;
+  decidedBy: string | null;
+  decidedAt: string | null;
+  executedBy: string | null;
+  executedAt: string | null;
+  reason: string | null;
+  errorCode: string | null;
+  result: Record<string, unknown> | null;
+};
+
+export type AgentApprovalsResponse = { approvals: AgentApproval[] };
+export type AgentApprovalResponse = { approval: AgentApproval };
+
+export type AgentsResponse = { agents: AgentSummary[] };
+export type AgentResponse = { agent: AgentSummary };
+
+export type AgentConfig = {
+  botId: string;
+  enabled: boolean;
+  modelProfile: {
+    providerId: string;
+    modelId: string;
+    credentialId?: string | null;
+    temperature: number;
+    maxTokens: number;
+    timeoutMs: number;
+  };
+  prompt: { systemPrompt: string; version: string };
+  toolAllowlist: string[];
+  permissionProfileId: string;
+  updatedAt: string;
+};
+
+export type AgentConfigResponse = {
+  config: AgentConfig;
+  agent: AgentSummary;
+};
+
+export type AgentCredentialResponse = {
+  credential: AgentCredentialSummary;
+  agent: AgentSummary;
+};
+
+export type AgentVerifyResponse = {
+  ok: boolean;
+  code: string;
+  error: string;
+  httpStatus: number | null;
+  latencyMs: number;
+  credential?: AgentCredentialSummary | null;
+  agent: AgentSummary;
+};
+
+export type AgentSession = {
+  id: string;
+  botId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+};
+
+export type AgentChatMessage = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  createdAt: string;
+  toolSteps?: ToolStep[];
+};
+
+export type AgentSessionDetailResponse = {
+  session: AgentSession;
+  messages: AgentChatMessage[];
+};
+
+export type AgentSessionsResponse = { sessions: AgentSession[] };
+
+export type AgentChatResponse = {
+  ok: true;
+  botId: string;
+  sessionId: string;
+  session: AgentSession;
+  message: AgentChatMessage;
+  toolSteps: ToolStep[];
+  evidence?: Array<{ kind: string; id: string }>;
+  changes?: Array<{ kind: string; id: string; decision: string }>;
+  requiresConfirmation?: boolean;
+  toolsEnabled: boolean;
+  model: { providerId: string; modelId: string };
+  stopReason: string | null;
+  messageCount: number;
+};
+
+export type AgentEvent = {
+  eventId: string;
+  taskId: string | null;
+  runId: string | null;
+  botId: string;
+  sessionId: string | null;
+  timestamp: string;
+  eventType: string;
+  payload: Record<string, string | number | boolean | null>;
+  correlationId: string | null;
+};
+
+export type AgentEventsResponse = { events: AgentEvent[] };
+
+export type AgentTask = {
+  taskId: string;
+  botId: string;
+  taskType: string;
+  goal: string;
+  sessionId: string | null;
+  parentSessionId?: string | null;
+  parentMessageId?: string | null;
+  deliveredToParentAt?: string | null;
+  deliveryMessageId?: string | null;
+  deliveryStatus?: 'pending' | 'delivered' | 'failed' | 'not_applicable';
+  deliveryErrorCode?: string | null;
+  allowedTools: string[];
+  deadlineMs: number;
+  status:
+    | 'queued'
+    | 'accepted'
+    | 'running'
+    | 'waiting_approval'
+    | 'completed'
+    | 'failed'
+    | 'cancelled'
+    | 'timed_out';
+  cancelRequested: boolean;
+  attempts: number;
+  maxAttempts: number;
+  recoveredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  errorCode: string | null;
+  result: {
+    summary: string;
+    toolSteps: ToolStep[];
+    evidence: Array<{ kind: string; id: string }>;
+    changes: Array<{ kind: string; id: string; decision: string }>;
+    requiresConfirmation: boolean;
+    rounds: number;
+    stopReason: string | null;
+    model: { providerId: string; modelId: string } | null;
+  } | null;
+};
+
+export type AgentTasksResponse = { tasks: AgentTask[] };
+export type AgentTaskResponse = { task: AgentTask };

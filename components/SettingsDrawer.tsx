@@ -42,6 +42,7 @@ export function SettingsDrawer({
   onOpenControlPanel,
   onOpenMonitoring,
   onOpenAgentTools,
+  onOpenAgentTeam,
   onOpenSettings,
   onOpenTasks,
   onOpenChat,
@@ -66,6 +67,7 @@ export function SettingsDrawer({
   onOpenControlPanel: () => void;
   onOpenMonitoring?: () => void;
   onOpenAgentTools?: () => void;
+  onOpenAgentTeam?: () => void;
   onOpenSettings?: () => void;
   onOpenTasks?: () => void;
   onOpenChat?: () => void;
@@ -201,6 +203,19 @@ export function SettingsDrawer({
                   />
                 )}
               </View>
+
+              {onOpenAgentTeam && (
+                <View style={styles.quickRow}>
+                  <QuickCard
+                    theme={theme}
+                    styles={styles}
+                    glyph="◎"
+                    label="Agent 团队"
+                    hint="Memory Bot 工作台"
+                    onPress={() => runAndClose(onOpenAgentTeam)}
+                  />
+                </View>
+              )}
 
               <TouchableOpacity
                 style={styles.banner}

@@ -7,6 +7,9 @@ const express = require('express');
 const cors = require('cors');
 const retrieval = require('./retrieval');
 const { createRetrievalRouter } = require('./retrieval/routes');
+const { createAgentRouter } = require('./agents/routes');
+const agentRuntime = require('./agents/runtime');
+const agentApprovals = require('./agents/approvals');
 
 // 生产级可观测性：独立模块 + 只读查询 API。记录失败绝不影响主业务；
 // BLUEBIRD_MONITORING=0 可关闭，前端会显示 disabled 而不是健康。
@@ -67,6 +70,8 @@ app.use(rateLimit());
 
 // 统一检索：查询只读，摄取/删除/重建写索引；全部复用 Bearer 鉴权与全局限流。
 app.use('/retrieval', createRetrievalRouter({ requireAuth }));
+// Memory Bot：独立配置/凭证/会话/任务；写操作复用 Bearer 鉴权与全局限流。
+app.use(createAgentRouter({ requireAuth, auditAction }));
 // 只读监控 API：复用现有 Bearer 鉴权与全局限流；没有任何写接口。
 app.use('/monitoring', createMonitoringRouter({ requireAuth }));
 
@@ -3680,6 +3685,15 @@ if (!retrievalStatus.enabled) {
 }
 // 拿到锁之后再初始化监控：初始化失败只降级，不影响聊天主链路。
 monitoring.initMonitoring();
+
+// 重启恢复：crash 时停在 accepted/running 的任务重新入队；
+// executing 审批标记失败，等待人工重新申请，绝不自动执行。
+const approvalRecovery = agentApprovals.recoverInterrupted();
+const agentQueue = agentRuntime.initializeTaskQueue();
+console.log(
+  `[agents] task queue concurrency=${agentQueue.concurrency} recovered=${agentQueue.recovered} ` +
+    `approvalsInterrupted=${approvalRecovery.recovered}`
+);
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   // PORT 为 0 时由操作系统分配空闲端口，日志回显真实端口

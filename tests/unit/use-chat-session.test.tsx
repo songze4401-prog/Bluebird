@@ -396,3 +396,36 @@ describe('发送守卫', () => {
     expect(hook.result.current.mood).toBe('happy');
   });
 });
+
+describe('主控结果消息注入', () => {
+  it('只接收当前会话，按消息 id 去重', async () => {
+    const hook = await setup({ sessionId: 'sess-A' });
+    const incoming = {
+      id: 'bot-result-task_1',
+      role: 'assistant' as const,
+      content: '【Memory Bot 任务完成】真实结果',
+      createdAt: '2026-10-31T00:00:00.000Z',
+      toolSteps: [{ name: 'memory_search', ok: true, summary: '找到 1 条', durationMs: 3 }],
+    };
+
+    await act(async () => {
+      hook.result.current.receiveExternalMessage('sess-A', incoming);
+    });
+    expect(hook.result.current.messages).toHaveLength(1);
+    expect(hook.result.current.messages[0].id).toBe(incoming.id);
+    expect(hook.result.current.messages[0].toolSteps?.[0].running).toBe(false);
+
+    await act(async () => {
+      hook.result.current.receiveExternalMessage('sess-A', incoming);
+    });
+    expect(hook.result.current.messages).toHaveLength(1);
+
+    await act(async () => {
+      hook.result.current.receiveExternalMessage('sess-B', {
+        ...incoming,
+        id: 'bot-result-task_2',
+      });
+    });
+    expect(hook.result.current.messages).toHaveLength(1);
+  });
+});

@@ -36,6 +36,8 @@ import { HistoryScreen } from './components/HistoryScreen';
 import { ControlPanelScreen } from './components/ControlPanelScreen';
 import { SettingsScreen } from './components/SettingsScreen';
 import { AgentToolsScreen } from './components/AgentToolsScreen';
+import { AgentTeamScreen } from './components/AgentTeamScreen';
+import { MemoryBotScreen } from './components/MemoryBotScreen';
 import { MonitoringScreen } from './components/MonitoringScreen';
 import { ModelScreen } from './components/ModelScreen';
 import { PlusPanel } from './components/PlusPanel';
@@ -51,6 +53,7 @@ import { useModelSelection } from './hooks/useModelSelection';
 import { useThemePreference } from './hooks/useThemePreference';
 import { useStreamingPreference } from './hooks/useStreamingPreference';
 import { useAttachments } from './hooks/useAttachments';
+import { useBotResultStream } from './hooks/useBotResultStream';
 
 export default function App() {
   // ---- 页面与弹层（纯 UI 状态，不进任何 hook）----
@@ -69,6 +72,8 @@ export default function App() {
   const [monitoringOpen, setMonitoringOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentToolsOpen, setAgentToolsOpen] = useState(false);
+  const [agentTeamOpen, setAgentTeamOpen] = useState(false);
+  const [memoryBotOpen, setMemoryBotOpen] = useState(false);
   const [actionMessage, setActionMessage] = useState<Message | null>(null);
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
   const [hiddenMessageIds, setHiddenMessageIds] = useState<Set<string>>(
@@ -149,6 +154,23 @@ export default function App() {
     onDraftConsumed: () => setInput(''),
     onAttachmentsConsumed: attachments.clearAttachments,
     onMenuCloseRequest: () => setDrawerOpen(false),
+  });
+
+  useBotResultStream({
+    sessionId: currentSessionId,
+    onResult: result => {
+      if (result.message) {
+        chat.receiveExternalMessage(result.sessionId, result.message);
+      }
+    },
+    onDeliveryFailed: (_taskId, errorCode) => {
+      Alert.alert(
+        'Memory Bot 结果回传失败',
+        errorCode
+          ? `任务结果未能写入当前会话（${errorCode}）。可在任务页查看任务状态。`
+          : '任务结果未能写入当前会话。可在任务页查看任务状态。'
+      );
+    },
   });
 
   const sessionList = useSessionList();
@@ -331,8 +353,8 @@ export default function App() {
           />
 
           {tab === 'tasks' ? (
-            // 任务页：后端没有任务接口，这里只放真实空状态，不画假卡片
-            <TasksPanel theme={theme} />
+            // 任务页：读取真实 /agent-tasks?parentSessionId=...，仅作审计与状态查询
+            <TasksPanel theme={theme} sessionId={currentSessionId} />
           ) : (
             <MessageList
               theme={theme}
@@ -424,6 +446,10 @@ export default function App() {
         onOpenAgentTools={() => {
           setDrawerOpen(false);
           setAgentToolsOpen(true);
+        }}
+        onOpenAgentTeam={() => {
+          setDrawerOpen(false);
+          setAgentTeamOpen(true);
         }}
         onOpenSettings={() => {
           setDrawerOpen(false);
@@ -523,6 +549,10 @@ export default function App() {
           setSettingsOpen(false);
           setAgentToolsOpen(true);
         }}
+        onOpenAgentTeam={() => {
+          setSettingsOpen(false);
+          setAgentTeamOpen(true);
+        }}
         onOpenMonitoring={() => {
           setSettingsOpen(false);
           setMonitoringOpen(true);
@@ -544,6 +574,26 @@ export default function App() {
         onOpenAdvanced={() => {
           setAgentToolsOpen(false);
           setPanelOpen(true);
+        }}
+      />
+
+      <AgentTeamScreen
+        visible={agentTeamOpen}
+        onClose={() => setAgentTeamOpen(false)}
+        theme={theme}
+        onOpenBot={() => {
+          setAgentTeamOpen(false);
+          setMemoryBotOpen(true);
+        }}
+      />
+
+      <MemoryBotScreen
+        visible={memoryBotOpen}
+        onClose={() => setMemoryBotOpen(false)}
+        theme={theme}
+        onOpenMemory={() => {
+          setMemoryBotOpen(false);
+          setMemoryOpen(true);
         }}
       />
 

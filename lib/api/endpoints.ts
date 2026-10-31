@@ -23,6 +23,47 @@ export const API_PATHS = {
   persona: '/persona',
   agentPolicy: '/agent-policy',
 
+  // Memory Bot
+  agents: '/agents',
+  agent: (botId: string) => `/agents/${encodeURIComponent(botId)}`,
+  agentConfig: (botId: string) =>
+    `/agents/${encodeURIComponent(botId)}/config`,
+  agentCredentials: (botId: string) =>
+    `/agents/${encodeURIComponent(botId)}/credentials`,
+  agentCredential: (botId: string, credentialId: string) =>
+    `/agents/${encodeURIComponent(botId)}/credentials/${encodeURIComponent(credentialId)}`,
+  agentCredentialVerify: (botId: string) =>
+    `/agents/${encodeURIComponent(botId)}/credentials/verify`,
+  agentSessions: (botId: string) =>
+    `/agents/${encodeURIComponent(botId)}/sessions`,
+  agentSession: (botId: string, sessionId: string) =>
+    `/agents/${encodeURIComponent(botId)}/sessions/${encodeURIComponent(sessionId)}`,
+  agentChat: (botId: string) =>
+    `/agents/${encodeURIComponent(botId)}/chat`,
+  agentEvents: (botId: string, limit = 30) =>
+    `/agents/${encodeURIComponent(botId)}/events?limit=${limit}`,
+  agentPermissions: (botId: string) =>
+    `/agents/${encodeURIComponent(botId)}/permissions`,
+  agentApprovals: (botId: string, limit = 50) =>
+    `/agents/${encodeURIComponent(botId)}/approvals?limit=${limit}`,
+  agentApprovalCreate: (botId: string) =>
+    `/agents/${encodeURIComponent(botId)}/approvals`,
+  agentApproval: (approvalId: string) =>
+    `/agent-approvals/${encodeURIComponent(approvalId)}`,
+  agentApprovalApprove: (approvalId: string) =>
+    `/agent-approvals/${encodeURIComponent(approvalId)}/approve`,
+  agentApprovalReject: (approvalId: string) =>
+    `/agent-approvals/${encodeURIComponent(approvalId)}/reject`,
+  agentApprovalExecute: (approvalId: string) =>
+    `/agent-approvals/${encodeURIComponent(approvalId)}/execute`,
+  agentTasks: (botId: string, limit = 20) =>
+    `/agent-tasks?botId=${encodeURIComponent(botId)}&limit=${limit}`,
+  agentTaskCreate: '/agent-tasks',
+  agentTask: (taskId: string) =>
+    `/agent-tasks/${encodeURIComponent(taskId)}`,
+  agentTaskCancel: (taskId: string) =>
+    `/agent-tasks/${encodeURIComponent(taskId)}/cancel`,
+
   // 记忆
   memory: '/memory',
   // 只读审计视图：包含 pending / archived / superseded，供 Memory Center 使用

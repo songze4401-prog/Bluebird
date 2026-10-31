@@ -24,6 +24,7 @@ export function SettingsScreen({
   onOpenMemory,
   onOpenControlPanel,
   onOpenAgentTools,
+  onOpenAgentTeam,
   onOpenMonitoring,
   onOpenTheme,
   onClearHistory,
@@ -38,6 +39,7 @@ export function SettingsScreen({
   onOpenMemory: () => void;
   onOpenControlPanel: () => void;
   onOpenAgentTools: () => void;
+  onOpenAgentTeam: () => void;
   onOpenMonitoring: () => void;
   onOpenTheme: () => void;
   onClearHistory: () => void;
@@ -112,6 +114,13 @@ export function SettingsScreen({
           </Section>
 
           <Section styles={styles} label="Agent">
+            <Row
+              theme={theme}
+              styles={styles}
+              label="Agent 团队"
+              value="Memory Bot"
+              onPress={onOpenAgentTeam}
+            />
             <Row
               theme={theme}
               styles={styles}
