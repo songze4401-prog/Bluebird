@@ -31,6 +31,7 @@ let memory;
 let tool;
 let runtime;
 let agentRuntime;
+let approvals;
 let apiServer;
 let apiBase;
 let providerId;
@@ -244,6 +245,7 @@ test.before(async () => {
   memory = require('../server/memory');
   tool = require('../server/tool-dispatch-bot').definition;
   runtime = require('../server/agents/runtime');
+  approvals = require('../server/agents/approvals');
   agentRuntime = require('../server/agent-runtime');
 
   const added = apiConfigs.addModelProvider({
@@ -517,6 +519,148 @@ test('主控记忆 → 委派 Bot：memory_remember 写入父主控会话 scope'
   });
   assert.ok(mainFound.results.some(item => item.content.includes('浅烘咖啡')));
   assert.equal(botFound.results.length, 0);
+});
+
+test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时回传', async () => {
+  const main = mainSessions.createSession({ title: '审批闭环测试' });
+  const seeded = await memory.applyCandidate(
+    {
+      content: '审批闭环测试记忆',
+      type: 'fact',
+      sourceQuote: '记录审批闭环测试记忆',
+      keywords: ['审批'],
+      confidence: 0.95,
+    },
+    {
+      sessionId: main.id,
+      sourceType: 'user',
+      intent: 'explicit',
+      userText: '记录审批闭环测试记忆',
+      requireUserGrounding: true,
+    }
+  );
+  assert.equal(seeded.written, true);
+  const botSession = botSessions.createSession('memory', { title: '审批测试' });
+  const task = tasks.createTask({
+    botId: 'memory',
+    taskType: 'memory.maintain',
+    goal: '审批更新测试记忆',
+    sessionId: botSession.id,
+    parentSessionId: main.id,
+    allowedTools: ['memory_search'],
+  });
+  const approval = approvals.createApproval({
+    botId: 'memory',
+    operation: 'update',
+    payload: { id: seeded.id, content: '审批闭环测试记忆已更新' },
+    taskId: task.taskId,
+    sessionId: botSession.id,
+  });
+
+  assert.equal(tasks.getTask(task.taskId).status, 'waiting_approval');
+  await runtime.runTask(task.taskId);
+  assert.equal(tasks.getTask(task.taskId).status, 'waiting_approval');
+
+  const eventPromise = readSseUntil(
+    `${apiBase}/agent-results/stream?sessionId=${encodeURIComponent(main.id)}`,
+    event => event.type === 'result' && event.taskId === task.taskId
+  );
+  await new Promise(resolve => setTimeout(resolve, 100));
+  approvals.approve(approval.approvalId);
+  const executed = await approvals.execute(approval.approvalId);
+  assert.equal(executed.status, 'completed');
+  const finished = tasks.getTask(task.taskId);
+  assert.equal(finished.status, 'completed');
+  assert.equal(finished.deliveryStatus, 'delivered');
+  const event = await eventPromise;
+  assert.equal(event.taskId, task.taskId);
+  assert.ok(
+    mainSessions
+      .getMessages(main.id)
+      .some(message => message.content.includes('【Memory Bot 任务完成】'))
+  );
+
+  const rejectTask = tasks.createTask({
+    botId: 'memory',
+    taskType: 'memory.maintain',
+    goal: '审批拒绝测试',
+    sessionId: botSession.id,
+    parentSessionId: main.id,
+    allowedTools: ['memory_search'],
+  });
+  const rejectApproval = approvals.createApproval({
+    botId: 'memory',
+    operation: 'delete',
+    payload: { id: seeded.id },
+    taskId: rejectTask.taskId,
+    sessionId: botSession.id,
+  });
+  approvals.reject(rejectApproval.approvalId, { reason: '测试拒绝' });
+  const rejected = tasks.getTask(rejectTask.taskId);
+  assert.equal(rejected.status, 'cancelled');
+  assert.equal(rejected.errorCode, 'approval_rejected');
+  assert.ok(
+    mainSessions
+      .getMessages(main.id)
+      .some(
+        message =>
+          message.content.includes('【Memory Bot 任务未完成】') &&
+          message.content.includes('approval_rejected')
+      )
+  );
+
+  const staleTask = tasks.createTask({
+    botId: 'memory',
+    taskType: 'memory.maintain',
+    goal: '审批任务被取消测试',
+    sessionId: botSession.id,
+    parentSessionId: main.id,
+    allowedTools: ['memory_search'],
+  });
+  const staleApproval = approvals.createApproval({
+    botId: 'memory',
+    operation: 'delete',
+    payload: { id: seeded.id },
+    taskId: staleTask.taskId,
+    sessionId: botSession.id,
+  });
+  runtime.cancelTask(staleTask.taskId);
+  approvals.approve(staleApproval.approvalId);
+  await assert.rejects(
+    () => approvals.execute(staleApproval.approvalId),
+    error => error && error.code === 'task_not_waiting_approval'
+  );
+
+  const failTask = tasks.createTask({
+    botId: 'memory',
+    taskType: 'memory.maintain',
+    goal: '审批执行失败测试',
+    sessionId: botSession.id,
+    parentSessionId: main.id,
+    allowedTools: ['memory_search'],
+  });
+  const failApproval = approvals.createApproval({
+    botId: 'memory',
+    operation: 'update',
+    payload: { id: 'missing-memory-for-approval', content: '不会成功' },
+    taskId: failTask.taskId,
+    sessionId: botSession.id,
+  });
+  approvals.approve(failApproval.approvalId);
+  const failedExecution = await approvals.execute(failApproval.approvalId);
+  assert.equal(failedExecution.status, 'failed');
+  const failedTask = tasks.getTask(failTask.taskId);
+  assert.equal(failedTask.status, 'failed');
+  assert.equal(failedTask.deliveryStatus, 'delivered');
+  assert.ok(
+    mainSessions
+      .getMessages(main.id)
+      .some(
+        message =>
+          message.content.includes('【Memory Bot 任务未完成】') &&
+          message.content.includes(failTask.taskId)
+      )
+  );
 });
 
 async function readSseUntil(url, predicate, timeoutMs = 6000) {

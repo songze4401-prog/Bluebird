@@ -442,7 +442,8 @@ async function chat(botId, {
 async function runTask(taskId) {
   const task = tasks.getRawTask(taskId);
   if (!task) return;
-  if (tasks.isTerminalStatus(task.status)) return;
+  // waiting_approval 是暂停态，不是终态；由 approvals.execute/reject 收尾。
+  if (tasks.isTerminalStatus(task.status) || task.status === 'waiting_approval') return;
 
   const controller = new AbortController();
   activeRuns.set(task.taskId, controller);
@@ -457,7 +458,12 @@ async function runTask(taskId) {
     });
 
     const afterAccept = tasks.getRawTask(task.taskId);
-    if (!afterAccept || tasks.isTerminalStatus(afterAccept.status) || afterAccept.cancelRequested) {
+    if (
+      !afterAccept ||
+      tasks.isTerminalStatus(afterAccept.status) ||
+      afterAccept.status === 'waiting_approval' ||
+      afterAccept.cancelRequested
+    ) {
       return;
     }
 
@@ -490,6 +496,10 @@ async function runTask(taskId) {
 
     const latest = tasks.getRawTask(task.taskId);
     if (!latest || tasks.isTerminalStatus(latest.status) || latest.cancelRequested) {
+      return;
+    }
+    if (latest.status === 'waiting_approval') {
+      // 审批在模型执行期间创建：保留等待态，不覆盖为 completed。
       return;
     }
 
@@ -536,6 +546,7 @@ async function runTask(taskId) {
   } catch (error) {
     const latest = tasks.getRawTask(task.taskId);
     if (!latest || tasks.isTerminalStatus(latest.status)) return;
+    if (latest.status === 'waiting_approval') return;
 
     const cancelled =
       latest.cancelRequested || (error && error.code === 'cancelled');
