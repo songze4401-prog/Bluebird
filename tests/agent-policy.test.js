@@ -364,6 +364,7 @@ async function main() {
         tc('call_b2', 'echo_test', { value: 'two' }),
       ],
     },
+    { content: '预算耗尽后的总结' },
   ]);
   const beforeBudget = echoCalls;
   const traceLines = [];
@@ -378,8 +379,20 @@ async function main() {
   } finally {
     console.error = originalError;
   }
-  check('预算耗尽仍返回受控回复', budgetChat.status === 200 && budgetChat.json.reply.includes('预算'));
+  check(
+    '预算耗尽后进行无工具收尾轮并返回文本',
+    budgetChat.status === 200 && budgetChat.json.reply.includes('预算耗尽后的总结')
+  );
   check('预算耗尽后不再执行第二个工具', echoCalls - beforeBudget === 1);
+  check(
+    '收尾轮不向模型暴露 tools',
+    captured.length === 2 && captured[1].tools === undefined
+  );
+  check(
+    '收尾轮携带已执行的工具结果',
+    captured.length === 2 &&
+      captured[1].messages.some(message => message.role === 'tool')
+  );
   const trace = traceLines.length
     ? JSON.parse(traceLines[traceLines.length - 1].replace('[context-trace] ', ''))
     : null;

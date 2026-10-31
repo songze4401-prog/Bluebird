@@ -84,14 +84,14 @@ Agent Policy 与 Persona 是两套独立概念：
 运行时硬边界：
 
 - `maxRounds`：与既有 `MAX_ROUNDS` 取小；末轮强制无 tools；
-- `maxToolCalls`：达到后不再发起新工具调用，由模型收尾；
+- `maxToolCalls`：达到后不再执行新工具调用；同批超出的调用被截断，并保留一次不带 tools 的收尾轮，由模型基于已取回结果生成正文；
 - `maxTotalMs`：模型调用与工具调用前检查；单模型调用 timeout 也按剩余预算截断；
 - 连续两次工具失败：`repeated_tool_failure` 停止；
 - `maxReadOnlyRetries`：只读工具遇到 `tool_timeout`/`tool_error` 时最多重试一次；写入工具不自动重试；
 - 高风险工具：`risk: high_risk` 的工具在后端一律返回 `confirmation_required`，当前没有已授权确认流程时**不执行**；本轮工具注册表没有高风险工具，因此默认行为不变；
 - 工具白名单只能过滤已注册工具；未知工具仍 `unknown_tool`，越权写入仍 `unauthorized_write`。
 
-停止原因：`tool_call_budget`、`total_time_budget`、`repeated_tool_failure`、`client_gone`。预算停止但没有模型正文时，路由返回受控的停止说明，不伪造工具成功。
+停止原因：`tool_call_budget`、`total_time_budget`、`repeated_tool_failure`、`client_gone`。工具预算停止时会先尝试一次无工具收尾轮；最终仍没有模型正文时，路由返回受控的停止说明，不伪造工具成功。Bot 任务在同样情况下返回 `tool_call_budget` 而不是 `empty_reply`。
 
 ## 5. 可观测性
 

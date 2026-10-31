@@ -19,6 +19,9 @@ const { AgentError } = require('./errors');
 const MAX_USER_MESSAGE = 4000;
 const HISTORY_MESSAGES = 24;
 const MAX_TASK_TOOLS = 6;
+// 工具调用次数预算与“允许的工具种类数”无关。旧实现用工具种类数当上限，
+// 3 个工具就只能调用 3 次，正常的多次检索会提前耗尽预算。
+const MAX_TASK_TOOL_CALLS = 6;
 const activeRuns = new Map();
 const TASK_CONCURRENCY = Math.min(
   4,
@@ -98,7 +101,7 @@ function buildPolicy({ config, allowedTools, toolsSupported }) {
     },
     tools: {
       allowedTools: toolsSupported ? allowedTools.slice(0, MAX_TASK_TOOLS) : [],
-      maxToolCalls: toolsSupported ? Math.min(6, allowedTools.length || 1) : 0,
+      maxToolCalls: toolsSupported ? MAX_TASK_TOOL_CALLS : 0,
       maxReadOnlyRetries: toolsSupported ? 1 : 0,
     },
     budgets: {
@@ -349,6 +352,17 @@ function requireText(value, label, max) {
   return text;
 }
 
+function emptyReplyError(stopReason) {
+  if (stopReason === 'tool_call_budget') {
+    return new AgentError(
+      'tool_call_budget',
+      'Memory Bot 工具调用预算已用尽，未能生成总结',
+      502
+    );
+  }
+  return new AgentError('empty_reply', 'Memory Bot 没有返回内容', 502);
+}
+
 async function chat(botId, {
   sessionId = null,
   message,
@@ -390,7 +404,7 @@ async function chat(botId, {
 
   const reply = typeof result.rawReply === 'string' ? result.rawReply.trim() : '';
   if (!reply) {
-    throw new AgentError('empty_reply', 'Memory Bot 没有返回内容', 502);
+    throw emptyReplyError(result.stopReason);
   }
   const appended = sessions.appendMessages(botId, session.id, [
     {
@@ -471,7 +485,7 @@ async function runTask(taskId) {
 
     const summary = typeof result.rawReply === 'string' ? result.rawReply.trim() : '';
     if (!summary) {
-      throw new AgentError('empty_reply', 'Memory Bot 没有返回内容', 502);
+      throw emptyReplyError(result.stopReason);
     }
 
     tasks.updateTask(task.taskId, {

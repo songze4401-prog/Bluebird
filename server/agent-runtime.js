@@ -726,6 +726,11 @@ async function runAgentTurn({
     // 若在 assistant 消息与 tool 循环里各归一化一次，两边 id 对不上号
     // （次轮请求会被服务商以 400 拒绝）。这里只生成一次，两边共用。
     const normalizedCalls = toolCalls.map(normalizeToolCall);
+    // 预算只允许执行剩余数量的调用；未执行的调用不能写进 assistant 消息，
+    // 否则下一轮会缺少对应的 tool 结果，部分服务商会直接以 400 拒绝。
+    const remainingToolCalls = Math.max(0, maxToolCalls - toolCallCount);
+    const executableCalls = normalizedCalls.slice(0, remainingToolCalls);
+    const budgetTruncated = executableCalls.length < normalizedCalls.length;
 
     // 追加 assistant tool_calls 消息（仅请求内存）：后续轮次需要读到
     // 完整的调用记录，否则模型会重复发起相同调用。
@@ -734,7 +739,7 @@ async function runAgentTurn({
         {
           role: 'assistant',
           content: message.content == null ? null : message.content,
-          tool_calls: normalizedCalls,
+          tool_calls: executableCalls,
         },
         `assistant-tool-call:${round}`
       )
@@ -742,7 +747,7 @@ async function runAgentTurn({
 
     let batchStopReason = null;
 
-    for (const normalized of normalizedCalls) {
+    for (const normalized of executableCalls) {
       if (typeof isClientGone === 'function' && isClientGone()) {
         batchStopReason = 'client_gone';
         break;
@@ -872,8 +877,17 @@ async function runAgentTurn({
       }
     }
 
+    if (budgetTruncated && !batchStopReason) {
+      batchStopReason = 'tool_call_budget';
+    }
+
     if (batchStopReason) {
       stopReason = batchStopReason;
+      // 预算耗尽不是终点：保留一次无工具收尾轮，让模型基于已取回的工具结果
+      // 生成最终答复。其它停止原因（断连、总时长、连续工具失败）仍立即结束。
+      if (batchStopReason === 'tool_call_budget' && round < maxRounds) {
+        continue;
+      }
       break;
     }
 
