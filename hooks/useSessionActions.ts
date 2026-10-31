@@ -108,12 +108,14 @@ export function useSessionActions({
   const selectSession = async (sessionId: string) => {
     if (chat.sending || chat.continuing || chat.loadingHistory) return;
 
-    const result = await chat.loadHistory(sessionId);
+    // 保持 loadingHistory=true 直到新 sessionId 提交，避免加载期间把消息发进旧会话。
+    const result = await chat.loadHistory(sessionId, { keepLoading: true });
 
-    // 已被更新的选择取代：本次结果作废，不改会话也不弹错（由最新那次收场）
+    // 已被更新的选择取代：本次结果作废，由最新的选择收场。
     if (result.stale) return;
 
     if (!result.ok) {
+      chat.markHistoryLoaded();
       Alert.alert(
         '打开会话失败',
         result.status === 404
@@ -124,6 +126,7 @@ export function useSessionActions({
     }
 
     setCurrentSessionId(sessionId);
+    chat.markHistoryLoaded();
     onEnterChat();
   };
 

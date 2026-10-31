@@ -69,19 +69,28 @@ function isRuntimeArtifact(name) {
 }
 
 /**
- * 密钥文件：默认不进备份。api-keys.json 是明文密钥库（API key 等），
- * 进快照等于把密钥存进一份可能被同步/外发的副本。默认排除；若业务确有需求，
- * 走加密通道（见 createBackup 的 encryptSecrets）。
+ * 密钥文件：默认不进备份。除 api-keys.json 明文密钥库外，Bot Vault 的
+ * agent-vault.key 与 agent-credentials.json 也必须排除；否则拿到备份的人
+ * 可同时获得主密钥与密文，AES-256-GCM 的静态加密会被备份抵消。
  *
  * 跨平台判定：relPath 可能来自 collectEntries 的 POSIX 拼接（永远是 `/`），
  * 也可能在某些调用方传入 Windows 风格 `\\`。先统一成 `/` 再取 basename，
- * 保证「嵌套目录里的 api-keys.json」在两种分隔符下都能正确排除。
+ * 保证「嵌套目录里的密钥文件」在两种分隔符下都能正确排除。
  */
+const SECRET_BASENAMES = new Set([
+  'api-keys.json',
+  'agent-vault.key',
+  'agent-credentials.json',
+]);
+
 function isSecretFile(relPath) {
   const normalized = String(relPath).replace(/\\/g, '/');
   const base = normalized.split('/').pop();
 
-  return base === 'api-keys.json';
+  return (
+    SECRET_BASENAMES.has(base) ||
+    /^(api-keys\.json|agent-vault\.key|agent-credentials\.json)\.corrupt-/.test(base)
+  );
 }
 
 function sha256File(filePath) {

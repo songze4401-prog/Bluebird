@@ -520,14 +520,21 @@ async function main() {
   const beforeEdit = await req(`/model-providers/${customId}`);
   const patched = await req(`/model-providers/${customId}`, {
     method: 'PATCH',
-    body: { name: 'Mock 服务商（改）' },
+    body: {
+      name: 'Mock 服务商（改）',
+      models: [{ id: 'mock-model' }, { id: 'mock-vision' }],
+    },
   });
   check(
-    'PATCH 改 name 成功且保留原密钥（keyHint 不变）',
+    'PATCH 改 name + 只提交模型 id 时保留名称/能力与原密钥',
     patched.status === 200 &&
       patched.json.provider.name === 'Mock 服务商（改）' &&
       patched.json.provider.keyHint === beforeEdit.json.provider.keyHint &&
-      patched.json.provider.keyConfigured === true
+      patched.json.provider.keyConfigured === true &&
+      patched.json.provider.models.find(model => model.id === 'mock-model').name ===
+        'Mock 文本模型' &&
+      patched.json.provider.models.find(model => model.id === 'mock-vision')
+        .capabilities.vision === true
   );
 
   // 编辑：传新 key 才覆盖

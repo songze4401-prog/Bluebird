@@ -11,6 +11,7 @@
 // 注意：RNTL 14 的 renderHook 返回 Promise，必须 await。
 
 import { act, renderHook } from '@testing-library/react-native';
+import { Alert } from 'react-native';
 
 import { useChatSession } from '../../hooks/useChatSession';
 
@@ -284,7 +285,7 @@ describe('启动情绪读取', () => {
 });
 
 describe('发送守卫', () => {
-  it('首次加载未完成（loadingHistory）时不发请求', async () => {
+  it('首次加载或切换会话加载期间（loadingHistory）都不发请求', async () => {
     const hook = await setup();
 
     expect(hook.result.current.loadingHistory).toBe(true);
@@ -295,6 +296,35 @@ describe('发送守卫', () => {
 
     expect(mockApiFetch).not.toHaveBeenCalled();
     expect(hook.result.current.sending).toBe(false);
+
+    const pending = deferred<Response>();
+    mockApiFetch.mockImplementationOnce(() => pending.promise);
+
+    await act(async () => {
+      hook.result.current.markHistoryLoaded();
+    });
+
+    let historyPromise!: Promise<LoadResult>;
+    await act(async () => {
+      historyPromise = hook.result.current.loadHistory('sess-B');
+    });
+    expect(hook.result.current.loadingHistory).toBe(true);
+
+    await act(async () => {
+      await hook.result.current.sendMessage();
+    });
+    expect(mockApiFetch).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pending.resolve(
+        jsonResponse({
+          sessionId: 'sess-B',
+          history: [{ id: 'b1', role: 'user', content: 'B 的消息' }],
+        })
+      );
+      await historyPromise;
+    });
+    expect(hook.result.current.loadingHistory).toBe(false);
   });
 
   it('既无文字也无附件时不发请求', async () => {
@@ -354,6 +384,39 @@ describe('发送守卫', () => {
       )
     ).toBe(false);
     expect(rejectRequest).not.toBeNull();
+  });
+
+  it('persisted:false 时提示回复未保存，但保留已生成的回复', async () => {
+    const alertSpy = jest.spyOn(Alert, 'alert').mockImplementation(() => {});
+    mockApiFetch.mockImplementationOnce(() =>
+      Promise.resolve(
+        jsonResponse({
+          reply: '收到但未保存',
+          mood: 'calm',
+          sessionId: 'sess-A',
+          userMessageId: 'srv-user-1',
+          persisted: false,
+        })
+      )
+    );
+
+    const hook = await setup();
+    await act(async () => {
+      hook.result.current.markHistoryLoaded();
+    });
+    await act(async () => {
+      await hook.result.current.sendMessage();
+    });
+
+    expect(hook.result.current.messages.map(message => message.content)).toEqual([
+      '你好',
+      '收到但未保存',
+    ]);
+    expect(alertSpy).toHaveBeenCalledWith(
+      '回复未保存',
+      expect.stringContaining('刷新后可能丢失')
+    );
+    alertSpy.mockRestore();
   });
 
   it('有文字时发出 /chat，并用服务端 id 替换本地临时 id', async () => {

@@ -221,16 +221,27 @@ export function ModelScreen({
   const saveForm = async (): Promise<ModelProvider | null> => {
     if (!form) return null;
 
-    const modelIds = form.modelIds
+    const currentProvider = providers?.find(provider => provider.id === form.id);
+    const models = form.modelIds
       .split(/[,，\s]+/)
       .map(item => item.trim())
       .filter(Boolean)
-      .map(id => ({ id }));
+      .map(id => {
+        const previous = currentProvider?.models.find(model => model.id === id);
+        return previous
+          ? {
+              id,
+              name: previous.name,
+              enabled: previous.enabled,
+              capabilities: previous.capabilities,
+            }
+          : { id };
+      });
 
     const body: Record<string, unknown> = {
       name: form.name.trim(),
       baseUrl: form.baseUrl.trim(),
-      models: modelIds,
+      models,
     };
 
     // 编辑时 apiKey 留空 = 保留原密钥（后端同样如此；前端不发送空串更直观）

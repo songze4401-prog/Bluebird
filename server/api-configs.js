@@ -271,15 +271,33 @@ function normalizeStoredProvider(p) {
   };
 }
 
-function normalizeModel(m) {
+function normalizeModel(m, previous = null) {
   if (!m || typeof m.id !== 'string' || !MODEL_ID_RE.test(m.id)) return null;
 
-  const caps = m.capabilities && typeof m.capabilities === 'object' ? m.capabilities : {};
+  const previousCaps =
+    previous && previous.capabilities && typeof previous.capabilities === 'object'
+      ? previous.capabilities
+      : {};
+  const caps =
+    m.capabilities && typeof m.capabilities === 'object'
+      ? m.capabilities
+      : previousCaps;
 
   return {
     id: m.id.slice(0, MAX_MODEL_ID_LEN),
-    name: typeof m.name === 'string' ? m.name.slice(0, MAX_NAME_LEN) : m.id,
-    enabled: m.enabled !== false,
+    // PATCH 只提交 id 时必须保留已有名称/能力，不能静默把 tools/vision 关掉。
+    name:
+      typeof m.name === 'string'
+        ? m.name.slice(0, MAX_NAME_LEN)
+        : previous && typeof previous.name === 'string'
+          ? previous.name
+          : m.id,
+    enabled:
+      typeof m.enabled === 'boolean'
+        ? m.enabled
+        : previous
+          ? previous.enabled !== false
+          : true,
     // 只接受布尔能力；缺省 = 未知 = 不支持（调用方按不支持处理，不虚报）
     // tools：Tool Calling 支持。自定义服务商必须显式声明 true 才会启用
     capabilities: { vision: caps.vision === true, tools: caps.tools === true },
@@ -466,7 +484,10 @@ function updateModelProvider(id, patch) {
       if (seen.has(m.id)) return { error: `模型 id 重复：${m.id}` };
       seen.add(m.id);
     }
-    next.models = models.map(normalizeModel);
+    const previousModels = new Map(provider.models.map(model => [model.id, model]));
+    next.models = models.map(model =>
+      normalizeModel(model, previousModels.get(model.id) || null)
+    );
   }
 
   // 默认服务商被禁用 / 默认模型被摘掉：拒绝，避免默认指向不可用目标

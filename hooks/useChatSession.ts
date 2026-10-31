@@ -75,6 +75,14 @@ function toErrorMessage(error: unknown): string {
   return '连接Bluebird失败了，再试一次。';
 }
 
+function warnIfNotPersisted(data: { persisted?: boolean }): void {
+  if (!data || data.persisted !== false) return;
+  Alert.alert(
+    '回复未保存',
+    '本轮回复未能写入本地会话存储，刷新后可能丢失。请检查磁盘空间或数据目录权限。'
+  );
+}
+
 export type ChatSendExtras = {
   attachments?: Attachment[];
   overrideText?: string;
@@ -116,7 +124,8 @@ export type ChatSessionApi = {
   stopGeneration: () => void;
   // stale=true：结果已被更新的请求取代，调用方不得据此改会话或弹错
   loadHistory: (
-    sessionId: string
+    sessionId: string,
+    options?: { keepLoading?: boolean }
   ) => Promise<{ ok: boolean; status: number; stale?: boolean }>;
   // 向上加载更早历史；hasMoreHistory=false 或没有游标时直接返回 false。
   loadOlderHistory: () => Promise<{ ok: boolean; status: number; stale?: boolean }>;
@@ -227,8 +236,11 @@ export function useChatSession({
   // 读取指定会话的消息并渲染；返回是否成功（失败时由调用方决定文案）。
   // stale=true 表示本次结果已被更新的请求取代，调用方不得据此改会话或弹错。
   const loadHistory = async (
-    targetSessionId: string
+    targetSessionId: string,
+    { keepLoading = false }: { keepLoading?: boolean } = {}
   ): Promise<{ ok: boolean; status: number; stale?: boolean }> => {
+    // 加载期间禁止发送；切会话时由调用方在提交新 id 后再显式解除。
+    setLoadingHistory(true);
     const ticket = historyGate.begin();
 
     try {
@@ -271,6 +283,10 @@ export function useChatSession({
       console.error('History load error:', error);
 
       return { ok: false, status: 0 };
+    } finally {
+      if (!keepLoading && historyGate.isCurrent(ticket.id)) {
+        setLoadingHistory(false);
+      }
     }
   };
 
@@ -449,6 +465,7 @@ export function useChatSession({
 
         if (outcome.kind === 'done') {
           const data = outcome.data;
+          warnIfNotPersisted(data);
           const segments = normalizeSegments(data);
 
           const serverUserId =
@@ -518,6 +535,7 @@ export function useChatSession({
       });
 
       const data = (await readJsonResponse(response)) as ChatResponse;
+      warnIfNotPersisted(data);
 
       if (!response.ok) {
         // 会话被清理/只读保护时给出明确的下一步指引
