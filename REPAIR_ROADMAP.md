@@ -195,7 +195,7 @@ flowchart TD
 
 ## 6. 执行状态（截至 2026-10-31）
 
-执行分支：`qoder/audit-p0-memory-scope-2026-10-31`（仅本地提交，未推送、未开 PR、未合并）。
+执行分支：`qoder/audit-p0-memory-scope-2026-10-31`（已推送；PR #48 处于 OPEN 状态，**未合并**）。
 
 ### 6.1 R-01～R-11：已实现并验证
 
@@ -280,3 +280,48 @@ CI 的「隔离守卫（运行时）：测试不得在仓库内留下 server/dat
 | P2-21 有主会话贡献时无归属 legacy 记忆不可见 | 设计假设 | 这是 P0-01 修复的**目的**本身：`scopeOf` 的 primary / legacy / excluded 三段划分，保证一条会话永远看不到另一条会话的私有事实。把无归属 legacy 记忆重新放回当前会话上下文，等于重新打开 P0-01 关掉的隐私泄漏口子。因此「修掉」它就等于退回一个已确认的缺陷 | 库里有、但本会话查不到，用户可能以为记忆丢了。**不是真的丢了**：Memory Center 读的是 `GET /memory?scope=all`（`API_PATHS.memoryAll`），无归属条目在界面里照常可见、可编辑、可删除；不可见的只是「自动注入本会话模型上下文」这一条路径 | 若要改变，须先定义「无归属记忆归谁」的产品规则（例如显式归属到某个会话，或引入用户可见的归属选择），再改 `scopeOf`；不能由实现层自行决定 |
 
 除此之外，§6.2 与 §6.3 的条目全部已修复。P3-04 有一处需要说明口径：**界面没有新增入口**，9 个仅 API 的能力按设计保留为「有接口、无界面」，并由登记册与 CI 门禁保证「文档说的和代码做的」一致；按 §4 原则 4 不得为了让缺口消失而删接口或谎称界面可用。
+
+### 6.7 PR #48 CI 失败：定位与修复（2026-11-01）
+
+**失败现象**（PR #48，CI「全量测试 + 覆盖率对账（单次执行）」，run `41220043071`，head `b4af9c2`）：
+
+- TAP：`not ok 7 - 主控结果 SSE：snapshot 重连可见，实时结果无需轮询`，`duration_ms: 6039.575063`，`failureType: testCodeFailure`，栈顶 `new DOMException` ← `AbortController.abort` ← `Timeout._onTimeout (tests/agent-dispatch.test.js:671:45)`。
+- 覆盖率对账随之失败：`backend=1612/1622 nodeSuite=221/221 runner=1391/1401`——`tests/agent-dispatch.test.js` 整个文件判定失败，它贡献的 10 个运行时用例被剔除，总数因此对不上基线。
+
+**根因：产品链路没问题，是测试自己写错了时序假设。**
+
+服务端 `GET /agent-results/stream`（`server/agents/routes.js:66-115`）在**建连时**先写一帧 snapshot，并在**同一个同步块**里调用 `resultDelivery.subscribe()`。于是有两种合法时序：
+
+| 时序 | 客户端收到什么 | 旧断言（等顶层 `result` 事件） |
+|---|---|---|
+| 结果投递 **早于** 订阅建立 | 只有一帧 `snapshot`，结果嵌在 `results` 里 | 顶层 `result` **永远不来** → 必然等到 6s 超时 |
+| 结果投递 **晚于** 订阅建立 | 顶层 `result` 事件实时到达 | 正常通过 |
+
+旧测试用 `readSseUntil(url, predicate)` 起流后**并发**派发任务，再等 `event.type === 'result'`，等于把「投递必须晚于订阅」当成了前提；投递抢赢时断言必然失败。审批闭环用例里那处靠 `setTimeout(100ms)` 猜时序的写法同样不可靠。
+
+**复现证据**（真实服务端 + 真实 SSE 客户端，不 mock）：
+
+```
+[A] 收到帧类型： snapshot
+[A] 顶层 result 事件数： 0
+[A] snapshot 内含该任务结果： true
+[A] 结论： 订阅晚于投递 → 只有 snapshot，顶层 result 永远不会来 → 测试判定必然超时
+[B] 握手帧类型： snapshot
+[B] 随后收到的顶层事件： result(taskId=task_138a407b-1de1-49c4-905c-a141b0d73e43)
+[B] 结论： 先订阅后投递 → 顶层 result 实时到达，实时推送链路本身是好的
+```
+
+**修复**（只改测试与文档，未改产品行为、未删任何能力）：
+
+- `tests/agent-dispatch.test.js`：把 `readSseUntil` 拆成 `openSse()`（建连）+ `readSseFrame()`（读帧并按谓词过滤）；SSE 用例改为**先握手再断言**——收到 `snapshot` 帧即代表订阅已建立，随后才派发任务并等待顶层 `result` 事件；审批闭环用例里那处 `setTimeout(100)` 的猜测时序换成同一套握手。
+- 断言失败时补上诊断信息（交付文案全文 + 任务终态与 `errorCode`），失败日志能直接看出是「未完成」还是「文案不符」。
+- `docs/memory-bot.md`：补「结果流时序契约」一条，把「客户端收到 snapshot 帧 = 订阅已建立」「先投递后建连只会拿到 snapshot」「前端 snapshot 分支会逐条回放 results 给 `onResult`」写清楚，避免后续再按错误前提写测试。
+
+**验证**：
+
+- `tests/agent-dispatch.test.js` 10 项全通过；SSE 用例耗时 ~194ms（修复前必然跑满 6s 超时）。
+- 本地连跑 **200 轮** `node tests/agent-dispatch.test.js`：0 失败。修复前的那个 6s 超时是 CI 上观测到的（run `41220043071`），本机未稳定复现——因为它取决于「投递与订阅谁先到」的运气，快机器上通常是订阅先建立（结果走实时推送），CI 那次恰好投递先到。
+- 对照组：`origin/main`（`6af05fe`）在独立 worktree 里连跑 **150 轮**同一测试文件：0 失败——main 上的同一处断言带着同样的时序假设，只是没碰上坏运气；本轮修复的实质是**把断言从「赌时序」改成「先握手再断言」，从此与运气无关**。
+- CI 复跑：待本次提交推送后由 PR #48 的「全量测试 + 覆盖率对账」给出结论；本地全量门禁已确认覆盖率为 `backend=1622/1622 nodeSuite=221/221 runner=1401/1401 frontend=179/179`。
+
+**同时如实记录一条尚未定位的偶发项（本轮不宣称已修）**：在修复前的一次 150 轮本地压测里，出现过 1 次 `tests/agent-dispatch.test.js` 的 SSE 用例读到「【Memory Bot 任务未完成】」——日志显示该次 `[agent-request]` 之后没有 `[agent-response]`，即进程内 stub provider 的那次模型调用抛错，导致任务以非 completed 收敛。同一台机器修复后连跑 200 轮未再出现，`origin/main` 连跑 150 轮也未出现，CI 日志里同样没有。**根因未定位**，当前判断是本机（Windows）偶发的传输层/事件循环时序问题，而不是可稳定复现的产品缺陷；已通过「断言失败时打印交付文案 + 任务 `errorCode`」保证下次出现时可直接定位。若在 CI 上复现，按该输出继续追。

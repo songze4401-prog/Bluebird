@@ -92,6 +92,7 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - 委派写入接地：任务保存主控用户原话 `parentUserText`；Bot 的 `memory_remember` 用该原话做 `sourceQuote` 接地，不再信任主控模型生成的 goal。旧任务/直接任务才回落到 goal。
 - Agent 写入确认：`memory_remember` 的 CREATE 仍可自动落地；UPDATE/MERGE/SUPERSEDE 会生成 pending 候选，必须通过 `POST /memory/confirm` 确认后才改写或替代已有记忆。自动记忆抽取保留原有策略，不改变既有后台行为。
 - 结果回传：任务完成/失败统一走 `result-delivery`：写入 Task Store 后，以固定消息 id `bot-result-<taskId>` 追加到父主控会话；记录 `deliveredToParentAt`、`deliveryMessageId`、`deliveryStatus` 或 `deliveryErrorCode`。主控前端通过 `GET /agent-results/stream?sessionId=...` 接收实时 `result`/`delivery_failed`，snapshot 覆盖断线重连；前端按消息 id 去重，因此重复投递不会生成第二条。任务页继续作为审计/状态入口。
+- 结果流时序契约：服务端建连时先写一帧 snapshot，并在同一个同步块里完成订阅，因此客户端收到这帧即代表订阅已建立。结果投递早于订阅时，客户端只会收到 snapshot（结果嵌在 `results` 里），不会再有顶层 `result` 事件；订阅建立之后的投递才以顶层 `result` 事件实时到达。两种情况前端都要能消费——`lib/agent-results-stream.ts` 的 snapshot 分支会把 `results` 逐条回放给 `onResult`，所以“先投递后建连”和“先建连后投递”都不会丢结果。
 - 审批结果投递：审批执行成功/失败、审批被拒绝、审批执行中断在更新关联任务终态后同步调用 Result Delivery；`waiting_approval` 是暂停态，`runTask` 不会覆盖它，审批完成后由审批执行器推进任务并实时回传父会话。
 - 事件可靠性：`appendEvent` 先写持久 outbox，再写主事件文件；主文件写失败时事件仍在 outbox，启动/读取时重试，不再被 `safeEvent` 静默丢弃。
 - 生命周期边界：`user_preference` 与 `project_fact` 过期后都走 `revalidate`——上下文注入保留条目并标记待验证，`memory_search` 仍可检索到；不再有 `demote_to_pending` 的“上下文静默消失、检索仍可见”双路径。Bot 会话达到 200 条时优先复用最早的空会话，只有 200 条都含消息才返回 `agent_session_limit`。任务类型仅接受 `memory.search` / `memory.explain`；`memory.maintain` / `memory.audit` 未实现，直接返回 `invalid_task_type`，维护操作只能走审批 API。

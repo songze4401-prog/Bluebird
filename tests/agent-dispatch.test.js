@@ -564,19 +564,27 @@ test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时
   await runtime.runTask(task.taskId);
   assert.equal(tasks.getTask(task.taskId).status, 'waiting_approval');
 
-  const eventPromise = readSseUntil(
-    `${apiBase}/agent-results/stream?sessionId=${encodeURIComponent(main.id)}`,
-    event => event.type === 'result' && event.taskId === task.taskId
+  const resultStream = await openSse(
+    `${apiBase}/agent-results/stream?sessionId=${encodeURIComponent(main.id)}`
   );
-  await new Promise(resolve => setTimeout(resolve, 100));
-  approvals.approve(approval.approvalId);
-  const executed = await approvals.execute(approval.approvalId);
-  assert.equal(executed.status, 'completed');
-  const finished = tasks.getTask(task.taskId);
-  assert.equal(finished.status, 'completed');
-  assert.equal(finished.deliveryStatus, 'delivered');
-  const event = await eventPromise;
-  assert.equal(event.taskId, task.taskId);
+  try {
+    // 握手帧到手即代表订阅已建立；此后再批准执行，结果才会以顶层 result 事件实时到达。
+    const handshake = await readSseFrame(resultStream, item => item.type === 'snapshot');
+    assert.equal(handshake.type, 'snapshot');
+    approvals.approve(approval.approvalId);
+    const executed = await approvals.execute(approval.approvalId);
+    assert.equal(executed.status, 'completed');
+    const finished = tasks.getTask(task.taskId);
+    assert.equal(finished.status, 'completed');
+    assert.equal(finished.deliveryStatus, 'delivered');
+    const event = await readSseFrame(
+      resultStream,
+      item => item.type === 'result' && item.taskId === task.taskId
+    );
+    assert.equal(event.taskId, task.taskId);
+  } finally {
+    resultStream.abort();
+  }
   assert.ok(
     mainSessions
       .getMessages(main.id)
@@ -666,7 +674,12 @@ test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时
   );
 });
 
-async function readSseUntil(url, predicate, timeoutMs = 6000) {
+// SSE 连接。服务端建连时先写一帧 snapshot，并在同一个同步块里完成
+// resultDelivery.subscribe()，所以客户端收到这帧就等于「订阅已建立」——
+// 此后投递的结果必然以顶层 result 事件推过来。
+// 反过来，若结果在客户端建连之前就已投递，服务端只会补发 snapshot（结果嵌在
+// results 里），不会再有顶层 result 事件：断言实时事件前必须先完成这帧握手。
+async function openSse(url, timeoutMs = 6000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -675,25 +688,51 @@ async function readSseUntil(url, predicate, timeoutMs = 6000) {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) throw new Error('sse_closed_before_event');
-      buffer += decoder.decode(value, { stream: true });
-      let sep = buffer.indexOf('\n\n');
-      while (sep >= 0) {
-        const frame = buffer.slice(0, sep);
-        buffer = buffer.slice(sep + 2);
-        const line = frame.split('\n').find(item => item.startsWith('data:'));
-        if (line) {
-          const event = JSON.parse(line.slice(5).trim());
-          if (predicate(event)) return event;
+    return {
+      abort: () => controller.abort(),
+      async readFrame() {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) throw new Error('sse_closed_before_event');
+          buffer += decoder.decode(value, { stream: true });
+          let sep = buffer.indexOf('\n\n');
+          while (sep >= 0) {
+            const frame = buffer.slice(0, sep);
+            buffer = buffer.slice(sep + 2);
+            const line = frame.split('\n').find(item => item.startsWith('data:'));
+            if (line) return JSON.parse(line.slice(5).trim());
+            sep = buffer.indexOf('\n\n');
+          }
         }
-        sep = buffer.indexOf('\n\n');
-      }
+      },
+    };
+  } catch (error) {
+    controller.abort();
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// 超时通过 abort 掐断连接，pending 的 readFrame 会以 AbortError 抛出。
+async function readSseFrame(stream, predicate, timeoutMs = 6000) {
+  const timer = setTimeout(() => stream.abort(), timeoutMs);
+  try {
+    while (true) {
+      const event = await stream.readFrame();
+      if (predicate(event)) return event;
     }
   } finally {
     clearTimeout(timer);
-    controller.abort();
+  }
+}
+
+async function readSseUntil(url, predicate, timeoutMs = 6000) {
+  const stream = await openSse(url, timeoutMs);
+  try {
+    return await readSseFrame(stream, predicate, timeoutMs);
+  } finally {
+    stream.abort();
   }
 }
 
@@ -720,25 +759,38 @@ test('主控结果 SSE：snapshot 重连可见，实时结果无需轮询', asyn
   assert.equal(snapshot.type, 'snapshot');
   const snapshotItem = snapshot.results.find(item => item.taskId === first.taskId);
   assert.ok(snapshotItem.message.id.startsWith('bot-result-'));
-  assert.ok(snapshotItem.message.content.includes('【Memory Bot 任务完成】'));
+  const snapshotTask = tasks.getTask(first.taskId);
+  assert.ok(
+    snapshotItem.message.content.includes('【Memory Bot 任务完成】'),
+    `交付文案应为完成态，实际内容：${snapshotItem.message.content}｜任务终态：${snapshotTask.status}/${snapshotTask.errorCode}`
+  );
 
   const live = mainSessions.createSession({ title: 'SSE 实时结果测试' });
-  const eventPromise = readSseUntil(
-    `${apiBase}/agent-results/stream?sessionId=${encodeURIComponent(live.id)}`,
-    event => event.type === 'result' && event.sessionId === live.id
+  const liveStream = await openSse(
+    `${apiBase}/agent-results/stream?sessionId=${encodeURIComponent(live.id)}`
   );
-  const second = await tool.handler(
-    {
-      botId: 'memory',
-      taskType: 'memory.search',
-      goal: '实时 SSE 结果',
-      allowedTools: ['memory_search'],
-    },
-    { sessionId: live.id, userText: '实时结果', userMessageId: 'sse-user-2' }
-  );
-  const liveEvent = await eventPromise;
-  assert.equal(liveEvent.taskId, second.taskId);
-  assert.ok(liveEvent.message.id.startsWith('bot-result-'));
+  try {
+    // 握手帧到手即代表订阅已建立；此后再派发任务，结果才会以顶层 result 事件实时到达。
+    const handshake = await readSseFrame(liveStream, event => event.type === 'snapshot');
+    assert.equal(handshake.type, 'snapshot');
+    const second = await tool.handler(
+      {
+        botId: 'memory',
+        taskType: 'memory.search',
+        goal: '实时 SSE 结果',
+        allowedTools: ['memory_search'],
+      },
+      { sessionId: live.id, userText: '实时结果', userMessageId: 'sse-user-2' }
+    );
+    const liveEvent = await readSseFrame(
+      liveStream,
+      event => event.type === 'result' && event.sessionId === live.id
+    );
+    assert.equal(liveEvent.taskId, second.taskId);
+    assert.ok(liveEvent.message.id.startsWith('bot-result-'));
+  } finally {
+    liveStream.abort();
+  }
 });
 
 test('失败回传：Bot 执行失败时主控会话收到失败原因，不伪造完成', async () => {
