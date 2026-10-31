@@ -11,6 +11,8 @@ const credentials = require('./credentials');
 const sessions = require('./sessions');
 const tasks = require('./tasks');
 const runtime = require('./runtime');
+const resultDelivery = require('./result-delivery');
+const mainSessions = require('../sessions');
 const approvals = require('./approvals');
 const permissions = require('./permissions');
 const { describeAgentError } = require('./errors');
@@ -42,7 +44,9 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
       pathName === '/agent-tasks' ||
       pathName.startsWith('/agent-tasks/') ||
       pathName === '/agent-approvals' ||
-      pathName.startsWith('/agent-approvals/');
+      pathName.startsWith('/agent-approvals/') ||
+      pathName === '/agent-results' ||
+      pathName.startsWith('/agent-results/');
     if (!isAgentPath) return next();
     return requireAuth(req, res, next);
   });
@@ -56,6 +60,59 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
       }
     }
   }
+
+  // 主控结果 SSE：任务完成/失败结果由 Result Delivery 推送到当前会话。
+  // 建连时先发最近结果 snapshot，客户端按消息 id 去重，覆盖断线重连。
+  router.get('/agent-results/stream', (req, res) => {
+    const sessionId =
+      typeof req.query.sessionId === 'string' ? req.query.sessionId.trim() : '';
+    if (!sessionId || !mainSessions.getSession(sessionId)) {
+      res.status(404).json({ error: '会话不存在', code: 'session_missing' });
+      return;
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.flushHeaders();
+
+    let closed = false;
+    const send = payload => {
+      if (closed || res.writableEnded) return;
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+
+    try {
+      send({
+        type: 'snapshot',
+        sessionId,
+        results: resultDelivery.snapshotForSession(sessionId),
+      });
+    } catch (_) {
+      send({ type: 'snapshot', sessionId, results: [] });
+    }
+
+    const unsubscribe = resultDelivery.subscribe(event => {
+      if (event && event.sessionId === sessionId) send(event);
+    });
+    const heartbeat = setInterval(() => {
+      if (closed || res.writableEnded) return;
+      res.write(': ping\n\n');
+    }, 15000);
+    if (typeof heartbeat.unref === 'function') heartbeat.unref();
+
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
+    req.on('close', cleanup);
+    res.on('close', cleanup);
+  });
 
   router.get(
     '/agents',

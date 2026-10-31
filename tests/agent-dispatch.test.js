@@ -29,6 +29,8 @@ let mainSessions;
 let tool;
 let runtime;
 let agentRuntime;
+let apiServer;
+let apiBase;
 let providerId;
 let providerBase;
 let providerPort;
@@ -65,6 +67,10 @@ test.before(async () => {
       const messages = parsed.messages || [];
       const hasToolResult = messages.some(message => message.role === 'tool');
       const lastText = String(messages.at(-1)?.content || '');
+      if (lastText.includes('FAIL_TASK')) {
+        json(res, 500, { error: 'provider_failed' });
+        return;
+      }
       if (
         Array.isArray(parsed.tools) &&
         parsed.tools.some(item => item.function?.name === 'delegate_to_bot') &&
@@ -126,6 +132,15 @@ test.before(async () => {
   providerPort = providerServer.address().port;
   providerBase = `http://127.0.0.1:${providerPort}/v1`;
 
+  const express = require('express');
+  const { createAgentRouter } = require('../server/agents/routes');
+  const app = express();
+  app.use(express.json());
+  app.use(createAgentRouter({ requireAuth: (req, res, next) => next() }));
+  apiServer = http.createServer(app);
+  await new Promise(resolve => apiServer.listen(0, '127.0.0.1', resolve));
+  apiBase = `http://127.0.0.1:${apiServer.address().port}`;
+
   apiConfigs = require('../server/api-configs');
   config = require('../server/agents/config');
   credentials = require('../server/agents/credentials');
@@ -170,6 +185,7 @@ test.before(async () => {
 });
 
 test.after(async () => {
+  if (apiServer) await new Promise(resolve => apiServer.close(resolve));
   await new Promise(resolve => providerServer.close(resolve));
   try {
     fs.rmSync(TMP, { recursive: true, force: true });
@@ -261,6 +277,14 @@ test('主控派发：创建带 parentSessionId 的任务，Bot Runtime 完成后
     )
   );
 
+  const countBeforeRepeat = mainSessions.getMessages(main.id).length;
+  const resultDelivery = require('../server/agents/result-delivery');
+  resultDelivery.deliverTaskOutcome(finished, {
+    status: 'completed',
+    result: finished.result,
+  });
+  assert.equal(mainSessions.getMessages(main.id).length, countBeforeRepeat);
+
   const filtered = tasks.listTasks('memory', { parentSessionId: main.id });
   assert.equal(filtered.length, 1);
   assert.equal(filtered[0].taskId, result.taskId);
@@ -297,6 +321,101 @@ test('主 Agent 工具循环：模型可调用 delegate_to_bot 并把任务交�
   assert.ok(mainSessions.getMessages(main.id).some(message =>
     message.content.includes('【Memory Bot 任务完成】')
   ));
+});
+
+async function readSseUntil(url, predicate, timeoutMs = 6000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    assert.equal(response.status, 200);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) throw new Error('sse_closed_before_event');
+      buffer += decoder.decode(value, { stream: true });
+      let sep = buffer.indexOf('\n\n');
+      while (sep >= 0) {
+        const frame = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        const line = frame.split('\n').find(item => item.startsWith('data:'));
+        if (line) {
+          const event = JSON.parse(line.slice(5).trim());
+          if (predicate(event)) return event;
+        }
+        sep = buffer.indexOf('\n\n');
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+  }
+}
+
+test('主控结果 SSE：snapshot 重连可见，实时结果无需轮询', async () => {
+  const main = mainSessions.createSession({ title: 'SSE 结果测试' });
+  const first = await tool.handler(
+    {
+      botId: 'memory',
+      taskType: 'memory.search',
+      goal: '生成一条 SSE 结果',
+      allowedTools: ['memory_search'],
+    },
+    { sessionId: main.id, userText: '生成结果', userMessageId: 'sse-user-1' }
+  );
+  await waitForTask(first.taskId);
+
+  const snapshot = await readSseUntil(
+    `${apiBase}/agent-results/stream?sessionId=${encodeURIComponent(main.id)}`,
+    event =>
+      event.type === 'snapshot' &&
+      Array.isArray(event.results) &&
+      event.results.some(item => item.taskId === first.taskId && item.message)
+  );
+  assert.equal(snapshot.type, 'snapshot');
+  const snapshotItem = snapshot.results.find(item => item.taskId === first.taskId);
+  assert.ok(snapshotItem.message.id.startsWith('bot-result-'));
+  assert.ok(snapshotItem.message.content.includes('【Memory Bot 任务完成】'));
+
+  const live = mainSessions.createSession({ title: 'SSE 实时结果测试' });
+  const eventPromise = readSseUntil(
+    `${apiBase}/agent-results/stream?sessionId=${encodeURIComponent(live.id)}`,
+    event => event.type === 'result' && event.sessionId === live.id
+  );
+  const second = await tool.handler(
+    {
+      botId: 'memory',
+      taskType: 'memory.search',
+      goal: '实时 SSE 结果',
+      allowedTools: ['memory_search'],
+    },
+    { sessionId: live.id, userText: '实时结果', userMessageId: 'sse-user-2' }
+  );
+  const liveEvent = await eventPromise;
+  assert.equal(liveEvent.taskId, second.taskId);
+  assert.ok(liveEvent.message.id.startsWith('bot-result-'));
+});
+
+test('失败回传：Bot 执行失败时主控会话收到失败原因，不伪造完成', async () => {
+  const main = mainSessions.createSession({ title: '失败回传测试' });
+  const result = await tool.handler(
+    {
+      botId: 'memory',
+      taskType: 'memory.search',
+      goal: 'FAIL_TASK 触发失败',
+      allowedTools: ['memory_search'],
+    },
+    { sessionId: main.id, userText: '触发失败', userMessageId: 'sse-user-fail' }
+  );
+  const finished = await waitForTask(result.taskId);
+  assert.equal(finished.status, 'failed');
+  assert.ok(finished.errorCode);
+  assert.equal(finished.deliveryStatus, 'delivered');
+  const history = mainSessions.getMessages(main.id);
+  assert.ok(history.some(message => message.content.includes('【Memory Bot 任务未完成】')));
+  assert.ok(history.some(message => message.content.includes('错误码：')));
 });
 
 test('事件 outbox：主事件文件写入失败时保留事件，恢复后可补写并读取', async () => {

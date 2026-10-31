@@ -833,6 +833,8 @@ export type AgentTask = {
   parentSessionId?: string | null;
   parentMessageId?: string | null;
   deliveredToParentAt?: string | null;
+  deliveryMessageId?: string | null;
+  deliveryStatus?: 'pending' | 'delivered' | 'failed' | 'not_applicable';
   deliveryErrorCode?: string | null;
   allowedTools: string[];
   deadlineMs: number;

@@ -56,6 +56,7 @@ const EVENT_TYPES = Object.freeze([
   'approval.requested',
   'approval.resolved',
   'task.completed',
+  'task.delivery',
   'task.failed',
   'task.cancelled',
   'task.timed_out',
@@ -77,6 +78,7 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'errorCode',
   'mode',
   'decision',
+  'messageId',
   'pending',
 ]);
 
@@ -312,6 +314,8 @@ function publicTask(task, { includeResult = true } = {}) {
     parentSessionId: task.parentSessionId || null,
     parentMessageId: task.parentMessageId || null,
     deliveredToParentAt: task.deliveredToParentAt || null,
+    deliveryMessageId: task.deliveryMessageId || null,
+    deliveryStatus: task.deliveryStatus || 'not_applicable',
     deliveryErrorCode: task.deliveryErrorCode || null,
     allowedTools: [...task.allowedTools],
     deadlineMs: task.deadlineMs,
@@ -406,6 +410,8 @@ function createTask({
     parentSessionId: cleanParentSession,
     parentMessageId: cleanParentMessage,
     deliveredToParentAt: null,
+    deliveryMessageId: null,
+    deliveryStatus: parentSessionId ? 'pending' : 'not_applicable',
     deliveryErrorCode: null,
     allowedTools: tools,
     deadlineMs: cleanDeadline,
@@ -482,6 +488,12 @@ function updateTask(taskId, patch = {}) {
   if (patch.deliveredToParentAt !== undefined) {
     task.deliveredToParentAt = patch.deliveredToParentAt;
   }
+  if (patch.deliveryMessageId !== undefined) {
+    task.deliveryMessageId = patch.deliveryMessageId;
+  }
+  if (patch.deliveryStatus !== undefined) {
+    task.deliveryStatus = patch.deliveryStatus;
+  }
   if (patch.deliveryErrorCode !== undefined) {
     task.deliveryErrorCode = patch.deliveryErrorCode;
   }
@@ -545,6 +557,10 @@ function isTerminalStatus(status) {
   return TERMINAL.has(status);
 }
 
+function allTasks() {
+  return Object.values(loadTasks().tasks);
+}
+
 function nextQueuedTask() {
   const current = loadTasks();
   return (
@@ -602,6 +618,7 @@ module.exports = {
   flushEventOutbox,
   safePayload,
   isTerminalStatus,
+  allTasks,
   nextQueuedTask,
   queuedCount,
   recoverInterrupted,

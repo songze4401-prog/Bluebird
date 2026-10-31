@@ -53,6 +53,7 @@ import { useModelSelection } from './hooks/useModelSelection';
 import { useThemePreference } from './hooks/useThemePreference';
 import { useStreamingPreference } from './hooks/useStreamingPreference';
 import { useAttachments } from './hooks/useAttachments';
+import { useBotResultStream } from './hooks/useBotResultStream';
 
 export default function App() {
   // ---- 页面与弹层（纯 UI 状态，不进任何 hook）----
@@ -153,6 +154,23 @@ export default function App() {
     onDraftConsumed: () => setInput(''),
     onAttachmentsConsumed: attachments.clearAttachments,
     onMenuCloseRequest: () => setDrawerOpen(false),
+  });
+
+  useBotResultStream({
+    sessionId: currentSessionId,
+    onResult: result => {
+      if (result.message) {
+        chat.receiveExternalMessage(result.sessionId, result.message);
+      }
+    },
+    onDeliveryFailed: (_taskId, errorCode) => {
+      Alert.alert(
+        'Memory Bot 结果回传失败',
+        errorCode
+          ? `任务结果未能写入当前会话（${errorCode}）。可在任务页查看任务状态。`
+          : '任务结果未能写入当前会话。可在任务页查看任务状态。'
+      );
+    },
   });
 
   const sessionList = useSessionList();
@@ -335,7 +353,7 @@ export default function App() {
           />
 
           {tab === 'tasks' ? (
-            // 任务页：后端没有任务接口，这里只放真实空状态，不画假卡片
+            // 任务页：读取真实 /agent-tasks?parentSessionId=...，仅作审计与状态查询
             <TasksPanel theme={theme} sessionId={currentSessionId} />
           ) : (
             <MessageList

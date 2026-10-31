@@ -28,6 +28,7 @@ import type {
   EmotionResponse,
   HistoryResponse,
   RecallResponse,
+  AgentChatMessage,
 } from '../lib/api/types';
 import { createRequestGate } from '../lib/api/latest-request';
 import { makeLocalId, readJsonResponse } from '../lib/utils';
@@ -126,6 +127,7 @@ export type ChatSessionApi = {
   loadEmotion: () => Promise<void>;
   clearHistory: () => void;
   recallMessage: (message: Message) => void;
+  receiveExternalMessage: (targetSessionId: string, message: AgentChatMessage) => void;
   resetMessages: () => void;
 };
 
@@ -334,6 +336,34 @@ export function useChatSession({
       setHasMoreHistory(false);
     }
   };
+
+  // 主控结果 SSE 的入口：只接受当前会话，按消息 id 去重，不触发额外网络请求。
+  const receiveExternalMessage = useCallback(
+    (targetSessionId: string, message: AgentChatMessage) => {
+      if (!targetSessionId || targetSessionId !== sessionId) return;
+      setMessages(prev => {
+        if (prev.some(item => item.id === message.id)) return prev;
+        return [
+          ...prev,
+          {
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            createdAt: message.createdAt,
+            ...(message.toolSteps && message.toolSteps.length
+              ? {
+                  toolSteps: message.toolSteps.map(step => ({
+                    ...step,
+                    running: false,
+                  })),
+                }
+              : {}),
+          },
+        ];
+      });
+    },
+    [sessionId, setMessages]
+  );
 
   // ---- 聊天请求的公共执行器 ----
   // 发送与续写共用这一条链路：流式 →（无 delta）回退非流式 → 统一分条。
@@ -857,6 +887,7 @@ export function useChatSession({
     loadEmotion,
     clearHistory,
     recallMessage,
+    receiveExternalMessage,
     resetMessages,
   };
 }

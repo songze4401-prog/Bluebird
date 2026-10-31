@@ -12,8 +12,8 @@ const { getManifest } = require('./manifest');
 const { assertRunnable } = require('./registry');
 const { getCredentialKey } = require('./credentials');
 const sessions = require('./sessions');
-const mainSessions = require('../sessions');
 const tasks = require('./tasks');
+const resultDelivery = require('./result-delivery');
 const { AgentError } = require('./errors');
 
 const MAX_USER_MESSAGE = 4000;
@@ -159,81 +159,6 @@ function extractEvidence(name, result, evidence, changes) {
         });
       }
     }
-  }
-}
-
-function formatTaskDelivery(task, result) {
-  const lines = [
-    '【Memory Bot 任务完成】',
-    `任务 ID：${task.taskId}`,
-    `目标：${task.goal}`,
-    `摘要：${result.summary}`,
-  ];
-  if (Array.isArray(result.toolSteps) && result.toolSteps.length) {
-    lines.push(
-      '工具：' +
-        result.toolSteps
-          .map(step => `${step.name}${step.ok ? '✓' : '✗'}`)
-          .join('、')
-    );
-  }
-  if (Array.isArray(result.evidence) && result.evidence.length) {
-    lines.push(
-      '证据：' +
-        result.evidence
-          .map(item => `${item.kind}:${item.id}`)
-          .join('、')
-    );
-  }
-  if (Array.isArray(result.changes) && result.changes.length) {
-    lines.push(
-      '变更：' +
-        result.changes
-          .map(item => `${item.kind}:${item.id}:${item.decision}`)
-          .join('、')
-    );
-  }
-  if (result.requiresConfirmation) {
-    lines.push('状态：需要用户确认后才会执行相关维护操作。');
-  }
-  return lines.join('\n');
-}
-
-function deliverTaskToParent(task, result) {
-  const current = tasks.getRawTask(task.taskId);
-  if (current && current.deliveredToParentAt) {
-    return { delivered: true, alreadyDelivered: true };
-  }
-  if (!task.parentSessionId) {
-    return { delivered: false, reason: 'no_parent_session' };
-  }
-  try {
-    const appended = mainSessions.appendMessages(task.parentSessionId, [
-      {
-        role: 'assistant',
-        content: formatTaskDelivery(task, result),
-        createdAt: new Date().toISOString(),
-      },
-    ]);
-    if (!appended) {
-      tasks.updateTask(task.taskId, {
-        deliveryErrorCode: 'parent_session_write_failed',
-      });
-      return { delivered: false, reason: 'parent_session_write_failed' };
-    }
-    tasks.updateTask(task.taskId, {
-      deliveredToParentAt: new Date().toISOString(),
-      deliveryErrorCode: null,
-    });
-    return { delivered: true };
-  } catch (error) {
-    const code = (error && error.code) || 'parent_delivery_failed';
-    try {
-      tasks.updateTask(task.taskId, { deliveryErrorCode: code });
-    } catch (_) {
-      // 任务已完成；投递失败只记录，不回滚任务结果。
-    }
-    return { delivered: false, reason: code };
   }
 }
 
@@ -574,12 +499,15 @@ async function runTask(taskId) {
       },
       { taskId: task.taskId }
     );
-    deliverTaskToParent(task, {
-      summary,
-      toolSteps: result.toolSteps,
-      evidence: result.evidence,
-      changes: result.changes,
-      requiresConfirmation: result.requiresConfirmation === true,
+    resultDelivery.deliverTaskOutcome(task, {
+      status: 'completed',
+      result: {
+        summary,
+        toolSteps: result.toolSteps,
+        evidence: result.evidence,
+        changes: result.changes,
+        requiresConfirmation: result.requiresConfirmation === true,
+      },
     });
   } catch (error) {
     const latest = tasks.getRawTask(task.taskId);
@@ -619,6 +547,11 @@ async function runTask(taskId) {
       completedAt: new Date().toISOString(),
       errorCode,
     });
+    resultDelivery.deliverTaskOutcome(task.taskId, {
+      status,
+      result: latest.result || null,
+      errorCode,
+    });
     safeEvent(
       task.botId,
       status === 'cancelled'
@@ -645,6 +578,11 @@ function startTask(taskId) {
 }
 
 function initializeTaskQueue() {
+  try {
+    resultDelivery.recoverPending();
+  } catch (_) {
+    // 结果投递恢复失败不阻塞任务队列；下次 SSE/snapshot 或启动再试。
+  }
   try {
     tasks.flushEventOutbox();
   } catch (_) {
@@ -688,6 +626,11 @@ function cancelTask(taskId) {
   });
   const controller = activeRuns.get(taskId);
   if (controller) controller.abort();
+  resultDelivery.deliverTaskOutcome(taskId, {
+    status: 'cancelled',
+    result: null,
+    errorCode: 'cancelled',
+  });
   safeEvent(task.botId, 'task.cancelled', { status: 'cancelled' }, { taskId });
   setImmediate(scheduleTaskQueue);
   return tasks.getTask(taskId);

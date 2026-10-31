@@ -42,6 +42,7 @@ server/agents/
   tasks.js                    # 任务状态机、队列查询、安全事件
   runtime.js                  # 双入口 Runtime + 持久任务队列调度
   approvals.js                # 申请/待审批/批准/拒绝/执行/失败恢复
+  result-delivery.js          # 统一结果投递：消息、去重、失败状态、SSE snapshot
   permissions.js              # 单用户权限检查 + 未来 ACL 扩展点
   routes.js                   # /agents、/agent-tasks、/agent-approvals API
   errors.js                   # 受控错误码
@@ -49,6 +50,7 @@ components/
   AgentTeamScreen.tsx
   MemoryBotScreen.tsx
 lib/agent-stream.ts           # XHR SSE 客户端（token delta / 工具事件）
+lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 ```
 
 数据文件（`BLUEBIRD_DATA_DIR/agents/`）：
@@ -84,7 +86,7 @@ lib/agent-stream.ts           # XHR SSE 客户端（token delta / 工具事件�
 - 取消：`POST /agent-tasks/:taskId/cancel` 标记取消并中止模型/工具调用；终态任务不可回写。
 - 流式：`POST /agents/:botId/chat/stream` 使用真实 Token 级 delta（来自 Provider 流式响应），保留 `tool_start`/`tool_end` 状态事件；工具轮不把参数或内部推理下发。UI 通过 XHR SSE 逐字渲染，并保留工具摘要。
 - 主控派发：主 Agent 工具表新增 `delegate_to_bot`（仅主控可用，Bot 自身 allowlist 不包含它）；它校验 Bot 就绪、任务类型与工具边界，调用现有 `tasks.createTask` + `runtime.startTask`，任务带 `parentSessionId` / `parentMessageId`。主控任务页读取 `GET /agent-tasks?parentSessionId=...`，不是静态占位。
-- 结果回传：任务完成/失败由 Runtime 写入 Task Store；成功结果以“【Memory Bot 任务完成】”消息追加到父主控会话，同时记录 `deliveredToParentAt` 或 `deliveryErrorCode`，下一次主控上下文会包含该结果；主控任务页可查看结构化结果。
+- 结果回传：任务完成/失败统一走 `result-delivery`：写入 Task Store 后，以固定消息 id `bot-result-<taskId>` 追加到父主控会话；记录 `deliveredToParentAt`、`deliveryMessageId`、`deliveryStatus` 或 `deliveryErrorCode`。主控前端通过 `GET /agent-results/stream?sessionId=...` 接收实时 `result`/`delivery_failed`，snapshot 覆盖断线重连；前端按消息 id 去重，因此重复投递不会生成第二条。任务页继续作为审计/状态入口。
 - 事件可靠性：`appendEvent` 先写持久 outbox，再写主事件文件；主文件写失败时事件仍在 outbox，启动/读取时重试，不再被 `safeEvent` 静默丢弃。
 
 ## 4. 人工审批与权限
@@ -134,6 +136,7 @@ lib/agent-stream.ts           # XHR SSE 客户端（token delta / 工具事件�
 | GET/DELETE | `/agents/:botId/sessions/:sessionId` | 读取/删除 Bot 会话 |
 | POST | `/agents/:botId/chat` | 非流式直接对话 |
 | POST | `/agents/:botId/chat/stream` | SSE；真实 token delta + 工具/状态事件 |
+| GET | `/agent-results/stream?sessionId=...` | 主控结果 SSE；snapshot + 实时结果/投递失败事件 |
 | GET | `/agents/:botId/events` | 安全事件 |
 | GET | `/agents/:botId/permissions` | 单用户权限配置与扩展点 |
 | POST/GET | `/agents/:botId/approvals` | 创建/列出审批申请 |
@@ -164,9 +167,9 @@ lib/agent-stream.ts           # XHR SSE 客户端（token delta / 工具事件�
 
 - `node tests/memory-bot.test.js`：7 项，覆盖 Registry、AES-256-GCM 密文/重启解密、真实 `/models` 验证、Bot 会话、独立 Key 工具循环、任务/审批 API、token SSE/工具事件、并发队列/恢复/失败隔离。
 - `node tests/memory-maintenance.test.js`：5 项，覆盖 update/merge/supersede/archive/withdraw/delete、维护门面白名单、审批闭环、事件不含正文、权限拒绝。
-- `node tests/agent-dispatch.test.js`：5 项，覆盖主控工具派发、`parentSessionId` 结果回传、主 Agent 工具循环、投递失败与事件 outbox 恢复。
+- `node tests/agent-dispatch.test.js`：7 项，覆盖主控工具派发、结果 SSE/snapshot、失败回传、重复投递防护、主 Agent 工具循环与事件 outbox 恢复。
 - `npx jest tests/unit/memory-bot-screen.test.tsx`：3 项，覆盖团队页、工作台/流式回退、Prompt/工具白名单、任务表单、审批操作。
-- 全量：`npm test` 48 个后端文件 / 1558 项；Jest 18 套 / 165 项；覆盖率校验 backend 1558/1558、runner 1337/1337、frontend 165/165；tsc/lint 通过（以最终交付命令输出为准）。
+- 全量：`npm test` 48 个后端文件 / 1560 项；Jest 18 套 / 166 项；覆盖率校验 backend 1560/1560、runner 1339/1339、frontend 166/166；tsc/lint 通过（以最终交付命令输出为准）。
 - Expo Web export 成功；浏览器 DOM 核对：Agent 团队入口、真实 Memory Bot 状态、工作台三页签、配置页真实服务商/脱敏 Key、维护申请表单与审批列表可渲染；浏览器实际提交一条 update 维护申请后，服务端返回 pending 并在审批列表显示。
 
 ### 8.1 Stub 与真实模型测试区分
@@ -174,6 +177,7 @@ lib/agent-stream.ts           # XHR SSE 客户端（token delta / 工具事件�
 - **CI/单元测试（Stub）**：`tests/memory-bot.test.js` 使用真实 HTTP OpenAI-compatible stub，确定性验证 key 隔离、工具循环、SSE 多段 delta、工具事件、审批 API 与任务队列。它不代表真实模型质量。
 - **真实模型 E2E（2026-10-31）**：本机真实 `Qwen2.5-0.5B-Instruct` ONNX int8 权重，经本地 OpenAI-compatible HTTP 服务提供 `/v1/chat/completions`（stream=true）。Bluebird 后端配置该 Provider 与 Bot 独立加密 Key（本地服务只接受该 Bot Key；全局 Provider Key 为拒绝值）。`POST /agents/memory/chat/stream` 实测返回 24 个 token delta、最终 `done` 与 Bot session，无 error，耗时约 4.7s；工作台浏览器也通过同一端点收到并显示了流式助手文本，`model-adapter` 日志记录完成。证明真实模型 HTTP SSE、UI 流式渲染与 Bot 凭证链路可用。
 - **真实模型质量边界**：0.5B int8 模型在 CPU 上生成内容质量有限，本轮只验证协议、流式、会话与凭证隔离，不把回答质量当作产品验收；模型文件和临时服务不在仓库内。
+- **结果回传 UI E2E（2026-10-31，Stub）**：Expo Web + 本地 OpenAI-compatible stub（非真实模型质量）+ Memory Bot 独立 Key。主控实际发送后经 `delegate_to_bot` 派发 3 个任务（2 完成、1 失败），成功与失败消息均在 `/agent-results/stream` 连接上即时显示、无需刷新；重启后端后 SSE 自动重连，snapshot 返回 3 条唯一结果，前端仍为 3 条、无重复；任务页显示同一批 3 条任务及“已回传主控”。该验证证明事件驱动展示、失败回传、重连快照与幂等去重，不代表真实模型回答质量。
 
 ## 9. 尚未实现 / 边界
 
@@ -196,9 +200,9 @@ lib/agent-stream.ts           # XHR SSE 客户端（token delta / 工具事件�
 
 | 阶段 | 实际实现 | 验收证据 |
 |---|---|---|
-| P0 主控派发 + 结果回传 + 事件 outbox | 主 Agent `delegate_to_bot` 工具、`parentSessionId`、结果写回父会话、任务页真实读取、事件 outbox | `tests/agent-dispatch.test.js` 5 项 |
+| P0 主控派发 + 结果回传 + 事件 outbox | 主 Agent `delegate_to_bot` 工具、`parentSessionId`、Result Delivery SSE、任务页真实读取、事件 outbox | `tests/agent-dispatch.test.js` 7 项 |
 | P0 记忆维护 + 人工审批 | `memory.updateMemory/mergeMemories/supersedeMemory/withdrawMemory` + `archive/delete` 复用；`memory-service` 白名单；`approvals` 状态机与 API | `tests/memory-maintenance.test.js` 5 项；审批 API 前后状态测试 |
 | P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；Provider token delta；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 7 项；SSE/tool event 测试；Jest 3 项 UI 测试 |
 | P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；维护申请表单；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验、真实模型 HTTP SSE E2E |
 
-“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1558/1558、nodeSuite 221/221、runner 1337/1337、frontend 165/165、CI 48/48。
+“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1560/1560、nodeSuite 221/221、runner 1339/1339、frontend 166/166、CI 48/48。
