@@ -165,7 +165,7 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-Forty-eight files, 1560 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
+Forty-eight files, 1563 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
 node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js tests/monitoring.test.js   # node:test suites (221)
@@ -206,7 +206,7 @@ node tests/memory-startup-lock.test.js    # 31
 node tests/retrieval.test.js              # 30 — unified retrieval: contract/store lifecycle, five source connectors, hybrid fusion, policy gate, vector provider, context/Agent integration
 node tests/retrieval-api.test.js          # 12 — live HTTP: auth/405, document/code/web ingest -> search -> delete, session isolation, rebuild/consistency, vector backfill 401/409
 node tests/retrieval-embeddings.test.js   # 8 — vector namespace reset, batch backfill, incremental embedding, reranker HTTP contract/fallback, engine rerank order
-node tests/memory-bot.test.js            # 7 — Memory Bot registry/config, AES-256-GCM vault, Bot sessions, real tool loop, tasks, queue/SSE
+node tests/memory-bot.test.js            # 8 — Memory Bot registry/config, AES-256-GCM vault, Bot sessions, tool loop and budget finalization, tasks, queue/SSE
 node tests/memory-maintenance.test.js    # 5 — explicit update/merge/supersede/archive/withdraw/delete, approval lifecycle, permissions
 node tests/agent-dispatch.test.js        # 7 — main tool → Bot task, result SSE/snapshot, failure delivery, dedupe, outbox recovery
 node tests/monitoring-api.test.js         # 38 — monitoring API + real HTTP/context/agent/SSE/persistence instrumentation (model SDK stubbed)

@@ -28,6 +28,7 @@ process.env.BLUEBIRD_MONITORING = '0';
 process.env.BLUEBIRD_ALLOW_PRIVATE_BASE_URL = '1';
 
 const seenAuth = [];
+const budgetRequests = [];
 let providerMode = 'text';
 let responseDelayMs = 0;
 let providerPort = 0;
@@ -164,6 +165,31 @@ const providerServer = http.createServer((req, res) => {
     const respond = () => {
       if (providerMode === 'fail') {
         jsonResponse(res, 500, { error: 'provider_failed' });
+        return;
+      }
+      if (providerMode === 'tool-budget') {
+        if (!hasToolResult) {
+          const calls = Array.from({ length: 7 }, (_, index) => ({
+            id: `call_budget_${index}`,
+            type: 'function',
+            function: {
+              name: 'memory_search',
+              arguments: JSON.stringify({ query: `咖啡 ${index}`, limit: 3 }),
+            },
+          }));
+          jsonResponse(res, 200, completion(null, calls));
+          return;
+        }
+        budgetRequests.push({
+          toolCount: Array.isArray(parsed.tools) ? parsed.tools.length : 0,
+          toolMessages: messages.filter(message => message.role === 'tool').length,
+          assistantToolCallIds: messages
+            .filter(
+              message => message.role === 'assistant' && Array.isArray(message.tool_calls)
+            )
+            .flatMap(message => message.tool_calls.map(call => call.id)),
+        });
+        jsonResponse(res, 200, completion('预算截断后的总结：已检索到咖啡偏好。'));
         return;
       }
       if (providerMode === 'tool-first' && !hasToolResult) {
@@ -462,6 +488,40 @@ test('主控委派：任务状态、结构化结果与取消', async () => {
       }),
     error => error && error.code === 'invalid_task_type'
   );
+});
+
+test('工具预算：超出旧上限后保留无工具总结轮，不返回 empty_reply', async () => {
+  providerMode = 'tool-budget';
+  budgetRequests.length = 0;
+  try {
+    const task = tasks.createTask({
+      botId: 'memory',
+      taskType: 'memory.search',
+      goal: '检索咖啡偏好并总结',
+      allowedTools: ['memory_search', 'memory_remember', 'knowledge_search'],
+      deadlineMs: 20000,
+    });
+    runtime.startTask(task.taskId);
+    const finished = await waitForTask(task.taskId);
+
+    assert.equal(finished.status, 'completed');
+    assert.equal(finished.errorCode, null);
+    assert.equal(finished.result.summary, '预算截断后的总结：已检索到咖啡偏好。');
+    assert.equal(finished.result.toolSteps.length, 6);
+    assert.equal(finished.result.stopReason, 'tool_call_budget');
+    assert.equal(budgetRequests.length, 1);
+    assert.equal(budgetRequests[0].toolCount, 0);
+    assert.equal(budgetRequests[0].toolMessages, 6);
+    assert.equal(budgetRequests[0].assistantToolCallIds.length, 6);
+
+    const events = tasks.listEvents('memory', { limit: 100 });
+    const completed = events.filter(
+      event => event.taskId === task.taskId && event.eventType === 'model.completed'
+    );
+    assert.equal(completed.at(-1).payload.stopReason, 'tool_call_budget');
+  } finally {
+    providerMode = 'text';
+  }
 });
 
 test('持久任务队列：并发限制、失败隔离与重启恢复', async () => {

@@ -165,11 +165,11 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 
 ## 8. 测试
 
-- `node tests/memory-bot.test.js`：7 项，覆盖 Registry、AES-256-GCM 密文/重启解密、真实 `/models` 验证、Bot 会话、独立 Key 工具循环、任务/审批 API、token SSE/工具事件、并发队列/恢复/失败隔离。
+- `node tests/memory-bot.test.js`：8 项，覆盖 Registry、AES-256-GCM 密文/重启解密、真实 `/models` 验证、Bot 会话、独立 Key 工具循环、工具预算截断后的无工具总结、任务/审批 API、token SSE/工具事件、并发队列/恢复/失败隔离。
 - `node tests/memory-maintenance.test.js`：5 项，覆盖 update/merge/supersede/archive/withdraw/delete、维护门面白名单、审批闭环、事件不含正文、权限拒绝。
 - `node tests/agent-dispatch.test.js`：7 项，覆盖主控工具派发、结果 SSE/snapshot、失败回传、重复投递防护、主 Agent 工具循环与事件 outbox 恢复。
 - `npx jest tests/unit/memory-bot-screen.test.tsx`：3 项，覆盖团队页、工作台/流式回退、Prompt/工具白名单、任务表单、审批操作。
-- 全量：`npm test` 48 个后端文件 / 1560 项；Jest 18 套 / 166 项；覆盖率校验 backend 1560/1560、runner 1339/1339、frontend 166/166；tsc/lint 通过（以最终交付命令输出为准）。
+- 全量：`npm test` 48 个后端文件 / 1563 项；Jest 18 套 / 166 项；覆盖率校验 backend 1563/1563、runner 1342/1342、frontend 166/166；tsc/lint 通过（以最终交付命令输出为准）。
 - Expo Web export 成功；浏览器 DOM 核对：Agent 团队入口、真实 Memory Bot 状态、工作台三页签、配置页真实服务商/脱敏 Key、维护申请表单与审批列表可渲染；浏览器实际提交一条 update 维护申请后，服务端返回 pending 并在审批列表显示。
 
 ### 8.1 Stub 与真实模型测试区分
@@ -202,7 +202,7 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 |---|---|---|
 | P0 主控派发 + 结果回传 + 事件 outbox | 主 Agent `delegate_to_bot` 工具、`parentSessionId`、Result Delivery SSE、任务页真实读取、事件 outbox | `tests/agent-dispatch.test.js` 7 项 |
 | P0 记忆维护 + 人工审批 | `memory.updateMemory/mergeMemories/supersedeMemory/withdrawMemory` + `archive/delete` 复用；`memory-service` 白名单；`approvals` 状态机与 API | `tests/memory-maintenance.test.js` 5 项；审批 API 前后状态测试 |
-| P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；Provider token delta；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 7 项；SSE/tool event 测试；Jest 3 项 UI 测试 |
+| P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；工具预算截断后无工具总结；Provider token delta；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 8 项；SSE/tool event 测试；Jest 3 项 UI 测试 |
 | P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；维护申请表单；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验、真实模型 HTTP SSE E2E |
 
-“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1560/1560、nodeSuite 221/221、runner 1339/1339、frontend 166/166、CI 48/48。
+“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1563/1563、nodeSuite 221/221、runner 1342/1342、frontend 166/166、CI 48/48。
