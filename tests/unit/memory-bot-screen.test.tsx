@@ -239,6 +239,32 @@ describe('Memory Bot UI', () => {
 
   it('配置页可编辑 Prompt/工具白名单，任务页展示真实任务与审批操作', async () => {
     mockedFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path === '/agents/memory/approvals' && init?.method === 'POST') {
+        return jsonResponse(
+          {
+            approval: {
+              approvalId: 'appr_new',
+              botId: 'memory',
+              taskId: null,
+              sessionId: null,
+              operation: 'update',
+              payload: { id: 'mem-a', content: '新的记忆内容' },
+              risk: 'medium',
+              status: 'pending',
+              requestedBy: 'user',
+              requestedAt: '2026-10-30T00:00:00.000Z',
+              decidedBy: null,
+              decidedAt: null,
+              executedBy: null,
+              executedAt: null,
+              reason: null,
+              errorCode: null,
+              result: null,
+            },
+          },
+          201
+        );
+      }
       if (path === '/agents/memory') return jsonResponse({ agent });
       if (path === '/agents/memory/config') return jsonResponse({ config, agent });
       if (path === '/agents/memory/sessions' && (!init || init.method !== 'POST')) {
@@ -312,6 +338,26 @@ describe('Memory Bot UI', () => {
       expect(screen.getByText('update · medium')).toBeTruthy();
       expect(screen.getByText('目标：mem-a')).toBeTruthy();
       expect(screen.getByText('执行')).toBeTruthy();
+    });
+
+    await fireEvent.changeText(screen.getByPlaceholderText('记忆 ID'), 'mem-a');
+    await fireEvent.changeText(
+      screen.getByPlaceholderText('更新后的内容（可选）'),
+      '新的记忆内容'
+    );
+    await fireEvent.press(screen.getByText('提交维护申请'));
+
+    await waitFor(() => {
+      const call = mockedFetch.mock.calls.find(
+        ([path, init]) =>
+          path === '/agents/memory/approvals' &&
+          (init as RequestInit | undefined)?.method === 'POST'
+      );
+      expect(call).toBeTruthy();
+      const body = JSON.parse(String((call?.[1] as RequestInit).body));
+      expect(body.operation).toBe('update');
+      expect(body.payload.id).toBe('mem-a');
+      expect(body.requestedBy).toBe('user');
     });
   });
 });

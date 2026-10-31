@@ -162,14 +162,20 @@ lib/agent-stream.ts           # XHR SSE 客户端（token delta / 工具事件�
 - `node tests/memory-maintenance.test.js`：5 项，覆盖 update/merge/supersede/archive/withdraw/delete、维护门面白名单、审批闭环、事件不含正文、权限拒绝。
 - `npx jest tests/unit/memory-bot-screen.test.tsx`：3 项，覆盖团队页、工作台/流式回退、Prompt/工具白名单、任务表单、审批操作。
 - 全量：`npm test` 47 个后端文件 / 1553 项；Jest 18 套 / 165 项；覆盖率校验 backend 1553/1553、runner 1332/1332、frontend 165/165；tsc/lint 通过（以最终交付命令输出为准）。
-- Expo Web export 成功；浏览器 DOM 核对：Agent 团队入口、真实 Memory Bot 状态、工作台三页签、配置页真实服务商/脱敏 Key、任务与审批入口可渲染。该次浏览器核对未配置真实聊天模型，因此 Bot 对话质量由真实 HTTP stub Provider 测试覆盖，不把浏览器渲染当作模型质量验证。
+- Expo Web export 成功；浏览器 DOM 核对：Agent 团队入口、真实 Memory Bot 状态、工作台三页签、配置页真实服务商/脱敏 Key、维护申请表单与审批列表可渲染；浏览器实际提交一条 update 维护申请后，服务端返回 pending 并在审批列表显示。
+
+### 8.1 Stub 与真实模型测试区分
+
+- **CI/单元测试（Stub）**：`tests/memory-bot.test.js` 使用真实 HTTP OpenAI-compatible stub，确定性验证 key 隔离、工具循环、SSE 多段 delta、工具事件、审批 API 与任务队列。它不代表真实模型质量。
+- **真实模型 E2E（2026-10-31）**：本机真实 `Qwen2.5-0.5B-Instruct` ONNX int8 权重，经本地 OpenAI-compatible HTTP 服务提供 `/v1/chat/completions`（stream=true）。Bluebird 后端配置该 Provider 与 Bot 独立加密 Key（本地服务只接受该 Bot Key；全局 Provider Key 为拒绝值）。`POST /agents/memory/chat/stream` 实测返回 24 个 token delta、最终 `done` 与 Bot session，无 error，耗时约 4.7s；工作台浏览器也通过同一端点收到并显示了流式助手文本，`model-adapter` 日志记录完成。证明真实模型 HTTP SSE、UI 流式渲染与 Bot 凭证链路可用。
+- **真实模型质量边界**：0.5B int8 模型在 CPU 上生成内容质量有限，本轮只验证协议、流式、会话与凭证隔离，不把回答质量当作产品验收；模型文件和临时服务不在仓库内。
 
 ## 9. 尚未实现 / 边界
 
 1. **多用户 ACL**：仍是单用户本地部署；`botId + sessionId` 已隔离，`permissions.js` 保留扩展点，但无用户身份/文档 ACL。
 2. **分布式任务队列**：持久化队列是单进程；没有跨进程 worker、分布式锁或重启后保留 in-flight 模型连接。
 3. **自动重试**：默认 `maxAttempts=1`；只有显式提高 `BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS` 且任务未启用 `memory_remember` 时，才对瞬时模型错误重试。有副作用的维护/写入任务不自动重试；失败会显式落库并继续队列。
-4. **审批发起 UI**：审批申请由 API/主控创建；工作台提供审批列表、批准/拒绝/执行，未提供完整的维护申请表单。
+4. **审批发起 UI**：工作台已提供维护申请表单（update/merge/supersede/archive/withdraw/delete），申请仍必须经批准与独立执行；未提供批量申请或审批模板。
 5. **其他 Bot**：只注册 Memory Bot；Research/Coding/Browser 等保持“预留 · 未注册”。
 6. **记忆维护模型工具**：维护操作只通过已鉴权审批接口执行，没有注册为模型可自行调用的工具；这是防止模型自主触发不可逆操作的安全边界。
 
@@ -187,6 +193,6 @@ lib/agent-stream.ts           # XHR SSE 客户端（token delta / 工具事件�
 |---|---|---|
 | P0 记忆维护 + 人工审批 | `memory.updateMemory/mergeMemories/supersedeMemory/withdrawMemory` + `archive/delete` 复用；`memory-service` 白名单；`approvals` 状态机与 API | `tests/memory-maintenance.test.js` 5 项；审批 API 前后状态测试 |
 | P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；Provider token delta；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 7 项；SSE/tool event 测试；Jest 3 项 UI 测试 |
-| P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验 |
+| P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；维护申请表单；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验、真实模型 HTTP SSE E2E |
 
 “P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1553/1553、nodeSuite 221/221、runner 1332/1332、frontend 165/165、CI 47/47。

@@ -46,6 +46,8 @@ export const API_PATHS = {
     `/agents/${encodeURIComponent(botId)}/permissions`,
   agentApprovals: (botId: string, limit = 50) =>
     `/agents/${encodeURIComponent(botId)}/approvals?limit=${limit}`,
+  agentApprovalCreate: (botId: string) =>
+    `/agents/${encodeURIComponent(botId)}/approvals`,
   agentApproval: (approvalId: string) =>
     `/agent-approvals/${encodeURIComponent(approvalId)}`,
   agentApprovalApprove: (approvalId: string) =>

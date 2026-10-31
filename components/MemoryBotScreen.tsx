@@ -44,6 +44,17 @@ const STATUS_LABEL: Record<string, string> = {
   degraded: '待配置',
 };
 
+const MEMORY_TYPES = ['identity', 'preference', 'fact', 'goal', 'relationship'] as const;
+
+const MAINTENANCE_OPERATIONS = [
+  ['update', '更新'],
+  ['merge', '合并'],
+  ['supersede', '替换'],
+  ['archive', '归档'],
+  ['withdraw', '撤回'],
+  ['delete', '删除'],
+] as const;
+
 const TASK_LABEL: Record<string, string> = {
   queued: '排队中',
   accepted: '已接收',
@@ -81,6 +92,15 @@ export function MemoryBotScreen({
   const [taskType, setTaskType] = useState('memory.search');
   const [taskBusy, setTaskBusy] = useState(false);
   const [approvalBusy, setApprovalBusy] = useState('');
+  const [maintenanceOperation, setMaintenanceOperation] = useState('update');
+  const [maintenanceId, setMaintenanceId] = useState('');
+  const [maintenanceTargetId, setMaintenanceTargetId] = useState('');
+  const [maintenanceSourceIds, setMaintenanceSourceIds] = useState('');
+  const [maintenanceContent, setMaintenanceContent] = useState('');
+  const [maintenanceType, setMaintenanceType] = useState('preference');
+  const [maintenanceKeywords, setMaintenanceKeywords] = useState('');
+  const [maintenanceSessionId, setMaintenanceSessionId] = useState('');
+  const [maintenanceBusy, setMaintenanceBusy] = useState(false);
   const [input, setInput] = useState('');
   const [keyInput, setKeyInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -439,6 +459,102 @@ export function MemoryBotScreen({
       setError(err instanceof Error ? err.message : '创建任务失败');
     } finally {
       setTaskBusy(false);
+    }
+  };
+
+  const createMaintenanceRequest = async () => {
+    if (maintenanceBusy) return;
+    const id = maintenanceId.trim();
+    const targetId = maintenanceTargetId.trim();
+    const sourceIds = maintenanceSourceIds
+      .split(/[,，\s]+/)
+      .map(item => item.trim())
+      .filter(Boolean);
+    const content = maintenanceContent.trim();
+    const keywords = maintenanceKeywords
+      .split(/[,，\s]+/)
+      .map(item => item.trim())
+      .filter(Boolean);
+
+    let payload: Record<string, unknown>;
+    if (maintenanceOperation === 'merge') {
+      if (!targetId || !sourceIds.length) {
+        setError('合并需要目标记忆 ID 和至少一个来源 ID。');
+        return;
+      }
+      payload = {
+        targetId,
+        sourceIds,
+        ...(content ? { content } : {}),
+        ...(keywords.length ? { keywords } : {}),
+      };
+    } else if (maintenanceOperation === 'supersede') {
+      if (!id || !content) {
+        setError('替换需要原记忆 ID 和新内容。');
+        return;
+      }
+      payload = {
+        id,
+        replacement: {
+          content,
+          type: maintenanceType,
+          ...(keywords.length ? { keywords } : {}),
+        },
+      };
+    } else if (maintenanceOperation === 'update') {
+      if (!id) {
+        setError('更新需要记忆 ID。');
+        return;
+      }
+      payload = {
+        id,
+        ...(content ? { content } : {}),
+        type: maintenanceType,
+        ...(keywords.length ? { keywords } : {}),
+      };
+    } else {
+      if (!id) {
+        setError('该操作需要记忆 ID。');
+        return;
+      }
+      payload = {
+        id,
+        ...(maintenanceOperation === 'withdraw' && maintenanceSessionId.trim()
+          ? { sessionId: maintenanceSessionId.trim() }
+          : {}),
+      };
+    }
+
+    setMaintenanceBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const response = await apiFetch(API_PATHS.agentApprovalCreate('memory'), {
+        method: 'POST',
+        body: JSON.stringify({
+          operation: maintenanceOperation,
+          payload,
+          requestedBy: 'user',
+          ...(maintenanceOperation === 'withdraw' &&
+          (maintenanceSessionId.trim() || sessionId)
+            ? { sessionId: maintenanceSessionId.trim() || sessionId }
+            : {}),
+        }),
+      });
+      const data = (await response.json()) as { error?: string; approval?: AgentApproval };
+      if (!response.ok) throw new Error(data.error || '创建维护申请失败');
+      await refreshActivity();
+      setMaintenanceId('');
+      setMaintenanceTargetId('');
+      setMaintenanceSourceIds('');
+      setMaintenanceContent('');
+      setMaintenanceKeywords('');
+      setMaintenanceSessionId('');
+      setNotice('维护申请已创建，待人工批准；批准后仍需单独执行。');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '创建维护申请失败');
+    } finally {
+      setMaintenanceBusy(false);
     }
   };
 
@@ -930,6 +1046,134 @@ export function MemoryBotScreen({
             <Text style={styles.sectionHint}>
               高风险记忆维护必须先申请；未批准不能执行，执行结果来自记忆服务。
             </Text>
+            <View style={styles.maintenanceForm}>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.choiceRow}>
+                {MAINTENANCE_OPERATIONS.map(([operation, label]) => (
+                  <TouchableOpacity
+                    key={operation}
+                    style={[
+                      styles.choice,
+                      maintenanceOperation === operation && styles.choiceSelected,
+                    ]}
+                    onPress={() => setMaintenanceOperation(operation)}
+                  >
+                    <Text
+                      style={[
+                        styles.choiceText,
+                        maintenanceOperation === operation && styles.choiceTextSelected,
+                      ]}
+                    >
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+
+              {maintenanceOperation === 'merge' ? (
+                <>
+                  <TextInput
+                    style={styles.smallInput}
+                    value={maintenanceTargetId}
+                    onChangeText={setMaintenanceTargetId}
+                    placeholder="目标记忆 ID"
+                    placeholderTextColor={theme.textMuted}
+                    autoCapitalize="none"
+                  />
+                  <TextInput
+                    style={styles.smallInput}
+                    value={maintenanceSourceIds}
+                    onChangeText={setMaintenanceSourceIds}
+                    placeholder="来源记忆 ID（逗号分隔）"
+                    placeholderTextColor={theme.textMuted}
+                    autoCapitalize="none"
+                  />
+                </>
+              ) : (
+                <TextInput
+                  style={styles.smallInput}
+                  value={maintenanceId}
+                  onChangeText={setMaintenanceId}
+                  placeholder="记忆 ID"
+                  placeholderTextColor={theme.textMuted}
+                  autoCapitalize="none"
+                />
+              )}
+
+              {['update', 'merge', 'supersede'].includes(maintenanceOperation) && (
+                <TextInput
+                  style={[styles.smallInput, styles.maintenanceContent]}
+                  value={maintenanceContent}
+                  onChangeText={setMaintenanceContent}
+                  placeholder={
+                    maintenanceOperation === 'merge'
+                      ? '合并后的内容（可选）'
+                      : maintenanceOperation === 'supersede'
+                        ? '替换后的新内容'
+                        : '更新后的内容（可选）'
+                  }
+                  placeholderTextColor={theme.textMuted}
+                  multiline
+                  maxLength={100}
+                />
+              )}
+
+              {['update', 'supersede'].includes(maintenanceOperation) && (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.choiceRow}>
+                  {MEMORY_TYPES.map(type => (
+                    <TouchableOpacity
+                      key={type}
+                      style={[styles.choice, maintenanceType === type && styles.choiceSelected]}
+                      onPress={() => setMaintenanceType(type)}
+                    >
+                      <Text
+                        style={[
+                          styles.choiceText,
+                          maintenanceType === type && styles.choiceTextSelected,
+                        ]}
+                      >
+                        {type}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              )}
+
+              {['update', 'merge', 'supersede'].includes(maintenanceOperation) && (
+                <TextInput
+                  style={styles.smallInput}
+                  value={maintenanceKeywords}
+                  onChangeText={setMaintenanceKeywords}
+                  placeholder="关键词（逗号分隔，可选）"
+                  placeholderTextColor={theme.textMuted}
+                  autoCapitalize="none"
+                />
+              )}
+
+              {maintenanceOperation === 'withdraw' && (
+                <TextInput
+                  style={styles.smallInput}
+                  value={maintenanceSessionId}
+                  onChangeText={setMaintenanceSessionId}
+                  placeholder="会话 ID（可选，留空撤回全部）"
+                  placeholderTextColor={theme.textMuted}
+                  autoCapitalize="none"
+                />
+              )}
+
+              <TouchableOpacity
+                style={[styles.secondaryButton, styles.maintenanceSubmit]}
+                onPress={() => void createMaintenanceRequest()}
+                disabled={maintenanceBusy}
+              >
+                <Text style={styles.secondaryButtonText}>
+                  {maintenanceBusy ? '提交中…' : '提交维护申请'}
+                </Text>
+              </TouchableOpacity>
+              <Text style={styles.toolHint}>
+                申请只创建 pending 审批；需在下方批准并执行，不会直接改写记忆。
+              </Text>
+            </View>
+
             {approvals.length === 0 ? (
               <Text style={styles.hint}>暂无审批申请。</Text>
             ) : (
@@ -1350,6 +1594,16 @@ const createStyles = (theme: Theme) =>
       fontSize: 12,
     },
     taskSubmit: { marginTop: 8, flex: 0 },
+    maintenanceForm: {
+      marginTop: 10,
+      padding: 12,
+      borderRadius: 14,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+    },
+    maintenanceContent: { minHeight: 72, textAlignVertical: 'top' },
+    maintenanceSubmit: { marginTop: 8, flex: 0 },
     approvalCard: {
       marginTop: 10,
       padding: 13,
