@@ -61,6 +61,7 @@ lib/agent-stream.ts           # XHR SSE 客户端（token delta / 工具事件�
 | `agent-sessions.json` | botId + sessionId + messages | 与主控会话分离 |
 | `agent-tasks.json` | 状态、目标、结构化结果、attempts、recoveredAt | 队列事实来源；事件不含正文 |
 | `agent-events.json` | 安全事件 | 只允许状态/工具/耗时/错误码等白名单字段 |
+| `agent-event-outbox.json` | 事件投递 outbox | 先持久化再写主事件文件；写失败时下次启动/读取补写 |
 | `agent-approvals.json` | 审批 operation/payload/status/decision/result | chmod 0600；不写事件正文 |
 
 主密钥优先取 `BLUEBIRD_AGENT_VAULT_KEY`（64 位十六进制）；未配置时生成 `agents/agent-vault.key`。Vault 解密同时校验 `botId + credentialId + providerId` 的 AAD，跨 Bot 读取直接拒绝。
@@ -82,6 +83,9 @@ lib/agent-stream.ts           # XHR SSE 客户端（token delta / 工具事件�
 - 失败处理：模型/工具/审批失败写入 `errorCode` 与终态，队列继续下一个任务；`BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS` >1 时只对只读任务（未启用 `memory_remember`）的瞬时模型错误尝试重试，写入任务不自动重试，避免重复操作。
 - 取消：`POST /agent-tasks/:taskId/cancel` 标记取消并中止模型/工具调用；终态任务不可回写。
 - 流式：`POST /agents/:botId/chat/stream` 使用真实 Token 级 delta（来自 Provider 流式响应），保留 `tool_start`/`tool_end` 状态事件；工具轮不把参数或内部推理下发。UI 通过 XHR SSE 逐字渲染，并保留工具摘要。
+- 主控派发：主 Agent 工具表新增 `delegate_to_bot`（仅主控可用，Bot 自身 allowlist 不包含它）；它校验 Bot 就绪、任务类型与工具边界，调用现有 `tasks.createTask` + `runtime.startTask`，任务带 `parentSessionId` / `parentMessageId`。主控任务页读取 `GET /agent-tasks?parentSessionId=...`，不是静态占位。
+- 结果回传：任务完成/失败由 Runtime 写入 Task Store；成功结果以“【Memory Bot 任务完成】”消息追加到父主控会话，同时记录 `deliveredToParentAt` 或 `deliveryErrorCode`，下一次主控上下文会包含该结果；主控任务页可查看结构化结果。
+- 事件可靠性：`appendEvent` 先写持久 outbox，再写主事件文件；主文件写失败时事件仍在 outbox，启动/读取时重试，不再被 `safeEvent` 静默丢弃。
 
 ## 4. 人工审批与权限
 
@@ -160,8 +164,9 @@ lib/agent-stream.ts           # XHR SSE 客户端（token delta / 工具事件�
 
 - `node tests/memory-bot.test.js`：7 项，覆盖 Registry、AES-256-GCM 密文/重启解密、真实 `/models` 验证、Bot 会话、独立 Key 工具循环、任务/审批 API、token SSE/工具事件、并发队列/恢复/失败隔离。
 - `node tests/memory-maintenance.test.js`：5 项，覆盖 update/merge/supersede/archive/withdraw/delete、维护门面白名单、审批闭环、事件不含正文、权限拒绝。
+- `node tests/agent-dispatch.test.js`：5 项，覆盖主控工具派发、`parentSessionId` 结果回传、主 Agent 工具循环、投递失败与事件 outbox 恢复。
 - `npx jest tests/unit/memory-bot-screen.test.tsx`：3 项，覆盖团队页、工作台/流式回退、Prompt/工具白名单、任务表单、审批操作。
-- 全量：`npm test` 47 个后端文件 / 1553 项；Jest 18 套 / 165 项；覆盖率校验 backend 1553/1553、runner 1332/1332、frontend 165/165；tsc/lint 通过（以最终交付命令输出为准）。
+- 全量：`npm test` 48 个后端文件 / 1558 项；Jest 18 套 / 165 项；覆盖率校验 backend 1558/1558、runner 1337/1337、frontend 165/165；tsc/lint 通过（以最终交付命令输出为准）。
 - Expo Web export 成功；浏览器 DOM 核对：Agent 团队入口、真实 Memory Bot 状态、工作台三页签、配置页真实服务商/脱敏 Key、维护申请表单与审批列表可渲染；浏览器实际提交一条 update 维护申请后，服务端返回 pending 并在审批列表显示。
 
 ### 8.1 Stub 与真实模型测试区分
@@ -191,8 +196,9 @@ lib/agent-stream.ts           # XHR SSE 客户端（token delta / 工具事件�
 
 | 阶段 | 实际实现 | 验收证据 |
 |---|---|---|
+| P0 主控派发 + 结果回传 + 事件 outbox | 主 Agent `delegate_to_bot` 工具、`parentSessionId`、结果写回父会话、任务页真实读取、事件 outbox | `tests/agent-dispatch.test.js` 5 项 |
 | P0 记忆维护 + 人工审批 | `memory.updateMemory/mergeMemories/supersedeMemory/withdrawMemory` + `archive/delete` 复用；`memory-service` 白名单；`approvals` 状态机与 API | `tests/memory-maintenance.test.js` 5 项；审批 API 前后状态测试 |
 | P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；Provider token delta；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 7 项；SSE/tool event 测试；Jest 3 项 UI 测试 |
 | P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；维护申请表单；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验、真实模型 HTTP SSE E2E |
 
-“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1553/1553、nodeSuite 221/221、runner 1332/1332、frontend 165/165、CI 47/47。
+“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1558/1558、nodeSuite 221/221、runner 1337/1337、frontend 165/165、CI 48/48。

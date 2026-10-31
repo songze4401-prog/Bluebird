@@ -830,6 +830,10 @@ export type AgentTask = {
   taskType: string;
   goal: string;
   sessionId: string | null;
+  parentSessionId?: string | null;
+  parentMessageId?: string | null;
+  deliveredToParentAt?: string | null;
+  deliveryErrorCode?: string | null;
   allowedTools: string[];
   deadlineMs: number;
   status:

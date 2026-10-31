@@ -13,7 +13,7 @@
 
 import React from 'react';
 import { StyleSheet } from 'react-native';
-import { fireEvent, render, screen } from '@testing-library/react-native';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react-native';
 
 import { ChatBubble } from '../../components/ChatBubble';
 import { ChatWelcome } from '../../components/ChatWelcome';
@@ -23,6 +23,7 @@ import { ChatInput } from '../../components/ChatInput';
 import { SettingsDrawer } from '../../components/SettingsDrawer';
 import { BottomTabBar } from '../../components/BottomTabBar';
 import { TasksPanel } from '../../components/TasksPanel';
+import { apiFetch } from '../../lib/api/client';
 import { ToolCallPillRow } from '../../components/ToolCallPill';
 import { CHAT_LAYOUT, CHAT_TYPE } from '../../lib/design';
 import type {
@@ -37,6 +38,11 @@ import {
   getTheme,
 } from '../../theme';
 
+jest.mock('../../lib/api/client', () => ({
+  apiFetch: jest.fn(),
+}));
+
+const mockedFetch = apiFetch as unknown as jest.Mock;
 const theme = getTheme('light', 'blue');
 
 // 「今天 09:08:07」：时间戳只显示到时刻，用今天可以避开日期前缀与时区差异
@@ -787,12 +793,56 @@ describe('底部标签栏与任务页', () => {
     expect(memory.props.accessibilityState).toEqual({ selected: false });
   });
 
-  it('任务页如实说明后端没有任务接口（不画假任务卡）', async () => {
-    await render(<TasksPanel theme={theme} />);
+  it('任务页读取真实任务并展示结果，不画假任务卡', async () => {
+    mockedFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        tasks: [
+          {
+            taskId: 'task_demo',
+            botId: 'memory',
+            taskType: 'memory.search',
+            goal: '整理咖啡偏好',
+            sessionId: 'bs_demo',
+            parentSessionId: 's-current',
+            parentMessageId: null,
+            allowedTools: ['memory_search'],
+            deadlineMs: 60000,
+            status: 'completed',
+            cancelRequested: false,
+            attempts: 1,
+            maxAttempts: 1,
+            recoveredAt: null,
+            createdAt: '2026-10-31T00:00:00.000Z',
+            updatedAt: '2026-10-31T00:00:01.000Z',
+            startedAt: '2026-10-31T00:00:00.000Z',
+            completedAt: '2026-10-31T00:00:01.000Z',
+            deliveredToParentAt: '2026-10-31T00:00:01.000Z',
+            deliveryErrorCode: null,
+            errorCode: null,
+            result: {
+              summary: '这是 Memory Bot 的真实结果。',
+              toolSteps: [{ name: 'memory_search', ok: true, summary: '找到 1 条', durationMs: 4 }],
+              evidence: [{ kind: 'memory', id: 'm1' }],
+              changes: [],
+              requiresConfirmation: false,
+              rounds: 1,
+              stopReason: null,
+              model: { providerId: 'p1', modelId: 'm1' },
+            },
+          },
+        ],
+      }),
+    });
+
+    await render(<TasksPanel theme={theme} sessionId="s-current" />);
 
     expect(screen.getByText('任务')).toBeTruthy();
-    expect(
-      screen.getByText(/后端未提供任务的创建、执行与记录接口/)
-    ).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByText('整理咖啡偏好')).toBeTruthy();
+      expect(screen.getByText('已完成')).toBeTruthy();
+      expect(screen.getByText('这是 Memory Bot 的真实结果。')).toBeTruthy();
+    });
+    expect(screen.queryByText(/后端未提供任务的创建/)).toBeNull();
   });
 });

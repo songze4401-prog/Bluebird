@@ -336,7 +336,7 @@ export default function App() {
 
           {tab === 'tasks' ? (
             // 任务页：后端没有任务接口，这里只放真实空状态，不画假卡片
-            <TasksPanel theme={theme} />
+            <TasksPanel theme={theme} sessionId={currentSessionId} />
           ) : (
             <MessageList
               theme={theme}

@@ -389,6 +389,8 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
         sessionId: body.sessionId,
         allowedTools: body.allowedTools,
         deadlineMs: body.deadlineMs,
+        parentSessionId: body.parentSessionId,
+        parentMessageId: body.parentMessageId,
       });
       audit(req, 'agent.task.create', {
         target: 'agent_task',
@@ -404,7 +406,15 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
     '/agent-tasks',
     route(async (req, res) => {
       const botId = typeof req.query.botId === 'string' ? req.query.botId : 'memory';
-      res.json({ tasks: tasks.listTasks(botId, { limit: req.query.limit }) });
+      res.json({
+        tasks: tasks.listTasks(botId, {
+          limit: req.query.limit,
+          parentSessionId:
+            typeof req.query.parentSessionId === 'string'
+              ? req.query.parentSessionId
+              : null,
+        }),
+      });
     })
   );
 

@@ -19,6 +19,7 @@ const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
 const AGENTS_DIR = path.join(DATA_DIR, 'agents');
 const TASKS_FILE = path.join(AGENTS_DIR, 'agent-tasks.json');
 const EVENTS_FILE = path.join(AGENTS_DIR, 'agent-events.json');
+const OUTBOX_FILE = path.join(AGENTS_DIR, 'agent-event-outbox.json');
 const SCHEMA_VERSION = 1;
 const TASK_MAX = 500;
 const EVENT_MAX = 3000;
@@ -81,6 +82,7 @@ const SAFE_PAYLOAD_KEYS = new Set([
 
 let taskCache = null;
 let eventCache = null;
+let outboxCache = null;
 
 function nowIso() {
   return new Date().toISOString();
@@ -103,6 +105,10 @@ function emptyTasks() {
   return { version: SCHEMA_VERSION, tasks: {} };
 }
 function emptyEvents() {
+  return { version: SCHEMA_VERSION, events: [] };
+}
+
+function emptyOutbox() {
   return { version: SCHEMA_VERSION, events: [] };
 }
 
@@ -148,6 +154,49 @@ function saveTasks() {
 function saveEvents() {
   ensureDir();
   writeFileAtomicSync(EVENTS_FILE, JSON.stringify(eventCache, null, 2));
+}
+
+function loadOutbox() {
+  if (outboxCache) return outboxCache;
+  ensureDir();
+  const parsed = readJson(OUTBOX_FILE, 'agent_event_outbox_corrupted');
+  if (!parsed) {
+    outboxCache = emptyOutbox();
+    return outboxCache;
+  }
+  if (parsed.version !== SCHEMA_VERSION || !Array.isArray(parsed.events)) {
+    throw new AgentError('agent_event_outbox_corrupted', '事件投递队列结构无效', 500);
+  }
+  outboxCache = parsed;
+  return outboxCache;
+}
+
+function saveOutbox() {
+  ensureDir();
+  writeFileAtomicSync(OUTBOX_FILE, JSON.stringify(outboxCache, null, 2));
+}
+
+// 先把事件放入持久 outbox，再尝试写主事件文件；写主文件失败时事件仍在
+// outbox 中，可由下次启动/读取重试，不再被 safeEvent 静默吞掉。
+function flushEventOutbox() {
+  const outbox = loadOutbox();
+  if (!outbox.events.length) return { flushed: 0, pending: 0 };
+  const events = loadEvents();
+  const known = new Set(events.events.map(event => event.eventId));
+  const pending = outbox.events.filter(event => !known.has(event.eventId));
+  events.events.push(...pending);
+  if (events.events.length > EVENT_MAX) {
+    events.events = events.events.slice(-EVENT_MAX);
+  }
+  try {
+    saveEvents();
+    outbox.events = [];
+    saveOutbox();
+    return { flushed: pending.length, pending: 0 };
+  } catch (error) {
+    outboxCache = outbox;
+    return { flushed: 0, pending: outbox.events.length, errorCode: (error && error.code) || 'event_write_failed' };
+  }
 }
 
 function assertBot(botId) {
@@ -199,20 +248,54 @@ function appendEvent({
     payload: safePayload(payload),
     correlationId: correlationId || taskId || runId || null,
   };
-  events.events.push(event);
-  if (events.events.length > EVENT_MAX) {
-    events.events = events.events.slice(-EVENT_MAX);
+  const outbox = loadOutbox();
+  outbox.events.push(event);
+  saveOutbox();
+
+  try {
+    if (!events.events.some(item => item.eventId === event.eventId)) {
+      events.events.push(event);
+      if (events.events.length > EVENT_MAX) {
+        events.events = events.events.slice(-EVENT_MAX);
+      }
+      saveEvents();
+    }
+    outbox.events = outbox.events.filter(item => item.eventId !== event.eventId);
+    saveOutbox();
+    return { ...event, payload: { ...event.payload } };
+  } catch (error) {
+    // 主事件文件暂时不可写：事件已在 outbox 持久化，返回 queued 供调用方记录。
+    return {
+      ...event,
+      payload: { ...event.payload },
+      queued: true,
+      errorCode: (error && error.code) || 'event_write_failed',
+    };
   }
-  saveEvents();
-  return { ...event, payload: { ...event.payload } };
 }
 
 function listEvents(botId, { limit = 50 } = {}) {
   assertBot(botId);
+  try {
+    flushEventOutbox();
+  } catch (_) {
+    // outbox 自身不可读时仍返回主事件文件中的可用部分。
+  }
   const events = loadEvents();
+  let queued = [];
+  try {
+    queued = loadOutbox().events;
+  } catch (_) {
+    queued = [];
+  }
+  const merged = new Map();
+  for (const event of [...events.events, ...queued]) {
+    merged.set(event.eventId, event);
+  }
   const max = Math.min(Math.max(Number(limit) || 50, 1), 200);
-  return events.events
+  return [...merged.values()]
     .filter(event => event.botId === botId)
+    .sort((a, b) => String(a.timestamp).localeCompare(String(b.timestamp)))
     .slice(-max)
     .reverse()
     .map(event => ({ ...event, payload: { ...event.payload } }));
@@ -226,6 +309,10 @@ function publicTask(task, { includeResult = true } = {}) {
     taskType: task.taskType,
     goal: task.goal,
     sessionId: task.sessionId,
+    parentSessionId: task.parentSessionId || null,
+    parentMessageId: task.parentMessageId || null,
+    deliveredToParentAt: task.deliveredToParentAt || null,
+    deliveryErrorCode: task.deliveryErrorCode || null,
     allowedTools: [...task.allowedTools],
     deadlineMs: task.deadlineMs,
     status: task.status,
@@ -250,6 +337,8 @@ function createTask({
   sessionId = null,
   allowedTools = null,
   deadlineMs = 60000,
+  parentSessionId = null,
+  parentMessageId = null,
 } = {}) {
   assertBot(botId);
   const manifest = getManifest(botId);
@@ -265,6 +354,14 @@ function createTask({
   }
   const cleanSession =
     typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null;
+  const cleanParentSession =
+    typeof parentSessionId === 'string' && parentSessionId.trim()
+      ? parentSessionId.trim()
+      : null;
+  const cleanParentMessage =
+    typeof parentMessageId === 'string' && parentMessageId.trim()
+      ? parentMessageId.trim()
+      : null;
   const cleanDeadline = Number(deadlineMs);
   if (
     !Number.isInteger(cleanDeadline) ||
@@ -306,6 +403,10 @@ function createTask({
     goal: cleanGoal,
     context: cleanContext,
     sessionId: cleanSession,
+    parentSessionId: cleanParentSession,
+    parentMessageId: cleanParentMessage,
+    deliveredToParentAt: null,
+    deliveryErrorCode: null,
     allowedTools: tools,
     deadlineMs: cleanDeadline,
     status: 'queued',
@@ -342,12 +443,17 @@ function getRawTask(taskId) {
   return tasks.tasks[String(taskId || '')] || null;
 }
 
-function listTasks(botId, { limit = 20 } = {}) {
+function listTasks(botId, { limit = 20, parentSessionId = null } = {}) {
   assertBot(botId);
   const tasks = loadTasks();
   const max = Math.min(Math.max(Number(limit) || 20, 1), 100);
+  const parent =
+    typeof parentSessionId === 'string' && parentSessionId.trim()
+      ? parentSessionId.trim()
+      : null;
   return Object.values(tasks.tasks)
     .filter(task => task.botId === botId)
+    .filter(task => !parent || task.parentSessionId === parent)
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
     .slice(0, max)
     .map(task => publicTask(task));
@@ -373,6 +479,12 @@ function updateTask(taskId, patch = {}) {
   if (patch.startedAt !== undefined) task.startedAt = patch.startedAt;
   if (patch.completedAt !== undefined) task.completedAt = patch.completedAt;
   if (patch.errorCode !== undefined) task.errorCode = patch.errorCode;
+  if (patch.deliveredToParentAt !== undefined) {
+    task.deliveredToParentAt = patch.deliveredToParentAt;
+  }
+  if (patch.deliveryErrorCode !== undefined) {
+    task.deliveryErrorCode = patch.deliveryErrorCode;
+  }
   if (patch.result !== undefined) {
     if (!patch.result || typeof patch.result !== 'object') {
       throw new AgentError('invalid_task_result', '任务结果必须是对象');
@@ -472,11 +584,13 @@ function recoverInterrupted() {
 function reloadForTests() {
   taskCache = null;
   eventCache = null;
+  outboxCache = null;
 }
 
 module.exports = {
   TASKS_FILE,
   EVENTS_FILE,
+  OUTBOX_FILE,
   STATUSES,
   createTask,
   getTask,
@@ -485,6 +599,7 @@ module.exports = {
   updateTask,
   appendEvent,
   listEvents,
+  flushEventOutbox,
   safePayload,
   isTerminalStatus,
   nextQueuedTask,

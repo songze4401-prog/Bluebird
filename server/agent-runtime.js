@@ -31,6 +31,7 @@ const monitoring = require('./monitoring');
 const memorySearchTool = require('./tool-memory-search');
 const memoryRememberTool = require('./tool-memory-remember');
 const knowledgeSearchTool = require('./tool-knowledge-search');
+const delegateToBotTool = require('./tool-dispatch-bot');
 const { truncateText } = require('./text-utils');
 const { buildPolicyInstruction } = require('./agent-policy');
 
@@ -194,6 +195,7 @@ function listToolMetadata() {
 registerTool(memorySearchTool.definition);
 registerTool(memoryRememberTool.definition);
 registerTool(knowledgeSearchTool.definition);
+registerTool(delegateToBotTool.definition);
 
 // ---- 工具执行 ----
 
