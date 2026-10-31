@@ -3257,6 +3257,8 @@ app.post('/chat', requireAuth, async (req, res) => {
         maxTokens: 1200,
         timeout: 90000,
         messages: ctx.requestMessages,
+        // 客户端断开时中止上游调用，不让模型把额度耗在没人要的回复上
+        signal: disconnect.signal,
       });
 
       rawReply = completion.choices?.[0]?.message?.content;
@@ -3317,6 +3319,19 @@ app.post('/chat', requireAuth, async (req, res) => {
     });
   } catch (error) {
     emitContextTrace(ctxForTrace);
+    // 客户端已断开：不再往已关闭的连接写响应（会抛 ERR_STREAM_WRITE_AFTER_END），
+    // 只按取消记账，不落盘。
+    if (clientGone) {
+      monitoring.recordTask({
+        status: 'cancelled',
+        termination: 'client_closed',
+        durationMs: Date.now() - userMessageReceivedAt,
+        rounds: lastAgentRounds || 1,
+        toolCount: lastAgentToolCount,
+        errorCode: 'client_closed',
+      });
+      return;
+    }
     // 模型调用类错误：按 kind 映射 HTTP 状态，返回结构化错误（已脱敏）；
     // 其余（内部 bug）保持原有 500 语义不变。
     if (error instanceof ModelCallError) {
@@ -3802,7 +3817,8 @@ app.use((error, req, res, next) => {
   res.status(status).json({ error: message });
 });
 
-// 先抢占数据目录锁：已有实例在跑就直接退出，绝不带病启动造成静默覆盖
+// 先抢占数据目录锁：已有实例在跑、或数据目录不可用，都直接退出，
+// 绝不带病启动造成静默覆盖（acquireSingleInstance 失败时不会返回）。
 acquireSingleInstance({ port: PORT });
 
 // 检索索引初始化失败不阻止聊天服务启动：状态接口会显式返回 degraded，

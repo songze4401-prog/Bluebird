@@ -90,6 +90,27 @@ function refuse(lockPath, info, state) {
   process.exit(1);
 }
 
+// 数据目录本身不可用（路径不是目录、权限不足、磁盘只读）：
+// 目录不可用时写状态文件必然失败，继续启动等于把故障留到运行期，
+// 而运行期的写失败是静默的（内存缓存全量覆写），所以启动期就拒绝。
+function refuseDataDir(dataDir, error) {
+  console.error('==================================================');
+  console.error('启动被拒绝：数据目录不可用，无法安全落盘');
+  console.error(`  数据目录：${dataDir}`);
+  console.error(`  原因：${error && error.message ? error.message : String(error)}`);
+  console.error(
+    '  影响：状态文件是「全量内存缓存 + 全量覆写」，目录不可用时继续启动，' +
+      '写入会静默失败并可能覆盖别人的数据。'
+  );
+  console.error('  处理：');
+  console.error('    1) 修复该路径（它必须是可创建、可写的目录）；');
+  console.error('    2) 或用 BLUEBIRD_DATA_DIR 指向另一个可写目录；');
+  console.error('    3) 确需多实例：给每个实例配不同的 BLUEBIRD_DATA_DIR。');
+  console.error('==================================================');
+
+  process.exit(1);
+}
+
 // 只删自己写的锁：万一锁内容不是本进程 pid（理论上不会），宁可留着让人处理
 function release() {
   if (released || !heldLockPath) return;
@@ -165,7 +186,9 @@ function installShutdownHooks(server, options = {}) {
   process.on('SIGTERM', stop('SIGTERM'));
 }
 
-// 在 server.listen 之前调用。抢占失败直接退出进程，不会返回。
+// 在 server.listen 之前调用。抢占失败（锁被别的实例占用、数据目录不可用）
+// 直接打印拒绝原因并退出进程，不会返回；只有拿到锁、或显式开了
+// BLUEBIRD_ALLOW_MULTI 逃生口时才会返回。
 function acquireSingleInstance({ port } = {}) {
   const dataDir = resolveDataDir();
   const lockPath = path.join(dataDir, LOCK_NAME);
@@ -187,7 +210,7 @@ function acquireSingleInstance({ port } = {}) {
       `[single-instance] 数据目录不可用：${dataDir} -> ${error.message}`
     );
 
-    return { acquired: false, skipped: false, dataDir, lockPath };
+    refuseDataDir(dataDir, error);
   }
 
   let fd;

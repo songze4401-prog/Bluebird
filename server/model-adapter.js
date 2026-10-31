@@ -62,6 +62,7 @@ const ERROR_STATUS = Object.freeze({
   bad_request: 400,
   not_configured: 500,
   capability: 400,
+  cancelled: 499,
 });
 
 const ERROR_MESSAGE = Object.freeze({
@@ -74,6 +75,7 @@ const ERROR_MESSAGE = Object.freeze({
   bad_request: '请求格式不被模型服务商接受',
   not_configured: '未配置可用的模型服务商',
   capability: '当前模型不支持该能力',
+  cancelled: '客户端已断开，模型调用已取消',
 });
 
 class ModelCallError extends Error {
@@ -748,6 +750,10 @@ function normalizeSdkError(error, key) {
   }
   if (name === 'APIConnectionError') {
     return new ModelCallError('connection', message);
+  }
+  // 客户端断开造成的中止：不是服务商故障，监控不能算作 provider 失败。
+  if (name === 'AbortError' || name === 'APIUserAbortError') {
+    return new ModelCallError('cancelled', message);
   }
   if (error && error.code === 'ETIMEDOUT') {
     return new ModelCallError('timeout', message);
