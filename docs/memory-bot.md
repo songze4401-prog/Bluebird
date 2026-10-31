@@ -192,6 +192,7 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - **真实模型 E2E（2026-10-31）**：本机真实 `Qwen2.5-0.5B-Instruct` ONNX int8 权重，经本地 OpenAI-compatible HTTP 服务提供 `/v1/chat/completions`（stream=true）。Bluebird 后端配置该 Provider 与 Bot 独立加密 Key（本地服务只接受该 Bot Key；全局 Provider Key 为拒绝值）。`POST /agents/memory/chat/stream` 实测返回 24 个 token delta、最终 `done` 与 Bot session，无 error，耗时约 4.7s；工作台浏览器也通过同一端点收到并显示了流式助手文本，`model-adapter` 日志记录完成。证明真实模型 HTTP SSE、UI 流式渲染与 Bot 凭证链路可用。
 - **真实模型质量边界**：0.5B int8 模型在 CPU 上生成内容质量有限，本轮只验证协议、流式、会话与凭证隔离，不把回答质量当作产品验收；模型文件和临时服务不在仓库内。
 - **结果回传 UI E2E（2026-10-31，Stub）**：Expo Web + 本地 OpenAI-compatible stub（非真实模型质量）+ Memory Bot 独立 Key。主控实际发送后经 `delegate_to_bot` 派发 3 个任务（2 完成、1 失败），成功与失败消息均在 `/agent-results/stream` 连接上即时显示、无需刷新；重启后端后 SSE 自动重连，snapshot 返回 3 条唯一结果，前端仍为 3 条、无重复；任务页显示同一批 3 条任务及“已回传主控”。该验证证明事件驱动展示、失败回传、重连快照与幂等去重，不代表真实模型回答质量。
+- **发布验收 E2E（2026-10-31，第二轮）**：真实后端进程（临时数据目录 + 独立 API Token + 真实 HTTP）。主控腿用确定性 OpenAI-compatible 服务商（真实 HTTP；0.5B 模型不支持结构化工具调用，无法作为主控腿）；Bot 腿用本机真实 Qwen2.5-0.5B-Instruct ONNX int8（`/v1/models` 与 `/v1/chat/completions`，只接受 Bot 独立 Key）。实测主控 2 轮（round1 返回 `delegate_to_bot` 工具调用，round2 收到工具结果后总结），Bot 任务 `task_*` completed、会话 `bs_*`、`deliveryStatus=delivered`；`/agent-results/stream` 实时收到 `result` 事件（`bot-result-<taskId>`），主控 `/history` 含【Memory Bot 任务完成】；凭证 verify 走真实 `/models` 返回 ok。主控腿非真实模型质量，Bot 腿为真实模型；0.5B 输出内容不作产品验收。
 
 ## 9. 尚未实现 / 边界
 
