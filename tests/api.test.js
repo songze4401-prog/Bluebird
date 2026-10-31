@@ -62,14 +62,23 @@ function check(name, cond, extra = '') {
   }
 }
 
-async function req(path, { method = 'GET', token = TOKEN, body } = {}) {
+async function req(
+  path,
+  { method = 'GET', token = TOKEN, body, rawBody, headers = {} } = {}
+) {
   const res = await fetch(BASE + path, {
     method,
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...headers,
     },
-    body: body ? JSON.stringify(body) : undefined,
+    body:
+      rawBody !== undefined
+        ? rawBody
+        : body
+          ? JSON.stringify(body)
+          : undefined,
   });
   let json = null;
   try {
@@ -77,7 +86,7 @@ async function req(path, { method = 'GET', token = TOKEN, body } = {}) {
   } catch (_) {
     /* 非 JSON 响应 */
   }
-  return { status: res.status, json };
+  return { status: res.status, json, headers: res.headers };
 }
 
 /* ---------------- 纵深防御 ----------------
@@ -208,6 +217,65 @@ async function waitReady() {
     process.exit(1);
   }
 
+  origLog('\nHTTP 边界：CORS、鉴权前 body、认证失败锁定');
+  {
+    const preflight = await req('/memory', {
+      method: 'OPTIONS',
+      token: null,
+      headers: {
+        Origin: 'http://localhost:8081',
+        'Access-Control-Request-Method': 'GET',
+      },
+    });
+    check(
+      '允许来源的预检返回 CORS 头',
+      (preflight.status === 204 || preflight.status === 200) &&
+        preflight.headers.get('access-control-allow-origin') ===
+          'http://localhost:8081',
+      `实际 ${preflight.status}`
+    );
+
+    const evil = await req('/memory', {
+      headers: { Origin: 'https://evil.example' },
+    });
+    check('未授权来源返回 403', evil.status === 403, `实际 ${evil.status}`);
+
+    const bigUnauth = await req('/uploads/image', {
+      method: 'POST',
+      token: null,
+      rawBody: '{' + 'x'.repeat(2 * 1024 * 1024),
+    });
+    check(
+      '未认证的大 body 在鉴权阶段被拒绝（401，不进入 8MB parser）',
+      bigUnauth.status === 401,
+      `实际 ${bigUnauth.status}`
+    );
+
+    const badJson = await req('/presence/report', {
+      method: 'POST',
+      rawBody: '{',
+    });
+    check(
+      '合法鉴权后的非法 JSON 返回 400 JSON 错误',
+      badJson.status === 400 &&
+        badJson.json &&
+        badJson.json.error === '请求体不是合法 JSON' &&
+        String(badJson.headers.get('content-type')).includes('application/json'),
+      `实际 ${badJson.status} / ${JSON.stringify(badJson.json)}`
+    );
+
+    let lastStatus = 0;
+    for (let i = 0; i < 11; i++) {
+      const r = await req('/emotion', { token: 'bad-token' });
+      lastStatus = r.status;
+      if (r.status === 429) break;
+    }
+    check('连续认证失败超过阈值后返回 429 锁定', lastStatus === 429, `实际 ${lastStatus}`);
+
+    const recovered = await req('/memory');
+    check('正确 token 不受失败锁定影响', recovered.status === 200, `实际 ${recovered.status}`);
+  }
+
   origLog('\n接口鉴权');
   {
     const r = await req('/', { token: null });
@@ -330,7 +398,7 @@ async function waitReady() {
     check('续写模式不因缺少 message 报 400', cont.status !== 400, `实际 ${cont.status}`);
   }
 
-  origLog('\n限流（60 次/分钟，按 IP+token）');
+  origLog('\n限流（60 次/分钟，按 IP）');
   {
     let sawRateLimit = false;
     let used = 0;
@@ -348,7 +416,11 @@ async function waitReady() {
     check('配额未重置前持续拦截', stillBlocked.status === 429, `实际 ${stillBlocked.status}`);
 
     const wrongToken = await req('/emotion', { token: 'another-token' });
-    check('错误 token 在限流期间仍走鉴权返回 401', wrongToken.status === 401, `实际 ${wrongToken.status}`);
+    check(
+      '旋转错误 token 不能绕过限流（仍返回 429）',
+      wrongToken.status === 429,
+      `实际 ${wrongToken.status}`
+    );
   }
 
   // 守卫 2（后置）：确认整轮跑下来真实数据目录一个字节都没变。

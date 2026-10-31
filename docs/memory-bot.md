@@ -170,6 +170,7 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - 事件字段白名单；任务结果中的记忆/知识只保留 ID，不把正文写入事件；审批 payload 存于审批文件，不写事件。
 - `agents.json` / Vault / sessions / tasks / events / approvals 损坏时显式报错并拒绝覆盖，不静默重建。
 - 单用户权限检查显式保留扩展点；没有多用户 ACL 时不宣称支持多租户。
+- HTTP 边界：Bearer 鉴权与按 IP 限流先于 body 解析；CORS 只放行 `BLUEBIRD_CORS_ORIGINS`（未配置时仅本地 Expo Web 开发地址）；认证失败按 IP 计数并在阈值后返回 429；body-parser 错误统一返回 JSON。自定义 Provider 每次聊天调用重新解析 DNS 并固定到已校验公网地址；`knowledge_search` 输出经过协议边界中和并附“不可执行”声明；向量补齐与神经重排服从检索 deadline，超时显式降级。
 
 ## 8. 测试
 
@@ -180,7 +181,7 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - `npx jest tests/unit/memory-bot-screen.test.tsx`：3 项，覆盖团队页、工作台/流式回退、Prompt/工具白名单、任务表单、审批操作。
 - `npx jest tests/unit/agent-results-stream.test.ts`：1 项，覆盖结果 SSE 的 401 永久失败、5xx/200 干净关闭可重试、主动 abort 为 `closed` 的连接分类。
 - `npx jest tests/unit/use-bot-result-stream.test.tsx`：2 项，覆盖 Hook 对永久错误只提示不重连、可重试错误按 1s 退避重连、snapshot 打开后重置延迟。
-- 全量：`npm test` 48 个后端文件 / 1580 项；Jest 20 套 / 170 项；覆盖率校验 backend 1580/1580、runner 1359/1359、frontend 170/170；tsc/lint 通过（以最终交付命令输出为准）。
+- 全量：`npm test` 48 个后端文件 / 1591 项；Jest 20 套 / 170 项；覆盖率校验 backend 1591/1591、runner 1370/1370、frontend 170/170；tsc/lint 通过（以最终交付命令输出为准）。
 - Expo Web export 成功；浏览器 DOM 核对：Agent 团队入口、真实 Memory Bot 状态、工作台三页签、配置页真实服务商/脱敏 Key、维护申请表单与审批列表可渲染；浏览器实际提交一条 update 维护申请后，服务端返回 pending 并在审批列表显示。
 
 ### 8.1 Stub 与真实模型测试区分
@@ -216,4 +217,4 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 | P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；工具预算截断后无工具总结；任务裁剪只删已投递终态；Provider token delta；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 9 项；SSE/tool event 测试；Jest 3 项 UI 测试 |
 | P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；维护申请表单；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验、真实模型 HTTP SSE E2E |
 
-“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1580/1580、nodeSuite 221/221、runner 1359/1359、frontend 170/170、CI 48/48。
+“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1591/1591、nodeSuite 221/221、runner 1370/1370、frontend 170/170、CI 48/48。

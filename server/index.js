@@ -23,7 +23,93 @@ const { createMonitoringRouter } = require('./monitoring/routes');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+// CORS 只放行显式来源；原生客户端/curl 不携带 Origin，不受影响。
+// 默认仅本地 Expo Web 开发端口，生产必须用 BLUEBIRD_CORS_ORIGINS 配置。
+const DEFAULT_CORS_ORIGINS = [
+  'http://localhost:8081',
+  'http://127.0.0.1:8081',
+  'http://localhost:19006',
+  'http://127.0.0.1:19006',
+];
+const CORS_ALLOWED_ORIGINS = (() => {
+  const raw = process.env.BLUEBIRD_CORS_ORIGINS;
+  const list = (typeof raw === 'string' ? raw : '')
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean);
+  return new Set(list.length ? list : DEFAULT_CORS_ORIGINS);
+})();
+
+function isAllowedCorsOrigin(origin) {
+  return Boolean(origin) && CORS_ALLOWED_ORIGINS.has(origin);
+}
+
+// 不在允许列表的浏览器来源直接 403，避免把 CORS 配置错误伪装成业务错误。
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && !isAllowedCorsOrigin(origin)) {
+    return res.status(403).json({ error: 'Origin 不在允许列表' });
+  }
+  next();
+});
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || isAllowedCorsOrigin(origin)) {
+        callback(null, origin || false);
+        return;
+      }
+      callback(null, false);
+    },
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    maxAge: 600,
+  })
+);
+
+// 简单内存限流：客户端 bundle 里必然带 EXPO_PUBLIC_ token（纯前端无法隐藏），
+// 这是缓解 token 泄露后被暴力/盗刷的基本防线。按 IP 限频，不能靠旋转
+// Authorization 换桶绕过；认证失败另有独立锁定计数。
+const RATE_LIMIT_WINDOW = 60 * 1000;
+const AUTH_FAILURE_WINDOW = 5 * 60 * 1000;
+const AUTH_FAILURE_MAX = 10;
+const rateBuckets = new Map();
+const authFailures = new Map();
+
+function clientIp(req) {
+  return req.ip || req.socket.remoteAddress || 'unknown';
+}
+
+function rateLimit({ maxPerWindow = 60 } = {}) {
+  return (req, res, next) => {
+    const key = clientIp(req);
+    const now = Date.now();
+    const bucket = rateBuckets.get(key);
+
+    if (!bucket || now - bucket.start > RATE_LIMIT_WINDOW) {
+      rateBuckets.set(key, { start: now, count: 1 });
+      return next();
+    }
+
+    if (bucket.count >= maxPerWindow) {
+      res.set('Retry-After', String(Math.ceil((bucket.start + RATE_LIMIT_WINDOW - now) / 1000)));
+      return res.status(429).json({ error: '请求过于频繁，请稍后再试' });
+    }
+
+    bucket.count++;
+    next();
+  };
+}
+
+app.use(rateLimit());
+
+// 鉴权必须先于 body 解析：未认证请求即使带 8MB JSON 也不会进入 body-parser。
+// 只放行根路径（版本探测）与 CORS 预检；所有业务路由仍保留各自的 requireAuth。
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return next();
+  if (req.method === 'GET' && req.path === '/') return next();
+  return requireAuth(req, res, next);
+});
 
 // 图片上传路由单独放宽 body limit（base64 比原图大约 33%，5MB 图约 6.7MB）。
 // 必须注册在全局 1mb parser 之前：body-parser 按注册顺序消费请求体，
@@ -34,39 +120,9 @@ app.use('/uploads/image', express.json({ limit: '8mb' }));
 app.use('/sticker-repo', express.json({ limit: '8mb' }));
 app.use(express.json({ limit: '1mb' }));
 
-// 埋点中间件注册在 body 解析之后（需要 sessionId 生成脱敏 session_ref），
-// 在限流之前（429 也是真实请求终态）；/monitoring 自身跳过，避免查询噪声。
+// 埋点中间件注册在 body 解析之后（需要 sessionId 生成脱敏 session_ref）。
 // 监控初始化放在单实例锁之后（见文件末尾），避免被拒绝启动的实例先写监控文件。
 app.use(monitoring.monitoringMiddleware());
-
-// 简单内存限流：客户端 bundle 里必然带 EXPO_PUBLIC_ token（纯前端无法隐藏），
-// 这是缓解 token 泄露后被暴力/盗刷的基本防线。按 IP+token 每分钟限频。
-const RATE_LIMIT_WINDOW = 60 * 1000;
-const rateBuckets = new Map();
-
-function rateLimit({ maxPerWindow = 60 } = {}) {
-  return (req, res, next) => {
-    const ip = req.ip || req.socket.remoteAddress || 'unknown';
-    const token = String(req.headers.authorization || '').slice(7) || 'anon';
-    const key = `${ip}:${token}`;
-    const now = Date.now();
-    const bucket = rateBuckets.get(key);
-
-    if (!bucket || now - bucket.start > RATE_LIMIT_WINDOW) {
-      rateBuckets.set(key, { start: now, count: 1 });
-      return next();
-    }
-
-    if (bucket.count >= maxPerWindow) {
-      return res.status(429).json({ error: '请求过于频繁，请稍后再试' });
-    }
-
-    bucket.count++;
-    next();
-  };
-}
-
-app.use(rateLimit());
 
 // 统一检索：查询只读，摄取/删除/重建写索引；全部复用 Bearer 鉴权与全局限流。
 app.use('/retrieval', createRetrievalRouter({ requireAuth }));
@@ -80,6 +136,9 @@ setInterval(() => {
   const now = Date.now();
   for (const [key, bucket] of rateBuckets) {
     if (now - bucket.start > RATE_LIMIT_WINDOW) rateBuckets.delete(key);
+  }
+  for (const [key, failure] of authFailures) {
+    if (now - failure.start > AUTH_FAILURE_WINDOW) authFailures.delete(key);
   }
 }, RATE_LIMIT_WINDOW).unref();
 
@@ -120,15 +179,45 @@ ${v.year}年${v.month}月${v.day}日 ${v.weekday} ${v.hour}:${v.minute}
   }
 }
 
+function tokenMatches(provided, expected) {
+  const { timingSafeEqual } = require('crypto');
+  const actual = Buffer.from(String(provided || ''));
+  const wanted = Buffer.from(String(expected || ''));
+  if (!wanted.length) return false;
+  if (actual.length !== wanted.length) {
+    // 长度不同也走一次恒定时间比较，避免用长度快速探测 token。
+    timingSafeEqual(wanted, wanted);
+    return false;
+  }
+  return timingSafeEqual(actual, wanted);
+}
+
 function requireAuth(req, res, next) {
   const expected = process.env.BLUEBIRD_API_TOKEN;
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
 
-  if (!expected || token !== expected) {
+  if (!expected || !tokenMatches(token, expected)) {
+    const key = clientIp(req);
+    const now = Date.now();
+    let failure = authFailures.get(key);
+    if (!failure || now - failure.start > AUTH_FAILURE_WINDOW) {
+      failure = { start: now, count: 0 };
+    }
+    failure.count += 1;
+    authFailures.set(key, failure);
+    res.set('WWW-Authenticate', 'Bearer');
+    if (failure.count > AUTH_FAILURE_MAX) {
+      res.set(
+        'Retry-After',
+        String(Math.ceil((failure.start + AUTH_FAILURE_WINDOW - now) / 1000))
+      );
+      return res.status(429).json({ error: '认证失败次数过多，请稍后再试' });
+    }
     return res.status(401).json({ error: "Unauthorized" });
   }
 
+  authFailures.delete(clientIp(req));
   next();
 }
 
@@ -3692,6 +3781,25 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments, {
     messageId: result && result.userMessageId ? result.userMessageId : null,
   });
+});
+
+// 统一 JSON 错误出口：body-parser 的 400/413 与未捕获路由错误不再返回
+// Express 默认 HTML 堆栈页；只回受控短句，不泄露内部实现。
+app.use((error, req, res, next) => {
+  if (res.headersSent) return next(error);
+  const status = Number(error && (error.status || error.statusCode)) || 500;
+  let message = '请求格式无效';
+  if (status === 413) message = '请求体过大';
+  else if (status === 400 && error && error.type === 'entity.parse.failed') {
+    message = '请求体不是合法 JSON';
+  } else if (status >= 500) {
+    message = '服务器内部错误';
+    console.error(
+      'Unhandled request error:',
+      error && error.message ? error.message : error
+    );
+  }
+  res.status(status).json({ error: message });
 });
 
 // 先抢占数据目录锁：已有实例在跑就直接退出，绝不带病启动造成静默覆盖

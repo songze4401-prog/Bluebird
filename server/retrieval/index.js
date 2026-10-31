@@ -49,6 +49,24 @@ function enqueueMutation(task) {
   return run;
 }
 
+function withDeadline(promise, deadline, errorCode) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    const error = new Error(errorCode);
+    error.code = errorCode;
+    return Promise.reject(error);
+  }
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(errorCode);
+      error.code = errorCode;
+      reject(error);
+    }, remaining);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 const ERROR_MESSAGES = Object.freeze({
   query_required: '检索内容不能为空',
   query_too_long: `检索内容超过 ${config.limits.maxQueryChars} 字上限`,
@@ -334,16 +352,32 @@ async function search(options = {}) {
     sync.conversation = syncConversation(sessionId);
   }
 
+  // 向量补齐必须服从本次检索 deadline：它是派生数据的增量维护，
+  // 不能因为一次 embedding 往返把聊天/工具调用拖过预算。
   let vectorSync = null;
-  try {
-    vectorSync = await ensureVectorCoverage({ reason: 'search' });
-  } catch (error) {
+  if (plan.deadline - Date.now() <= 20) {
     vectorSync = {
-      status: 'failed',
-      errorCode:
-        (error && error.code) || error && error.name || 'vector_sync_failed',
+      status: 'timeout',
+      reason: 'retrieval_deadline',
+      errorCode: 'deadline',
       count: 0,
     };
+  } else {
+    try {
+      vectorSync = await withDeadline(
+        ensureVectorCoverage({ reason: 'search' }),
+        plan.deadline,
+        'vector_sync_deadline'
+      );
+    } catch (error) {
+      const code =
+        (error && error.code) || error && error.name || 'vector_sync_failed';
+      vectorSync = {
+        status: code === 'vector_sync_deadline' ? 'timeout' : 'failed',
+        errorCode: code === 'vector_sync_deadline' ? 'deadline' : code,
+        count: 0,
+      };
+    }
   }
 
   let result;
@@ -376,6 +410,10 @@ async function search(options = {}) {
     if (vectorSync && vectorSync.status === 'failed') {
       result.trace.degraded.push(
         `vector_sync_${vectorSync.errorCode || 'failed'}`
+      );
+    } else if (vectorSync && vectorSync.status === 'timeout') {
+      result.trace.degraded.push(
+        `vector_sync_${vectorSync.errorCode || 'timeout'}`
       );
     } else if (vectorSync && vectorSync.truncated) {
       result.trace.degraded.push('vector_sync_truncated');

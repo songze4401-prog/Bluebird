@@ -24,12 +24,12 @@ node server/index.js       # API :3000
 npx expo start             # Metro :8081
 ```
 
-`server/.env` 读取 `DEEPSEEK_API_KEY`、`BLUEBIRD_API_TOKEN`、`PORT`、`MEMORY_ENABLED`、`BLUEBIRD_MONITORING`；根 `.env` 读取 `EXPO_PUBLIC_API_URL`、`EXPO_PUBLIC_BLUEBIRD_API_TOKEN`。
+`server/.env` 读取 `DEEPSEEK_API_KEY`、`BLUEBIRD_API_TOKEN`、`PORT`、`MEMORY_ENABLED`、`BLUEBIRD_MONITORING`、`BLUEBIRD_CORS_ORIGINS`（浏览器来源白名单，未配置时只允许本地 Expo Web 开发端口）；根 `.env` 读取 `EXPO_PUBLIC_API_URL`、`EXPO_PUBLIC_BLUEBIRD_API_TOKEN`。
 
 ## Quality gates
 
 ```bash
-npm test                    # backend: auto-discovers tests/*.test.js (48 files / 1580 checks)
+npm test                    # backend: auto-discovers tests/*.test.js (48 files / 1591 checks)
 npm run test:unit -- --ci   # frontend: 20 suites / 170 cases
 npx tsc --noEmit            # TypeScript
 npm run lint                # Expo ESLint

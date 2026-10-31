@@ -755,10 +755,16 @@ async function executeSearch({ store, embedding, reranker, config, plan }) {
     const candidates = fusion.selected.slice(0, poolLimit);
 
     try {
-      const outcome = await reranker.rerank({
-        query: plan.query,
-        documents: candidates.map(entry => entry.chunk.content),
-      });
+      // 神经重排是可选增强：必须服从同一条 retrieval deadline，
+      // 超时立即回退到本地确定性排序，不让外部重排拖垮 Context 延迟。
+      const outcome = await withTimeout(
+        reranker.rerank({
+          query: plan.query,
+          documents: candidates.map(entry => entry.chunk.content),
+        }),
+        Math.max(10, plan.deadline - Date.now()),
+        'reranker_deadline'
+      );
 
       if (outcome.ok && Array.isArray(outcome.scores) && outcome.scores.length) {
         const byIndex = new Map(
@@ -802,13 +808,16 @@ async function executeSearch({ store, embedding, reranker, config, plan }) {
         trace.degraded.push('reranker_failed');
       }
     } catch (error) {
+      const code =
+        (error && error.code) || error && error.name || 'reranker_failed';
       neuralRerank = {
         applied: false,
         attempted: true,
-        errorCode:
-          (error && error.code) || error && error.name || 'reranker_failed',
+        errorCode: code,
       };
-      trace.degraded.push('reranker_failed');
+      trace.degraded.push(
+        code === 'reranker_deadline' ? 'reranker_deadline' : 'reranker_failed'
+      );
     }
   }
 
