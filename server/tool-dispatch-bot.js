@@ -140,6 +140,7 @@ const definition = Object.freeze({
       // 父会话同时是委派任务的记忆 scope；Bot session 只承载执行轨迹。
       parentSessionId: mainSessionId,
       parentMessageId: context.userMessageId || null,
+      parentUserText: context.userText || '',
       allowedTools: args.allowedTools || null,
       deadlineMs: 60000,
     });

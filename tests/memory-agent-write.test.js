@@ -227,8 +227,8 @@ function check(name, cond, extra = '') {
     JSON.stringify(rejected.json.toolSteps)
   );
 
-  console.log('\n3) 同一候选重复提交不重复创建');
-  const before = diskMemory().length;
+  console.log('\n3) 同一候选重复提交进入待确认，不直接改写 active');
+  const activeBefore = diskMemory().filter(item => item.status === 'active').length;
 
   resetScripted([
     {
@@ -246,11 +246,27 @@ function check(name, cond, extra = '') {
   ]);
   await req('/chat', { method: 'POST', body: { message: '我喜欢喝美式咖啡' } });
 
+  const pendingCoffee = diskMemory().find(
+    item => item.status === 'pending' && item.content === '用户喜欢喝美式咖啡'
+  );
   check(
-    '重复提交仍只有一条记忆',
-    diskMemory().length === before &&
-      diskMemory().filter(item => item.content === '用户喜欢喝美式咖啡').length === 1,
+    '重复提交不直接改写 active，而是进入 pending',
+    pendingCoffee &&
+      pendingCoffee.pendingMutation === 'merge' &&
+      diskMemory().filter(item => item.status === 'active' && item.content === '用户喜欢喝美式咖啡').length === activeBefore,
     JSON.stringify(diskMemory())
+  );
+
+  const mergeConfirmed = await req('/memory/confirm', {
+    method: 'POST',
+    body: { id: pendingCoffee.id },
+  });
+  check(
+    '确认后 active 仍只有一条咖啡记忆',
+    mergeConfirmed.status === 200 &&
+      diskMemory().filter(item => item.status === 'active' && item.content === '用户喜欢喝美式咖啡').length === 1 &&
+      !diskMemory().some(item => item.status === 'pending' && item.content === '用户喜欢喝美式咖啡'),
+    JSON.stringify({ mergeConfirmed: mergeConfirmed.json, memory: diskMemory() })
   );
 
   console.log('\n4) 低置信 Agent 候选进入 pending，可由 HTTP 确认');

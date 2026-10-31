@@ -341,6 +341,34 @@ test('Registry：只注册 Memory Bot，状态由真实配置与凭证计算', a
     () => config.updateConfig('memory', { enabled: 'yes' }),
     error => error && error.code === 'invalid_config'
   );
+
+  const alt = apiConfigs.addModelProvider({
+    name: 'Bot Alt Provider',
+    baseUrl: `http://127.0.0.1:${providerPort}/v1`,
+    apiKey: 'alt-provider-key',
+    models: [{ id: 'alt-test-model', name: 'Alt Test Model' }],
+  });
+  assert.ok(alt.provider, JSON.stringify(alt));
+  const originalProfile = config.getRuntimeConfig('memory').modelProfile;
+  config.updateConfig('memory', {
+    modelProfile: {
+      providerId: alt.provider.id,
+      modelId: 'alt-test-model',
+    },
+  });
+  assert.equal(registry.getAgent('memory').status, 'degraded');
+  assert.equal(registry.getAgent('memory').statusReason, 'credential_provider_mismatch');
+  assert.throws(
+    () =>
+      credentials.getCredentialKey(
+        originalProfile.credentialId,
+        'memory',
+        alt.provider.id
+      ),
+    error => error && error.code === 'credential_provider_mismatch'
+  );
+  config.updateConfig('memory', { modelProfile: originalProfile });
+  assert.equal(registry.getAgent('memory').status, 'enabled');
 });
 
 test('凭证库：AES-256-GCM 密文落盘、脱敏读取、真实验证且可重启解密', async () => {
@@ -359,6 +387,24 @@ test('凭证库：AES-256-GCM 密文落盘、脱敏读取、真实验证且可�
   assert.throws(
     () => credentials.getCredentialKey(list[0].credentialId, 'unknown'),
     error => error && error.code === 'agent_not_found'
+  );
+  assert.throws(
+    () =>
+      credentials.getCredentialKey(
+        list[0].credentialId,
+        'memory',
+        'other-provider'
+      ),
+    error => error && error.code === 'credential_provider_mismatch'
+  );
+  await assert.rejects(
+    () =>
+      credentials.verifyCredential(
+        list[0].credentialId,
+        'memory',
+        'other-provider'
+      ),
+    error => error && error.code === 'credential_provider_mismatch'
   );
 
   const verified = await credentials.verifyCredential(list[0].credentialId, 'memory');

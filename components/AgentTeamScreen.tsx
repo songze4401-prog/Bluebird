@@ -29,6 +29,7 @@ const REASON_LABEL: Record<string, string> = {
   model_not_found: '模型不存在',
   model_disabled: '模型已停用',
   credential_not_configured: '未配置独立 API Key',
+  credential_provider_mismatch: '凭证与当前服务商不匹配',
 };
 
 export function AgentTeamScreen({

@@ -195,7 +195,11 @@ async function execute({
 }) {
   const { config, model } = assertRunnable(botId);
   const manifest = getManifest(botId);
-  const credentialKey = getCredentialKey(config.modelProfile.credentialId, botId);
+  const credentialKey = getCredentialKey(
+    config.modelProfile.credentialId,
+    botId,
+    config.modelProfile.providerId
+  );
   const toolsSupported = Boolean(model.capabilities && model.capabilities.tools === true);
   const allowedTools = allowedToolsFor(config, manifest, taskTools);
   const policy = buildPolicy({ config, allowedTools, toolsSupported });
@@ -476,7 +480,8 @@ async function runTask(taskId) {
       sessionId: task.sessionId,
       // 委派任务：Bot 会话只承载执行轨迹，记忆读写归属父主控会话。
       memoryScopeSessionId: task.parentSessionId || task.sessionId,
-      userText: task.goal,
+      // 写入接地优先使用主控用户原话；旧任务或直接任务才回落到 goal。
+      userText: task.parentUserText || task.goal,
       taskId: task.taskId,
       taskTools: task.allowedTools,
       mode: 'delegated_task',

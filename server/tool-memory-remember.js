@@ -213,6 +213,8 @@ const definition = Object.freeze({
         actor: 'agent',
         userText: context.userText,
         requireUserGrounding: true,
+        // 新增可自动落地；改写/合并/替代已有记忆必须先确认。
+        requireMutationConfirmation: true,
         signal: context.signal,
       }
     );

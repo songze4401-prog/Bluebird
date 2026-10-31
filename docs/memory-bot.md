@@ -87,6 +87,9 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - 流式：`POST /agents/:botId/chat/stream` 使用真实 Token 级 delta（来自 Provider 流式响应），保留 `tool_start`/`tool_end` 状态事件；工具轮不把参数或内部推理下发。UI 通过 XHR SSE 逐字渲染，并保留工具摘要。
 - 主控派发：主 Agent 工具表新增 `delegate_to_bot`（仅主控可用，Bot 自身 allowlist 不包含它）；它校验 Bot 就绪、任务类型与工具边界，调用现有 `tasks.createTask` + `runtime.startTask`，任务带 `parentSessionId` / `parentMessageId`。主控任务页读取 `GET /agent-tasks?parentSessionId=...`，不是静态占位。
 - 记忆作用域：委派任务把 `parentSessionId` 作为 `memoryScopeSessionId` 传给 Bot 工具；Bot 的 `bs_*` 会话只承载执行轨迹和工具日志，不再充当记忆 scope。这样主控会话的长期记忆可被委派 Bot 检索，Bot 的 `memory_remember` 也归属父会话；直接 Bot 对话没有父会话时仍回落 Bot 会话 scope。
+- 凭证绑定：Bot 的 `credential.providerId` 必须与当前 `modelProfile.providerId` 一致；registry 会显示 `credential_provider_mismatch`，运行时会拒绝把旧 Key 发往新服务商。切换服务商后必须重新录入该 Bot 的 Key。
+- 委派写入接地：任务保存主控用户原话 `parentUserText`；Bot 的 `memory_remember` 用该原话做 `sourceQuote` 接地，不再信任主控模型生成的 goal。旧任务/直接任务才回落到 goal。
+- Agent 写入确认：`memory_remember` 的 CREATE 仍可自动落地；UPDATE/MERGE/SUPERSEDE 会生成 pending 候选，必须通过 `POST /memory/confirm` 确认后才改写或替代已有记忆。自动记忆抽取保留原有策略，不改变既有后台行为。
 - 结果回传：任务完成/失败统一走 `result-delivery`：写入 Task Store 后，以固定消息 id `bot-result-<taskId>` 追加到父主控会话；记录 `deliveredToParentAt`、`deliveryMessageId`、`deliveryStatus` 或 `deliveryErrorCode`。主控前端通过 `GET /agent-results/stream?sessionId=...` 接收实时 `result`/`delivery_failed`，snapshot 覆盖断线重连；前端按消息 id 去重，因此重复投递不会生成第二条。任务页继续作为审计/状态入口。
 - 事件可靠性：`appendEvent` 先写持久 outbox，再写主事件文件；主文件写失败时事件仍在 outbox，启动/读取时重试，不再被 `safeEvent` 静默丢弃。
 
@@ -170,7 +173,7 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - `node tests/memory-maintenance.test.js`：5 项，覆盖 update/merge/supersede/archive/withdraw/delete、维护门面白名单、审批闭环、事件不含正文、权限拒绝。
 - `node tests/agent-dispatch.test.js`：9 项，覆盖主控工具派发、主控记忆→委派 Bot 的父会话读/写 scope、结果 SSE/snapshot、失败回传、重复投递防护、主 Agent 工具循环与事件 outbox 恢复。
 - `npx jest tests/unit/memory-bot-screen.test.tsx`：3 项，覆盖团队页、工作台/流式回退、Prompt/工具白名单、任务表单、审批操作。
-- 全量：`npm test` 48 个后端文件 / 1565 项；Jest 18 套 / 166 项；覆盖率校验 backend 1565/1565、runner 1344/1344、frontend 166/166；tsc/lint 通过（以最终交付命令输出为准）。
+- 全量：`npm test` 48 个后端文件 / 1567 项；Jest 18 套 / 166 项；覆盖率校验 backend 1567/1567、runner 1346/1346、frontend 166/166；tsc/lint 通过（以最终交付命令输出为准）。
 - Expo Web export 成功；浏览器 DOM 核对：Agent 团队入口、真实 Memory Bot 状态、工作台三页签、配置页真实服务商/脱敏 Key、维护申请表单与审批列表可渲染；浏览器实际提交一条 update 维护申请后，服务端返回 pending 并在审批列表显示。
 
 ### 8.1 Stub 与真实模型测试区分
@@ -206,4 +209,4 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 | P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；工具预算截断后无工具总结；Provider token delta；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 8 项；SSE/tool event 测试；Jest 3 项 UI 测试 |
 | P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；维护申请表单；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验、真实模型 HTTP SSE E2E |
 
-“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1565/1565、nodeSuite 221/221、runner 1344/1344、frontend 166/166、CI 48/48。
+“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1567/1567、nodeSuite 221/221、runner 1346/1346、frontend 166/166、CI 48/48。

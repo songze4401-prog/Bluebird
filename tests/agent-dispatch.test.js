@@ -187,7 +187,7 @@ test.before(async () => {
                         goal: lastText.includes('MEMORY_SCOPE')
                           ? 'MEMORY_SCOPE 检索主控深烘咖啡偏好'
                           : lastText.includes('MEMORY_WRITE')
-                            ? 'MEMORY_WRITE 我喜欢浅烘咖啡'
+                            ? 'MEMORY_WRITE 记录浅烘咖啡偏好'
                             : '主 Agent 派发测试',
                         allowedTools: lastText.includes('MEMORY_WRITE')
                           ? ['memory_search', 'memory_remember']

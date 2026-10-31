@@ -25,6 +25,7 @@ const TASK_MAX = 500;
 const EVENT_MAX = 3000;
 const GOAL_MAX = 2000;
 const CONTEXT_MAX = 8000;
+const PARENT_USER_TEXT_MAX = 4000;
 const RESULT_SUMMARY_MAX = 8000;
 
 const STATUSES = Object.freeze([
@@ -343,6 +344,7 @@ function createTask({
   deadlineMs = 60000,
   parentSessionId = null,
   parentMessageId = null,
+  parentUserText = null,
 } = {}) {
   assertBot(botId);
   const manifest = getManifest(botId);
@@ -366,6 +368,11 @@ function createTask({
     typeof parentMessageId === 'string' && parentMessageId.trim()
       ? parentMessageId.trim()
       : null;
+  // 委派写入的接地来源是主控用户原话，不是模型生成的 goal。
+  const cleanParentUserText =
+    typeof parentUserText === 'string'
+      ? parentUserText.trim().slice(0, PARENT_USER_TEXT_MAX)
+      : '';
   const cleanDeadline = Number(deadlineMs);
   if (
     !Number.isInteger(cleanDeadline) ||
@@ -409,6 +416,7 @@ function createTask({
     sessionId: cleanSession,
     parentSessionId: cleanParentSession,
     parentMessageId: cleanParentMessage,
+    parentUserText: cleanParentUserText,
     deliveredToParentAt: null,
     deliveryMessageId: null,
     deliveryStatus: parentSessionId ? 'pending' : 'not_applicable',

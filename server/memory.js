@@ -1213,6 +1213,47 @@ async function applyCandidate(raw, options = {}) {
     const record = (action, reason) =>
       decisionRecord(action, reason, candidate, options.actor, nowIso);
 
+    // Agent 工具路径：改写/合并/替代已有记忆必须由用户确认，不能自动落盘。
+    // 自动记忆抽取仍保留既有策略，避免改变主控聊天既有行为。
+    const mutationDecisions = new Set([
+      DECISION.UPDATE,
+      DECISION.MERGE,
+      DECISION.SUPERSEDE,
+    ]);
+    if (
+      options.requireMutationConfirmation === true &&
+      mutationDecisions.has(decision.decision)
+    ) {
+      const pendingTargetId = decision.target
+        ? decision.target.id
+        : candidate.targetId || null;
+      const pending = storedCandidate(candidate, {
+        status: STATUS_PENDING,
+        pendingReason: 'mutation_requires_confirmation',
+        pendingAt: nowIso,
+        pendingTargetId,
+        pendingMutation: decision.decision,
+        lastDecision: record('needs_confirmation', 'mutation_requires_confirmation'),
+      });
+
+      next.push(pending);
+      trimToCapacity(next);
+      if (!(await persist())) return abortedResult();
+      memories = next;
+
+      return {
+        written: false,
+        action: 'pending',
+        reason: 'mutation_requires_confirmation',
+        id: pending.id,
+        supersededId: null,
+        targetId: pendingTargetId,
+        decision: DECISION.NEEDS_CONFIRMATION,
+        status: STATUS_PENDING,
+        durable: true,
+      };
+    }
+
     if (decision.decision === DECISION.REJECT) {
       return {
         ...base,
@@ -2747,7 +2788,7 @@ async function confirmPending(id) {
       return { updated: 0, reason: 'not-pending' };
     }
 
-    const { pendingReason, pendingAt, pendingTargetId, ...rest } = item;
+    const { pendingReason, pendingAt, pendingTargetId, pendingMutation, ...rest } = item;
     const now = new Date().toISOString();
     const next = current.slice();
     const targetIndex = pendingTargetId
@@ -2761,6 +2802,57 @@ async function confirmPending(id) {
 
     if (targetIndex >= 0) {
       const target = current[targetIndex];
+
+      if (pendingMutation === DECISION.SUPERSEDE) {
+        const replacement = {
+          ...rest,
+          status: STATUS_ACTIVE,
+          validFrom: now,
+          validTo: item.validTo || null,
+          supersededBy: null,
+          supersedes: target.id,
+          updatedAt: now,
+          lastDecision: {
+            action: 'confirm',
+            reason: 'user_confirmed_supersede',
+            at: now,
+            actor: 'user',
+            sourceType: 'user',
+          },
+        };
+        const rewritten = current
+          .filter((_, position) => position !== index)
+          .map(candidate =>
+            candidate.id === target.id
+              ? {
+                  ...candidate,
+                  status: STATUS_SUPERSEDED,
+                  validTo: now,
+                  supersededBy: item.id,
+                  updatedAt: now,
+                  lastDecision: {
+                    action: 'confirm_supersede',
+                    reason: 'user_confirmed_supersede',
+                    at: now,
+                    actor: 'user',
+                    sourceType: 'user',
+                  },
+                }
+              : candidate
+          );
+        rewritten.push(replacement);
+
+        await saveMemories(rewritten);
+        memories = rewritten;
+
+        return {
+          updated: 1,
+          reason: 'ok',
+          id: replacement.id,
+          supersededId: target.id,
+          status: STATUS_ACTIVE,
+        };
+      }
 
       next[targetIndex] = {
         ...target,
