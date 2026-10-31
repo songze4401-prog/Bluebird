@@ -190,6 +190,8 @@ const definition = Object.freeze({
       };
     }
 
+    // 记忆归属使用独立 scope；委派任务写入父主控会话，而不是 Bot 的 bs_ 会话。
+    const memorySessionId = context.memoryScopeSessionId || context.sessionId;
     const result = await applyCandidate(
       {
         content: args.content,
@@ -204,7 +206,7 @@ const definition = Object.freeze({
         condition: args.condition,
       },
       {
-        sessionId: context.sessionId,
+        sessionId: memorySessionId,
         messageId: context.userMessageId || null,
         sourceType: 'agent',
         intent: args.targetId ? 'correction' : 'explicit',

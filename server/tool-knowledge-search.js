@@ -109,7 +109,11 @@ const definition = Object.freeze({
   },
 
   async handler(args, context) {
-    const sessionId = context && context.sessionId ? context.sessionId : null;
+    // 记忆/会话来源使用记忆 scope；委派任务因此能检索父主控会话的长期记忆。
+    // 工具执行轨迹仍记录在 Bot 自己的 session，避免混用两种身份。
+    const sessionId = context
+      ? context.memoryScopeSessionId || context.sessionId || null
+      : null;
     let sources = args.sources;
     if (!sessionId) {
       sources = (sources || SOURCES).filter(

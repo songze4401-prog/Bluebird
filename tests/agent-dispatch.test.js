@@ -14,6 +14,7 @@ const assert = require('node:assert');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-agent-dispatch-'));
 process.env.BLUEBIRD_DATA_DIR = TMP;
 process.env.DEEPSEEK_API_KEY = '';
+process.env.MEMORY_ENABLED = 'true';
 process.env.BLUEBIRD_AGENT_TOOLS = '';
 process.env.BLUEBIRD_MONITORING = '0';
 process.env.BLUEBIRD_ALLOW_PRIVATE_BASE_URL = '1';
@@ -26,6 +27,7 @@ let registry;
 let tasks;
 let botSessions;
 let mainSessions;
+let memory;
 let tool;
 let runtime;
 let agentRuntime;
@@ -67,13 +69,98 @@ test.before(async () => {
       const messages = parsed.messages || [];
       const hasToolResult = messages.some(message => message.role === 'tool');
       const lastText = String(messages.at(-1)?.content || '');
+      const toolNames = Array.isArray(parsed.tools)
+        ? parsed.tools
+            .map(item => item.function && item.function.name)
+            .filter(Boolean)
+        : [];
       if (lastText.includes('FAIL_TASK')) {
         json(res, 500, { error: 'provider_failed' });
         return;
       }
+      // Bot 委派：先调用 memory_search；主控 Agent 的工具集包含 delegate，
+      // 因此用 delegate 是否可见来区分两个入口。
       if (
-        Array.isArray(parsed.tools) &&
-        parsed.tools.some(item => item.function?.name === 'delegate_to_bot') &&
+        !hasToolResult &&
+        toolNames.includes('memory_remember') &&
+        !toolNames.includes('delegate_to_bot') &&
+        lastText.includes('MEMORY_WRITE')
+      ) {
+        json(res, 200, {
+          id: 'chatcmpl-memory-write',
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: 'dispatch-test-model',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  {
+                    id: 'call_memory_write',
+                    type: 'function',
+                    function: {
+                      name: 'memory_remember',
+                      arguments: JSON.stringify({
+                        content: '用户喜欢浅烘咖啡',
+                        type: 'preference',
+                        sourceQuote: '我喜欢浅烘咖啡',
+                        keywords: ['咖啡', '浅烘'],
+                        confidence: 0.95,
+                      }),
+                    },
+                  },
+                ],
+              },
+              finish_reason: 'tool_calls',
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
+        return;
+      }
+      if (
+        !hasToolResult &&
+        toolNames.includes('memory_search') &&
+        !toolNames.includes('delegate_to_bot') &&
+        lastText.includes('MEMORY_SCOPE')
+      ) {
+        json(res, 200, {
+          id: 'chatcmpl-memory-scope',
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: 'dispatch-test-model',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  {
+                    id: 'call_memory_scope',
+                    type: 'function',
+                    function: {
+                      name: 'memory_search',
+                      arguments: JSON.stringify({
+                        query: '深烘咖啡',
+                        limit: 3,
+                      }),
+                    },
+                  },
+                ],
+              },
+              finish_reason: 'tool_calls',
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
+        return;
+      }
+      if (
+        toolNames.includes('delegate_to_bot') &&
         !hasToolResult &&
         lastText.includes('DELEGATE')
       ) {
@@ -97,8 +184,14 @@ test.before(async () => {
                       arguments: JSON.stringify({
                         botId: 'memory',
                         taskType: 'memory.search',
-                        goal: '主 Agent 派发测试',
-                        allowedTools: ['memory_search'],
+                        goal: lastText.includes('MEMORY_SCOPE')
+                          ? 'MEMORY_SCOPE 检索主控深烘咖啡偏好'
+                          : lastText.includes('MEMORY_WRITE')
+                            ? 'MEMORY_WRITE 我喜欢浅烘咖啡'
+                            : '主 Agent 派发测试',
+                        allowedTools: lastText.includes('MEMORY_WRITE')
+                          ? ['memory_search', 'memory_remember']
+                          : ['memory_search'],
                       }),
                     },
                   },
@@ -148,6 +241,7 @@ test.before(async () => {
   tasks = require('../server/agents/tasks');
   botSessions = require('../server/agents/sessions');
   mainSessions = require('../server/sessions');
+  memory = require('../server/memory');
   tool = require('../server/tool-dispatch-bot').definition;
   runtime = require('../server/agents/runtime');
   agentRuntime = require('../server/agent-runtime');
@@ -321,6 +415,108 @@ test('主 Agent 工具循环：模型可调用 delegate_to_bot 并把任务交�
   assert.ok(mainSessions.getMessages(main.id).some(message =>
     message.content.includes('【Memory Bot 任务完成】')
   ));
+});
+
+test('主控记忆 → 委派 Bot：memory_search 使用父主控会话 scope', async () => {
+  const main = mainSessions.createSession({ title: '主控记忆 scope 回归' });
+  const seeded = await memory.applyCandidate(
+    {
+      content: '用户喜欢深烘咖啡',
+      type: 'preference',
+      sourceQuote: '我喜欢深烘咖啡',
+      keywords: ['咖啡', '深烘'],
+      confidence: 0.95,
+    },
+    {
+      sessionId: main.id,
+      sourceType: 'user',
+      intent: 'explicit',
+      userText: '我喜欢深烘咖啡',
+      requireUserGrounding: true,
+    }
+  );
+  assert.equal(seeded.written, true);
+  assert.ok(seeded.id);
+
+  const outcome = await agentRuntime.runAgentTurn({
+    providerId,
+    modelId: 'dispatch-test-model',
+    sessionId: main.id,
+    userText: 'DELEGATE MEMORY_SCOPE 请检索我的深烘咖啡偏好',
+    messages: [
+      { role: 'system', content: '你可以调用 delegate_to_bot。' },
+      { role: 'user', content: 'DELEGATE MEMORY_SCOPE 请检索我的深烘咖啡偏好' },
+    ],
+    policy: {
+      schemaVersion: 1,
+      mode: 'bounded_autonomy',
+      tools: { allowedTools: ['delegate_to_bot'], maxToolCalls: 2, maxReadOnlyRetries: 0 },
+      budgets: { maxRounds: 2, maxTotalMs: 10000 },
+    },
+    credentialKey: 'dispatch-bot-key',
+    timeout: 10000,
+  });
+  assert.equal(outcome.toolSteps.length, 1);
+  assert.equal(outcome.toolSteps[0].name, 'delegate_to_bot');
+
+  const task = tasks.listTasks('memory', { parentSessionId: main.id })[0];
+  assert.ok(task);
+  assert.notEqual(task.sessionId, main.id);
+  const finished = await waitForTask(task.taskId);
+  assert.equal(finished.status, 'completed');
+  assert.equal(finished.parentSessionId, main.id);
+  assert.ok(
+    finished.result.evidence.some(
+      item => item.kind === 'memory' && item.id === seeded.id
+    ),
+    JSON.stringify(finished.result.evidence)
+  );
+  assert.ok(
+    mainSessions
+      .getMessages(main.id)
+      .some(message => message.content.includes('【Memory Bot 任务完成】'))
+  );
+});
+
+test('主控记忆 → 委派 Bot：memory_remember 写入父主控会话 scope', async () => {
+  const main = mainSessions.createSession({ title: '委派写入 scope 回归' });
+  const outcome = await agentRuntime.runAgentTurn({
+    providerId,
+    modelId: 'dispatch-test-model',
+    sessionId: main.id,
+    userText: 'DELEGATE MEMORY_WRITE 我喜欢浅烘咖啡',
+    messages: [
+      { role: 'system', content: '你可以调用 delegate_to_bot。' },
+      { role: 'user', content: 'DELEGATE MEMORY_WRITE 我喜欢浅烘咖啡' },
+    ],
+    policy: {
+      schemaVersion: 1,
+      mode: 'bounded_autonomy',
+      tools: { allowedTools: ['delegate_to_bot'], maxToolCalls: 2, maxReadOnlyRetries: 0 },
+      budgets: { maxRounds: 2, maxTotalMs: 10000 },
+    },
+    credentialKey: 'dispatch-bot-key',
+    timeout: 10000,
+  });
+  assert.equal(outcome.toolSteps.length, 1);
+  const task = tasks.listTasks('memory', { parentSessionId: main.id })[0];
+  assert.ok(task);
+  const finished = await waitForTask(task.taskId);
+  assert.equal(finished.status, 'completed');
+  assert.equal(finished.parentSessionId, main.id);
+
+  const mainFound = memory.searchMemories({
+    query: '浅烘咖啡',
+    sessionId: main.id,
+    limits: { maxItems: 10, perItemMax: 300, totalMax: 2000, maxTokens: 1200 },
+  });
+  const botFound = memory.searchMemories({
+    query: '浅烘咖啡',
+    sessionId: task.sessionId,
+    limits: { maxItems: 10, perItemMax: 300, totalMax: 2000, maxTokens: 1200 },
+  });
+  assert.ok(mainFound.results.some(item => item.content.includes('浅烘咖啡')));
+  assert.equal(botFound.results.length, 0);
 });
 
 async function readSseUntil(url, predicate, timeoutMs = 6000) {

@@ -236,9 +236,12 @@ const definition = Object.freeze({
    * 超时被中止时尽快收尾，不做无谓的后台工作。
    */
   async handler(args, context) {
+    // 委派任务：memoryScopeSessionId 指向父主控会话；直接 Bot 对话缺省回落到 Bot 会话。
+    const memorySessionId =
+      context && (context.memoryScopeSessionId || context.sessionId);
     const found = searchMemories({
       query: args.query,
-      sessionId: context && context.sessionId,
+      sessionId: memorySessionId,
       mode: args.mode || 'current',
       asOf: args.asOf || null,
       filters: args.filters || null,
@@ -249,7 +252,6 @@ const definition = Object.freeze({
         maxTokens: LIMITS.maxTokens,
       },
     });
-
     const results = found.results.slice(0, args.limit).map(item => ({
       content: truncateText(item.content, LIMITS.perItemMax),
       type: item.type,

@@ -182,6 +182,8 @@ async function execute({
   botId,
   messages,
   sessionId = null,
+  // 记忆作用域独立于 Bot 对话会话；委派任务由 runTask 传入父主控 session。
+  memoryScopeSessionId = null,
   userText = '',
   taskId = null,
   taskTools = null,
@@ -212,6 +214,7 @@ async function execute({
       modelId: config.modelProfile.modelId,
       messages,
       sessionId,
+      memoryScopeSessionId,
       userText,
       temperature: config.modelProfile.temperature,
       maxTokens: config.modelProfile.maxTokens,
@@ -471,6 +474,8 @@ async function runTask(taskId) {
       botId: task.botId,
       messages,
       sessionId: task.sessionId,
+      // 委派任务：Bot 会话只承载执行轨迹，记忆读写归属父主控会话。
+      memoryScopeSessionId: task.parentSessionId || task.sessionId,
       userText: task.goal,
       taskId: task.taskId,
       taskTools: task.allowedTools,

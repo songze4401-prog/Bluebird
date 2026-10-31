@@ -443,6 +443,7 @@ async function executeToolCall(name, rawArgs, context) {
     .then(() =>
       def.handler(validated.args, {
         sessionId: context.sessionId,
+        memoryScopeSessionId: context.memoryScopeSessionId || context.sessionId,
         userText: context.userText,
         userMessageId: context.userMessageId,
         signal: controller.signal,
@@ -561,6 +562,9 @@ async function runAgentTurn({
   sessionId,
   userText = '',
   userMessageId = null,
+  // 记忆作用域与对话作用域分开：委派任务用父主控会话作为记忆 scope，
+  // 但工具轨迹、任务日志仍属于 Bot 自己的 session。
+  memoryScopeSessionId = null,
   temperature = 0.8,
   maxTokens = 1200,
   timeout = 90000,
@@ -783,6 +787,7 @@ async function runAgentTurn({
 
       const toolContext = {
         sessionId,
+        memoryScopeSessionId: memoryScopeSessionId || sessionId,
         userText,
         userMessageId,
         cache,
