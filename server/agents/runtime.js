@@ -447,6 +447,11 @@ async function runTask(taskId) {
 
   const controller = new AbortController();
   activeRuns.set(task.taskId, controller);
+  // deadlineMs 此前只被存储与校验，运行时不执行，任务可以无限跑。
+  // 这里在任务真正开始执行时起算截止时间：到期中止本次运行，
+  // 并把任务收敛成 timed_out（而不是被误判成用户取消）。
+  let deadlineExceeded = false;
+  let deadlineTimer = null;
 
   try {
     tasks.updateTask(task.taskId, {
@@ -467,13 +472,25 @@ async function runTask(taskId) {
       return;
     }
 
+    const runningSince = Date.now();
     tasks.updateTask(task.taskId, {
       status: 'running',
-      startedAt: new Date().toISOString(),
+      startedAt: new Date(runningSince).toISOString(),
     });
     safeEvent(task.botId, 'task.started', { status: 'running', taskType: task.taskType }, {
       taskId: task.taskId,
     });
+
+    const deadlineMs =
+      Number.isInteger(task.deadlineMs) && task.deadlineMs > 0 ? task.deadlineMs : null;
+    if (deadlineMs) {
+      const remaining = Math.max(0, deadlineMs - (Date.now() - runningSince));
+      deadlineTimer = setTimeout(() => {
+        deadlineExceeded = true;
+        controller.abort();
+      }, remaining);
+      if (typeof deadlineTimer.unref === 'function') deadlineTimer.unref();
+    }
 
     const config = require('./config').getRuntimeConfig(task.botId);
     const messages = [
@@ -548,11 +565,15 @@ async function runTask(taskId) {
     if (!latest || tasks.isTerminalStatus(latest.status)) return;
     if (latest.status === 'waiting_approval') return;
 
+    // 截止时间到期的中止在 execute() 里会被归一成 cancelled（信号已断），
+    // 这里必须先认出来：它是超时，不是用户取消，且不可重试。
     const cancelled =
-      latest.cancelRequested || (error && error.code === 'cancelled');
-    const timedOut = error && error.code === 'model_timeout';
-    const errorCode =
-      (error && error.code) || (timedOut ? 'model_timeout' : 'agent_failed');
+      !deadlineExceeded &&
+      (latest.cancelRequested || (error && error.code === 'cancelled'));
+    const timedOut = deadlineExceeded || (error && error.code === 'model_timeout');
+    const errorCode = deadlineExceeded
+      ? 'deadline_exceeded'
+      : (error && error.code) || (timedOut ? 'model_timeout' : 'agent_failed');
     const attempts = Number.isInteger(latest.attempts) ? latest.attempts : 0;
     const maxAttempts = Number.isInteger(latest.maxAttempts) ? latest.maxAttempts : 1;
     const retryable =
@@ -598,6 +619,7 @@ async function runTask(taskId) {
       { taskId: task.taskId }
     );
   } finally {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
     activeRuns.delete(task.taskId);
     scheduleTaskQueue();
   }

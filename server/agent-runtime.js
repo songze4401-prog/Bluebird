@@ -155,10 +155,6 @@ function unregisterTool(name) {
   tools.delete(String(name || ''));
 }
 
-function supportsTool(name) {
-  return tools.has(String(name || ''));
-}
-
 function policyAllowsTool(policy, name) {
   if (!policy) return true;
   if (policy.mode === 'answer_only') return false;
@@ -418,13 +414,18 @@ async function executeToolCall(name, rawArgs, context) {
 
   const controller = new AbortController();
 
-  // 外部中止（客户端断连）：立即传播给 handler，尽早停止后台工作
+  // 外部中止（客户端断连）：立即传播给 handler，尽早停止后台工作。
+  // 监听器必须在本次工具调用结束时摘掉：once:true 只在信号真的触发时移除，
+  // 而一次请求会连续调用十几次工具，监听器会在外部信号上不断累积
+  // （Node 超过 10 个监听器就告警）。
   const externalSignal = context && context.abortSignal;
+  let externalAbortHandler = null;
   if (externalSignal) {
     if (externalSignal.aborted) {
       controller.abort();
     } else {
-      externalSignal.addEventListener('abort', () => controller.abort(), {
+      externalAbortHandler = () => controller.abort();
+      externalSignal.addEventListener('abort', externalAbortHandler, {
         once: true,
       });
     }
@@ -512,6 +513,9 @@ async function executeToolCall(name, rawArgs, context) {
     return result;
   } finally {
     if (timer) clearTimeout(timer);
+    if (externalAbortHandler && externalSignal) {
+      externalSignal.removeEventListener('abort', externalAbortHandler);
+    }
   }
 }
 
@@ -903,14 +907,17 @@ async function runAgentTurn({
     }
   }
 
-  const reachedMaxRounds = rounds >= MAX_ROUNDS;
+  // 轮次上限按本次 policy 的 maxRounds 判定：循环用的就是它。拿全局
+  // MAX_ROUNDS 比较，会把「按策略收敛后跑满」报成「没到轮次上限」，
+  // 监控口径与真实行为对不上。
+  const reachedMaxRounds = rounds >= maxRounds;
   const clientGone = typeof isClientGone === 'function' && isClientGone();
 
   monitoring.recordAgentRun({
     status: clientGone ? 'cancelled' : rawReply ? 'success' : 'failed',
     rounds,
     toolCount: toolSteps.length,
-    maxRounds: MAX_ROUNDS,
+    maxRounds,
     reachedMaxRounds,
     clientGone,
   });
@@ -919,6 +926,7 @@ async function runAgentTurn({
     rawReply,
     toolSteps,
     rounds,
+    maxRounds,
     completion,
     stopReason,
     toolCallCount,
@@ -947,7 +955,6 @@ module.exports = {
   TOOL_RESULT_MAX,
   registerTool,
   unregisterTool,
-  supportsTool,
   listToolSpecs,
   listToolMetadata,
   listToolRegistry,

@@ -1,6 +1,6 @@
 name: CI
 
-# 回归兜底：覆盖率脚本单次执行后端 49 个测试文件（1603 项）+ 前端 21 套单元测试（173 项）
+# 回归兜底：覆盖率脚本单次执行后端 51 个测试文件（1622 项）+ 前端 22 套单元测试（179 项）
 # + tsc --noEmit + Expo lint，不再在 CI 里重复跑同一批测试。
 # 触发范围：main 的 push、针对 main 的 PR、手动触发；同一 PR 不会因 push+PR 双跑。
 on:
@@ -22,10 +22,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      # actions v5 起使用 Node 24 运行时，避开 GitHub 对 Node 20 action 的弃用告警。
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
+          # 与 package.json engines.node（>=22）和仓库根 .nvmrc 保持同一版本线。
           node-version: '22'
           cache: 'npm'
 
@@ -59,6 +61,21 @@ jobs:
 
       - name: 测试覆盖验证（自测）
         run: node scripts/verify-test-coverage.test.js
+
+      # 文档计数自测：确认 sync-doc-counts 脚本自身的派生与锚点替换逻辑是对的，
+      # 否则下面那次 --check 的绿灯没有意义。
+      - name: 文档计数同步（自测）
+        run: node scripts/sync-doc-counts.test.js
+
+      # 文档计数单一来源门禁：AGENTS.md / README.md / docs/* 与 CI 注释里的测试
+      # 计数必须等于 scripts/test-coverage-baseline.json 里的值，否则失败。
+      - name: 文档计数与基线一致
+        run: node scripts/sync-doc-counts.js --check
+
+      # 后端能力登记门禁：每条后端路由都必须落在登记册里；标了 ui 的能力必须有
+      # 前端消费者，标了 api-only 的能力必须确实没有前端消费者。
+      - name: API 能力登记一致
+        run: node scripts/verify-api-capabilities.js
 
       # 单次执行全部后端文件（node:test + 自定义 runner）与 Jest，并按逐文件
       # 运行时计数对账；这里不再重复跑上面已删除的同类步骤。

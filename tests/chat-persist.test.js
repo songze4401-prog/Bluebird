@@ -52,8 +52,6 @@ const DATA_DIR = path.join(TMP_ROOT, 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const STORE_FILE = path.join(DATA_DIR, 'sessions.json');
-// 落盘用的临时文件名带 pid（多实例不再抢同一路径），这里必须同步带上
-const TMP_FILE = `${STORE_FILE}.tmp.${process.pid}`;
 
 const ORIG_LOG = console.log;
 const ORIG_ERR = console.error;
@@ -270,13 +268,33 @@ async function main() {
     ORIG_LOG('\nC2 + A4. 落盘失败时 persisted:false 且不落盘');
     const beforeFail = readStore().messages[sessionA].length;
 
-    // 把临时文件路径占成目录，openSync('w') 必然失败
-    fs.mkdirSync(TMP_FILE);
+    // 注入写盘失败：sessions.json 现在走统一原子写，临时文件是
+    // sessions.json.tmp-<pid>-<ts>-<rand>（随机后缀），没法再靠"占成目录"
+    // 命中固定路径；这里改为拦截 openSync，让临时文件的独占创建必然失败。
+    const realOpenSync = fs.openSync;
+    const openSyncDesc = Object.getOwnPropertyDescriptor(fs, 'openSync');
+    Object.defineProperty(fs, 'openSync', {
+      configurable: true,
+      writable: true,
+      value: (filePath, ...rest) => {
+        if (
+          typeof filePath === 'string' &&
+          filePath.startsWith(`${STORE_FILE}.tmp-`)
+        ) {
+          const error = new Error('forced temp file failure');
+          error.code = 'EACCES';
+          throw error;
+        }
+        return realOpenSync.call(fs, filePath, ...rest);
+      },
+    });
 
     const failedChat = await req('/chat', {
       method: 'POST',
       body: { message: '写不进去的消息', sessionId: sessionA },
     });
+
+    if (openSyncDesc) Object.defineProperty(fs, 'openSync', openSyncDesc);
 
     check(
       '写盘失败仍返回模型回复（不吞掉内容）',
@@ -304,10 +322,9 @@ async function main() {
     );
     check(
       '失败后未残留半写的临时文件',
-      !fs.existsSync(TMP_FILE) || fs.statSync(TMP_FILE).isDirectory()
+      fs.readdirSync(DATA_DIR).filter(name => name.includes('.tmp-')).length === 0,
+      fs.readdirSync(DATA_DIR).filter(name => name.includes('.tmp-')).join(', ')
     );
-
-    fs.rmdirSync(TMP_FILE);
 
     const recoveredChat = await req('/chat', {
       method: 'POST',
@@ -326,7 +343,8 @@ async function main() {
     );
     check(
       'fsync 落盘路径可用（临时文件已清理）',
-      !fs.existsSync(TMP_FILE)
+      fs.readdirSync(DATA_DIR).filter(name => name.includes('.tmp-')).length === 0,
+      fs.readdirSync(DATA_DIR).filter(name => name.includes('.tmp-')).join(', ')
     );
 
     ORIG_LOG('\nB1. 客户端历史回退只对默认会话开放');

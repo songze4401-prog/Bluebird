@@ -2,6 +2,7 @@
 // 与任务页轮询解耦；snapshot 用于断线重连，客户端按消息 id 去重。
 import { API_BASE } from './api/client';
 import { API_TOKEN } from './constants';
+import { API_PATHS } from './api/endpoints';
 import type { AgentChatMessage } from './api/types';
 
 export type AgentResultEvent =
@@ -111,10 +112,7 @@ export function subscribeAgentResults(
     };
 
     const xhr = new XMLHttpRequest();
-    xhr.open(
-      'GET',
-      `${API_BASE}/agent-results/stream?sessionId=${encodeURIComponent(sessionId)}`
-    );
+    xhr.open('GET', `${API_BASE}${API_PATHS.agentResultsStream(sessionId)}`);
     xhr.setRequestHeader('Authorization', `Bearer ${API_TOKEN}`);
     xhr.setRequestHeader('Accept', 'text/event-stream');
     xhr.onprogress = () => {

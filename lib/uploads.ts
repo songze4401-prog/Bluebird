@@ -7,7 +7,7 @@
 
 import { API_TOKEN } from './constants';
 import { readJsonResponse } from './utils';
-import { apiFetch, TIMEOUTS } from './api/client';
+import { API_BASE, apiFetch, TIMEOUTS } from './api/client';
 import { API_PATHS } from './api/endpoints';
 import { apiErrorFromPayload } from './api/errors';
 import type {
@@ -17,11 +17,11 @@ import type {
 } from './api/types';
 import type { Attachment } from './types';
 
-const API_URL = process.env.EXPO_PUBLIC_API_URL;
-
-// 图片读取地址：GET /uploads/image/:id（需鉴权，配合 expo-image 的 source.headers）
+// 图片地址与 API_BASE 同源：EXPO_PUBLIC_API_URL 未配置时回退到相对路径，
+// 不再拼出 "undefined/uploads/image/..." 这种必然 404 的地址。
+// GET /uploads/image/:id 需鉴权，配合 expo-image 的 source.headers。
 export function imageUrl(id: string): string {
-  return `${API_URL}${API_PATHS.uploadImage(id)}`;
+  return `${API_BASE}${API_PATHS.uploadImage(id)}`;
 }
 
 // expo-image 读取受保护图片时挂在 source.headers 上的鉴权头
@@ -70,7 +70,7 @@ export async function listStickerRepo(): Promise<Attachment[]> {
 
 // 仓库表情包图片地址：GET /sticker-repo/:id/image（与聊天图片不同路由）
 export function stickerImageUrl(id: string): string {
-  return `${API_URL}${API_PATHS.stickerImage(id)}`;
+  return `${API_BASE}${API_PATHS.stickerImage(id)}`;
 }
 
 // 登记一张图片进表情包仓库（POST /sticker-repo）。

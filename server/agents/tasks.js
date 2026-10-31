@@ -23,6 +23,10 @@ const OUTBOX_FILE = path.join(AGENTS_DIR, 'agent-event-outbox.json');
 const SCHEMA_VERSION = 1;
 const TASK_MAX = 500;
 const EVENT_MAX = 3000;
+// 事件 outbox 的增长硬上限：主事件文件写不进去时，事件会先堆在 outbox 里。
+// 没有上限时磁盘可能被写满；超出后只保留最近的 OUTBOX_MAX 条并记录被丢弃的条数，
+// 不假装"全都保存了"。
+const OUTBOX_MAX = 500;
 const GOAL_MAX = 2000;
 const CONTEXT_MAX = 8000;
 const PARENT_USER_TEXT_MAX = 4000;
@@ -253,6 +257,23 @@ function appendEvent({
   };
   const outbox = loadOutbox();
   outbox.events.push(event);
+  if (outbox.events.length > OUTBOX_MAX) {
+    const dropped = outbox.events.length - OUTBOX_MAX;
+    outbox.events = outbox.events.slice(-OUTBOX_MAX);
+    console.error(
+      JSON.stringify({
+        ts: nowIso(),
+        level: 'error',
+        event: 'agent_event_outbox_overflow',
+        module: 'agents',
+        file: OUTBOX_FILE,
+        reason: 'outbox_overflow',
+        action: 'drop_oldest',
+        dropped,
+        cap: OUTBOX_MAX,
+      })
+    );
+  }
   saveOutbox();
 
   try {
@@ -648,6 +669,7 @@ module.exports = {
   TASKS_FILE,
   EVENTS_FILE,
   OUTBOX_FILE,
+  OUTBOX_MAX,
   STATUSES,
   createTask,
   getTask,

@@ -358,6 +358,9 @@ test('主控派发：创建带 parentSessionId 的任务，Bot Runtime 完成后
   const finished = await waitForTask(result.taskId);
   assert.equal(finished.status, 'completed');
   assert.equal(finished.parentSessionId, main.id);
+  // 审计 P3-05 说「parentMessageId 实际始终为 null」——那是过期结论：
+  // 派发工具把本轮用户消息 id 原样带进任务，任务里存的就是这条消息。
+  assert.equal(finished.parentMessageId, 'main-user-1');
   assert.equal(finished.result.summary.startsWith('已处理：'), true);
   assert.equal(finished.deliveryErrorCode, null);
   assert.ok(finished.deliveredToParentAt);

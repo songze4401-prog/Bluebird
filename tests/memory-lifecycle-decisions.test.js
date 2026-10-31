@@ -571,3 +571,77 @@ describe('生命周期与历史查询', { concurrency: 1 }, () => {
     assert.equal(result.reason, 'unauthorized_target');
   });
 });
+
+describe('跨会话去重与可见范围', { concurrency: 1 }, () => {
+  test('合并到别的会话条目时不改写对方的正文与类型', async () => {
+    seed([
+      base({
+        content: '用户喜欢喝美式咖啡',
+        type: 'preference',
+        keywords: ['咖啡', '美式'],
+        sourceQuote: '我喜欢喝美式咖啡',
+        sessionId: 's-other',
+      }),
+    ]);
+    const otherBefore = memory.getMemories()[0];
+
+    const result = await memory.applyCandidate(
+      {
+        content: '用户喜欢喝美式咖啡',
+        type: 'fact',
+        keywords: ['咖啡'],
+        confidence: 0.93,
+        sourceQuote: '我喜欢喝美式咖啡',
+      },
+      USER
+    );
+
+    // 全局去重仍是既有能力：同一条事实合并到同一条目。
+    assert.equal(result.decision, 'merge');
+    assert.equal(result.id, otherBefore.id);
+    assert.equal(memory.getMemories().length, 1);
+
+    const saved = memory.getMemories()[0];
+    // 但对方的条目内容不得被本次写入改写。
+    assert.equal(saved.content, '用户喜欢喝美式咖啡');
+    assert.equal(saved.type, 'preference');
+    assert.deepEqual(saved.keywords, ['咖啡', '美式']);
+    // 贡献追加：这条事实现在两个会话都认。
+    assert.deepEqual(
+      saved.contributions.map(item => item.sessionId).sort(),
+      ['s-decision', 's-other']
+    );
+  });
+
+  test('同会话内的合并仍刷新正文与类型', async () => {
+    const first = await memory.applyCandidate(
+      {
+        content: '用户喜欢喝美式咖啡',
+        type: 'preference',
+        keywords: ['咖啡', '美式'],
+        confidence: 0.95,
+        sourceQuote: '我喜欢喝美式咖啡',
+      },
+      USER
+    );
+    assert.equal(first.decision, 'create');
+
+    const second = await memory.applyCandidate(
+      {
+        content: '用户喜欢喝美式咖啡',
+        type: 'fact',
+        keywords: ['咖啡'],
+        confidence: 0.93,
+        sourceQuote: '我喜欢喝美式咖啡',
+      },
+      USER
+    );
+
+    assert.equal(second.decision, 'merge');
+    assert.equal(second.id, first.id);
+
+    const saved = memory.getMemories()[0];
+    assert.equal(saved.type, 'fact');
+    assert.deepEqual(saved.keywords, ['咖啡']);
+  });
+});

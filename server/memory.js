@@ -1295,20 +1295,34 @@ async function applyCandidate(raw, options = {}) {
     ) {
       const index = next.findIndex(item => item.id === decision.target.id);
       const existing = next[index];
-      const updated = storedCandidate(candidate, {
-        id: existing.id,
-        status: STATUS_ACTIVE,
-        createdAt: existing.createdAt || candidate.createdAt,
-        validFrom: existing.validFrom || candidate.validFrom,
-        validTo: null,
-        supersededBy: null,
-        contributions: mergeContributions(
-          existing.contributions,
-          candidate.contributions
-        ),
-        updatedAt: nowIso,
-        lastDecision: record(decision.decision, decision.reason),
-      });
+      const contributions = mergeContributions(
+        existing.contributions,
+        candidate.contributions
+      );
+      // 合并到别的会话的条目时，只追加贡献：对方条目的正文、类型、关键词、
+      // 置信度保持原样，否则一次写入会改写别的会话已经存下来的事实。
+      const updated =
+        decision.reason === 'same_fact_other_session'
+          ? {
+              ...existing,
+              status: STATUS_ACTIVE,
+              validTo: null,
+              supersededBy: null,
+              contributions,
+              updatedAt: nowIso,
+              lastDecision: record(decision.decision, decision.reason),
+            }
+          : storedCandidate(candidate, {
+              id: existing.id,
+              status: STATUS_ACTIVE,
+              createdAt: existing.createdAt || candidate.createdAt,
+              validFrom: existing.validFrom || candidate.validFrom,
+              validTo: null,
+              supersededBy: null,
+              contributions,
+              updatedAt: nowIso,
+              lastDecision: record(decision.decision, decision.reason),
+            });
 
       next[index] = updated;
       trimToCapacity(next);
@@ -1739,6 +1753,12 @@ const INJECT_CAP = 10;
 // sessionId 为空 = 调用方没有会话身份（旧数据 / 老调用）。这时绝不退回
 // 「全库可见」：只注入无归属的旧数据，属于具名会话的记忆一律不露。
 // 线上路径必须显式传 sessionId —— 这是 P0 修掉的隐私外泄口子。
+//
+// 注意：这不是生产注入路径。线上注入走 Context Runtime v3
+// （server/context/retriever.js → searchMemories → server/context/builder.js
+// 的 renderMemoryBlock）。本函数保留给固定评测（tests/memory-eval/）与
+// 作用域回归断言使用：它与 searchMemories 共用 scopeOf / visiblePool /
+// rankMemories，因此评测里的作用域结论与线上读路径一致。
 function buildMemoryContext(message, sessionId = null) {
   if (!MEMORY_ENABLED) return '';
 
@@ -1778,7 +1798,7 @@ function buildMemoryContext(message, sessionId = null) {
   }
 }
 
-// 相关性算分与选取：buildMemoryContext（会话内注入）与 Agent 工具检索
+// 相关性算分与选取：buildMemoryContext（评测注入渲染器）与 Agent 工具检索
 // （searchMemories，scope 化）共用同一套算分，不另造轮子。
 // current 传原始查询串：关键词命中按归一化文本比较，内容二元组按原文计算。
 // identity 类型优先（≤2 条），保证身份类事实不会因字面 0 分被丢弃；

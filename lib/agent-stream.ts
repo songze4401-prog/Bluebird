@@ -3,6 +3,7 @@
 // token delta（delta 字段）与结构化任务/工具事件。
 import { API_BASE } from './api/client';
 import { API_TOKEN } from './constants';
+import { API_PATHS } from './api/endpoints';
 import type { AgentChatResponse, AgentChatMessage } from './api/types';
 
 export type AgentStreamEvent =
@@ -107,7 +108,7 @@ export function sendAgentChatStream(
     };
 
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${API_BASE}/agents/${encodeURIComponent(botId)}/chat/stream`);
+    xhr.open('POST', `${API_BASE}${API_PATHS.agentChatStream(botId)}`);
     xhr.setRequestHeader('Content-Type', 'application/json');
     xhr.setRequestHeader('Authorization', `Bearer ${API_TOKEN}`);
     xhr.timeout = 60_000;

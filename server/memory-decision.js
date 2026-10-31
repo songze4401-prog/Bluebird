@@ -91,9 +91,14 @@ function decide({ candidate, matches = [], target = null, rules = DEFAULT_RULES 
   }
 
   if (duplicates.length === 1) {
+    // 去重目标不在当前会话作用域内（别的会话的私有事实）：全局去重是既有
+    // 能力，仍然合并为同一条事实，但必须标记出来——写入时只追加贡献，
+    // 不得用本次候选改写对方条目的正文、类型与关键词。
+    const crossSession = duplicates[0].visible === false;
+
     return {
       decision: DECISION.MERGE,
-      reason: 'same_fact',
+      reason: crossSession ? 'same_fact_other_session' : 'same_fact',
       target: duplicates[0].item,
     };
   }

@@ -248,7 +248,7 @@ async function waitReady() {
     const unknownHistory = await req('/history?sessionId=unknown-id');
     check('GET /history 未知会话返回 404', unknownHistory.status === 404, `实际 ${unknownHistory.status}`);
 
-    const cleared = await req('/history/clear', { method: 'POST', body: { sessionId: sessionAId } });
+    const cleared = await req('/history/clear', { method: 'POST', body: { sessionId: sessionAId, confirm: true } });
     check('POST /history/clear 指定会话返回 200', cleared.status === 200, `实际 ${cleared.status}`);
 
     const aAfter = sessions.getMessages(sessionAId);
@@ -493,6 +493,80 @@ async function waitReady() {
       '裁剪后会话仍保留 1000 条且包含新消息',
       sessions.getMessages(attached.id).length === 1000 &&
         sessions.getMessages(attached.id).some(item => item.id === 'att-new')
+    );
+  }
+
+  origLog('\n会话数量上限（P3-09）：回收空会话，无可回收时明确拒绝');
+  {
+    const cap = sessions.SESSION_MAX;
+
+    while (sessions.listSessions().length < cap) {
+      sessions.createSession({ title: '容量用例' });
+    }
+
+    check(
+      '会话数量补齐到上限',
+      sessions.listSessions().length === cap,
+      `实际 ${sessions.listSessions().length} / 上限 ${cap}`
+    );
+
+    const beforeIds = sessions.listSessions().map(meta => meta.id);
+    const emptyIds = new Set(
+      sessions
+        .listSessions()
+        .filter(meta => meta.id !== 'default' && sessions.getMessages(meta.id).length === 0)
+        .map(meta => meta.id)
+    );
+
+    const overCap = sessions.createSession({ title: '超上限' });
+    const afterMetas = sessions.listSessions();
+    const removed = beforeIds.filter(id => !afterMetas.some(meta => meta.id === id));
+
+    check(
+      '超过上限时先回收一个空会话，再成功新建',
+      overCap &&
+        typeof overCap.id === 'string' &&
+        afterMetas.length === cap &&
+        removed.length === 1,
+      `实际 ${afterMetas.length} / 被回收 ${removed.length} 个`
+    );
+
+    check(
+      '被回收的会话此前确实没有消息',
+      removed.length === 1 && emptyIds.has(removed[0]),
+      `被回收：${removed.join(',')}`
+    );
+
+    check(
+      '默认会话不受容量回收影响',
+      Boolean(sessions.getSession('default')),
+      '默认会话丢失'
+    );
+
+    // 让每个会话都有消息：此时没有任何可回收的空会话。
+    for (const meta of sessions.listSessions()) {
+      sessions.appendMessages(meta.id, [
+        { role: 'user', content: `占位消息 ${meta.id}` },
+      ]);
+    }
+
+    let limitError = null;
+    try {
+      sessions.createSession({ title: '无可回收' });
+    } catch (error) {
+      limitError = error;
+    }
+
+    check(
+      '没有可回收的空会话时明确拒绝（code=session_limit）',
+      limitError && limitError.code === 'session_limit',
+      `实际 ${limitError ? limitError.code : '未抛错'}`
+    );
+
+    check(
+      '拒绝创建后会话数量保持不变',
+      sessions.listSessions().length === cap,
+      `实际 ${sessions.listSessions().length}`
     );
   }
 

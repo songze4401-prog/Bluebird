@@ -240,10 +240,10 @@ async function waitReady() {
     });
     check('POST /memory/clear-session 无 token 返回 401', noToken.status === 401, `实际 ${noToken.status}`);
 
-    const missing = await req('/memory/clear-session', { method: 'POST', body: {} });
+    const missing = await req('/memory/clear-session', { method: 'POST', body: { confirm: true } });
     check('缺 sessionId 返回 400（空 sessionId 不允许等于全库清空）', missing.status === 400, `实际 ${missing.status}`);
 
-    const blank = await req('/memory/clear-session', { method: 'POST', body: { sessionId: '   ' } });
+    const blank = await req('/memory/clear-session', { method: 'POST', body: { sessionId: '   ', confirm: true } });
     check('空白 sessionId 返回 400', blank.status === 400, `实际 ${blank.status}`);
 
     const noBody = await req('/memory/delete', { method: 'POST', body: {} });
@@ -479,7 +479,7 @@ async function waitReady() {
 
     const retry = await req('/history/clear', {
       method: 'POST',
-      body: { sessionId },
+      body: { sessionId, confirm: true },
     });
     check('聊天记录清掉后接口仍正常（不受上一次失败影响）', retry.status === 200, `实际 ${retry.status}`);
 
@@ -540,7 +540,7 @@ async function waitReady() {
 
     const noop = await req('/memory/clear-session', {
       method: 'POST',
-      body: { sessionId: 's-从没说过话' },
+      body: { sessionId: 's-从没说过话', confirm: true },
     });
     check(
       '没有匹配贡献 → 200 + 全 0 计数 + 明确说明',
@@ -553,7 +553,7 @@ async function waitReady() {
 
     const cleared = await req('/memory/clear-session', {
       method: 'POST',
-      body: { sessionId: SESSION_A },
+      body: { sessionId: SESSION_A, confirm: true },
     });
 
     check(

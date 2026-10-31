@@ -298,6 +298,40 @@ async function waitReady() {
     );
   }
 
+  origLog('\nHTTP 语义：JSON 404、统一错误体、版本号（P3-10 / P3-02）');
+  {
+    const missing = await req('/no-such-route');
+    check(
+      '未知路由返回 404 JSON（error + code）',
+      missing.status === 404 &&
+        missing.json &&
+        missing.json.code === 'not_found' &&
+        typeof missing.json.error === 'string' &&
+        String(missing.headers.get('content-type')).includes('application/json'),
+      `实际 ${missing.status} / ${JSON.stringify(missing.json)}`
+    );
+
+    const invalidJson = await req('/presence/report', {
+      method: 'POST',
+      rawBody: '{',
+    });
+    check(
+      '非法 JSON 的错误体带机器可读 code',
+      invalidJson.status === 400 &&
+        invalidJson.json &&
+        invalidJson.json.code === 'invalid_json',
+      `实际 ${invalidJson.status} / ${JSON.stringify(invalidJson.json)}`
+    );
+
+    const pkg = require(path.join(__dirname, '..', 'package.json'));
+    const root = await req('/', { token: null });
+    check(
+      'GET / 返回的 version 与 package.json 一致',
+      root.status === 200 && root.json && root.json.version === pkg.version,
+      `实际 ${JSON.stringify(root.json)} / package.json ${pkg.version}`
+    );
+  }
+
   origLog('\n记忆与情绪接口');
   {
     const emo = await req('/emotion');
@@ -313,7 +347,7 @@ async function waitReady() {
       JSON.stringify(emo.json)
     );
 
-    const cleared = await req('/memory/clear', { method: 'POST' });
+    const cleared = await req('/memory/clear', { method: 'POST', body: { confirm: true } });
     check('POST /memory/clear 返回 200', cleared.status === 200, `实际 ${cleared.status}`);
 
     const after = await req('/memory');
@@ -327,36 +361,38 @@ async function waitReady() {
     );
   }
 
-  origLog('\n数据目录隔离守卫（D-2）');
+  origLog('\n破坏性操作的二次确认守卫（P3-12，与数据目录无关）');
   {
-    // 把「有效数据目录」临时指向真实 server/data（非临时目录）：无 confirm 的
-    // clear 必须被 403 拦截。守卫在写盘之前返回，不会触碰任何数据；
-    // 且各数据模块的 DATA_DIR 在加载时已固定为临时目录，即便误放行也只会清临时数据。
-    const prevDir = process.env.BLUEBIRD_DATA_DIR;
-    process.env.BLUEBIRD_DATA_DIR = path.join(__dirname, '..', 'server', 'data');
+    // 守卫与数据目录无关：临时目录、真实目录一律要求 confirm: true。
+    // 这里在临时数据目录下再验一次，证明它不是"只有真实目录才拦"。
+    const memGuard = await req('/memory/clear', { method: 'POST' });
+    check(
+      '临时目录下 POST /memory/clear 无 confirm 也返回 403',
+      memGuard.status === 403,
+      `实际 ${memGuard.status}`
+    );
+    check(
+      '403 响应带 requireConfirm 标记',
+      memGuard.json && memGuard.json.requireConfirm === true,
+      JSON.stringify(memGuard.json)
+    );
 
-    try {
-      const memGuard = await req('/memory/clear', { method: 'POST' });
-      check(
-        '真实目录下 POST /memory/clear 无 confirm 返回 403',
-        memGuard.status === 403,
-        `实际 ${memGuard.status}`
-      );
-      check(
-        '403 响应带 requireConfirm 标记',
-        memGuard.json && memGuard.json.requireConfirm === true,
-        JSON.stringify(memGuard.json)
-      );
+    const histGuard = await req('/history/clear', { method: 'POST' });
+    check(
+      '临时目录下 POST /history/clear 无 confirm 也返回 403',
+      histGuard.status === 403,
+      `实际 ${histGuard.status}`
+    );
 
-      const histGuard = await req('/history/clear', { method: 'POST' });
-      check(
-        '真实目录下 POST /history/clear 无 confirm 返回 403',
-        histGuard.status === 403,
-        `实际 ${histGuard.status}`
-      );
-    } finally {
-      process.env.BLUEBIRD_DATA_DIR = prevDir;
-    }
+    const sessionGuard = await req('/memory/clear-session', {
+      method: 'POST',
+      body: { sessionId: 'default' },
+    });
+    check(
+      'POST /memory/clear-session 无 confirm 返回 403',
+      sessionGuard.status === 403,
+      `实际 ${sessionGuard.status}`
+    );
   }
 
   origLog('\n聊天历史接口');
@@ -374,7 +410,7 @@ async function waitReady() {
     const notFound = await req('/history/recall', { method: 'POST', body: { messageId: 'not-exist-id' } });
     check('POST /history/recall 未知 id 返回 404', notFound.status === 404, `实际 ${notFound.status}`);
 
-    const cleared = await req('/history/clear', { method: 'POST' });
+    const cleared = await req('/history/clear', { method: 'POST', body: { confirm: true } });
     check('POST /history/clear 返回 200', cleared.status === 200, `实际 ${cleared.status}`);
   }
 

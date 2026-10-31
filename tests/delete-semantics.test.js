@@ -315,7 +315,7 @@ async function waitReady() {
   {
     const res = await req('/history/clear', {
       method: 'POST',
-      body: { sessionId: a2 },
+      body: { sessionId: a2, confirm: true },
     });
 
     check('返回 200 ok', res.status === 200 && res.json.ok === true, JSON.stringify(res.json));
@@ -389,7 +389,7 @@ async function waitReady() {
 
     const res = await req('/memory/clear-session', {
       method: 'POST',
-      body: { sessionId: a4 },
+      body: { sessionId: a4, confirm: true },
     });
 
     check(

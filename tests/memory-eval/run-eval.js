@@ -13,7 +13,10 @@
  *   2. 对 26 道固定题分别调用三条真实读路径 ——
  *        scoped       路径：searchMemories({query, sessionId, limits})（Agent 工具 / Context Engine 用的）
  *        inject       路径：buildMemoryContext(query)（不带 sessionId 的兼容入口，应只回无归属旧数据）
- *        injectScoped 路径：buildMemoryContext(query, sessionId)（/chat 线上真正走的那条）
+ *        injectScoped 路径：buildMemoryContext(query, sessionId)（评测/回归用的注入渲染器）
+ *   注：inject / injectScoped 两条不是 /chat 的线上注入路径——线上走 Context Runtime v3
+ *   （server/context/engine.js）。buildMemoryContext 在生产聊天链路里没有调用点，
+ *   这里保留它是为了给固定评测集一个可复现的注入渲染基线（审计 P3-06）。
  *   3. 算 Recall@K / Precision@K / 跨会话泄漏数 / 更正残留 / 删除残留 / 检索延迟；
  *   4. 事实更正与删除类题目走真实写路径（processMemory + 假 client、
  *      recallMemoryBySourceQuote、deleteMemory、clearMemories、clearSessionMemories），跑完再检索。
