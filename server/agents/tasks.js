@@ -334,6 +334,29 @@ function publicTask(task, { includeResult = true } = {}) {
   };
 }
 
+// 只有“终态且已投递（或无需投递）”的任务可以被裁剪。未完成的队列任务、
+// waiting_approval 和投递失败的任务仍需要恢复/展示，不能在容量压力下被删掉。
+function isDeliveredTerminal(task) {
+  if (!task || !TERMINAL.has(task.status)) return false;
+  return (
+    task.deliveryStatus === 'delivered' ||
+    task.deliveryStatus === 'not_applicable'
+  );
+}
+
+function pruneDeliveredTerminalTasks(tasks) {
+  const removable = Object.values(tasks.tasks)
+    .filter(isDeliveredTerminal)
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  const removed = [];
+  for (const item of removable) {
+    if (Object.keys(tasks.tasks).length < TASK_MAX) break;
+    removed.push(item);
+    delete tasks.tasks[item.taskId];
+  }
+  return removed;
+}
+
 function createTask({
   botId,
   taskType,
@@ -398,12 +421,16 @@ function createTask({
   }
 
   const tasks = loadTasks();
+  const pruned =
+    Object.keys(tasks.tasks).length >= TASK_MAX
+      ? pruneDeliveredTerminalTasks(tasks)
+      : [];
   if (Object.keys(tasks.tasks).length >= TASK_MAX) {
-    const oldest = Object.values(tasks.tasks)
-      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
-      .slice(0, 50)
-      .map(item => item.taskId);
-    for (const id of oldest) delete tasks.tasks[id];
+    throw new AgentError(
+      'agent_task_limit',
+      '任务数量已达上限，且没有可裁剪的已投递终态任务',
+      409
+    );
   }
 
   const t = nowIso();
@@ -436,7 +463,13 @@ function createTask({
     result: null,
   };
   tasks.tasks[task.taskId] = task;
-  saveTasks();
+  try {
+    saveTasks();
+  } catch (error) {
+    for (const removed of pruned) tasks.tasks[removed.taskId] = removed;
+    delete tasks.tasks[task.taskId];
+    throw error;
+  }
   appendEvent({
     botId,
     taskId: task.taskId,

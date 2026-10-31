@@ -811,3 +811,97 @@ test('HTTP API：鉴权由外层注入，配置/凭证/会话/任务均走真实
   assert.ok(Array.isArray(events.json.events));
   assert.ok(!JSON.stringify(events.json).includes('bot-replacement-key'));
 });
+
+test('任务裁剪：只删除已投递终态，活跃与未投递任务保留', () => {
+  const seeded = {};
+  const seedTask = (index, patch = {}) => {
+    const createdAt = new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString();
+    return {
+      taskId: `task_seed_${index}`,
+      botId: 'memory',
+      taskType: 'memory.search',
+      goal: '容量测试种子任务',
+      context: '',
+      sessionId: null,
+      parentSessionId: null,
+      parentMessageId: null,
+      parentUserText: '',
+      deliveredToParentAt: null,
+      deliveryMessageId: null,
+      deliveryStatus: 'not_applicable',
+      deliveryErrorCode: null,
+      allowedTools: [],
+      deadlineMs: 60000,
+      status: 'completed',
+      cancelRequested: false,
+      attempts: 1,
+      maxAttempts: 1,
+      recoveredAt: null,
+      createdAt,
+      updatedAt: createdAt,
+      startedAt: createdAt,
+      completedAt: createdAt,
+      errorCode: null,
+      result: null,
+      ...patch,
+    };
+  };
+
+  for (let index = 0; index < 500; index += 1) {
+    const task = seedTask(index);
+    if (index === 0) {
+      task.status = 'running';
+      task.deliveryStatus = 'pending';
+    }
+    if (index === 1) {
+      // 终态但未投递：仍需要恢复/展示，不能被容量裁剪。
+      task.status = 'completed';
+      task.deliveryStatus = 'pending';
+    }
+    seeded[task.taskId] = task;
+  }
+  fs.writeFileSync(
+    tasks.TASKS_FILE,
+    JSON.stringify({ version: 1, tasks: seeded }, null, 2)
+  );
+  tasks.reloadForTests();
+
+  const created = tasks.createTask({
+    botId: 'memory',
+    taskType: 'memory.search',
+    goal: '容量上限后的新任务',
+  });
+  assert.equal(tasks.allTasks().length, 500);
+  assert.ok(tasks.getTask(created.taskId));
+  assert.equal(tasks.getTask('task_seed_0').status, 'running');
+  assert.equal(tasks.getTask('task_seed_1').deliveryStatus, 'pending');
+  assert.equal(tasks.getTask('task_seed_2'), null);
+
+  const activeOnly = {};
+  for (let index = 0; index < 500; index += 1) {
+    const task = seedTask(index, {
+      status: index % 2 === 0 ? 'running' : 'waiting_approval',
+      deliveryStatus: 'pending',
+    });
+    activeOnly[task.taskId] = task;
+  }
+  fs.writeFileSync(
+    tasks.TASKS_FILE,
+    JSON.stringify({ version: 1, tasks: activeOnly }, null, 2)
+  );
+  tasks.reloadForTests();
+
+  assert.throws(
+    () =>
+      tasks.createTask({
+        botId: 'memory',
+        taskType: 'memory.search',
+        goal: '没有可裁剪任务时的新任务',
+      }),
+    error =>
+      error &&
+      error.code === 'agent_task_limit' &&
+      error.status === 409
+  );
+  assert.equal(tasks.allTasks().length, 500);
+});

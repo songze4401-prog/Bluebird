@@ -1210,6 +1210,46 @@ async function searchForContext({ query, sessionId, now = Date.now() } = {}) {
   };
 }
 
+// 会话已删除时立即移除派生索引；不等下一次 search/rebuild 才发现来源缺失。
+// 失败只返回结构化错误，不抛异常——会话数据已经删除，派生索引可重建。
+function cleanupConversationIndex(sessionId) {
+  if (!config.enabled) {
+    return { ok: true, status: 'disabled', removed: false, chunks: 0 };
+  }
+  const id = typeof sessionId === 'string' ? sessionId.trim() : '';
+  if (!id) return { ok: false, status: 'invalid', errorCode: 'session_required' };
+
+  initialize();
+  if (initError) {
+    return { ok: false, status: 'failed', errorCode: 'index_unavailable' };
+  }
+
+  const sourceId = `conversation:${id}`;
+  const result = store.deleteSource(sourceId);
+  syncState.conversations.delete(id);
+  return {
+    ok: true,
+    status: result.removed ? 'ok' : 'unchanged',
+    sourceId,
+    removed: result.removed,
+    chunks: result.chunks,
+  };
+}
+
+// 记忆删除/归档/撤回后重建记忆派生来源：removed entries 的来源和向量被清掉，
+// 仍存在但贡献变化的条目会刷新 scope，避免已删会话继续检索到旧记忆。
+function cleanupMemoryIndex() {
+  if (!config.enabled) {
+    return { ok: true, status: 'disabled', count: 0 };
+  }
+  initialize();
+  if (initError) {
+    return { ok: false, status: 'failed', errorCode: 'index_unavailable' };
+  }
+  const result = syncMemory({ force: true });
+  return { ok: result.status !== 'failed', ...result };
+}
+
 module.exports = {
   config,
   initialize,
@@ -1224,6 +1264,8 @@ module.exports = {
   getStatus,
   getSources,
   getSource,
+  cleanupConversationIndex,
+  cleanupMemoryIndex,
   checkConsistency,
   describeError,
   store,

@@ -229,6 +229,7 @@ async function waitReady() {
 
   const memory = require(path.join(__dirname, '..', 'server', 'memory.js'));
   const sessions = require(path.join(__dirname, '..', 'server', 'sessions.js'));
+  const retrieval = require(path.join(__dirname, '..', 'server', 'retrieval'));
 
   origLog('\n鉴权与参数校验');
   {
@@ -344,6 +345,19 @@ async function waitReady() {
     ]);
     memory.loadMemories();
 
+    const target = memory
+      .getMemories()
+      .find(item => item.content === '用户喝咖啡只喝拿铁');
+    await retrieval.search({
+      query: '拿铁',
+      sessionId,
+      sources: ['memory'],
+    });
+    check(
+      '基线：撤回目标记忆派生索引存在',
+      Boolean(retrieval.getSource(`memory:${target.id}`))
+    );
+
     const recalled = await req('/history/recall', {
       method: 'POST',
       body: { messageId: message.id, sessionId },
@@ -371,6 +385,10 @@ async function waitReady() {
       '记忆确实从磁盘消失，且别的会话的记忆没被连带删除',
       !diskMemory().some(item => item.content === '用户喝咖啡只喝拿铁') &&
         diskMemory().some(item => item.content === '用户喝咖啡只喝美式')
+    );
+    check(
+      '撤回后派生索引同步清理',
+      retrieval.getSource(`memory:${target.id}`) === null
     );
     check(
       '返回条数 = 内存视图条数 = 磁盘条数',

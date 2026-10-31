@@ -2457,6 +2457,26 @@ function searchMemories({
 
 loadMemories();
 
+// 记忆是 canonical source，检索索引是派生数据。删除/归档/撤回后立即同步，
+// 避免已删除内容或已失去会话可见性的 chunk 继续留在 index.json。
+// 索引失败不回滚已落盘的记忆删除；派生索引可由下一次 search/rebuild 修复。
+function refreshDerivedMemoryIndex(reason) {
+  try {
+    const retrieval = require('./retrieval');
+    const result = retrieval.cleanupMemoryIndex();
+    if (result && result.ok === false) {
+      console.error(
+        `[retrieval] 记忆索引同步失败（${reason}）：${result.errorCode || result.status || 'unknown'}`
+      );
+    }
+  } catch (error) {
+    console.error(
+      `[retrieval] 记忆索引同步异常（${reason}）：`,
+      error && error.message ? error.message : error
+    );
+  }
+}
+
 // 三个写入口（processMemory / recall / delete / clear）统一遵守同一顺序：
 // 先在副本上算出新库 → await 落盘成功 → 才把内存换成新库。
 // 落盘失败时异常原样抛给调用方（内存与磁盘都还是旧的，两边一致），
@@ -2471,6 +2491,8 @@ async function clearMemories() {
     await saveMemories([]);
 
     memories = [];
+
+    refreshDerivedMemoryIndex('clear');
 
     console.log(`Memory cleared: ${removedEntries}`);
 
@@ -2536,6 +2558,8 @@ async function clearSessionMemories(sessionId) {
     await saveMemories(remaining);
 
     memories = remaining;
+
+    refreshDerivedMemoryIndex('clear_session');
 
     console.log(
       `Memory session cleared: ${target} entries=${removedEntries} contributions=${removedContributions}`
@@ -2666,6 +2690,8 @@ async function recallMemoryBySourceQuote(
 
     memories = remaining;
 
+    refreshDerivedMemoryIndex('recall');
+
     console.log(
       `Memory recalled: entries=${removedEntries} contributions=${removedContributions}`
     );
@@ -2743,6 +2769,8 @@ async function deleteMemory({ id, createdAt, content } = {}) {
     await saveMemories(next);
 
     memories = next;
+
+    refreshDerivedMemoryIndex('delete');
 
     console.log('Memory deleted');
 
@@ -2973,6 +3001,8 @@ async function archiveMemory(id) {
 
     await saveMemories(next);
     memories = next;
+
+    refreshDerivedMemoryIndex('archive');
 
     return { updated: 1, reason: 'ok', id: targetId, status: STATUS_ARCHIVED };
   });
@@ -3369,6 +3399,7 @@ async function withdrawMemory({ id, sessionId = null, actor = 'user' } = {}) {
 
     await saveMemories(next);
     memories = next;
+    refreshDerivedMemoryIndex('withdraw');
     return {
       withdrawn: 1,
       reason: 'ok',

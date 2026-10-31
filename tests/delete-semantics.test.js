@@ -122,6 +122,7 @@ async function waitReady() {
 
   const sessions = require(path.join(__dirname, '..', 'server', 'sessions.js'));
   const memory = require(path.join(__dirname, '..', 'server', 'memory.js'));
+  const retrieval = require(path.join(__dirname, '..', 'server', 'retrieval'));
 
   const a1 = sessions.createSession({ title: '删除会话 A1' }).id;
   const b1 = sessions.createSession({ title: '删除会话 B1' }).id;
@@ -148,6 +149,7 @@ async function waitReady() {
   uploads.clearOnly = await upload('clear-only.png');
   uploads.memoryOnly = await upload('memory-only.png');
   uploads.clearSession = await upload('clear-session.png');
+  uploads.sessionShared = await upload('session-shared.png');
 
   function appendWithImage(sessionId, messageId, text, imageId) {
     return sessions.appendMessages(sessionId, [
@@ -162,6 +164,8 @@ async function waitReady() {
   }
 
   appendWithImage(a1, 'm-a1', 'A1 的消息', uploads.sessionOnly);
+  appendWithImage(a1, 'm-a1b', 'A1 的共享图片', uploads.sessionShared);
+  appendWithImage(b1, 'm-b1', 'B1 的共享图片', uploads.sessionShared);
   appendWithImage(a2, 'm-a2', 'A2 的消息', uploads.clearShared);
   appendWithImage(a2, 'm-a2b', 'A2 的第二条消息', uploads.clearOnly);
   appendWithImage(b2, 'm-b2', 'B2 的消息', uploads.clearShared);
@@ -256,12 +260,22 @@ async function waitReady() {
   {
     const before = diskMemory();
     check('基线：8 条记忆', before.length === 8, `实际 ${before.length}`);
-    check('基线：A1 消息存在', (await req(`/history?sessionId=${a1}`)).json.history.length === 1);
+    check('基线：A1 消息存在', (await req(`/history?sessionId=${a1}`)).json.history.length === 2);
     check('基线：附件存在', (await req(`/uploads/image/${uploads.sessionOnly}`)).status === 200);
   }
 
   origLog('\n1) DELETE /sessions/:id');
   {
+    await retrieval.search({
+      query: 'A1 的消息',
+      sessionId: a1,
+      sources: ['conversation'],
+    });
+    check(
+      '基线：A1 会话派生索引存在',
+      Boolean(retrieval.getSource(`conversation:${a1}`))
+    );
+
     const res = await req(`/sessions/${a1}`, { method: 'DELETE' });
 
     check('返回 200 ok', res.status === 200 && res.json.ok === true, JSON.stringify(res.json));
@@ -283,8 +297,16 @@ async function waitReady() {
       JSON.stringify(shared && contributionsOf(shared))
     );
     check(
-      '附件不回收：仅被已删会话引用的图片仍存在',
-      (await req(`/uploads/image/${uploads.sessionOnly}`)).status === 200
+      '仅被已删会话引用的附件被回收',
+      (await req(`/uploads/image/${uploads.sessionOnly}`)).status === 404
+    );
+    check(
+      '跨会话共享附件保留',
+      (await req(`/uploads/image/${uploads.sessionShared}`)).status === 200
+    );
+    check(
+      '会话派生索引同步清理',
+      retrieval.getSource(`conversation:${a1}`) === null
     );
     check('其他会话元信息仍在', (await req(`/sessions/${b1}`)).status === 200);
   }
@@ -320,6 +342,16 @@ async function waitReady() {
   {
     const list = (await req('/memory')).json.memories;
     const target = list.find(item => item.content === 'A3 待删除记忆');
+    await retrieval.search({
+      query: 'A3 待删除记忆',
+      sessionId: a3,
+      sources: ['memory'],
+    });
+    check(
+      '基线：A3 记忆派生索引存在',
+      Boolean(retrieval.getSource(`memory:${target.id}`))
+    );
+
     const res = await req('/memory/delete', {
       method: 'POST',
       body: { id: target.id },
@@ -330,13 +362,31 @@ async function waitReady() {
     check('会话元信息保留', (await req(`/sessions/${a3}`)).status === 200);
     check('消息保留', (await req(`/history?sessionId=${a3}`)).json.history.length === 1);
     check(
-      '附件保留',
+      '记忆派生索引同步清理',
+      retrieval.getSource(`memory:${target.id}`) === null
+    );
+    check(
+      '消息附件不属于记忆，删除记忆不回收图片',
       (await req(`/uploads/image/${uploads.memoryOnly}`)).status === 200
     );
   }
 
   origLog('\n4) POST /memory/clear-session');
   {
+    const list = (await req('/memory')).json.memories;
+    const ownA4 = list.find(item => item.content === 'A4 清空会话记忆');
+    const sharedA4 = list.find(item => item.content === 'A4/B4 共享记忆');
+    await retrieval.search({
+      query: 'A4 会话记忆',
+      sessionId: a4,
+      sources: ['memory'],
+    });
+    check(
+      '基线：A4 独有/共享记忆索引存在',
+      Boolean(retrieval.getSource(`memory:${ownA4.id}`)) &&
+        Boolean(retrieval.getSource(`memory:${sharedA4.id}`))
+    );
+
     const res = await req('/memory/clear-session', {
       method: 'POST',
       body: { sessionId: a4 },
@@ -363,6 +413,14 @@ async function waitReady() {
       JSON.stringify(shared && contributionsOf(shared))
     );
     check('B4 独有条目仍在', Boolean(other));
+    check(
+      '清空会话记忆：独有条目派生索引移除',
+      retrieval.getSource(`memory:${ownA4.id}`) === null
+    );
+    check(
+      '清空会话记忆：共享条目派生索引保留',
+      Boolean(retrieval.getSource(`memory:${sharedA4.id}`))
+    );
     check('会话元信息保留', (await req(`/sessions/${a4}`)).status === 200);
     check('消息保留', (await req(`/history?sessionId=${a4}`)).json.history.length === 1);
     check(

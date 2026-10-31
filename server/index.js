@@ -940,6 +940,9 @@ app.get('/sessions/:id', requireAuth, (req, res) => {
 // default 被删时会立即重建为空会话（sessions.js 的不变量），客户端可安全切回。
 app.delete('/sessions/:id', requireAuth, (req, res) => {
   try {
+    // 删除前先保留该会话的附件引用；删除后全局扫描剩余消息，
+    // 只回收不再被任何会话引用的文件，跨会话共享的图片不受影响。
+    const deletedMessages = getMessages(req.params.id) || [];
     const result = deleteSession(req.params.id);
 
     if (result === null) {
@@ -968,6 +971,25 @@ app.delete('/sessions/:id', requireAuth, (req, res) => {
       forgetSession(req.params.id);
     } catch (error) {
       console.error('Presence forget error:', error);
+    }
+
+    // 附件与派生索引都按删除后的 canonical 数据重新计算；清理失败不把
+    // 已成功的会话删除回滚为失败，但必须留日志，便于后续重建/人工清理。
+    try {
+      releaseOrphanAttachments(deletedMessages.map(message => message && message.attachments));
+    } catch (error) {
+      console.error('Session attachment cleanup error:', error);
+    }
+    try {
+      const indexCleanup = retrieval.cleanupConversationIndex(req.params.id);
+      if (indexCleanup && indexCleanup.ok === false) {
+        console.error(
+          'Session index cleanup failed:',
+          indexCleanup.errorCode || indexCleanup.status
+        );
+      }
+    } catch (error) {
+      console.error('Session index cleanup error:', error);
     }
 
     res.json({ ok: true, sessionId: req.params.id, message: '会话已删除' });
