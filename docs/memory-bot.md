@@ -93,6 +93,8 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - 结果回传：任务完成/失败统一走 `result-delivery`：写入 Task Store 后，以固定消息 id `bot-result-<taskId>` 追加到父主控会话；记录 `deliveredToParentAt`、`deliveryMessageId`、`deliveryStatus` 或 `deliveryErrorCode`。主控前端通过 `GET /agent-results/stream?sessionId=...` 接收实时 `result`/`delivery_failed`，snapshot 覆盖断线重连；前端按消息 id 去重，因此重复投递不会生成第二条。任务页继续作为审计/状态入口。
 - 审批结果投递：审批执行成功/失败、审批被拒绝、审批执行中断在更新关联任务终态后同步调用 Result Delivery；`waiting_approval` 是暂停态，`runTask` 不会覆盖它，审批完成后由审批执行器推进任务并实时回传父会话。
 - 事件可靠性：`appendEvent` 先写持久 outbox，再写主事件文件；主文件写失败时事件仍在 outbox，启动/读取时重试，不再被 `safeEvent` 静默丢弃。
+- 生命周期边界：`user_preference` 与 `project_fact` 过期后都走 `revalidate`——上下文注入保留条目并标记待验证，`memory_search` 仍可检索到；不再有 `demote_to_pending` 的“上下文静默消失、检索仍可见”双路径。Bot 会话达到 200 条时优先复用最早的空会话，只有 200 条都含消息才返回 `agent_session_limit`。任务类型仅接受 `memory.search` / `memory.explain`；`memory.maintain` / `memory.audit` 未实现，直接返回 `invalid_task_type`，维护操作只能走审批 API。
+- 结果流重连：`agent-results-stream` 区分永久失败与瞬时失败。401/403/404 不重试并提示错误；`status=0`、429、5xx 和“200 但流被关闭”按指数退避重连（上限 15s），重连后以 snapshot 补齐结果；主动 abort 标记为 `closed`，不计错误。
 
 ## 4. 人工审批与权限
 
@@ -174,7 +176,8 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - `node tests/memory-maintenance.test.js`：5 项，覆盖 update/merge/supersede/archive/withdraw/delete、维护门面白名单、审批闭环、事件不含正文、权限拒绝。
 - `node tests/agent-dispatch.test.js`：10 项，覆盖主控工具派发、主控记忆→委派 Bot 的父会话读/写 scope、审批 waiting/完成/拒绝投递、结果 SSE/snapshot、失败回传、重复投递防护、主 Agent 工具循环与事件 outbox 恢复。
 - `npx jest tests/unit/memory-bot-screen.test.tsx`：3 项，覆盖团队页、工作台/流式回退、Prompt/工具白名单、任务表单、审批操作。
-- 全量：`npm test` 48 个后端文件 / 1568 项；Jest 18 套 / 167 项；覆盖率校验 backend 1568/1568、runner 1347/1347、frontend 167/167；tsc/lint 通过（以最终交付命令输出为准）。
+- `npx jest tests/unit/agent-results-stream.test.ts`：1 项，覆盖结果 SSE 的 401 永久失败、5xx/200 干净关闭可重试、主动 abort 为 `closed` 的连接分类。
+- 全量：`npm test` 48 个后端文件 / 1568 项；Jest 19 套 / 168 项；覆盖率校验 backend 1568/1568、runner 1347/1347、frontend 168/168；tsc/lint 通过（以最终交付命令输出为准）。
 - Expo Web export 成功；浏览器 DOM 核对：Agent 团队入口、真实 Memory Bot 状态、工作台三页签、配置页真实服务商/脱敏 Key、维护申请表单与审批列表可渲染；浏览器实际提交一条 update 维护申请后，服务端返回 pending 并在审批列表显示。
 
 ### 8.1 Stub 与真实模型测试区分
@@ -210,4 +213,4 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 | P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；工具预算截断后无工具总结；Provider token delta；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 8 项；SSE/tool event 测试；Jest 3 项 UI 测试 |
 | P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；维护申请表单；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验、真实模型 HTTP SSE E2E |
 
-“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1568/1568、nodeSuite 221/221、runner 1347/1347、frontend 167/167、CI 48/48。
+“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1568/1568、nodeSuite 221/221、runner 1347/1347、frontend 168/168、CI 48/48。

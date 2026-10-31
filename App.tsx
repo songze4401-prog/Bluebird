@@ -171,6 +171,9 @@ export default function App() {
           : '任务结果未能写入当前会话。可在任务页查看任务状态。'
       );
     },
+    onError: message => {
+      Alert.alert('Memory Bot 结果流中断', `${message}。可切换会话或刷新后重试。`);
+    },
   });
 
   const sessionList = useSessionList();

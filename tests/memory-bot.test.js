@@ -435,6 +435,23 @@ test('Bot 会话：创建、读取、追加与跨 Bot/不存在会话拒绝', ()
     error => error && error.code === 'agent_session_not_found'
   );
   assert.equal(sessions.listSessions('memory').some(item => item.id === created.id), true);
+
+  const createdForCap = [];
+  for (let index = 0; index < 199; index += 1) {
+    createdForCap.push(
+      sessions.createSession('memory', { title: `容量测试-${index}` })
+    );
+  }
+  assert.equal(sessions.listSessions('memory').length, 200);
+  const reused = sessions.createSession('memory', { title: '容量复用' });
+  assert.ok(reused.id.startsWith('bs_'));
+  assert.equal(sessions.listSessions('memory').length, 200);
+  assert.equal(reused.messageCount, 0);
+
+  for (const item of createdForCap) {
+    sessions.deleteSession('memory', item.id);
+  }
+  assert.equal(sessions.listSessions('memory').length, 1);
 });
 
 test('直接对话：使用 Bot 独立 Key，真实工具循环与事件可追溯', async () => {
@@ -530,6 +547,24 @@ test('主控委派：任务状态、结构化结果与取消', async () => {
       tasks.createTask({
         botId: 'memory',
         taskType: 'shell.exec',
+        goal: 'x',
+      }),
+    error => error && error.code === 'invalid_task_type'
+  );
+  assert.throws(
+    () =>
+      tasks.createTask({
+        botId: 'memory',
+        taskType: 'memory.maintain',
+        goal: 'x',
+      }),
+    error => error && error.code === 'invalid_task_type'
+  );
+  assert.throws(
+    () =>
+      tasks.createTask({
+        botId: 'memory',
+        taskType: 'memory.audit',
         goal: 'x',
       }),
     error => error && error.code === 'invalid_task_type'

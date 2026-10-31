@@ -127,10 +127,32 @@ function getSession(botId, sessionId) {
 function createSession(botId, { title } = {}) {
   assertBot(botId);
   const current = load();
-  if (current.sessions.filter(item => item.botId === botId).length >= 200) {
-    throw new AgentError('agent_session_limit', 'Bot 会话数量已达上限');
-  }
   const t = nowIso();
+  const botSessions = current.sessions.filter(item => item.botId === botId);
+
+  if (botSessions.length >= 200) {
+    // 委派任务通常不需要独立的对话历史；到达硬上限时复用最早的空会话，
+    // 避免长期派发把 Bot 会话撑满后再也无法创建任务。
+    const reusable = botSessions.find(
+      item => (current.messages[item.id] || []).length === 0
+    );
+    if (!reusable) {
+      throw new AgentError('agent_session_limit', 'Bot 会话数量已达上限');
+    }
+    const previousTitle = reusable.title;
+    const previousUpdatedAt = reusable.updatedAt;
+    reusable.title = normalizeTitle(title);
+    reusable.updatedAt = t;
+    try {
+      save();
+    } catch (error) {
+      reusable.title = previousTitle;
+      reusable.updatedAt = previousUpdatedAt;
+      throw error;
+    }
+    return { ...reusable, messageCount: 0 };
+  }
+
   const meta = {
     id: `bs_${crypto.randomUUID()}`,
     botId,

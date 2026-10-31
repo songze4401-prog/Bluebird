@@ -30,7 +30,12 @@ export type AgentResultPush = {
 
 export type AgentResultStreamOutcome =
   | { kind: 'closed' }
-  | { kind: 'error'; message: string };
+  | {
+      kind: 'error';
+      message: string;
+      status?: number;
+      retryable?: boolean;
+    };
 
 function parseFrame(frame: string): AgentResultEvent | null {
   for (const line of frame.split('\n')) {
@@ -51,6 +56,7 @@ export function subscribeAgentResults(
   sessionId: string,
   handlers: {
     onResult?: (result: AgentResultPush) => void;
+    onOpen?: () => void;
     onDeliveryFailed?: (event: Extract<AgentResultEvent, { type: 'delivery_failed' }>) => void;
     signal?: AbortSignal;
   } = {}
@@ -80,6 +86,7 @@ export function subscribeAgentResults(
     const handle = (event: AgentResultEvent | null) => {
       if (!event) return;
       if (event.type === 'snapshot') {
+        handlers.onOpen?.();
         for (const result of event.results || []) handlers.onResult?.(result);
         return;
       }
@@ -121,9 +128,34 @@ export function subscribeAgentResults(
       if (finished) return;
       const text = xhr.responseText || '';
       if (text.length > processed) parse(text.slice(processed));
-      finish({ kind: 'closed' });
+      if (xhr.status !== 200) {
+        let message = '结果事件流连接失败';
+        try {
+          const data = JSON.parse(xhr.responseText || '');
+          if (data && typeof data.error === 'string' && data.error) {
+            message = data.error;
+          }
+        } catch {
+          // Non-JSON error body: keep the controlled message.
+        }
+        finish({
+          kind: 'error',
+          message,
+          status: xhr.status,
+          retryable: xhr.status === 0 || xhr.status === 429 || xhr.status >= 500,
+        });
+        return;
+      }
+      // The endpoint is long-lived; a clean 200 close is still a dropped stream.
+      finish({ kind: 'error', message: '结果事件流已断开', retryable: true });
     };
-    xhr.onerror = () => finish({ kind: 'error', message: '结果事件流连接失败' });
+    xhr.onerror = () =>
+      finish({
+        kind: 'error',
+        message: '结果事件流连接失败',
+        status: xhr.status || 0,
+        retryable: true,
+      });
     xhr.onabort = () => finish({ kind: 'closed' });
 
     if (externalSignal) {

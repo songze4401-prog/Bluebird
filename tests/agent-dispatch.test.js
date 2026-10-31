@@ -543,7 +543,7 @@ test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时
   const botSession = botSessions.createSession('memory', { title: '审批测试' });
   const task = tasks.createTask({
     botId: 'memory',
-    taskType: 'memory.maintain',
+    taskType: 'memory.search',
     goal: '审批更新测试记忆',
     sessionId: botSession.id,
     parentSessionId: main.id,
@@ -582,7 +582,7 @@ test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时
 
   const rejectTask = tasks.createTask({
     botId: 'memory',
-    taskType: 'memory.maintain',
+    taskType: 'memory.search',
     goal: '审批拒绝测试',
     sessionId: botSession.id,
     parentSessionId: main.id,
@@ -611,7 +611,7 @@ test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时
 
   const staleTask = tasks.createTask({
     botId: 'memory',
-    taskType: 'memory.maintain',
+    taskType: 'memory.search',
     goal: '审批任务被取消测试',
     sessionId: botSession.id,
     parentSessionId: main.id,
@@ -633,7 +633,7 @@ test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时
 
   const failTask = tasks.createTask({
     botId: 'memory',
-    taskType: 'memory.maintain',
+    taskType: 'memory.search',
     goal: '审批执行失败测试',
     sessionId: botSession.id,
     parentSessionId: main.id,

@@ -488,7 +488,7 @@ test('D5: 旧记忆与更新用户陈述冲突时，以用户历史为准并记�
   assert.strictEqual(adjudication.conflicts.length, 1);
 });
 
-test('D6: TTL——fresh 进入；过期的用户偏好降级待确认；过期项目事实标记待验证；实时过期排除', () => {
+test('D6: TTL——fresh 进入；过期偏好/项目事实标记待验证；实时过期排除', () => {
   const now = Date.parse(iso(10));
   const base = {
     source: 'memory',
@@ -500,12 +500,12 @@ test('D6: TTL——fresh 进入；过期的用户偏好降级待确认；过期�
     applyTtlPolicy({ ...base, type: 'user_preference', freshness: { status: 'fresh' } }, config).keep,
     true
   );
-  const demoted = applyTtlPolicy(
+  const stalePreference = applyTtlPolicy(
     { ...base, type: 'user_preference', freshness: { status: 'stale' } },
     config
   );
-  assert.strictEqual(demoted.keep, false);
-  assert.strictEqual(demoted.reason, 'demoted_to_pending');
+  assert.strictEqual(stalePreference.keep, true);
+  assert.strictEqual(stalePreference.pendingValidation, true);
   const revalidate = applyTtlPolicy(
     { ...base, type: 'project_fact', freshness: { status: 'stale' } },
     config

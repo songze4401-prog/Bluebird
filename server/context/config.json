@@ -1,9 +1,19 @@
 {
   "schemaVersion": "v3.0",
   "ttl": {
-    "realtime_data": { "ttlMs": 30000, "on_expire": "refetch", "ttlRequired": true },
-    "user_preference": { "ttlMs": 2592000000, "on_expire": "demote_to_pending" },
-    "project_fact": { "ttlMs": 604800000, "on_expire": "revalidate" }
+    "realtime_data": {
+      "ttlMs": 30000,
+      "on_expire": "refetch",
+      "ttlRequired": true
+    },
+    "user_preference": {
+      "ttlMs": 2592000000,
+      "on_expire": "revalidate"
+    },
+    "project_fact": {
+      "ttlMs": 604800000,
+      "on_expire": "revalidate"
+    }
   },
   "history": {
     "recentBudgetTokens": 4000,
