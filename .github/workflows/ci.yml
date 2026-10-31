@@ -1,12 +1,11 @@
 name: CI
 
-# 回归兜底：后端 48 个测试文件（1591 项）+ 前端 20 套单元测试（170 项）+ tsc --noEmit + Expo lint。
-# 触发范围：main、workbuddy/**、qoder/** 分支的 push、针对 main 的 PR、手动触发。
-# 测试命令与 AGENTS.md「Tests」小节保持一致——新增测试文件时同步更新本文件，
-# 否则新文件不会被运行（静默漏测）；覆盖验证脚本会比对 CI 清单与 tests/ 实际文件。
+# 回归兜底：覆盖率脚本单次执行后端 48 个测试文件（1591 项）+ 前端 21 套单元测试（173 项）
+# + tsc --noEmit + Expo lint，不再在 CI 里重复跑同一批测试。
+# 触发范围：main 的 push、针对 main 的 PR、手动触发；同一 PR 不会因 push+PR 双跑。
 on:
   push:
-    branches: [main, 'workbuddy/**', 'qoder/**']
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -17,7 +16,7 @@ concurrency:
 
 jobs:
   backend:
-    name: 后端测试与类型检查
+    name: 全量测试与类型检查
     # 固定 24.04 而非 ubuntu-latest：GitHub 已公告 ubuntu-latest 将于 2026-10-19
     # 迁移到 Ubuntu 26，避免 runner 大版本切换带来的意外。
     runs-on: ubuntu-24.04
@@ -44,20 +43,27 @@ jobs:
             exit 1
           fi
 
-      - name: node:test 七套（memory + emotion + sticker-markers + streaming-segments + backup + context-engine + monitoring，共 221 项）
-        run: node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js tests/monitoring.test.js
+      - name: TypeScript 类型检查（前端 strict）
+        run: npx tsc --noEmit
 
-      # 逐文件单独跑（AGENTS.md 约定）。某个套件失败也跑完其余套件，
-      # 最后统一以非零退出码结束，方便一次看全失败面。
-      - name: 自定义 runner 四十一套（逐文件单独跑，共 1370 项）
-        run: |
-          fail=0
-          for f in api atomic-write chat-persist corruption-contract data-events emotion-decay-global memory-session-scope session-scope-e2e sessions-recovery sessions presence time-gap persona chat-stream multimodal sticker-repo model-providers model-routing agent-policy agent-tools context-engine-e2e delete-semantics memory-agent-write memory-api-recall memory-context-injection memory-eval-baseline memory-id-migration memory-id-order memory-lifecycle-decisions memory-restart memory-retrieval memory-semantic memory-session-isolation memory-startup-lock retrieval retrieval-api retrieval-embeddings memory-bot memory-maintenance agent-dispatch monitoring-api; do
-            echo "::group::node tests/$f.test.js"
-            node "tests/$f.test.js" || fail=1
-            echo "::endgroup::"
-          done
-          exit $fail
+      # 静态检查不依赖测试是否覆盖；Expo 项目用统一的 expo lint 入口。
+      - name: ESLint（Expo lint）
+        run: npm run lint
+
+      # 固定评测先跑；随后覆盖率脚本单次执行全部后端与 Jest。
+      - name: 语义检索评测（固定集，Recall/MRR/隔离/预算）
+        run: node tests/memory-semantic-eval.js --assert
+
+      - name: 统一检索评测（固定语料，Recall/MRR）
+        run: node tests/retrieval-eval.js --assert
+
+      - name: 测试覆盖验证（自测）
+        run: node scripts/verify-test-coverage.test.js
+
+      # 单次执行全部后端文件（node:test + 自定义 runner）与 Jest，并按逐文件
+      # 运行时计数对账；这里不再重复跑上面已删除的同类步骤。
+      - name: 全量测试 + 覆盖率对账（单次执行）
+        run: node scripts/verify-test-coverage.js
 
       # 运行时隔离守卫：全新 checkout 里不存在 server/data（被 .gitignore 排除），
       # 全部测试都使用临时数据目录，跑完后它也不该出现。出现了即为隔离失效——
@@ -69,29 +75,3 @@ jobs:
             ls -la server/data
             exit 1
           fi
-
-      - name: TypeScript 类型检查（前端 strict）
-        run: npx tsc --noEmit
-
-      # 静态检查不依赖测试是否覆盖；Expo 项目用统一的 expo lint 入口。
-      - name: ESLint（Expo lint）
-        run: npm run lint
-
-      # 前端单元测试：jest-expo preset + @testing-library/react-native 的 renderHook。
-      # 只跑 tests/unit/**（jest.config 的 testMatch 已限定），不会误收上面的
-      # node:test 文件 tests/*.test.js——两套 runner 的分工必须保持不变。
-      - name: 前端单元测试（jest，20 套 / 170 项）
-        run: npm run test:unit -- --ci
-
-      # 先真实执行全部测试，再用运行时计数与基线对账；静态 test(/check( 计数不作为通过依据。
-      - name: 语义检索评测（固定集，Recall/MRR/隔离/预算）
-        run: node tests/memory-semantic-eval.js --assert
-
-      - name: 统一检索评测（固定语料，Recall/MRR）
-        run: node tests/retrieval-eval.js --assert
-
-      - name: 测试覆盖验证（自测）
-        run: node scripts/verify-test-coverage.test.js
-
-      - name: 测试覆盖验证（真实执行）
-        run: node scripts/verify-test-coverage.js

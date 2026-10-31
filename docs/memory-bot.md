@@ -85,6 +85,7 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - 失败处理：模型/工具/审批失败写入 `errorCode` 与终态，队列继续下一个任务；`BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS` >1 时只对只读任务（未启用 `memory_remember`）的瞬时模型错误尝试重试，写入任务不自动重试，避免重复操作。
 - 取消：`POST /agent-tasks/:taskId/cancel` 标记取消并中止模型/工具调用；终态任务不可回写。
 - 流式：`POST /agents/:botId/chat/stream` 使用真实 Token 级 delta（来自 Provider 流式响应），保留 `tool_start`/`tool_end` 状态事件；工具轮不把参数或内部推理下发。UI 通过 XHR SSE 逐字渲染，并保留工具摘要。
+- 工作台交互：流式期间提供停止按钮；切换会话/新建会话会 abort 当前流并丢弃迟到结果，不会把旧会话回复写进新会话。工作台直接创建的是独立 Bot 任务（无 `parentSessionId`），任务卡明确显示归属；主控委派任务才显示父会话归属。维护表单的 update 默认不下发 `type`（保持原类型），withdraw 的记忆 scope 只写入 `payload.sessionId`，不把 Bot 会话混作记忆 scope。
 - 主控派发：主 Agent 工具表新增 `delegate_to_bot`（仅主控可用，Bot 自身 allowlist 不包含它）；它校验 Bot 就绪、任务类型与工具边界，调用现有 `tasks.createTask` + `runtime.startTask`，任务带 `parentSessionId` / `parentMessageId`。主控任务页读取 `GET /agent-tasks?parentSessionId=...`，不是静态占位。
 - 记忆作用域：委派任务把 `parentSessionId` 作为 `memoryScopeSessionId` 传给 Bot 工具；Bot 的 `bs_*` 会话只承载执行轨迹和工具日志，不再充当记忆 scope。这样主控会话的长期记忆可被委派 Bot 检索，Bot 的 `memory_remember` 也归属父会话；直接 Bot 对话没有父会话时仍回落 Bot 会话 scope。
 - 凭证绑定：Bot 的 `credential.providerId` 必须与当前 `modelProfile.providerId` 一致；registry 会显示 `credential_provider_mismatch`，运行时会拒绝把旧 Key 发往新服务商。切换服务商后必须重新录入该 Bot 的 Key。
@@ -178,10 +179,11 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - `node tests/delete-semantics.test.js`：43 项，覆盖会话删除后的附件回收/共享保留与派生索引清理、历史清理、记忆删除/按会话清理后的派生索引同步。
 - `node tests/memory-maintenance.test.js`：5 项，覆盖 update/merge/supersede/archive/withdraw/delete、维护门面白名单、审批闭环、事件不含正文、权限拒绝。
 - `node tests/agent-dispatch.test.js`：10 项，覆盖主控工具派发、主控记忆→委派 Bot 的父会话读/写 scope、审批 waiting/完成/拒绝投递、结果 SSE/snapshot、失败回传、重复投递防护、主 Agent 工具循环与事件 outbox 恢复。
-- `npx jest tests/unit/memory-bot-screen.test.tsx`：3 项，覆盖团队页、工作台/流式回退、Prompt/工具白名单、任务表单、审批操作。
+- `npx jest tests/unit/memory-bot-screen.test.tsx`：5 项，覆盖团队页、工作台/流式回退、流式停止与切会话丢弃旧结果、Prompt/工具白名单、任务表单、维护 scope/类型、审批操作。
 - `npx jest tests/unit/agent-results-stream.test.ts`：1 项，覆盖结果 SSE 的 401 永久失败、5xx/200 干净关闭可重试、主动 abort 为 `closed` 的连接分类。
 - `npx jest tests/unit/use-bot-result-stream.test.tsx`：2 项，覆盖 Hook 对永久错误只提示不重连、可重试错误按 1s 退避重连、snapshot 打开后重置延迟。
-- 全量：`npm test` 48 个后端文件 / 1591 项；Jest 20 套 / 170 项；覆盖率校验 backend 1591/1591、runner 1370/1370、frontend 170/170；tsc/lint 通过（以最终交付命令输出为准）。
+- `npx jest tests/unit/app-smoke.test.tsx`：1 项，覆盖 App 组合根聊天首屏与设置抽屉的 Agent 团队入口。
+- 全量：`npm test` 48 个后端文件 / 1591 项；Jest 21 套 / 173 项；覆盖率校验 backend 1591/1591、runner 1370/1370、frontend 173/173；tsc/lint 通过（以最终交付命令输出为准）。
 - Expo Web export 成功；浏览器 DOM 核对：Agent 团队入口、真实 Memory Bot 状态、工作台三页签、配置页真实服务商/脱敏 Key、维护申请表单与审批列表可渲染；浏览器实际提交一条 update 维护申请后，服务端返回 pending 并在审批列表显示。
 
 ### 8.1 Stub 与真实模型测试区分
@@ -214,7 +216,7 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 |---|---|---|
 | P0 主控派发 + 结果回传 + 事件 outbox | 主 Agent `delegate_to_bot` 工具、`parentSessionId`、父会话记忆读/写 scope、审批结果投递、Result Delivery SSE、任务页真实读取、事件 outbox | `tests/agent-dispatch.test.js` 10 项 |
 | P0 记忆维护 + 人工审批 | `memory.updateMemory/mergeMemories/supersedeMemory/withdrawMemory` + `archive/delete` 复用；`memory-service` 白名单；`approvals` 状态机与 API | `tests/memory-maintenance.test.js` 5 项；审批 API 前后状态测试 |
-| P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；工具预算截断后无工具总结；任务裁剪只删已投递终态；Provider token delta；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 9 项；SSE/tool event 测试；Jest 3 项 UI 测试 |
+| P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；工具预算截断后无工具总结；任务裁剪只删已投递终态；Provider token delta；停止/切会话 abort；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 9 项；SSE/tool event 测试；Jest 5 项工作台测试 + 1 项 App 冒烟 |
 | P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；维护申请表单；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验、真实模型 HTTP SSE E2E |
 
-“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1591/1591、nodeSuite 221/221、runner 1370/1370、frontend 170/170、CI 48/48。
+“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1591/1591、nodeSuite 221/221、runner 1370/1370、frontend 173/173、CI 48/48。

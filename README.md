@@ -30,7 +30,7 @@ npx expo start             # Metro :8081
 
 ```bash
 npm test                    # backend: auto-discovers tests/*.test.js (48 files / 1591 checks)
-npm run test:unit -- --ci   # frontend: 20 suites / 170 cases
+npm run test:unit -- --ci   # frontend: 21 suites / 173 cases
 npx tsc --noEmit            # TypeScript
 npm run lint                # Expo ESLint
 npm run eval:context        # real-model capability eval (needs DEEPSEEK_API_KEY; not in CI)
@@ -38,7 +38,7 @@ npm run eval:retrieval      # fixed-corpus unified retrieval eval (lexical/exact
 npm run eval:embedding      # real embedding + hybrid + reranker open-domain eval (needs a real embedding/reranker service; not in CI)
 ```
 
-CI (`.github/workflows/ci.yml`) runs the backend suites, TypeScript, lint, and Jest on Node 22, plus the runtime test-coverage verifier and two data-isolation tripwires that ensure tests never read or write the real `server/data`.
+CI (`.github/workflows/ci.yml`) runs TypeScript, lint, the fixed evaluations, and a single coverage-verifier invocation that executes every backend suite and Jest once on Node 22, plus two data-isolation tripwires that ensure tests never read or write the real `server/data`.
 
 ## Data safety
 

@@ -159,6 +159,22 @@ check('CI 引用未登记测试文件时失败', () => {
   assert.equal(outcome.ok, false);
   assert.ok(outcome.errors.some(error => error.includes('ghost')));
 });
+check('CI 只调用覆盖率脚本时视为自跑全部文件', () => {
+  const outcome = evaluateCiCoverage(
+    baseline(),
+    'run: node scripts/verify-test-coverage.js'
+  );
+  assert.equal(outcome.ok, true, outcome.errors.join('\n'));
+  assert.equal(outcome.selfRunning, true);
+});
+check('注释掉的覆盖率脚本不算 CI 覆盖', () => {
+  const outcome = evaluateCiCoverage(
+    baseline(),
+    '# run: node scripts/verify-test-coverage.js\nrun: echo skip'
+  );
+  assert.equal(outcome.ok, false);
+  assert.ok(outcome.errors.some(error => error.includes('custom-case')));
+});
 
 console.log(`\n通过 ${passed} 项，失败 ${failed} 项`);
 process.exit(failed ? 1 : 0);

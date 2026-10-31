@@ -98,6 +98,7 @@ export function MemoryBotScreen({
   const [maintenanceSourceIds, setMaintenanceSourceIds] = useState('');
   const [maintenanceContent, setMaintenanceContent] = useState('');
   const [maintenanceType, setMaintenanceType] = useState('preference');
+  const [maintenanceTypeExplicit, setMaintenanceTypeExplicit] = useState(false);
   const [maintenanceKeywords, setMaintenanceKeywords] = useState('');
   const [maintenanceSessionId, setMaintenanceSessionId] = useState('');
   const [maintenanceBusy, setMaintenanceBusy] = useState(false);
@@ -109,14 +110,30 @@ export function MemoryBotScreen({
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const scrollRef = useRef<React.ElementRef<typeof ScrollView>>(null);
+  const activeStreamRef = useRef<{ controller: AbortController } | null>(null);
+  const streamSeqRef = useRef(0);
+  const loadSeqRef = useRef(0);
+
+  // 停止当前流并让所有迟到回调失效；切换会话/隐藏页面/主动停止共用。
+  const abortActiveStream = useCallback(() => {
+    streamSeqRef.current += 1;
+    const active = activeStreamRef.current;
+    activeStreamRef.current = null;
+    if (active) active.controller.abort();
+    setSending(false);
+  }, []);
 
   const loadSession = useCallback(async (id: string) => {
+    abortActiveStream();
+    const seq = ++loadSeqRef.current;
     const response = await apiFetch(API_PATHS.agentSession('memory', id));
     if (!response.ok) throw new Error('session');
     const data = (await response.json()) as AgentSessionDetailResponse;
+    // 快速切换 A→B 时，A 的迟到响应不能覆盖 B。
+    if (seq !== loadSeqRef.current) return;
     setSessionId(id);
     setMessages(data.messages || []);
-  }, []);
+  }, [abortActiveStream]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -200,6 +217,10 @@ export function MemoryBotScreen({
   const send = async () => {
     const text = input.trim();
     if (!text || sending) return;
+    const seq = streamSeqRef.current + 1;
+    streamSeqRef.current = seq;
+    const controller = new AbortController();
+    activeStreamRef.current = { controller };
     setSending(true);
     setError('');
     setNotice('');
@@ -218,12 +239,15 @@ export function MemoryBotScreen({
     setInput('');
 
     const fallback = async () => {
+      if (controller.signal.aborted || streamSeqRef.current !== seq) return;
       setMessages(prev => prev.filter(message => message.id !== streamId));
       const response = await apiFetch(API_PATHS.agentChat('memory'), {
         method: 'POST',
         body: JSON.stringify({ sessionId, message: text }),
+        signal: controller.signal,
       });
       const data = (await response.json()) as AgentChatResponse & { error?: string };
+      if (controller.signal.aborted || streamSeqRef.current !== seq) return;
       if (!response.ok) throw new Error(data.error || '发送失败');
       setSessionId(data.sessionId);
       setMessages(prev => [...prev, data.message]);
@@ -232,7 +256,9 @@ export function MemoryBotScreen({
 
     try {
       const outcome = await sendAgentChatStream('memory', { sessionId, message: text }, {
+        signal: controller.signal,
         onDelta: delta => {
+          if (streamSeqRef.current !== seq) return;
           setMessages(prev =>
             prev.map(message =>
               message.id === streamId
@@ -243,7 +269,7 @@ export function MemoryBotScreen({
           setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 20);
         },
         onToolEvent: event => {
-          if (event.type !== 'tool_end') return;
+          if (streamSeqRef.current !== seq || event.type !== 'tool_end') return;
           setMessages(prev =>
             prev.map(message => {
               if (message.id !== streamId) return message;
@@ -263,6 +289,8 @@ export function MemoryBotScreen({
         },
       });
 
+      if (streamSeqRef.current !== seq) return;
+
       if (outcome.kind === 'done') {
         setSessionId(outcome.data.sessionId);
         setMessages(prev =>
@@ -272,19 +300,42 @@ export function MemoryBotScreen({
       } else if (outcome.kind === 'fallback') {
         await fallback();
       } else if (outcome.kind === 'aborted') {
-        setError('流式请求已取消');
+        setNotice('流式请求已取消。');
       } else {
         setError(outcome.message);
       }
     } catch (err) {
+      if (controller.signal.aborted || streamSeqRef.current !== seq) return;
       setError(err instanceof Error ? err.message : '发送失败');
     } finally {
-      setSending(false);
+      if (activeStreamRef.current?.controller === controller) {
+        activeStreamRef.current = null;
+      }
+      if (streamSeqRef.current === seq) setSending(false);
     }
   };
 
+  const stopGeneration = () => {
+    if (!sending) return;
+    abortActiveStream();
+    setNotice('已停止生成。');
+  };
+
+  useEffect(() => {
+    // 隐藏页面只中止网络请求；状态收尾由 send 的 aborted 分支完成，
+    // 避免在 effect 内同步 setState 触发级联渲染。
+    if (!visible) activeStreamRef.current?.controller.abort();
+  }, [visible]);
+
+  useEffect(
+    () => () => {
+      activeStreamRef.current?.controller.abort();
+    },
+    []
+  );
 
   const createSession = async () => {
+    abortActiveStream();
     setSaving(true);
     setError('');
     try {
@@ -294,6 +345,7 @@ export function MemoryBotScreen({
       });
       if (!response.ok) throw new Error('创建会话失败');
       const data = (await response.json()) as { session: AgentSession };
+      loadSeqRef.current += 1;
       setSessions(prev => [data.session, ...prev]);
       setSessionId(data.session.id);
       setMessages([]);
@@ -509,7 +561,8 @@ export function MemoryBotScreen({
       payload = {
         id,
         ...(content ? { content } : {}),
-        type: maintenanceType,
+        // 只有用户显式选了类型才下发；否则保持原记忆类型不变。
+        ...(maintenanceTypeExplicit ? { type: maintenanceType } : {}),
         ...(keywords.length ? { keywords } : {}),
       };
     } else {
@@ -535,10 +588,6 @@ export function MemoryBotScreen({
           operation: maintenanceOperation,
           payload,
           requestedBy: 'user',
-          ...(maintenanceOperation === 'withdraw' &&
-          (maintenanceSessionId.trim() || sessionId)
-            ? { sessionId: maintenanceSessionId.trim() || sessionId }
-            : {}),
         }),
       });
       const data = (await response.json()) as { error?: string; approval?: AgentApproval };
@@ -550,6 +599,7 @@ export function MemoryBotScreen({
       setMaintenanceContent('');
       setMaintenanceKeywords('');
       setMaintenanceSessionId('');
+      setMaintenanceTypeExplicit(false);
       setNotice('维护申请已创建，待人工批准；批准后仍需单独执行。');
     } catch (err) {
       setError(err instanceof Error ? err.message : '创建维护申请失败');
@@ -756,14 +806,24 @@ export function MemoryBotScreen({
                 maxLength={4000}
                 editable={!sending}
               />
-              <TouchableOpacity
-                style={[styles.sendButton, (!input.trim() || sending) && styles.sendDisabled]}
-                onPress={() => void send()}
-                disabled={!input.trim() || sending}
-                accessibilityLabel="发送给 Memory Bot"
-              >
-                <Text style={styles.sendText}>{sending ? '···' : '↑'}</Text>
-              </TouchableOpacity>
+              {sending ? (
+                <TouchableOpacity
+                  style={[styles.sendButton, styles.stopButton]}
+                  onPress={stopGeneration}
+                  accessibilityLabel="停止 Memory Bot 生成"
+                >
+                  <Text style={styles.stopText}>■</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  style={[styles.sendButton, !input.trim() && styles.sendDisabled]}
+                  onPress={() => void send()}
+                  disabled={!input.trim()}
+                  accessibilityLabel="发送给 Memory Bot"
+                >
+                  <Text style={styles.sendText}>↑</Text>
+                </TouchableOpacity>
+              )}
             </View>
           </View>
         ) : tab === 'config' ? (
@@ -973,9 +1033,9 @@ export function MemoryBotScreen({
           </ScrollView>
         ) : (
           <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-            <Text style={styles.sectionTitle}>创建委派任务</Text>
+            <Text style={styles.sectionTitle}>创建任务（独立 Bot 任务）</Text>
             <Text style={styles.sectionHint}>
-              任务由主控提交、Memory Bot 执行；状态和结果只来自服务端任务存储。
+              这里创建的任务直接归属 Bot，没有主控 parentSessionId；主控通过对话委派的任务才会写入父会话并回传结果。
             </Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.choiceRow}>
               {(agent?.acceptedTaskTypes || ['memory.search']).map(type => (
@@ -1021,7 +1081,7 @@ export function MemoryBotScreen({
               </TouchableOpacity>
             </View>
             {tasks.length === 0 ? (
-              <Text style={styles.hint}>还没有主控委派任务。</Text>
+              <Text style={styles.hint}>还没有任务记录。</Text>
             ) : (
               tasks.map(task => (
                 <View key={task.taskId} style={styles.taskCard}>
@@ -1030,6 +1090,11 @@ export function MemoryBotScreen({
                     <Text style={styles.taskStatus}>{TASK_LABEL[task.status] || task.status}</Text>
                   </View>
                   <Text style={styles.taskGoal}>{task.goal}</Text>
+                  <Text style={styles.taskMeta}>
+                    {task.parentSessionId
+                      ? `归属：主控会话 ${task.parentSessionId}`
+                      : '归属：独立 Bot 任务'}
+                  </Text>
                   {task.result?.summary ? (
                     <Text style={styles.taskSummary} numberOfLines={4}>
                       {task.result.summary}
@@ -1055,7 +1120,10 @@ export function MemoryBotScreen({
                       styles.choice,
                       maintenanceOperation === operation && styles.choiceSelected,
                     ]}
-                    onPress={() => setMaintenanceOperation(operation)}
+                    onPress={() => {
+                      setMaintenanceOperation(operation);
+                      setMaintenanceTypeExplicit(false);
+                    }}
                   >
                     <Text
                       style={[
@@ -1119,22 +1187,49 @@ export function MemoryBotScreen({
 
               {['update', 'supersede'].includes(maintenanceOperation) && (
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.choiceRow}>
-                  {MEMORY_TYPES.map(type => (
+                  {maintenanceOperation === 'update' && (
                     <TouchableOpacity
-                      key={type}
-                      style={[styles.choice, maintenanceType === type && styles.choiceSelected]}
-                      onPress={() => setMaintenanceType(type)}
+                      style={[
+                        styles.choice,
+                        !maintenanceTypeExplicit && styles.choiceSelected,
+                      ]}
+                      onPress={() => setMaintenanceTypeExplicit(false)}
                     >
                       <Text
                         style={[
                           styles.choiceText,
-                          maintenanceType === type && styles.choiceTextSelected,
+                          !maintenanceTypeExplicit && styles.choiceTextSelected,
                         ]}
                       >
-                        {type}
+                        保持原类型
                       </Text>
                     </TouchableOpacity>
-                  ))}
+                  )}
+                  {MEMORY_TYPES.map(type => {
+                    const selected =
+                      maintenanceOperation === 'supersede'
+                        ? maintenanceType === type
+                        : maintenanceTypeExplicit && maintenanceType === type;
+                    return (
+                      <TouchableOpacity
+                        key={type}
+                        style={[styles.choice, selected && styles.choiceSelected]}
+                        onPress={() => {
+                          setMaintenanceType(type);
+                          setMaintenanceTypeExplicit(true);
+                        }}
+                      >
+                        <Text
+                          style={[
+                            styles.choiceText,
+                            selected && styles.choiceTextSelected,
+                          ]}
+                        >
+                          {type}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
                 </ScrollView>
               )}
 
@@ -1154,7 +1249,7 @@ export function MemoryBotScreen({
                   style={styles.smallInput}
                   value={maintenanceSessionId}
                   onChangeText={setMaintenanceSessionId}
-                  placeholder="会话 ID（可选，留空撤回全部）"
+                  placeholder="记忆归属会话 ID（可选，留空=全部）"
                   placeholderTextColor={theme.textMuted}
                   autoCapitalize="none"
                 />
@@ -1419,6 +1514,12 @@ const createStyles = (theme: Theme) =>
       justifyContent: 'center',
     },
     sendDisabled: { opacity: 0.4 },
+    stopButton: {
+      backgroundColor: theme.surfaceAlt,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.borderStrong,
+    },
+    stopText: { color: theme.danger, fontSize: 14, fontWeight: '700' },
     sendText: { color: '#fff', fontSize: 18, fontWeight: '600' },
     content: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 40 },
     sectionTitle: {

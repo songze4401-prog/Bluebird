@@ -186,8 +186,14 @@ function extractCiTestNames(ciText) {
 
 function evaluateCiCoverage(baseline, ciText) {
   const errors = [];
-  const ciNames = extractCiTestNames(ciText);
   const expectedNames = Object.keys(baseline.files).sort();
+  const uncommented = String(ciText || '').replace(/#.*$/gm, '');
+  // 覆盖率脚本本身逐个执行全部后端文件与 Jest；CI 只调用它时，
+  // 再要求重复列出每个文件会迫使 CI 双跑。注释掉的命令不算覆盖。
+  if (/node\s+scripts\/verify-test-coverage\.js/.test(uncommented)) {
+    return { ok: true, errors, ciFiles: expectedNames, selfRunning: true };
+  }
+  const ciNames = extractCiTestNames(ciText);
 
   const missing = expectedNames.filter(name => !ciNames.has(name));
   const extra = [...ciNames].filter(name => !baseline.files[name]).sort();

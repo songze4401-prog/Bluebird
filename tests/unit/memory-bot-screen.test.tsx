@@ -5,6 +5,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react-nativ
 import { AgentTeamScreen } from '../../components/AgentTeamScreen';
 import { MemoryBotScreen } from '../../components/MemoryBotScreen';
 import { apiFetch } from '../../lib/api/client';
+import { sendAgentChatStream } from '../../lib/agent-stream';
 import { getTheme } from '../../theme';
 
 jest.mock('../../lib/api/client', () => ({
@@ -23,6 +24,7 @@ jest.mock('../../lib/agent-stream', () => ({
 }));
 
 const mockedFetch = apiFetch as unknown as jest.Mock;
+const mockedStream = sendAgentChatStream as unknown as jest.Mock;
 const theme = getTheme('light', 'blue');
 
 function jsonResponse(payload: unknown, status = 200): Response {
@@ -104,9 +106,53 @@ const session = {
   messageCount: 1,
 };
 
+const secondSession = {
+  ...session,
+  id: 's2',
+  title: '另一个会话',
+};
+
+function mockAgentWorkspace({
+  sessions = [session],
+  details = {},
+}: {
+  sessions?: (typeof session)[];
+  details?: Record<string, unknown[]>;
+} = {}) {
+  mockedFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+    if (path === '/agents/memory') return jsonResponse({ agent });
+    if (path === '/agents/memory/config') return jsonResponse({ config, agent });
+    if (path === '/agents/memory/sessions' && (!init || init.method !== 'POST')) {
+      return jsonResponse({ sessions });
+    }
+    if (path === '/agent-tasks?botId=memory&limit=20') {
+      return jsonResponse({ tasks: [] });
+    }
+    if (path === '/agents/memory/events?limit=30') {
+      return jsonResponse({ events: [] });
+    }
+    if (path === '/agents/memory/approvals?limit=50') {
+      return jsonResponse({ approvals: [] });
+    }
+    if (path === '/model-providers') {
+      return jsonResponse({ providers: [] });
+    }
+    if (path.startsWith('/agents/memory/sessions/')) {
+      const id = path.slice('/agents/memory/sessions/'.length);
+      const meta = sessions.find(item => item.id === id);
+      if (meta) {
+        return jsonResponse({ session: meta, messages: details[id] || [] });
+      }
+    }
+    return jsonResponse({ error: 'not_found' }, 404);
+  });
+}
+
 describe('Memory Bot UI', () => {
   beforeEach(() => {
     mockedFetch.mockReset();
+    mockedStream.mockReset();
+    mockedStream.mockResolvedValue({ kind: 'fallback' });
   });
 
   it('团队页只展示真实 Memory Bot，并把未注册 Bot 标为预留', async () => {
@@ -335,6 +381,7 @@ describe('Memory Bot UI', () => {
       expect(
         screen.getByPlaceholderText('任务目标，例如：整理我关于咖啡的长期记忆')
       ).toBeTruthy();
+      expect(screen.getByText(/独立 Bot 任务/)).toBeTruthy();
       expect(screen.getByText('update · medium')).toBeTruthy();
       expect(screen.getByText('目标：mem-a')).toBeTruthy();
       expect(screen.getByText('执行')).toBeTruthy();
@@ -357,7 +404,160 @@ describe('Memory Bot UI', () => {
       const body = JSON.parse(String((call?.[1] as RequestInit).body));
       expect(body.operation).toBe('update');
       expect(body.payload.id).toBe('mem-a');
+      expect(body.payload.type).toBeUndefined();
+      expect(body.sessionId).toBeUndefined();
       expect(body.requestedBy).toBe('user');
     });
+
+    await fireEvent.press(screen.getByText('撤回'));
+    await fireEvent.changeText(screen.getByPlaceholderText('记忆 ID'), 'mem-withdraw');
+    await fireEvent.changeText(
+      screen.getByPlaceholderText('记忆归属会话 ID（可选，留空=全部）'),
+      'main-scope-1'
+    );
+    await fireEvent.press(screen.getByText('提交维护申请'));
+
+    await waitFor(() => {
+      const calls = mockedFetch.mock.calls.filter(
+        ([path, init]) =>
+          path === '/agents/memory/approvals' &&
+          (init as RequestInit | undefined)?.method === 'POST'
+      );
+      expect(calls.length).toBe(2);
+      const body = JSON.parse(String((calls[1][1] as RequestInit).body));
+      expect(body.operation).toBe('withdraw');
+      expect(body.payload.id).toBe('mem-withdraw');
+      expect(body.payload.sessionId).toBe('main-scope-1');
+      // 记忆 scope 只走 payload；审批记录不把 Bot 会话混作 scope。
+      expect(body.sessionId).toBeUndefined();
+    });
+  });
+
+  it('流式期间可停止生成：abort 信号触发，迟到结果不写入消息', async () => {
+    const stream: {
+      handlers: { signal?: AbortSignal } | null;
+      resolve: ((value: unknown) => void) | null;
+    } = { handlers: null, resolve: null };
+    mockedStream.mockImplementationOnce((_bot, _payload, nextHandlers) => {
+      stream.handlers = nextHandlers;
+      return new Promise(resolve => {
+        stream.resolve = resolve;
+      });
+    });
+    mockAgentWorkspace({
+      details: {
+        s1: [
+          {
+            id: 'm1',
+            role: 'user',
+            content: '我喜欢拿铁',
+            createdAt: '2026-10-30T00:00:00.000Z',
+          },
+        ],
+      },
+    });
+
+    await render(<MemoryBotScreen visible onClose={() => {}} theme={theme} />);
+    await waitFor(() => expect(screen.getByText('咖啡记忆')).toBeTruthy());
+
+    await fireEvent.changeText(
+      screen.getByPlaceholderText('问问你的记忆，或让我整理一条候选…'),
+      '再查一次咖啡偏好'
+    );
+    await fireEvent.press(screen.getByLabelText('发送给 Memory Bot'));
+    await waitFor(() =>
+      expect(screen.getByLabelText('停止 Memory Bot 生成')).toBeTruthy()
+    );
+
+    expect(stream.handlers?.signal?.aborted).toBe(false);
+    await fireEvent.press(screen.getByLabelText('停止 Memory Bot 生成'));
+    expect(stream.handlers?.signal?.aborted).toBe(true);
+    expect(screen.queryByLabelText('停止 Memory Bot 生成')).toBeNull();
+
+    stream.resolve?.({
+      kind: 'done',
+      data: {
+        sessionId: 's1',
+        message: {
+          id: 'late',
+          role: 'assistant',
+          content: '迟到的回复不应显示',
+          createdAt: '2026-10-30T00:00:00.000Z',
+          toolSteps: [],
+        },
+      },
+    });
+    await waitFor(() => expect(screen.getByText('已停止生成。')).toBeTruthy());
+    expect(screen.queryByText('迟到的回复不应显示')).toBeNull();
+  });
+
+  it('流式期间切换会话：旧流 abort，旧会话结果不得覆盖新会话', async () => {
+    const stream: {
+      handlers: { signal?: AbortSignal } | null;
+      resolve: ((value: unknown) => void) | null;
+    } = { handlers: null, resolve: null };
+    mockedStream.mockImplementationOnce((_bot, _payload, nextHandlers) => {
+      stream.handlers = nextHandlers;
+      return new Promise(resolve => {
+        stream.resolve = resolve;
+      });
+    });
+    mockAgentWorkspace({
+      sessions: [session, secondSession],
+      details: {
+        s1: [
+          {
+            id: 'm1',
+            role: 'user',
+            content: '我喜欢拿铁',
+            createdAt: '2026-10-30T00:00:00.000Z',
+          },
+        ],
+        s2: [
+          {
+            id: 'm2',
+            role: 'assistant',
+            content: '这是另一个会话的消息',
+            createdAt: '2026-10-30T00:00:00.000Z',
+          },
+        ],
+      },
+    });
+
+    await render(<MemoryBotScreen visible onClose={() => {}} theme={theme} />);
+    await waitFor(() => expect(screen.getByText('咖啡记忆')).toBeTruthy());
+
+    await fireEvent.changeText(
+      screen.getByPlaceholderText('问问你的记忆，或让我整理一条候选…'),
+      '切换前的问题'
+    );
+    await fireEvent.press(screen.getByLabelText('发送给 Memory Bot'));
+    await waitFor(() =>
+      expect(screen.getByLabelText('停止 Memory Bot 生成')).toBeTruthy()
+    );
+
+    await fireEvent.press(screen.getByText('另一个会话'));
+    await waitFor(() =>
+      expect(screen.getByText('这是另一个会话的消息')).toBeTruthy()
+    );
+    expect(stream.handlers?.signal?.aborted).toBe(true);
+
+    stream.resolve?.({
+      kind: 'done',
+      data: {
+        sessionId: 's1',
+        message: {
+          id: 'late-old-session',
+          role: 'assistant',
+          content: '旧会话的迟到回复',
+          createdAt: '2026-10-30T00:00:00.000Z',
+          toolSteps: [],
+        },
+      },
+    });
+    await waitFor(() =>
+      expect(screen.getByText('这是另一个会话的消息')).toBeTruthy()
+    );
+    expect(screen.queryByText('旧会话的迟到回复')).toBeNull();
   });
 });
