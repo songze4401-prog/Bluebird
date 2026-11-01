@@ -14,6 +14,9 @@ const { getCredentialKey } = require('./credentials');
 const sessions = require('./sessions');
 const tasks = require('./tasks');
 const resultDelivery = require('./result-delivery');
+const { projectWorkerContext } = require('./context-projection');
+const { normalizeWorkerResult } = require('./worker-result');
+const { createToolAuthorizer } = require('./tool-gateway');
 const { AgentError } = require('./errors');
 
 const MAX_USER_MESSAGE = 4000;
@@ -22,12 +25,22 @@ const MAX_TASK_TOOLS = 6;
 // 工具调用次数预算与“允许的工具种类数”无关。旧实现用工具种类数当上限，
 // 3 个工具就只能调用 3 次，正常的多次检索会提前耗尽预算。
 const MAX_TASK_TOOL_CALLS = 6;
+// Worker 心跳：运行期间每 N 毫秒刷新任务 heartbeatAt 并写一条安全事件。
+// 只证明"执行器仍活着"，不携带任何内容。
+const HEARTBEAT_MS = Math.min(
+  60000,
+  Math.max(20, Number(process.env.BLUEBIRD_AGENT_HEARTBEAT_MS) || 5000)
+);
 const activeRuns = new Map();
 const TASK_CONCURRENCY = Math.min(
   4,
   Math.max(1, Number(process.env.BLUEBIRD_AGENT_TASK_CONCURRENCY) || 2)
 );
 let scheduling = false;
+
+function nowIso() {
+  return new Date().toISOString();
+}
 
 function scheduleTaskQueue() {
   if (scheduling) return;
@@ -128,21 +141,6 @@ function normalizeHistory(messages) {
     .filter(message => message.content.trim());
 }
 
-function taskInstruction(task) {
-  const lines = [
-    '【主控委派任务】',
-    `任务类型：${task.taskType}`,
-    `目标：${task.goal}`,
-  ];
-  if (task.context) lines.push(`必要上下文：${task.context}`);
-  lines.push(
-    `允许的记忆工具：${task.allowedTools.length ? task.allowedTools.join('、') : '无'}`,
-    '请完成该任务，并用简洁中文给出结果摘要、依据的记忆/知识 ID、发生的变更与仍需确认的事项。',
-    '不要编造未通过工具验证的记忆或变更；不能执行的操作要明确说明。'
-  );
-  return lines.join('\n');
-}
-
 function extractEvidence(name, result, evidence, changes) {
   if (!result || result.ok !== true) return;
   if (name === 'memory_search' && Array.isArray(result.results)) {
@@ -200,6 +198,10 @@ async function execute({
   mode = 'direct_chat',
   signal = null,
   onToolEvent = null,
+  onProgress = null,
+  toolAuthorizer = null,
+  onToolDenied = null,
+  runId: runIdOverride = null,
   stream = false,
   onDelta = null,
 }) {
@@ -215,7 +217,10 @@ async function execute({
   const policy = buildPolicy({ config, allowedTools, toolsSupported, budget });
   const evidence = [];
   const changes = [];
-  const runId = `run_${crypto.randomUUID()}`;
+  // Worker 生命周期已经有 runId 时复用它，保证任务、事件与结果指向同一次运行。
+  const runId = runIdOverride || `run_${crypto.randomUUID()}`;
+  let lastRound = 0;
+  let progressToolCalls = 0;
 
   if (signal && signal.aborted) {
     throw new AgentError('cancelled', '运行已取消', 409);
@@ -237,9 +242,12 @@ async function execute({
       isClientGone: signal ? () => signal.aborted : undefined,
       abortSignal: signal,
       credentialKey,
+      toolAuthorizer,
+      onToolDenied,
       stream,
       onDelta,
       onRequest: ({ round }) => {
+        lastRound = round;
         safeEvent(
           botId,
           'model.requested',
@@ -251,6 +259,9 @@ async function execute({
           },
           { taskId, runId, sessionId }
         );
+        if (typeof onProgress === 'function') {
+          onProgress({ round, toolCalls: progressToolCalls, phase: 'model_requested' });
+        }
       },
       onToolEvent: event => {
         const eventType =
@@ -275,6 +286,7 @@ async function execute({
         }
       },
       onToolResult: result => {
+        progressToolCalls += 1;
         extractEvidence(result.name, result.result, evidence, changes);
         if (result.ok && result.name === 'memory_search') {
           safeEvent(
@@ -312,6 +324,13 @@ async function execute({
               { taskId, runId, sessionId }
             );
           }
+        }
+        if (typeof onProgress === 'function') {
+          onProgress({
+            round: lastRound,
+            toolCalls: progressToolCalls,
+            phase: 'tool_result',
+          });
         }
       },
     });
@@ -457,20 +476,93 @@ async function runTask(taskId) {
 
   const controller = new AbortController();
   activeRuns.set(task.taskId, controller);
-  // deadlineMs 此前只被存储与校验，运行时不执行，任务可以无限跑。
-  // 这里在任务真正开始执行时起算截止时间：到期中止本次运行，
-  // 并把任务收敛成 timed_out（而不是被误判成用户取消）。
+  const runId = `run_${crypto.randomUUID()}`;
   let deadlineExceeded = false;
   let deadlineTimer = null;
+  let heartbeatTimer = null;
+
+  const recordCheckpoint = ({ round = 0, toolCalls = 0, phase = 'progress' } = {}) => {
+    const checkpoint = {
+      round: Number.isInteger(round) ? round : 0,
+      toolCalls: Number.isInteger(toolCalls) ? toolCalls : 0,
+      phase: String(phase || 'progress').slice(0, 40),
+      at: nowIso(),
+    };
+    try {
+      tasks.updateTask(task.taskId, { checkpoint, heartbeatAt: checkpoint.at });
+    } catch (_) {
+      // checkpoint 落盘失败不中止执行；事件仍提供可追溯信号。
+    }
+    safeEvent(
+      task.botId,
+      'worker.checkpoint',
+      {
+        status: 'running',
+        rounds: checkpoint.round,
+        toolCalls: checkpoint.toolCalls,
+        phase: checkpoint.phase,
+      },
+      { taskId: task.taskId, runId, sessionId: task.sessionId }
+    );
+  };
 
   try {
+    // ---- Worker 会话：缺失时补建，归属检查 + 生命周期 ----
+    let workerSessionId = task.sessionId;
+    if (!workerSessionId) {
+      const created = sessions.createSession(task.botId, {
+        title: String(task.goal || '').slice(0, 30),
+        scope: 'worker',
+      });
+      workerSessionId = created.id;
+      tasks.updateTask(task.taskId, {
+        workerSessionId,
+        sessionId: workerSessionId,
+      });
+      task.workerSessionId = workerSessionId;
+      task.sessionId = workerSessionId;
+    }
+    const workerSession = sessions.getSession(task.botId, workerSessionId);
+    if (!workerSession) {
+      throw new AgentError('worker_session_missing', 'Worker 会话不存在', 409);
+    }
+    // 归属检查：已在运行的 Worker 保留自己的会话；已终态任务的会话允许
+    // 顺序复用，避免 API 调用方传回旧会话时永久不可用。
+    let allowTakeover = false;
+    if (workerSession.owner && workerSession.owner.taskId !== task.taskId) {
+      const ownerTask = tasks.getTask(workerSession.owner.taskId);
+      allowTakeover = Boolean(ownerTask && tasks.isTerminalStatus(ownerTask.status));
+      if (!allowTakeover) {
+        throw new AgentError(
+          'worker_session_owner_mismatch',
+          'Worker 会话已归属其他任务',
+          409
+        );
+      }
+    }
+    sessions.attachOwner(task.botId, workerSessionId, {
+      agentId: task.botId,
+      taskId: task.taskId,
+      runId,
+      allowTakeover,
+    });
+    sessions.markRunning(task.botId, workerSessionId, runId);
+
+    // ---- accept ----
     tasks.updateTask(task.taskId, {
       status: 'accepted',
       attempts: (Number.isInteger(task.attempts) ? task.attempts : 0) + 1,
+      runId,
+      runStartedAt: nowIso(),
+      heartbeatAt: nowIso(),
+      checkpoint: null,
     });
-    safeEvent(task.botId, 'task.accepted', { status: 'accepted', taskType: task.taskType }, {
-      taskId: task.taskId,
-    });
+    safeEvent(
+      task.botId,
+      'task.accepted',
+      { status: 'accepted', taskType: task.taskType },
+      { taskId: task.taskId, runId, sessionId: task.sessionId }
+    );
 
     const afterAccept = tasks.getRawTask(task.taskId);
     if (
@@ -482,15 +574,37 @@ async function runTask(taskId) {
       return;
     }
 
+    // ---- start ----
     const runningSince = Date.now();
     tasks.updateTask(task.taskId, {
       status: 'running',
       startedAt: new Date(runningSince).toISOString(),
     });
-    safeEvent(task.botId, 'task.started', { status: 'running', taskType: task.taskType }, {
-      taskId: task.taskId,
-    });
+    safeEvent(
+      task.botId,
+      'task.started',
+      { status: 'running', taskType: task.taskType },
+      { taskId: task.taskId, runId, sessionId: task.sessionId }
+    );
 
+    heartbeatTimer = setInterval(() => {
+      try {
+        tasks.updateTask(task.taskId, { heartbeatAt: nowIso() });
+      } catch (_) {
+        // 心跳落盘失败只影响可观测性，不中止执行。
+      }
+      safeEvent(
+        task.botId,
+        'worker.heartbeat',
+        { status: 'running' },
+        { taskId: task.taskId, runId, sessionId: task.sessionId }
+      );
+    }, HEARTBEAT_MS);
+    if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
+
+    // deadlineMs 此前只被存储与校验，运行时不执行，任务可以无限跑。
+    // 这里在任务真正开始执行时起算截止时间：到期中止本次运行，
+    // 并把任务收敛成 timed_out（而不是被误判成用户取消）。
     const deadlineMs =
       Number.isInteger(task.deadlineMs) && task.deadlineMs > 0 ? task.deadlineMs : null;
     if (deadlineMs) {
@@ -502,25 +616,40 @@ async function runTask(taskId) {
       if (typeof deadlineTimer.unref === 'function') deadlineTimer.unref();
     }
 
+    // ---- execute：只投影任务所需的摘要/引用/授权数据 ----
     const config = require('./config').getRuntimeConfig(task.botId);
-    const messages = [
-      { role: 'system', content: config.prompt.systemPrompt },
-      { role: 'user', content: taskInstruction(task) },
-    ];
+    const projection = projectWorkerContext({
+      task,
+      systemPrompt: config.prompt.systemPrompt,
+    });
+    const authorizer = createToolAuthorizer({ allowedTools: task.allowedTools });
+    recordCheckpoint({ round: 0, toolCalls: 0, phase: 'started' });
+
     const result = await execute({
       botId: task.botId,
-      messages,
+      messages: projection.messages,
       sessionId: task.sessionId,
       // 委派任务：Bot 会话只承载执行轨迹，记忆读写归属父主控会话。
-      memoryScopeSessionId: task.parentSessionId || task.sessionId,
+      memoryScopeSessionId: projection.memoryScopeSessionId,
       // 写入接地优先使用主控用户原话；旧任务或直接任务才回落到 goal。
-      userText: task.parentUserText || task.goal,
+      userText: projection.userText,
       taskId: task.taskId,
       taskTools: task.allowedTools,
+      runId,
       // 路由层冻结的 Fast/Slow 预算随任务落库，执行时不再读当前配置。
       budget: task.budget || null,
       mode: 'delegated_task',
       signal: controller.signal,
+      toolAuthorizer: authorizer,
+      onToolDenied: ({ name, code }) => {
+        safeEvent(
+          task.botId,
+          'tool.denied',
+          { tool: name, errorCode: code, mode: 'delegated_task' },
+          { taskId: task.taskId, runId, sessionId: task.sessionId }
+        );
+      },
+      onProgress: recordCheckpoint,
     });
 
     const latest = tasks.getRawTask(task.taskId);
@@ -537,19 +666,25 @@ async function runTask(taskId) {
       throw emptyReplyError(result.stopReason);
     }
 
+    const finalResult = normalizeWorkerResult({
+      status: 'completed',
+      summary,
+      artifacts: [],
+      toolSteps: result.toolSteps,
+      evidence: result.evidence,
+      changes: result.changes,
+      requiresConfirmation: result.requiresConfirmation === true,
+      rounds: result.rounds,
+      stopReason: result.stopReason,
+      model: result.model,
+      runId: result.runId || runId,
+      finishedAt: nowIso(),
+    });
+
     tasks.updateTask(task.taskId, {
       status: 'completed',
-      completedAt: new Date().toISOString(),
-      result: {
-        summary,
-        toolSteps: result.toolSteps,
-        evidence: result.evidence,
-        changes: result.changes,
-        requiresConfirmation: result.requiresConfirmation === true,
-        rounds: result.rounds,
-        stopReason: result.stopReason,
-        model: result.model,
-      },
+      completedAt: finalResult.finishedAt,
+      result: finalResult,
     });
     safeEvent(
       task.botId,
@@ -560,17 +695,11 @@ async function runTask(taskId) {
         toolCalls: result.toolSteps.length,
         stopReason: result.stopReason || null,
       },
-      { taskId: task.taskId }
+      { taskId: task.taskId, runId, sessionId: task.sessionId }
     );
     resultDelivery.deliverTaskOutcome(task, {
       status: 'completed',
-      result: {
-        summary,
-        toolSteps: result.toolSteps,
-        evidence: result.evidence,
-        changes: result.changes,
-        requiresConfirmation: result.requiresConfirmation === true,
-      },
+      result: finalResult,
     });
   } catch (error) {
     const latest = tasks.getRawTask(task.taskId);
@@ -597,27 +726,39 @@ async function runTask(taskId) {
     if (retryable) {
       tasks.updateTask(task.taskId, {
         status: 'queued',
-        recoveredAt: new Date().toISOString(),
+        recoveredAt: nowIso(),
         errorCode,
+        // 下一次尝试会分配新的 runId；上一个 run 的 checkpoint 只作审计。
+        runId: null,
+        heartbeatAt: null,
       });
       safeEvent(
         task.botId,
         'task.recovered',
         { status: 'queued', errorCode, mode: 'retry' },
-        { taskId: task.taskId }
+        { taskId: task.taskId, sessionId: task.sessionId }
       );
       return;
     }
 
     const status = cancelled ? 'cancelled' : timedOut ? 'timed_out' : 'failed';
+    // 统一结果 schema：失败/取消/超时也落一份结果，而不是 result: null。
+    const failureResult = normalizeWorkerResult({
+      status,
+      summary: '',
+      errorCode,
+      runId,
+      finishedAt: nowIso(),
+    });
     tasks.updateTask(task.taskId, {
       status,
-      completedAt: new Date().toISOString(),
+      completedAt: failureResult.finishedAt,
       errorCode,
+      result: failureResult,
     });
     resultDelivery.deliverTaskOutcome(task.taskId, {
       status,
-      result: latest.result || null,
+      result: failureResult,
       errorCode,
     });
     safeEvent(
@@ -628,11 +769,26 @@ async function runTask(taskId) {
           ? 'task.timed_out'
           : 'task.failed',
       { status, errorCode },
-      { taskId: task.taskId }
+      { taskId: task.taskId, runId, sessionId: task.sessionId }
     );
   } finally {
     if (deadlineTimer) clearTimeout(deadlineTimer);
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
     activeRuns.delete(task.taskId);
+    // Worker 会话生命周期收口：终态沿用任务状态，暂停/异常退出标记 closed。
+    try {
+      const finalTask = tasks.getRawTask(task.taskId);
+      const lifecycleStatus =
+        finalTask && tasks.isTerminalStatus(finalTask.status)
+          ? finalTask.status
+          : 'closed';
+      sessions.closeSession(task.botId, task.sessionId, {
+        status: lifecycleStatus,
+        reason: finalTask ? finalTask.errorCode : null,
+      });
+    } catch (_) {
+      // 会话收口失败不影响任务终态。
+    }
     scheduleTaskQueue();
   }
 }
@@ -688,19 +844,37 @@ function cancelTask(taskId) {
   const task = tasks.getTask(taskId);
   if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
   if (tasks.isTerminalStatus(task.status)) return task;
+  const finishedAt = nowIso();
+  const result = normalizeWorkerResult({
+    status: 'cancelled',
+    summary: '',
+    errorCode: 'cancelled',
+    runId: task.runId || null,
+    finishedAt,
+  });
   tasks.updateTask(taskId, {
     cancelRequested: true,
     status: 'cancelled',
-    completedAt: new Date().toISOString(),
+    completedAt: finishedAt,
+    errorCode: 'cancelled',
+    result,
   });
   const controller = activeRuns.get(taskId);
   if (controller) controller.abort();
   resultDelivery.deliverTaskOutcome(taskId, {
     status: 'cancelled',
-    result: null,
+    result,
     errorCode: 'cancelled',
   });
   safeEvent(task.botId, 'task.cancelled', { status: 'cancelled' }, { taskId });
+  try {
+    sessions.closeSession(task.botId, task.sessionId, {
+      status: 'cancelled',
+      reason: 'cancelled',
+    });
+  } catch (_) {
+    // 会话收口失败不影响取消结果。
+  }
   setImmediate(scheduleTaskQueue);
   return tasks.getTask(taskId);
 }

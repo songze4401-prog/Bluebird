@@ -22,11 +22,25 @@ const MESSAGE_MAX = 1000;
 const TITLE_MAX = 60;
 const CONTENT_MAX = 12000;
 const TOOL_STEPS_MAX = 12;
+const SCOPES = Object.freeze(['direct', 'worker']);
+const LIFECYCLE_STATES = Object.freeze([
+  'active',
+  'running',
+  'completed',
+  'failed',
+  'cancelled',
+  'timed_out',
+  'closed',
+]);
 
 let cache = null;
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function defaultLifecycle() {
+  return { status: 'active', startedAt: null, closedAt: null, closeReason: null };
 }
 
 function ensureDir() {
@@ -35,6 +49,26 @@ function ensureDir() {
 
 function emptyStore() {
   return { version: STORE_VERSION, sessions: [], messages: {} };
+}
+
+// 旧会话没有 owner/scope/lifecycle：读取时补齐为 direct 作用域，
+// 不改变既有会话的可见性与消息语义。
+function normalizeStoredSession(meta) {
+  if (!meta || typeof meta !== 'object') return false;
+  let changed = false;
+  if (!SCOPES.includes(meta.scope)) {
+    meta.scope = 'direct';
+    changed = true;
+  }
+  if (meta.owner === undefined) {
+    meta.owner = null;
+    changed = true;
+  }
+  if (!meta.lifecycle || typeof meta.lifecycle !== 'object') {
+    meta.lifecycle = defaultLifecycle();
+    changed = true;
+  }
+  return changed;
 }
 
 function load() {
@@ -61,6 +95,17 @@ function load() {
     throw new AgentError('agent_sessions_corrupted', 'Bot 会话存储结构无效', 500);
   }
   cache = parsed;
+  let migrated = false;
+  for (const meta of cache.sessions) {
+    if (normalizeStoredSession(meta)) migrated = true;
+  }
+  if (migrated) {
+    try {
+      save();
+    } catch (_) {
+      // 存储暂不可写时保留内存中的规范视图。
+    }
+  }
   return cache;
 }
 
@@ -93,19 +138,26 @@ function findMeta(botId, sessionId) {
   );
 }
 
+function publicMeta(meta, messageCount) {
+  return {
+    id: meta.id,
+    botId: meta.botId,
+    title: meta.title,
+    createdAt: meta.createdAt,
+    updatedAt: meta.updatedAt,
+    messageCount,
+    scope: meta.scope || 'direct',
+    owner: meta.owner ? clone(meta.owner) : null,
+    lifecycle: meta.lifecycle ? clone(meta.lifecycle) : defaultLifecycle(),
+  };
+}
+
 function listSessions(botId) {
   assertBot(botId);
   const current = load();
   return current.sessions
     .filter(item => item.botId === botId)
-    .map(item => ({
-      id: item.id,
-      botId: item.botId,
-      title: item.title,
-      createdAt: item.createdAt,
-      updatedAt: item.updatedAt,
-      messageCount: (current.messages[item.id] || []).length,
-    }))
+    .map(item => publicMeta(item, (current.messages[item.id] || []).length))
     .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
 }
 
@@ -114,18 +166,14 @@ function getSession(botId, sessionId) {
   const meta = findMeta(botId, sessionId);
   if (!meta) return null;
   const current = load();
-  return {
-    id: meta.id,
-    botId: meta.botId,
-    title: meta.title,
-    createdAt: meta.createdAt,
-    updatedAt: meta.updatedAt,
-    messageCount: (current.messages[meta.id] || []).length,
-  };
+  return publicMeta(meta, (current.messages[meta.id] || []).length);
 }
 
-function createSession(botId, { title } = {}) {
+function createSession(botId, { title, scope = 'direct' } = {}) {
   assertBot(botId);
+  if (!SCOPES.includes(scope)) {
+    throw new AgentError('invalid_scope', 'Bot 会话作用域无效');
+  }
   const current = load();
   const t = nowIso();
   const botSessions = current.sessions.filter(item => item.botId === botId);
@@ -139,18 +187,19 @@ function createSession(botId, { title } = {}) {
     if (!reusable) {
       throw new AgentError('agent_session_limit', 'Bot 会话数量已达上限');
     }
-    const previousTitle = reusable.title;
-    const previousUpdatedAt = reusable.updatedAt;
+    const previous = clone(reusable);
     reusable.title = normalizeTitle(title);
     reusable.updatedAt = t;
+    reusable.scope = scope;
+    reusable.owner = null;
+    reusable.lifecycle = defaultLifecycle();
     try {
       save();
     } catch (error) {
-      reusable.title = previousTitle;
-      reusable.updatedAt = previousUpdatedAt;
+      Object.assign(reusable, previous);
       throw error;
     }
-    return { ...reusable, messageCount: 0 };
+    return publicMeta(reusable, 0);
   }
 
   const meta = {
@@ -159,6 +208,9 @@ function createSession(botId, { title } = {}) {
     title: normalizeTitle(title),
     createdAt: t,
     updatedAt: t,
+    scope,
+    owner: null,
+    lifecycle: defaultLifecycle(),
   };
   current.sessions.push(meta);
   current.messages[meta.id] = [];
@@ -169,7 +221,92 @@ function createSession(botId, { title } = {}) {
     delete current.messages[meta.id];
     throw error;
   }
-  return { ...meta, messageCount: 0 };
+  return publicMeta(meta, 0);
+}
+
+// Worker 会话归属：一个任务只能使用自己的 worker 会话；已归属其他任务的
+// 会话拒绝复用，避免两个 Worker 读写同一份轨迹。
+function attachOwner(
+  botId,
+  sessionId,
+  { agentId, taskId, runId = null, allowTakeover = false } = {}
+) {
+  assertBot(botId);
+  const current = load();
+  const meta = findMeta(botId, sessionId);
+  if (!meta) throw new AgentError('agent_session_not_found', 'Bot 会话不存在', 404);
+  if (meta.owner && meta.owner.taskId !== taskId) {
+    if (!allowTakeover) {
+      throw new AgentError(
+        'worker_session_owner_mismatch',
+        'Bot 会话已归属其他任务',
+        409
+      );
+    }
+    meta.owner = null;
+  }
+  meta.owner = {
+    agentId,
+    taskId,
+    runId: runId || null,
+    attachedAt: meta.owner ? meta.owner.attachedAt : nowIso(),
+  };
+  meta.scope = 'worker';
+  save();
+  return publicMeta(meta, (current.messages[meta.id] || []).length);
+}
+
+function assertWorkerSession(botId, sessionId, taskId) {
+  assertBot(botId);
+  const meta = findMeta(botId, sessionId);
+  if (!meta) {
+    throw new AgentError('worker_session_missing', 'Worker 会话不存在', 409);
+  }
+  if (meta.owner && meta.owner.taskId !== taskId) {
+    throw new AgentError(
+      'worker_session_owner_mismatch',
+      'Worker 会话已归属其他任务',
+      409
+    );
+  }
+  return publicMeta(meta, (load().messages[meta.id] || []).length);
+}
+
+function markRunning(botId, sessionId, runId) {
+  assertBot(botId);
+  const current = load();
+  const meta = findMeta(botId, sessionId);
+  if (!meta) throw new AgentError('worker_session_missing', 'Worker 会话不存在', 409);
+  const previous = clone(meta.lifecycle);
+  meta.lifecycle = {
+    ...(meta.lifecycle || defaultLifecycle()),
+    status: 'running',
+    startedAt: nowIso(),
+  };
+  if (meta.owner) meta.owner.runId = runId || meta.owner.runId;
+  try {
+    save();
+  } catch (error) {
+    meta.lifecycle = previous;
+    throw error;
+  }
+  return publicMeta(meta, (current.messages[meta.id] || []).length);
+}
+
+function closeSession(botId, sessionId, { status = 'closed', reason = null } = {}) {
+  assertBot(botId);
+  const current = load();
+  const meta = findMeta(botId, sessionId);
+  if (!meta) return null;
+  const finalStatus = LIFECYCLE_STATES.includes(status) ? status : 'closed';
+  meta.lifecycle = {
+    ...(meta.lifecycle || defaultLifecycle()),
+    status: finalStatus,
+    closedAt: nowIso(),
+    closeReason: typeof reason === 'string' ? reason.slice(0, 120) : null,
+  };
+  save();
+  return publicMeta(meta, (current.messages[meta.id] || []).length);
 }
 
 function getMessages(botId, sessionId) {
@@ -266,11 +403,17 @@ function reloadForTests() {
 module.exports = {
   STORE_FILE,
   MESSAGE_MAX,
+  SCOPES,
+  LIFECYCLE_STATES,
   listSessions,
   getSession,
   createSession,
   getMessages,
   appendMessages,
   deleteSession,
+  attachOwner,
+  assertWorkerSession,
+  markRunning,
+  closeSession,
   reloadForTests,
 };

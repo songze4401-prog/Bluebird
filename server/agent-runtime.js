@@ -326,6 +326,31 @@ async function executeToolCall(name, rawArgs, context) {
     return { ok: false, code: 'unknown_tool', error: `未注册的工具：${name}` };
   }
 
+  // Worker 工具权限网关：任务声明的工具集合由 Worker Runtime 注入，
+  // 拒绝时回调审计钩子；参数与返回内容不进入审计。
+  const authorizer =
+    context && typeof context.authorizer === 'function' ? context.authorizer : null;
+  if (authorizer) {
+    const verdict = authorizer(def.name);
+    if (!verdict || verdict.ok !== true) {
+      const code = (verdict && verdict.code) || 'tool_not_allowed';
+      monitor.complete({
+        ok: false,
+        code,
+        durationMs: Date.now() - startedAt,
+        executed: false,
+      });
+      if (typeof context.onToolDenied === 'function') {
+        try {
+          context.onToolDenied({ name: def.name, code });
+        } catch (_) {
+          // 审计失败不能改变拒绝结果。
+        }
+      }
+      return { ok: false, code, error: '当前任务不允许调用该工具' };
+    }
+  }
+
   if (policy && !policyAllowsTool(policy, def.name)) {
     monitor.complete({
       ok: false,
@@ -578,6 +603,8 @@ async function runAgentTurn({
   onToolEvent,
   onRequest,
   onToolResult,
+  toolAuthorizer = null,
+  onToolDenied = null,
   credentialKey = null,
   stream = false,
   onDelta = null,
@@ -797,6 +824,8 @@ async function runAgentTurn({
         cache,
         abortSignal,
         policy: activePolicy,
+        authorizer: toolAuthorizer,
+        onToolDenied,
         round,
       };
       let result = await executeToolCall(toolName, rawArgs, toolContext);

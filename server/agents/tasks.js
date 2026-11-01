@@ -58,6 +58,9 @@ const EVENT_TYPES = Object.freeze([
   'route.decided',
   'route.rejected',
   'task.started',
+  'worker.checkpoint',
+  'worker.heartbeat',
+  'tool.denied',
   'model.requested',
   'model.completed',
   'model.failed',
@@ -107,6 +110,8 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'contractVersion',
   'idempotent',
   'policyDigest',
+  'round',
+  'phase',
 ]);
 
 let taskCache = null;
@@ -160,6 +165,10 @@ function normalizeStoredTask(task) {
   setIfMissing('idempotencyKey', null);
   setIfMissing('route', null);
   setIfMissing('budget', null);
+  setIfMissing('runId', null);
+  setIfMissing('runStartedAt', null);
+  setIfMissing('heartbeatAt', null);
+  setIfMissing('checkpoint', null);
   return changed;
 }
 
@@ -401,6 +410,11 @@ function publicTask(task, { includeResult = true } = {}) {
     idempotencyKey: task.idempotencyKey || null,
     route: task.route ? clone(task.route) : null,
     budget: task.budget ? clone(task.budget) : null,
+    // Worker 运行期元数据（不属于 Task Contract 字段，随执行更新）。
+    runId: task.runId || null,
+    runStartedAt: task.runStartedAt || null,
+    heartbeatAt: task.heartbeatAt || null,
+    checkpoint: task.checkpoint ? clone(task.checkpoint) : null,
     deliveredToParentAt: task.deliveredToParentAt || null,
     deliveryMessageId: task.deliveryMessageId || null,
     deliveryStatus: task.deliveryStatus || 'not_applicable',
@@ -628,6 +642,10 @@ function createTask({
     idempotencyKey: cleanIdempotencyKey,
     route: cleanRoute,
     budget: cleanBudget,
+    runId: null,
+    runStartedAt: null,
+    heartbeatAt: null,
+    checkpoint: null,
     parentSessionId: cleanParentSession,
     parentMessageId: cleanParentMessage,
     parentUserText: cleanParentUserText,
@@ -713,6 +731,35 @@ function updateTask(taskId, patch = {}) {
   if (patch.startedAt !== undefined) task.startedAt = patch.startedAt;
   if (patch.completedAt !== undefined) task.completedAt = patch.completedAt;
   if (patch.errorCode !== undefined) task.errorCode = patch.errorCode;
+  if (patch.runId !== undefined) task.runId = patch.runId;
+  if (patch.runStartedAt !== undefined) task.runStartedAt = patch.runStartedAt;
+  if (patch.heartbeatAt !== undefined) task.heartbeatAt = patch.heartbeatAt;
+  // 旧任务/直接建任务可能没有 Worker 会话：运行开始时补建并回填，
+  // 只允许从空值变为实际会话，不允许改写已存在的会话身份。
+  if (
+    (patch.workerSessionId !== undefined || patch.sessionId !== undefined) &&
+    !task.sessionId
+  ) {
+    const next = String(patch.workerSessionId || patch.sessionId || '').trim();
+    if (next) {
+      task.workerSessionId = next;
+      task.sessionId = next;
+    }
+  }
+  if (patch.checkpoint !== undefined) {
+    if (patch.checkpoint === null) {
+      task.checkpoint = null;
+    } else if (typeof patch.checkpoint === 'object') {
+      task.checkpoint = {
+        round: Number.isInteger(patch.checkpoint.round) ? patch.checkpoint.round : 0,
+        toolCalls: Number.isInteger(patch.checkpoint.toolCalls)
+          ? patch.checkpoint.toolCalls
+          : 0,
+        phase: String(patch.checkpoint.phase || '').slice(0, 40),
+        at: typeof patch.checkpoint.at === 'string' ? patch.checkpoint.at : nowIso(),
+      };
+    }
+  }
   if (patch.deliveredToParentAt !== undefined) {
     task.deliveredToParentAt = patch.deliveredToParentAt;
   }
@@ -731,10 +778,22 @@ function updateTask(taskId, patch = {}) {
     }
     const result = patch.result;
     task.result = {
+      // 统一结果 schema：终态（completed/failed/cancelled/timed_out）都按
+      // 这一形状落库，status/errorCode 不再只存在于任务顶层。
+      status: STATUSES.includes(result.status) ? result.status : null,
       summary:
         typeof result.summary === 'string'
           ? result.summary.slice(0, RESULT_SUMMARY_MAX)
           : '',
+      artifacts: Array.isArray(result.artifacts)
+        ? result.artifacts
+            .filter(item => item && typeof item === 'object')
+            .slice(0, 40)
+            .map(item => ({
+              kind: String(item.kind || '').slice(0, 40),
+              id: String(item.id || '').slice(0, 120),
+            }))
+        : [],
       toolSteps: Array.isArray(result.toolSteps)
         ? result.toolSteps.slice(0, 20).map(step => ({
             name: String(step && step.name ? step.name : '').slice(0, 60),
@@ -766,6 +825,12 @@ function updateTask(taskId, patch = {}) {
             }))
         : [],
       requiresConfirmation: result.requiresConfirmation === true,
+      requiresApproval:
+        result.requiresApproval === true || result.requiresConfirmation === true,
+      errorCode:
+        typeof result.errorCode === 'string' ? result.errorCode.slice(0, 60) : null,
+      runId: typeof result.runId === 'string' ? result.runId.slice(0, 80) : null,
+      finishedAt: typeof result.finishedAt === 'string' ? result.finishedAt : null,
       rounds: Number.isInteger(result.rounds) ? result.rounds : 0,
       stopReason: typeof result.stopReason === 'string' ? result.stopReason : null,
       model: result.model && typeof result.model === 'object'

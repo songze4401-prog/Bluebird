@@ -446,9 +446,25 @@ function createRouter(overrides = {}) {
     }
 
     let workerSessionId = normalizeString(context.workerSessionId) || null;
-    if (!workerSessionId) {
+    if (workerSessionId) {
+      const meta = sessionStore.getSession(agentId, workerSessionId);
+      if (!meta) {
+        throw new AgentError('agent_session_not_found', 'Bot 会话不存在', 404);
+      }
+      if (meta.owner && meta.owner.taskId) {
+        const ownerTask = taskStore.getTask(meta.owner.taskId);
+        if (!ownerTask || !taskStore.isTerminalStatus(ownerTask.status)) {
+          throw new AgentError(
+            'worker_session_owner_mismatch',
+            'Bot 会话已归属其他任务',
+            409
+          );
+        }
+      }
+    } else {
       const session = sessionStore.createSession(agentId, {
         title: normalizeString(input.goal).slice(0, 30),
+        scope: 'worker',
       });
       workerSessionId = session.id;
     }
@@ -484,6 +500,21 @@ function createRouter(overrides = {}) {
         idempotent: true,
       });
       return { task, decision: { ...decision, idempotent: true }, idempotent: true };
+    }
+
+    // 任务创建后把 Worker 会话绑定到该任务；绑定失败不阻塞任务本身，
+    // Worker 启动时会再次尝试并做归属校验。
+    try {
+      sessionStore.attachOwner(agentId, workerSessionId, {
+        agentId,
+        taskId: task.taskId,
+      });
+    } catch (error) {
+      console.warn(
+        `[agent-route] session owner attach failed task=${task.taskId} code=${
+          (error && error.code) || 'owner_attach_failed'
+        }`
+      );
     }
 
     writeRouteEvent(appendEvent, agentId, 'route.decided', decision, {
