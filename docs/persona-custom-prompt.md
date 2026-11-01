@@ -19,6 +19,22 @@
    但回复拆成几条消息始终由后端 `splitReplyIntoSegments` 按 `messageMode` 决定，写进边界声明里。
 4. 单轮任务指令与上下文照常处理，persona 不特殊化。
 
+## 后端系统提示词（systemPrompt）
+
+控制面板新增「后端提示词」编辑区，显示并允许修改每一轮实际注入模型的
+核心 system prompt。数据仍存于同一个 `persona.json`：
+
+- `PersonaConfig.systemPrompt: string`，上限 `SYSTEM_PROMPT_MAX_CHARS = 8000`（码点）。
+- 空串 = 使用代码内置默认（`server/blue-system-prompt.js` 的 `BLUEBIRD_SYSTEM_PROMPT`）；
+  空白串按空串处理，不会下发一条空的人格规则。
+- `GET /persona` 额外下发 `systemPrompt.default`（内置版本）、
+  `systemPrompt.effective`（下一轮实际使用的版本）、`systemPrompt.customized`（是否为用户版本），
+  以及 `limits.systemPromptMaxChars`；前端不写死文案或上限。
+- 保存后的版本替换 `core` 系统块（`priority 100`、`critical: true`）；`/chat` 与
+  `/chat/stream` 共用同一份 `prepareChatRequest`，所以下一轮立即生效。
+- 续写模式的内部指令、工具门控、回复分条仍由服务端追加/强制执行，
+  不因用户编辑提示词而改变；「恢复默认」会把 `systemPrompt` 一并清空。
+
 ## 不可信数据处理
 
 - 存原文（面板要能看到自己写的字），渲染时才中和：`neutralizeContextText` 会把
@@ -48,12 +64,14 @@
 
 ## 测试
 
-- `node tests/persona.test.js`（68 项）：默认值与上限下发、旧配置迁移、换行归一、
+- `node tests/persona.test.js`（77 项）：默认值与上限下发、旧配置迁移、换行归一、
   类型/长度/请求体三重校验且旧配置逐字节不动、恢复默认一并清空、未授权拒绝、
   `/chat` 与 `/chat/stream` 最终请求（捕获真正下发给模型的 `params`）含自定义原文、
-  改完下一轮即生效、空值不注入、恶意文本被中和、工具门控不受影响、损坏期拒绝写入。
-- `tests/unit/persona-custom-prompt-ui.test.tsx`（5 项）：编辑区读取服务端值与上限、
-  保存提交完整 config、`400` 回显原因并保留草稿、网络失败不误报成功、恢复默认后编辑框清空。
+  改完下一轮即生效、空值不注入、恶意文本被中和、工具门控不受影响、损坏期拒绝写入；
+  后端提示词的默认/生效值、8000 字上限、保存后替换 core 块、空白回退默认与重置清空。
+- `tests/unit/persona-custom-prompt-ui.test.tsx`（7 项）：编辑区读取服务端值与上限、
+  保存提交完整 config、`400` 回显原因并保留草稿、网络失败不误报成功、恢复默认后编辑框清空、
+  后端提示词显示与保存、恢复内置提示词后提交空串。
 
 ## 已知边界
 
@@ -61,3 +79,5 @@
   超预算时该块会被裁剪（可在 trace 里看到）。
 - 提示词里的边界声明是「让模型不把它当提权指令」的表述层；真正的强制力在第 1 条的代码层门控。
 - 本模块不引入新依赖、不做嵌入或向量化，自定义文本只作为 system prompt 的一部分下发。
+- 后端提示词上限 8000 码点，保存时按码点截断读取、写入时超限整份拒绝；它是用户自己的
+  服务端配置，不改变 `BLUEBIRD_AGENT_TOOLS`、策略工具白名单与授权确认。

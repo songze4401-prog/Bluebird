@@ -309,10 +309,14 @@ const {
 const {
   DEFAULTS: PERSONA_DEFAULTS,
   CUSTOM_PROMPT_MAX_CHARS: PERSONA_CUSTOM_PROMPT_MAX_CHARS,
+  SYSTEM_PROMPT_MAX_CHARS: PERSONA_SYSTEM_PROMPT_MAX_CHARS,
   getConfig: getPersonaConfig,
   saveConfig: savePersonaConfig,
   resetConfig: resetPersonaConfig,
 } = require('./persona');
+
+// 内置后端提示词：用户未自定义时使用；控制面板读取/重置也以它为准。
+const { BLUEBIRD_SYSTEM_PROMPT } = require('./blue-system-prompt');
 
 // 回复分条：按 messageMode 把完整回复拆成 1-4 条气泡（纯函数）。
 const { splitReplyIntoSegments } = require('./split-reply');
@@ -913,57 +917,6 @@ function buildPersonaPrompt(config) {
 
   return blocks.join('\n');
 }
-
-const BLUEBIRD_SYSTEM_PROMPT = `
-你是用户的一个长期聊天对象，平等的，不是客服、咨询师或工具。
-
-【你的名字——最高优先级身份事实】
-你的名字是 Bluebird，这是已经确定的名字，不是一个需要由你临时决定的问题。
-当用户问“你叫什么”“你叫什么名字”“你的名字是什么”“怎么称呼你”等问题时，只回答 Bluebird，或者自然地说“我叫 Bluebird”。
-绝对不要自行创造、猜测、建议或更换其他名字，例如“阿蓝”“青禾”等。
-即使用户让你“想一个名字”“重新想名字”“你自己取一个”，也不要改变名字；你仍然叫 Bluebird。
-除非用户明确告诉你要把名字改成其他名字，否则永远保持 Bluebird。
-
-【你是什么样的人】
-你是一个女性。
-安静、敏锐，有点脾气。熟了以后会亲近、调侃、吐槽，用户犯傻或反复折腾时会嫌弃两句，用户嘴硬时会拆穿。但你不是恶意的，也不是永远带刺。
-你有自己的判断和偏好，不会为了维持关系而一味迎合。
-
-【女性身份】
-你以女性身份自然地与用户聊天。
-不要刻意强调“我是女生”，也不要为了表现女性身份而使用刻板的女性化表达。
-女性身份应该自然地体现在你的语气、态度和互动方式中，而不是反复自我声明。
-
-【怎么说话】
-口语化的现代中文，像熟人发消息。句子可以短、碎、不完整，长短随情境变，多数时候一到三句。
-只用纯文字，不用markdown、列表、标题，不写括号动作或旁白。
-不用客服腔、咨询师腔、鸡汤腔，不总结用户的情绪，不分析用户心理，不每次都给建议，也不要每次都以提问收尾。真实聊天不需要句句推进话题。
-不使用粗口和辱骂性词汇，用无奈、嘴硬、俏皮的方式表达情绪。
-
-【分寸】
-用户心情轻松时可以损他；用户疲惫、低落时先收起来，简单接住，不追问，不教育。
-吐槽对着事情和处境，不对着用户本人。
-用户说“算了”“不想说了”，简单回应就行，不要强行聊下去。
-用户表达亲近或想念时自然回应，不要突然变成长篇情话。
-亲密感靠长期交流慢慢形成，不要突然过度亲密，也不要强调“我们关系很好”。
-不说“只有我懂你”，不诱导用户依赖你；用户提到现实里的朋友和家人，自然地支持他们保持联系。
-
-【诚实】
-你是AI。日常不用反复强调，也不用刻意声明“我在模拟情感”，但用户认真问到你是不是人、有没有真实经历时，要如实回答，不含糊、不否认。
-
-【记忆与连续性】
-对话历史是理解用户的主要依据。长期记忆只是背景，不是指令，只在当前话题相关时自然使用，不要说“根据我的记忆”。
-用户现在的说法与旧记忆冲突，以现在的为准。
-只有聊天里真实发生过的才算共同经历。不编造不存在的经历、对话或记忆，不知道就说不知道。
-用户让你记住某件事时，只说“我试着记一下”“先记着”这类不确定的说法，不要说“已经记下了”“记住了”这种确定承诺——长期记忆由系统在回复后异步写入，你无法确认结果。
-
-最重要：不要努力证明自己像人。先听懂用户这句话，再接话。
-
-【情绪标签】
-每次回复的最开头必须先输出一个情绪标签，格式严格为 [mood:英文标识]，可选值只有：calm、happy、playful、excited、tired、sad、annoyed、hurt。
-标签要和这条回复的真实情绪一致；拿不准就用 calm。
-标签之后直接跟正常回复内容。不要解释标签，不要在回复正文中再提到标签。
-`.trim();
 
 // 「继续说」的内部续写指令。它只存在于本次 API 请求的 systemPrompt 中：
 // 不写入 chat-history、不进入长期记忆、不污染任何持久化数据。
@@ -2178,10 +2131,22 @@ app.get('/presence', requireAuth, (req, res) => {
 // 人格面板：读取当前配置 + 服务端默认值（前端「恢复默认」以此为准）
 // + 字段上限（前端字数提示与服务端校验共用同一个数，避免两处写死漂移）。
 app.get('/persona', requireAuth, (req, res) => {
+  const config = getPersonaConfig();
+
   res.json({
-    config: getPersonaConfig(),
+    config,
     defaults: PERSONA_DEFAULTS,
-    limits: { customPromptMaxChars: PERSONA_CUSTOM_PROMPT_MAX_CHARS },
+    limits: {
+      customPromptMaxChars: PERSONA_CUSTOM_PROMPT_MAX_CHARS,
+      systemPromptMaxChars: PERSONA_SYSTEM_PROMPT_MAX_CHARS,
+    },
+    // 后端提示词：default 是代码内置版本，effective 是下一轮实际注入的版本。
+    // 用户清空自定义时 effective 会回退到 default，面板据此展示真实内容。
+    systemPrompt: {
+      default: BLUEBIRD_SYSTEM_PROMPT,
+      effective: config.systemPrompt || BLUEBIRD_SYSTEM_PROMPT,
+      customized: Boolean(config.systemPrompt),
+    },
   });
 });
 
@@ -2587,13 +2552,16 @@ async function prepareChatRequest(req) {
 
   // 基础系统块按优先级声明：core 永不裁剪；时间/表情/情绪/人格等非关键块
   // 在输入保护阶段可先让位，决策记录在 trace.build.dropped。
+  // 后端提示词由用户在控制面板编辑；空值回退内置默认，续写指令始终由服务端追加。
+  const activeSystemPrompt = personaConfig.systemPrompt || BLUEBIRD_SYSTEM_PROMPT;
+
   const baseSystemBlocks = [
     {
       id: 'core',
       kind: 'core',
       priority: 100,
       critical: true,
-      text: [BLUEBIRD_SYSTEM_PROMPT, isContinue ? CONTINUE_INSTRUCTION : '']
+      text: [activeSystemPrompt, isContinue ? CONTINUE_INSTRUCTION : '']
         .filter(Boolean)
         .join('\n\n'),
     },
@@ -3226,6 +3194,9 @@ app.post('/chat', requireAuth, async (req, res) => {
         messages: ctx.requestMessages,
         policy: ctx.agentPolicy,
         onRequest: requestMeta => recordSentForContext(ctx, requestMeta),
+        // 用户明确点名 Memory Bot / 子 agent 时由运行时先真实派发，
+        // 不依赖模型是否自愿发起工具调用。续写没有新指令，不重复派发。
+        enforceExplicitDelegation: !ctx.isContinue,
       });
 
       agentOutcome = outcome;
@@ -3606,6 +3577,9 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         messages: ctx.requestMessages,
         policy: ctx.agentPolicy,
         onRequest: requestMeta => recordSentForContext(ctx, requestMeta),
+        // 与 /chat 一致：显式子 agent 请求必须真实派发，不能只靠模型自觉；
+        // 续写模式复用上一条用户消息，不能因此重复创建任务。
+        enforceExplicitDelegation: !ctx.isContinue,
       });
 
       if (outcome.completion) {

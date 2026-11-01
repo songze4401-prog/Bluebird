@@ -310,6 +310,11 @@ export function ControlPanelScreen({
   // 字数上限由服务端 GET /persona 下发（persona.js 是唯一来源，前端不写死）；
   // 拿到之前只做纯计数展示，不做拦截——超限由服务端拒绝并回显原因。
   const [customPromptMax, setCustomPromptMax] = useState<number | null>(null);
+  // 后端系统提示词：编辑区显示服务端下发的 effective 版本；
+  // 保存时若与内置默认逐字相同则提交空串，继续跟随服务端默认值。
+  const [systemPromptText, setSystemPromptText] = useState('');
+  const [systemPromptDefault, setSystemPromptDefault] = useState('');
+  const [systemPromptMax, setSystemPromptMax] = useState<number | null>(null);
 
   const [policy, setPolicy] = useState<AgentPolicyConfig | null>(null);
   const [policyMeta, setPolicyMeta] = useState<AgentPolicyResponse['meta'] | null>(null);
@@ -345,6 +350,23 @@ export function ControlPanelScreen({
         if (!cancelled) {
           setConfig(data.config);
           setCustomPromptMax(data.limits?.customPromptMaxChars ?? null);
+          setSystemPromptMax(data.limits?.systemPromptMaxChars ?? null);
+
+          const storedSystemPrompt =
+            typeof data.config.systemPrompt === 'string'
+              ? data.config.systemPrompt
+              : '';
+          const defaultSystemPrompt =
+            typeof data.systemPrompt?.default === 'string'
+              ? data.systemPrompt.default
+              : '';
+
+          setSystemPromptDefault(defaultSystemPrompt);
+          setSystemPromptText(
+            typeof data.systemPrompt?.effective === 'string'
+              ? data.systemPrompt.effective
+              : storedSystemPrompt
+          );
         }
       } catch {
         if (!cancelled) setLoadError('配置加载失败，请检查后端连接');
@@ -497,6 +519,11 @@ export function ControlPanelScreen({
     setNotice(null);
   };
 
+  const updateSystemPrompt = (text: string) => {
+    setSystemPromptText(text);
+    setNotice(null);
+  };
+
   const notify = (text: string, error = false) => setNotice({ text, error });
 
   // 返回 null 表示保存成功；返回字符串表示失败原因（本地编辑内容一律保留）。
@@ -521,6 +548,13 @@ export function ControlPanelScreen({
 
     // 以服务端归一化结果为准（换行统一、越界夹取），避免面板与实际注入不一致
     setConfig(data.config);
+
+    const storedSystemPrompt =
+      typeof data.config.systemPrompt === 'string' ? data.config.systemPrompt : '';
+
+    if (storedSystemPrompt) setSystemPromptText(storedSystemPrompt);
+    else if (systemPromptDefault) setSystemPromptText(systemPromptDefault);
+
     return null;
   };
 
@@ -531,7 +565,15 @@ export function ControlPanelScreen({
     setNotice(null);
 
     try {
-      const failure = await applyConfig({ config });
+      // 与内置默认逐字相同时提交空串：继续跟随服务端默认，
+      // 避免把默认值复制成一份永不更新的自定义副本。
+      const systemPromptForSave =
+        systemPromptDefault && systemPromptText === systemPromptDefault
+          ? ''
+          : systemPromptText;
+      const failure = await applyConfig({
+        config: { ...config, systemPrompt: systemPromptForSave },
+      });
 
       // 失败原因（400/409/500）一律按错误样式显示，不能和成功提示同色
       if (failure) notify(failure, true);
@@ -567,6 +609,11 @@ export function ControlPanelScreen({
   const customPromptChars = Array.from(customPromptText).length;
   const customPromptOver =
     customPromptMax !== null && customPromptChars > customPromptMax;
+
+  const systemPromptChars = Array.from(systemPromptText).length;
+  const systemPromptOver =
+    systemPromptMax !== null && systemPromptChars > systemPromptMax;
+  const systemPromptCustomized = Boolean(config?.systemPrompt);
 
   const selectedPolicyToolNames = policy
     ? new Set(policy.tools.allowedTools ?? policyTools.map(tool => tool.name))
@@ -623,6 +670,56 @@ export function ControlPanelScreen({
 
           {config && (
             <>
+              <View style={styles.systemPromptBlock}>
+                <View style={styles.sliderHead}>
+                  <Text style={styles.sliderTitle}>后端提示词</Text>
+                  <Text
+                    style={
+                      systemPromptOver
+                        ? styles.counterOver
+                        : styles.counterNormal
+                    }
+                  >
+                    {systemPromptMax === null
+                      ? `${systemPromptChars} 字`
+                      : `${systemPromptChars} / ${systemPromptMax} 字`}
+                  </Text>
+                </View>
+
+                <Text style={styles.customHint} testID="system-prompt-hint">
+                  {'这里显示每轮实际发给模型的后端系统提示词（System Prompt）。修改后点击底部「保存」，从下一轮聊天生效；清空则恢复为内置默认。工具权限与消息分条仍由后端强制执行，不在这段文字里。'}
+                </Text>
+
+                <TextInput
+                  testID="system-prompt-input"
+                  style={styles.systemPromptInput}
+                  value={systemPromptText}
+                  onChangeText={updateSystemPrompt}
+                  multiline
+                  textAlignVertical="top"
+                  placeholder="输入后端系统提示词"
+                  placeholderTextColor={theme.textMuted}
+                  accessibilityLabel="后端系统提示词"
+                />
+
+                {systemPromptDefault ? (
+                  <TouchableOpacity
+                    style={styles.promptResetButton}
+                    onPress={() => {
+                      setSystemPromptText(systemPromptDefault);
+                      setNotice(null);
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Text
+                      style={[styles.promptResetText, { color: theme.accent }]}
+                    >
+                      恢复内置提示词
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+
               {SLIDERS.map(def => (
                 <View key={def.key} style={styles.sliderBlock}>
                   <View style={styles.sliderHead}>
@@ -722,6 +819,10 @@ export function ControlPanelScreen({
                   {customPromptChars === 0
                     ? '未填写'
                     : `已填写 ${customPromptChars} 字`}
+                  {'\n'}后端提示词：
+                  {systemPromptCustomized
+                    ? `已自定义 ${systemPromptChars} 字`
+                    : `内置默认（${systemPromptChars} 字）`}
                 </Text>
               </View>
 
@@ -862,8 +963,7 @@ export function ControlPanelScreen({
 
               <Text style={styles.policySubhead}>可用工具</Text>
               <Text style={styles.sectionHint}>
-                只能缩小服务端已注册工具集合，不能注册新工具。高风险工具始终由
-                后端确认门拦截。
+                {'只能缩小服务端已注册工具集合，不能注册新工具。高风险工具始终由后端确认门拦截。显式点名 Memory Bot / 子 agent 时，系统会先真实调用 delegate_to_bot；禁用该工具时只能如实说明无法派发。'}
               </Text>
               {policyTools.map(tool => {
                 const checked = selectedPolicyToolNames.has(tool.name);
@@ -1204,6 +1304,29 @@ const createStyles = (theme: Theme) =>
       color: theme.textBody,
       backgroundColor: theme.surface,
       borderColor: theme.borderStrong,
+    },
+    systemPromptBlock: {
+      marginTop: 6,
+      marginBottom: 24,
+    },
+    systemPromptInput: {
+      borderWidth: 1,
+      borderRadius: 10,
+      padding: 12,
+      minHeight: 240,
+      fontSize: 13,
+      lineHeight: 20,
+      color: theme.textBody,
+      backgroundColor: theme.surface,
+      borderColor: theme.borderStrong,
+    },
+    promptResetButton: {
+      alignSelf: 'flex-start',
+      paddingVertical: 8,
+    },
+    promptResetText: {
+      fontSize: 13,
+      fontWeight: '600',
     },
     counterNormal: {
       color: theme.textMuted,

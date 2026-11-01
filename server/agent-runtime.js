@@ -34,6 +34,22 @@ const knowledgeSearchTool = require('./tool-knowledge-search');
 const delegateToBotTool = require('./tool-dispatch-bot');
 const { truncateText } = require('./text-utils');
 const { buildPolicyInstruction } = require('./agent-policy');
+const { detectExplicitDelegation } = require('./delegation-intent');
+
+const FORCED_DELEGATION_INSTRUCTION = `
+【服务端已执行子 agent 委派】
+本轮用户明确要求把任务交给 Memory Bot / 子 agent 处理。系统已经在本次请求中实际调用 delegate_to_bot，工具结果在上一条 tool 消息里。
+你必须只依据该工具结果回复：
+- ok=true 时，简短说明任务已提交、会异步执行，结果稍后回到当前会话或任务页；不要声称任务已经完成，不要编造进度、队列或失败信息。
+- ok=false 时，如实说明提交失败的原因，不得改口说已经派发成功。
+- 不要再调用 delegate_to_bot。
+`.trim();
+
+const FORCED_DELEGATION_DENIED_INSTRUCTION = `
+【本次无法调用子 agent】
+用户明确要求把任务交给 Memory Bot / 子 agent，但当前 Agent 策略不允许调用 delegate_to_bot，系统无法派发任务。
+你必须如实说明当前无法派发及原因；绝不能说已经派发、已经在队列里或正在处理。
+`.trim();
 
 // ---- 可调参数（环境变量，加载时读取；开关除外——开关每请求重读） ----
 // 逐个显式读取（不用动态 process.env[name]：既让 lint 的
@@ -578,11 +594,12 @@ function normalizeToolCall(call) {
  *   isClientGone           断连探针；每一轮模型调用前检查
  *   onToolEvent            工具生命周期事件回调（SSE 用）
  *
- * 返回 { rawReply, toolSteps, rounds, completion }：
+ * 返回 { rawReply, toolSteps, rounds, completion, delegationEnforced }：
  *   rawReply    最终文本（交 completeChatTurn 清洗落盘）
  *   toolSteps   工具执行摘要数组（独立字段，禁敏感内容）
  *   rounds      实际模型调用轮数
  *   completion  末轮 completion（调用方取 model 回执）；断连未调用时为 null
+ *   delegationEnforced  本次是否由运行时强制实际调用了 delegate_to_bot
  */
 async function runAgentTurn({
   providerId,
@@ -608,6 +625,9 @@ async function runAgentTurn({
   credentialKey = null,
   stream = false,
   onDelta = null,
+  // 主控聊天入口开启：用户明确点名 Memory Bot / 子 agent 时，
+  // 不走"等模型自觉调用"，由运行时先真实调用 delegate_to_bot。
+  enforceExplicitDelegation = false,
 }) {
   logSwitchIfChanged();
 
@@ -617,10 +637,6 @@ async function runAgentTurn({
   // 绝不写入 sessions.json（落盘由调用方只收最终消息）。
   const conversation = messages.map(message => ({ ...message }));
   const instruction = buildPolicyInstruction(activePolicy);
-  if (instruction) {
-    const insertAt = conversation[0] && conversation[0].role === 'system' ? 1 : 0;
-    conversation.splice(insertAt, 0, { role: 'system', content: instruction });
-  }
   const toolSteps = [];
   const cache = new Map();
 
@@ -651,6 +667,200 @@ async function runAgentTurn({
   let readOnlyRetries = 0;
   let consecutiveFailures = 0;
 
+  // 执行并记录一次工具调用：循环与「强制委派」共用同一路径，
+  // 保证超时、只读重试、去重、事件、toolSteps 与监控口径完全一致。
+  const performToolCall = async (normalized, round) => {
+    const startedAtTool = Date.now();
+    const toolName = normalized.function.name;
+
+    if (typeof onToolEvent === 'function') {
+      onToolEvent({
+        type: 'tool_start',
+        name: toolName,
+        callId: normalized.id,
+      });
+    }
+
+    let rawArgs = null;
+    try {
+      rawArgs = JSON.parse(normalized.function.arguments || '{}');
+    } catch (_) {
+      rawArgs = null;
+    }
+
+    console.log(`[agent-dispatch] round=${round} name=${toolName} dispatched=true`);
+
+    const toolContext = {
+      sessionId,
+      memoryScopeSessionId: memoryScopeSessionId || sessionId,
+      userText,
+      userMessageId,
+      cache,
+      abortSignal,
+      policy: activePolicy,
+      authorizer: toolAuthorizer,
+      onToolDenied,
+      round,
+    };
+    let result = await executeToolCall(toolName, rawArgs, toolContext);
+    toolCallCount += 1;
+
+    const toolDef = tools.get(toolName);
+    if (
+      !result.ok &&
+      toolDef &&
+      toolDef.readOnly === true &&
+      readOnlyRetries < maxReadOnlyRetries &&
+      (result.code === 'tool_timeout' || result.code === 'tool_error')
+    ) {
+      readOnlyRetries += 1;
+      result = await executeToolCall(toolName, rawArgs, {
+        ...toolContext,
+        cache: new Map(),
+      });
+    }
+
+    if (result.ok) consecutiveFailures = 0;
+    else consecutiveFailures += 1;
+
+    const summary = buildToolSummary(result);
+
+    console.log(
+      `[agent-tool] round=${round} name=${toolName}` +
+        ` ok=${result.ok === true} code=${result.code || 'none'}` +
+        ` deduped=${result.deduped === true} durationMs=${Date.now() - startedAtTool}`
+    );
+
+    if (typeof onToolEvent === 'function') {
+      onToolEvent({
+        type: 'tool_end',
+        name: toolName,
+        callId: normalized.id,
+        ok: result.ok === true,
+        ...(result.code ? { code: result.code } : {}),
+        ...(result.deduped ? { deduped: true } : {}),
+        summary,
+      });
+    }
+
+    if (typeof onToolResult === 'function') {
+      try {
+        onToolResult({
+          name: toolName,
+          callId: normalized.id,
+          ok: result.ok === true,
+          durationMs: Date.now() - startedAtTool,
+          result,
+        });
+      } catch (_) {
+        /* 证据回调失败不影响工具结果转发 */
+      }
+    }
+
+    toolSteps.push({
+      name: toolName,
+      ok: result.ok === true,
+      summary: truncateText(summary, 120),
+      durationMs: Date.now() - startedAtTool,
+    });
+
+    conversation.push(
+      tagModelMessage(
+        {
+          role: 'tool',
+          tool_call_id: normalized.id,
+          content: truncateText(JSON.stringify(result), TOOL_RESULT_MAX),
+        },
+        `tool:${normalized.id}`
+      )
+    );
+
+    monitoring.recordToolResultReturned({
+      toolName: normalized.function.name,
+      round,
+      forwarded: true,
+    });
+
+    console.log(`[agent-result] round=${round} name=${toolName} forwarded=true`);
+
+    return result;
+  };
+
+  // 显式子 agent 请求：先由运行时真实调用 delegate_to_bot，再让模型
+  // 依据工具结果回复。模型是否"愿意"调用工具不再决定任务是否真的派出。
+  // 只在调用方显式开启（主控聊天）时生效；策略关闭或不允许该工具时不派发。
+  let forcedDelegationDispatched = false;
+  let forcedDelegationNotice = '';
+
+  if (
+    enforceExplicitDelegation &&
+    !(typeof isClientGone === 'function' && isClientGone()) &&
+    Date.now() - startedAt <= maxTotalMs
+  ) {
+    const intent = detectExplicitDelegation(userText);
+
+    if (intent) {
+      if (
+        tools.has('delegate_to_bot') &&
+        policyAllowsTool(activePolicy, 'delegate_to_bot')
+      ) {
+        const forcedCall = normalizeToolCall({
+          id: `call_forced_delegate_${crypto.randomUUID()}`,
+          type: 'function',
+          function: {
+            name: 'delegate_to_bot',
+            arguments: JSON.stringify({
+              botId: 'memory',
+              taskType: intent.taskType,
+              goal: intent.goal,
+              ...(intent.context ? { context: intent.context } : {}),
+            }),
+          },
+        });
+
+        conversation.push(
+          tagModelMessage(
+            {
+              role: 'assistant',
+              content: null,
+              tool_calls: [forcedCall],
+            },
+            'assistant-tool-call:forced-delegation'
+          )
+        );
+
+        const result = await performToolCall(forcedCall, 1);
+        forcedDelegationDispatched = true;
+        forcedDelegationNotice = FORCED_DELEGATION_INSTRUCTION;
+
+        console.log(
+          `[agent-delegate] enforced=true taskType=${intent.taskType}` +
+            ` ok=${result.ok === true} code=${result.code || 'none'}`
+        );
+      } else {
+        forcedDelegationNotice = FORCED_DELEGATION_DENIED_INSTRUCTION;
+        console.log('[agent-delegate] enforced=false reason=policy_tool_denied');
+      }
+    }
+  }
+
+  const systemInstructions = [instruction, forcedDelegationNotice]
+    .filter(Boolean)
+    .join('\n\n');
+
+  if (systemInstructions) {
+    const insertAt = conversation[0] && conversation[0].role === 'system' ? 1 : 0;
+    conversation.splice(insertAt, 0, {
+      role: 'system',
+      content: systemInstructions,
+    });
+  }
+
+  // 已由运行时派发后不再把 delegate_to_bot 暴露给模型，避免同一任务被重复提交。
+  const requestSpecs = forcedDelegationDispatched
+    ? specs.filter(spec => spec.function.name !== 'delegate_to_bot')
+    : specs;
+
   for (let round = 1; round <= maxRounds; round += 1) {
     if (typeof isClientGone === 'function' && isClientGone()) {
       stopReason = 'client_gone';
@@ -665,10 +875,10 @@ async function runAgentTurn({
     const isFinalRound = round === maxRounds || toolBudgetReached;
 
     rounds = round;
-    const requestToolCount = isFinalRound ? 0 : specs.length;
+    const requestToolCount = isFinalRound ? 0 : requestSpecs.length;
     const requestToolNames = isFinalRound
       ? ''
-      : specs.map(spec => spec.function.name).join(',');
+      : requestSpecs.map(spec => spec.function.name).join(',');
 
     // 记录实际请求元数据：不记录 messages、工具参数或用户内容。
     console.log(
@@ -702,8 +912,11 @@ async function runAgentTurn({
       credentialKey,
       signal: abortSignal,
       stream,
-      // 末轮/预算耗尽轮强制无 tools：模型只能产出文本，从结构上终结循环
-      ...(isFinalRound ? {} : { tools: specs, tool_choice: 'auto' }),
+      // 末轮/预算耗尽轮强制无 tools：模型只能产出文本，从结构上终结循环。
+      // requestSpecs 为空时也不下发空数组，避免部分服务商拒绝 tools: []。
+      ...(!isFinalRound && requestToolCount
+        ? { tools: requestSpecs, tool_choice: 'auto' }
+        : {}),
     };
     completion = await createChatCompletion(completionRequest);
     if (stream) {
@@ -796,118 +1009,7 @@ async function runAgentTurn({
         break;
       }
 
-      const startedAtTool = Date.now();
-      const toolName = normalized.function.name;
-
-      if (typeof onToolEvent === 'function') {
-        onToolEvent({
-          type: 'tool_start',
-          name: toolName,
-          callId: normalized.id,
-        });
-      }
-
-      let rawArgs = null;
-      try {
-        rawArgs = JSON.parse(normalized.function.arguments || '{}');
-      } catch (_) {
-        rawArgs = null;
-      }
-
-      console.log(`[agent-dispatch] round=${round} name=${toolName} dispatched=true`);
-
-      const toolContext = {
-        sessionId,
-        memoryScopeSessionId: memoryScopeSessionId || sessionId,
-        userText,
-        userMessageId,
-        cache,
-        abortSignal,
-        policy: activePolicy,
-        authorizer: toolAuthorizer,
-        onToolDenied,
-        round,
-      };
-      let result = await executeToolCall(toolName, rawArgs, toolContext);
-      toolCallCount += 1;
-
-      const toolDef = tools.get(toolName);
-      if (
-        !result.ok &&
-        toolDef &&
-        toolDef.readOnly === true &&
-        readOnlyRetries < maxReadOnlyRetries &&
-        (result.code === 'tool_timeout' || result.code === 'tool_error')
-      ) {
-        readOnlyRetries += 1;
-        result = await executeToolCall(toolName, rawArgs, {
-          ...toolContext,
-          cache: new Map(),
-        });
-      }
-
-      if (result.ok) consecutiveFailures = 0;
-      else consecutiveFailures += 1;
-
-      const summary = buildToolSummary(result);
-
-      console.log(
-        `[agent-tool] round=${round} name=${toolName}` +
-          ` ok=${result.ok === true} code=${result.code || 'none'}` +
-          ` deduped=${result.deduped === true} durationMs=${Date.now() - startedAtTool}`
-      );
-
-      if (typeof onToolEvent === 'function') {
-        onToolEvent({
-          type: 'tool_end',
-          name: toolName,
-          callId: normalized.id,
-          ok: result.ok === true,
-          ...(result.code ? { code: result.code } : {}),
-          ...(result.deduped ? { deduped: true } : {}),
-          summary,
-        });
-      }
-
-      if (typeof onToolResult === 'function') {
-        try {
-          onToolResult({
-            name: toolName,
-            callId: normalized.id,
-            ok: result.ok === true,
-            durationMs: Date.now() - startedAtTool,
-            result,
-          });
-        } catch (_) {
-          /* 证据回调失败不影响工具结果转发 */
-        }
-      }
-
-      toolSteps.push({
-        name: toolName,
-        ok: result.ok === true,
-        summary: truncateText(summary, 120),
-        durationMs: Date.now() - startedAtTool,
-      });
-
-      conversation.push(
-        tagModelMessage(
-          {
-            role: 'tool',
-            tool_call_id: normalized.id,
-            content: truncateText(JSON.stringify(result), TOOL_RESULT_MAX),
-          },
-          `tool:${normalized.id}`
-        )
-      );
-
-      monitoring.recordToolResultReturned({
-        toolName: normalized.function.name,
-        round,
-        forwarded: true,
-      });
-
-      console.log(`[agent-result] round=${round} name=${toolName} forwarded=true`);
+      await performToolCall(normalized, round);
 
       if (consecutiveFailures >= 2) {
         batchStopReason = 'repeated_tool_failure';
@@ -961,6 +1063,7 @@ async function runAgentTurn({
     toolCallCount,
     readOnlyRetries,
     reachedMaxRounds,
+    delegationEnforced: forcedDelegationDispatched,
   };
 }
 

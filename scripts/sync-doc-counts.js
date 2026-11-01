@@ -39,7 +39,7 @@ const NOTES = {
   sessions:
     'sessions: legacy migration, CRUD/isolation, 1000-message retention, /history cursor pagination, trim metadata',
   persona:
-    'persona panel: split-reply rules (incl. short-segment regression), /persona API, customPrompt (defaults, old-file migration, strict type/length/body-size validation with the stored file left byte-identical, reset clears it), custom block in the final /chat and /chat/stream model request, empty value = legacy prompt, malicious text neutralized and tool gating unchanged, prompt injection, per-mode splitting, corruption protection',
+    'persona panel: split-reply rules (incl. short-segment regression), /persona API, customPrompt (defaults, old-file migration, strict type/length/body-size validation with the stored file left byte-identical, reset clears it), editable systemPrompt (built-in default vs effective, 8000-char limit, saved prompt replaces the core block in /chat and /chat/stream, blank falls back to built-in), custom block in the final /chat and /chat/stream model request, empty value = legacy prompt, malicious text neutralized and tool gating unchanged, prompt injection, per-mode splitting, corruption protection',
   'chat-stream':
     'SSE streaming: stream-strip rules, /chat/stream framing/deltas/done fields, persistence timing, continue mode, mid-stream error, pure-image memory extraction, /chat coexistence',
   multimodal:
@@ -57,7 +57,7 @@ const NOTES = {
   'agent-policy':
     'Agent policy schema/persistence/API, mode/tool whitelist, budgets, high-risk confirmation gate, trace privacy',
   'agent-tools':
-    'agent tool calling V1: three gates (switch / capability / no-new-image), history-image and MIME boundary, 3-round cap, per-session memory scope, tool timeout & abort, late-result handling, toolSteps persistence & read-back, SSE tool_start/tool_end, model semantics on downgrade',
+    'agent tool calling V1: three gates (switch / capability / no-new-image), explicit delegation requests dispatched by the runtime even when the model returns text only (delegate removed from the follow-up request), history-image and MIME boundary, 3-round cap, per-session memory scope, tool timeout & abort, late-result handling, toolSteps persistence & read-back, SSE tool_start/tool_end, model semantics on downgrade',
   'memory-retrieval':
     'filters, hybrid scoring, budgets, explainable metadata, tool validation',
   'memory-semantic':
@@ -85,7 +85,7 @@ const NOTES = {
   'memory-budget-golden':
     'budget trimming: 10 memories → memoryMaxItems=8 → final request injects ≤8, token budget enforced',
   'agent-dispatch':
-    'main tool → Bot task, parent-memory read/write scope, approval delivery, result SSE/snapshot, failure delivery, dedupe, outbox recovery',
+    'main tool → Bot task, explicit delegation intent detection, runtime-enforced delegate_to_bot dispatch even when the model does not call tools (policy-denied case documented), parent-memory read/write scope, approval delivery, result SSE/snapshot, failure delivery, dedupe, outbox recovery',
   'agent-router':
     'router decision chain, task contract v1, fast/slow budgets, idempotency/priority queue, route events privacy, delegate_to_bot compatibility',
   'agent-worker':

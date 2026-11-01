@@ -18,6 +18,7 @@ const PERSONA_VERSION = 1;
 // 默认值对齐 Blue 当前表现：恢复默认 ≈ 行为不变。
 // messageMode: single 强制单条（与旧行为一致）/ auto 自然分条 / frequent 倾向多条。
 // customPrompt: 用户在控制面板自行撰写的人格提示词；空串 = 不注入自定义块。
+// systemPrompt: 用户在控制面板编辑的完整后端系统提示词；空串 = 使用内置默认。
 const DEFAULTS = Object.freeze({
   colloquial: 70,
   warmth: 70,
@@ -25,6 +26,7 @@ const DEFAULTS = Object.freeze({
   length: 50,
   messageMode: 'auto',
   customPrompt: '',
+  systemPrompt: '',
 });
 
 const MESSAGE_MODES = Object.freeze(['single', 'auto', 'frequent']);
@@ -39,6 +41,10 @@ const SLIDER_KEYS = Object.freeze([
 // 自定义人格提示词上限（码点）：中文 4000 字足够写满一套人格设定，
 // 同时保证落盘文件与注入的 system prompt 都有确定的规模上界。
 const CUSTOM_PROMPT_MAX_CHARS = 4000;
+
+// 后端系统提示词上限：内置默认约 1.6k 字，8000 字给用户留出充分改写空间，
+// 同时避免整套提示词挤占上下文预算。
+const SYSTEM_PROMPT_MAX_CHARS = 8000;
 
 function clampInt(value, fallback) {
   const n = typeof value === 'number' ? value : Number(value);
@@ -63,6 +69,21 @@ function sanitizeCustomPrompt(value) {
   return [...text].slice(0, CUSTOM_PROMPT_MAX_CHARS).join('');
 }
 
+// 系统提示词沿用同样的可读性归一；不同点是空白串按"未自定义"处理，
+// 避免用户清空后实际下发一条空的人格规则。
+function sanitizeSystemPrompt(value) {
+  if (typeof value !== 'string') return '';
+
+  const text = value
+    .replace(/\r\n?/g, '\n')
+    // eslint-disable-next-line no-control-regex -- 显式清洗 C0 控制字符，保留 \t \n
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
+
+  if (!text.trim()) return '';
+
+  return [...text].slice(0, SYSTEM_PROMPT_MAX_CHARS).join('');
+}
+
 // 宽松归一：读盘与旧配置迁移用。字段缺失/类型不符一律回退默认值，
 // 保证人手改过或旧版本写下的 persona.json 都能安全读入。
 function normalizeConfig(input) {
@@ -78,6 +99,7 @@ function normalizeConfig(input) {
     : DEFAULTS.messageMode;
 
   config.customPrompt = sanitizeCustomPrompt(src.customPrompt);
+  config.systemPrompt = sanitizeSystemPrompt(src.systemPrompt);
 
   return config;
 }
@@ -119,6 +141,19 @@ function validateConfig(input) {
   } else if (typeof custom === 'string' && [...custom].length > CUSTOM_PROMPT_MAX_CHARS) {
     errors.push(
       `customPrompt 超过 ${CUSTOM_PROMPT_MAX_CHARS} 字上限（当前 ${[...custom].length} 字）`
+    );
+  }
+
+  const system = input.systemPrompt;
+
+  if (system !== undefined && system !== null && typeof system !== 'string') {
+    errors.push('systemPrompt 必须是字符串');
+  } else if (
+    typeof system === 'string' &&
+    [...system].length > SYSTEM_PROMPT_MAX_CHARS
+  ) {
+    errors.push(
+      `systemPrompt 超过 ${SYSTEM_PROMPT_MAX_CHARS} 字上限（当前 ${[...system].length} 字）`
     );
   }
 
@@ -245,6 +280,7 @@ module.exports = {
   DEFAULTS,
   MESSAGE_MODES,
   CUSTOM_PROMPT_MAX_CHARS,
+  SYSTEM_PROMPT_MAX_CHARS,
   getConfig,
   saveConfig,
   resetConfig,

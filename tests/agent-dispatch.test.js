@@ -37,6 +37,7 @@ let apiBase;
 let providerId;
 let providerBase;
 let providerPort;
+const capturedChatRequests = [];
 
 function json(res, status, payload) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -67,6 +68,7 @@ test.before(async () => {
     });
     req.on('end', () => {
       const parsed = JSON.parse(body);
+      capturedChatRequests.push(parsed);
       const messages = parsed.messages || [];
       const hasToolResult = messages.some(message => message.role === 'tool');
       const lastText = String(messages.at(-1)?.content || '');
@@ -420,6 +422,127 @@ test('主 Agent 工具循环：模型可调用 delegate_to_bot 并把任务交�
   assert.ok(mainSessions.getMessages(main.id).some(message =>
     message.content.includes('【Memory Bot 任务完成】')
   ));
+});
+
+test('委派意图识别：显式请求命中，否定/元问题/旧任务回看不触发', () => {
+  const { detectExplicitDelegation } = require('../server/delegation-intent');
+
+  assert.deepEqual(
+    detectExplicitDelegation('让记忆机器人帮我查一下我喜欢的咖啡'),
+    {
+      taskType: 'memory.search',
+      goal: '让记忆机器人帮我查一下我喜欢的咖啡',
+      context: '',
+    }
+  );
+  assert.equal(
+    detectExplicitDelegation('让记忆机器人解释一下我为什么喜欢深烘').taskType,
+    'memory.explain'
+  );
+  assert.ok(detectExplicitDelegation('把这个活交给子 agent'));
+  assert.equal(detectExplicitDelegation('记忆机器人是什么'), null);
+  assert.equal(detectExplicitDelegation('怎么用 Memory Bot'), null);
+  assert.equal(detectExplicitDelegation('别让记忆机器人查'), null);
+  assert.equal(detectExplicitDelegation('上次让记忆机器人查的结果呢'), null);
+  assert.ok(
+    detectExplicitDelegation('上次没查成，这次让记忆机器人重新查一下')
+  );
+});
+
+test('显式子 agent 请求：模型不主动调用工具时，运行时仍真实派发', async () => {
+  const main = mainSessions.createSession({ title: '强制委派测试' });
+
+  capturedChatRequests.length = 0;
+
+  const outcome = await agentRuntime.runAgentTurn({
+    providerId,
+    modelId: 'dispatch-test-model',
+    sessionId: main.id,
+    userText: '让记忆机器人帮我查一下我的咖啡偏好 FORCE_TEXT',
+    messages: [
+      { role: 'system', content: '你可以调用工具。' },
+      { role: 'user', content: '让记忆机器人帮我查一下我的咖啡偏好 FORCE_TEXT' },
+    ],
+    policy: {
+      schemaVersion: 1,
+      mode: 'bounded_autonomy',
+      tools: { allowedTools: ['delegate_to_bot'], maxToolCalls: 2, maxReadOnlyRetries: 0 },
+      budgets: { maxRounds: 2, maxTotalMs: 10000 },
+    },
+    credentialKey: 'dispatch-bot-key',
+    timeout: 10000,
+    enforceExplicitDelegation: true,
+  });
+
+  assert.equal(outcome.delegationEnforced, true);
+  assert.equal(outcome.toolSteps.length, 1);
+  assert.equal(outcome.toolSteps[0].name, 'delegate_to_bot');
+  assert.ok(outcome.rawReply.includes('已处理'));
+
+  const task = tasks.listTasks('memory', { parentSessionId: main.id })[0];
+  assert.ok(task);
+  assert.equal(task.taskType, 'memory.search');
+  assert.ok(task.goal.includes('让记忆机器人'));
+
+  // 模型自己没发起工具调用：第一次模型请求发生在强制派发之后，
+  // delegate_to_bot 已从工具列表移除，并带上了"系统已实际调用"的说明。
+  assert.ok(capturedChatRequests.length >= 1);
+  const firstRequest = capturedChatRequests[0];
+  const firstToolNames = (firstRequest.tools || [])
+    .map(item => item.function && item.function.name)
+    .filter(Boolean);
+  assert.equal(firstToolNames.includes('delegate_to_bot'), false);
+  assert.ok(
+    (firstRequest.messages || []).some(
+      message =>
+        message.role === 'system' &&
+        typeof message.content === 'string' &&
+        message.content.includes('系统已经在本次请求中实际调用 delegate_to_bot')
+    )
+  );
+
+  const finished = await waitForTask(task.taskId);
+  assert.equal(finished.status, 'completed');
+  assert.equal(finished.parentSessionId, main.id);
+});
+
+test('显式委派意图但策略未允许工具：不创建任务，并明确注入无法派发说明', async () => {
+  const main = mainSessions.createSession({ title: '策略拒绝委派测试' });
+
+  capturedChatRequests.length = 0;
+
+  const outcome = await agentRuntime.runAgentTurn({
+    providerId,
+    modelId: 'dispatch-test-model',
+    sessionId: main.id,
+    userText: '让记忆机器人查一下我的咖啡偏好 FORCE_TEXT',
+    messages: [
+      { role: 'system', content: '你可以调用工具。' },
+      { role: 'user', content: '让记忆机器人查一下我的咖啡偏好 FORCE_TEXT' },
+    ],
+    policy: {
+      schemaVersion: 1,
+      mode: 'bounded_autonomy',
+      tools: { allowedTools: ['memory_search'], maxToolCalls: 2, maxReadOnlyRetries: 0 },
+      budgets: { maxRounds: 2, maxTotalMs: 10000 },
+    },
+    credentialKey: 'dispatch-bot-key',
+    timeout: 10000,
+    enforceExplicitDelegation: true,
+  });
+
+  assert.equal(outcome.delegationEnforced, false);
+  assert.equal(outcome.toolSteps.length, 0);
+  assert.equal(tasks.listTasks('memory', { parentSessionId: main.id }).length, 0);
+  assert.ok(
+    capturedChatRequests.length >= 1 &&
+      (capturedChatRequests[0].messages || []).some(
+        message =>
+          message.role === 'system' &&
+          typeof message.content === 'string' &&
+          message.content.includes('当前 Agent 策略不允许调用 delegate_to_bot')
+      )
+  );
 });
 
 test('主控记忆 → 委派 Bot：memory_search 使用父主控会话 scope', async () => {
