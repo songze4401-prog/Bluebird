@@ -29,6 +29,7 @@
     "memoryMaxItems": 8,
     "memoryPerItemMax": 300,
     "memoryTotalMax": 1600,
+    "memoryTimeoutMs": 800,
     "coverageSkipThreshold": 0.75,
     "coveragePartialThreshold": 0.4,
     "pairwiseDedupeThreshold": 0.85

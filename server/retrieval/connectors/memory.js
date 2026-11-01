@@ -7,6 +7,7 @@
  * 避免把“无归属”误当成“所有会话可见”。
  */
 const memory = require('../../memory');
+const { isEffectiveAt } = require('../../memory-lifecycle');
 const {
   createChunk,
   contentHashOf,
@@ -23,10 +24,18 @@ function collectMemoryChunks({ maxChunkChars }) {
   const sources = [];
   let scanned = 0;
   let skippedLegacy = 0;
+  let skippedNonEffective = 0;
 
   for (const item of items) {
     if (!item || typeof item.content !== 'string' || !item.content.trim()) continue;
     scanned += 1;
+
+    // 生命周期一致性：只索引当前有效的记忆（active 且在 validFrom/validTo 窗口内）。
+    // pending / superseded / archived 条目不入索引，引擎不再可能把它们当现行事实检索到。
+    if (!isEffectiveAt(item)) {
+      skippedNonEffective += 1;
+      continue;
+    }
 
     const sessions = [
       ...new Set(
@@ -104,7 +113,9 @@ function collectMemoryChunks({ maxChunkChars }) {
   return {
     sources,
     scanned,
-    skipped: skippedLegacy,
+    skipped: skippedLegacy + skippedNonEffective,
+    skippedLegacy,
+    skippedNonEffective,
     reason: skippedLegacy ? 'legacy_unscoped_memories_skipped' : null,
   };
 }
@@ -117,6 +128,8 @@ function sourceIdsForMemory() {
         item =>
           item &&
           item.id &&
+          // 与 collectMemoryChunks 保持同一生命周期口径：只保留当前有效记忆的源。
+          isEffectiveAt(item) &&
           Array.isArray(item.contributions) &&
           item.contributions.some(
             contribution => contribution && contribution.sessionId

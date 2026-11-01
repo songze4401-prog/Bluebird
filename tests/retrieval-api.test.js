@@ -145,6 +145,62 @@ test('查询参数错误：空 query、缺少 session、未知 session、非法�
   assert.equal(invalid.json.code, 'invalid_source');
 });
 
+test('查询契约：purpose/categories/tokenBudget 显式校验并进入 trace', async () => {
+  const badPurpose = await req('/retrieval/search', {
+    method: 'POST',
+    body: { query: 'x', sources: ['document'], purpose: 'bogus' },
+  });
+  assert.equal(badPurpose.status, 400);
+  assert.equal(badPurpose.json.code, 'invalid_purpose');
+
+  const badCategory = await req('/retrieval/search', {
+    method: 'POST',
+    body: { query: 'x', sources: ['document'], categories: ['bogus'] },
+  });
+  assert.equal(badCategory.status, 400);
+  assert.equal(badCategory.json.code, 'invalid_category');
+
+  const badBudget = await req('/retrieval/search', {
+    method: 'POST',
+    body: { query: 'x', sources: ['document'], tokenBudget: 0 },
+  });
+  assert.equal(badBudget.status, 400);
+  assert.equal(badBudget.json.code, 'invalid_token_budget');
+
+  const badLimit = await req('/retrieval/search', {
+    method: 'POST',
+    body: { query: 'x', sources: ['document'], limit: 0 },
+  });
+  assert.equal(badLimit.status, 400);
+  assert.equal(badLimit.json.code, 'invalid_limit');
+
+  // categories 与 sources 取交集：memory 类别不能检索 document。
+  const noOverlap = await req('/retrieval/search', {
+    method: 'POST',
+    body: { query: 'x', sources: ['document'], categories: ['memory'] },
+  });
+  assert.equal(noOverlap.status, 400);
+  assert.equal(noOverlap.json.code, 'sources_empty');
+
+  const ok = await req('/retrieval/search', {
+    method: 'POST',
+    body: {
+      query: 'x',
+      sources: ['document'],
+      purpose: 'agent_tool',
+      categories: ['knowledge'],
+      tokenBudget: 1000,
+      limit: 2,
+    },
+  });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.trace.purpose, 'agent_tool');
+  assert.deepEqual(ok.json.trace.categories, ['knowledge']);
+  assert.equal(ok.json.trace.limits.tokenBudget, 1000);
+  assert.equal(ok.json.trace.limits.limit, 2);
+  assert.ok(Number.isFinite(ok.json.trace.limits.timeoutMs));
+});
+
 test('文档摄取 -> 查询 -> 来源列表/详情 -> 删除', async () => {
   const ingest = await req('/retrieval/ingest', {
     method: 'POST',

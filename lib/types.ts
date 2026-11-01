@@ -65,6 +65,9 @@ export type ToolStreamEvent =
       summary?: string;
     };
 
+// 记忆链路状态：与服务端 /chat 响应的 memoryState 一一对应。
+export type MemoryState = 'ok' | 'empty' | 'degraded' | 'failed';
+
 export type Message = {
   id: string;
   role: 'user' | 'assistant';
@@ -84,6 +87,10 @@ export type Message = {
   agentNotice?: string;
   // Agent 工具调用摘要（仅 assistant）：设计图里的「调用工具」pill
   toolSteps?: ToolStepView[];
+  // 记忆链路状态（仅 assistant、仅本轮）：ok/empty 不打扰用户，
+  // degraded/failed 由 memoryNote 给出明确提示
+  memoryState?: MemoryState;
+  memoryNote?: string;
   // 用户主动停止后保留的本地部分回复；服务端未落盘，刷新后可能消失
   stopped?: boolean;
 };

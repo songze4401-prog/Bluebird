@@ -72,6 +72,10 @@ const ERROR_MESSAGES = Object.freeze({
   query_too_long: `检索内容超过 ${config.limits.maxQueryChars} 字上限`,
   sources_empty: '没有可检索的来源',
   invalid_source: '来源类型非法',
+  invalid_purpose: 'purpose 非法（chat_context/agent_tool/api_search）',
+  invalid_category: 'categories 非法（memory/conversation/knowledge/document/web/code）',
+  invalid_token_budget: 'tokenBudget 必须是正数',
+  invalid_limit: 'limit 必须是正整数',
   session_required: '检索记忆或历史对话时必须提供 sessionId',
   invalid_as_of: 'asOf 不是合法时间',
   retrieval_disabled: '统一检索未启用',
@@ -323,9 +327,29 @@ async function search(options = {}) {
     typeof options.sessionId === 'string' && options.sessionId.trim()
       ? options.sessionId.trim()
       : null;
-  const sources = engine.normalizeSources(options.sources, { sessionId });
+
+  // purpose / categories / tokenBudget 是查询契约的显式字段：
+  // purpose 进入 plan 与 trace；categories 映射到 sourceType 并与 sources 取交集；
+  // tokenBudget 由 createPlan 做正数/上限归一，非法值不静默吞掉。
+  const purpose = engine.normalizePurpose(options.purpose);
+  if (typeof purpose !== 'string') {
+    return failure(purpose.error, { status: 'failed', evidence: [], citations: [], trace: null });
+  }
+  const categoryPlan = engine.normalizeCategories(options.categories);
+  if (categoryPlan && categoryPlan.error) {
+    return failure(categoryPlan.error, { status: 'failed', evidence: [], citations: [], trace: null });
+  }
+
+  let sources = engine.normalizeSources(options.sources, { sessionId });
   if (sources && sources.error) {
     return failure(sources.error, { status: 'failed', evidence: [], citations: [], trace: null });
+  }
+  if (categoryPlan) {
+    const allowed = new Set(categoryPlan.sources);
+    sources = sources.filter(source => allowed.has(source));
+    if (!sources.length) {
+      return failure('sources_empty', { status: 'failed', evidence: [], citations: [], trace: null });
+    }
   }
 
   const plan = engine.createPlan({
@@ -339,6 +363,8 @@ async function search(options = {}) {
     timeoutMs: options.timeoutMs || config.limits.timeoutMs,
     maxQueryChars: config.limits.maxQueryChars,
     maxEvidence: config.limits.maxEvidence,
+    purpose,
+    categories: categoryPlan ? categoryPlan.names : [],
   });
   if (plan.error) {
     return failure(plan.error, { status: 'failed', evidence: [], citations: [], trace: null });
@@ -380,23 +406,18 @@ async function search(options = {}) {
     }
   }
 
-  let result;
-  try {
-    result = await engine.executeSearch({
-      store,
-      embedding,
-      reranker,
-      config,
-      plan,
-    });
-  } catch (error) {
-    return failure((error && error.code) || 'retrieval_failed', {
-      status: 'failed',
-      evidence: [],
-      citations: [],
-      trace: null,
-    });
-  }
+  // 时间预算由 engine 内部逐通道执行（vector 补齐、embedding、rerank 都
+  // 以 plan.deadline 为上限，各自超时后标记降级并继续返回部分结果）。
+  // 这里不再套整体 Promise.race：词法/精确是同步扫描无法被抢占，
+  // 而竞速在 deadline 到达时会丢掉已完成的降级结果，把 partial_success
+  // 误报成整体失败。
+  const result = await engine.executeSearch({
+    store,
+    embedding,
+    reranker,
+    config,
+    plan,
+  });
   if (result.ok && result.trace) {
     result.trace.sync = sync;
     result.trace.vectorSync = vectorSync;
@@ -1195,6 +1216,8 @@ async function searchForContext({ query, sessionId, now = Date.now() } = {}) {
     query,
     sessionId,
     sources: config.contextSources,
+    purpose: 'chat_context',
+    categories: ['knowledge'],
     limit: config.limits.contextMaxItems,
     tokenBudget: config.limits.contextTokenBudget,
     timeoutMs: config.limits.contextTimeoutMs,

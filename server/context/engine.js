@@ -21,6 +21,21 @@ const { buildContext } = require('./builder');
 const { fitRequest } = require('./input-guard');
 const { createTrace } = require('./trace');
 
+// 记忆状态标准化：把内部检索状态映射为对外契约状态。
+// - ok → ok（检索成功且有结果）
+// - no_result（空查询/空库）→ empty（确实没有相关记忆，不是失败）
+// - source_unavailable（记忆未启用）→ empty（能力关闭，无记忆可注入）
+// - timeout → degraded（超出时间预算，本轮降级但可恢复）
+// - retrieval_error + breaker → degraded（熔断降级，可恢复）
+// - retrieval_error（其他异常）→ failed（检索失败，但不阻断主控）
+function normalizeMemoryState(status, extra = {}) {
+  if (extra && extra.timeout === true) return 'degraded';
+  if (status === 'ok') return 'ok';
+  if (status === 'no_result' || status === 'source_unavailable') return 'empty';
+  if (status === 'retrieval_error') return extra && extra.breaker ? 'degraded' : 'failed';
+  return 'failed';
+}
+
 function verifyContext({ selection, summary, build, fit }) {
   const checks = [];
 
@@ -81,6 +96,7 @@ function verifyContext({ selection, summary, build, fit }) {
 async function runContextRuntime({
   task = '',
   sessionId = null,
+  requestId = null,
   projectedMessages = [],
   renderMessage,
   renderFinalMessage,
@@ -92,7 +108,7 @@ async function runContextRuntime({
   config = defaultConfig,
   now = Date.now(),
 } = {}) {
-  const trace = createTrace({ task, sessionId });
+  const trace = createTrace({ task, sessionId, requestId });
   const guard = config.inputGuard;
 
   const selection = selectHistory({
@@ -217,6 +233,7 @@ async function runContextRuntime({
       ok: false,
       errorCode: fit.errorCode,
       error: fit.error,
+      requestId,
       systemPrompt: fit.systemPrompt,
       messages: [],
       historyMessages: fit.historyMessages,
@@ -225,6 +242,11 @@ async function runContextRuntime({
       contextIds: [],
       summary,
       memory: build.memory,
+      // 记忆编排契约字段：检索状态（ok / no_result / source_unavailable / retrieval_error）。
+      // 主控据此区分"确实没有相关记忆"与"检索失败/降级"，避免把故障伪装成空结果。
+      memoryStatus: retrieval.status || 'retrieval_error',
+      memoryState: normalizeMemoryState(retrieval.status, retrieval),
+      memoryError: retrieval.error || null,
       knowledge: {
         ...build.knowledge,
         status: knowledge.status,
@@ -251,6 +273,7 @@ async function runContextRuntime({
     ok: verification.ok,
     error: verification.ok ? null : `上下文验证失败：${verification.reason}`,
     errorCode: verification.ok ? null : 'context_verification_failed',
+    requestId,
     systemPrompt: fit.systemPrompt,
     messages: fit.messages,
     historyMessages: fit.historyMessages,
@@ -265,6 +288,10 @@ async function runContextRuntime({
       warning: summaryWarning,
     },
     memory: build.memory,
+    // 记忆编排契约字段：检索状态（ok / no_result / source_unavailable / retrieval_error）。
+    memoryStatus: retrieval.status || 'retrieval_error',
+    memoryState: normalizeMemoryState(retrieval.status, retrieval),
+    memoryError: retrieval.error || null,
     knowledge: {
       ...build.knowledge,
       status: knowledge.status,
@@ -280,4 +307,5 @@ async function runContextRuntime({
 module.exports = {
   runContextRuntime,
   verifyContext,
+  normalizeMemoryState,
 };

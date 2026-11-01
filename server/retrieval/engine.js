@@ -28,6 +28,46 @@ const { estimateTokens, truncateToTokenBudget } = require('../text-utils');
 const DEFAULT_SOURCES = ['memory', 'conversation', 'document', 'web', 'code'];
 const MAX_LIMIT = 20;
 
+// 检索目的：显式建模调用方意图，进入 query plan 与 trace。
+// 不改变召回算法，只让 trace/日志能回答「这次检索为什么发生」。
+const PURPOSES = Object.freeze(['chat_context', 'agent_tool', 'api_search']);
+
+// 检索类别：调用方的粗粒度期望，映射到真实 sourceType。
+// categories 与 sources 取交集；两者都显式给出时，以更窄的 categories 为准。
+const CATEGORY_SOURCES = Object.freeze({
+  memory: ['memory'],
+  conversation: ['conversation'],
+  knowledge: ['document', 'web', 'code'],
+  document: ['document'],
+  web: ['web'],
+  code: ['code'],
+});
+
+function normalizePurpose(raw) {
+  if (raw === undefined || raw === null || raw === '') return 'api_search';
+  return typeof raw === 'string' && PURPOSES.includes(raw)
+    ? raw
+    : { error: 'invalid_purpose' };
+}
+
+function normalizeCategories(raw) {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const list = Array.isArray(raw) ? raw : [raw];
+  if (!list.length) return { error: 'invalid_category' };
+  const names = [];
+  const sources = [];
+  for (const item of list) {
+    if (typeof item !== 'string' || !CATEGORY_SOURCES[item]) {
+      return { error: 'invalid_category' };
+    }
+    if (!names.includes(item)) names.push(item);
+    for (const source of CATEGORY_SOURCES[item]) {
+      if (!sources.includes(source)) sources.push(source);
+    }
+  }
+  return { names, sources };
+}
+
 function fail(errorCode, error, status = 'failed') {
   return {
     ok: false,
@@ -72,6 +112,8 @@ function createPlan({
   timeoutMs,
   maxQueryChars,
   maxEvidence,
+  purpose = 'api_search',
+  categories = [],
 }) {
   const text = typeof query === 'string' ? query.trim() : '';
   if (!text) return { error: 'query_required' };
@@ -101,10 +143,13 @@ function createPlan({
       typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null,
     sources,
     sourceSet: new Set(sources),
+    purpose,
+    categories,
     limit: normalizedLimit,
     tokenBudget: normalizedBudget,
     asOfMs,
     now,
+    timeoutMs: Math.max(100, timeoutMs),
     deadline: now + Math.max(100, timeoutMs),
     language: detectLanguage(text),
     intent: codeIntent(text) ? 'code' : 'natural_language',
@@ -695,8 +740,14 @@ function emptyTrace(plan) {
     language: plan.language,
     intent: plan.intent,
     sources: plan.sources,
+    purpose: plan.purpose || 'api_search',
+    categories: plan.categories || [],
     sessionScoped: Boolean(plan.sessionId),
-    limits: { limit: plan.limit, tokenBudget: plan.tokenBudget },
+    limits: {
+      limit: plan.limit,
+      tokenBudget: plan.tokenBudget,
+      timeoutMs: plan.timeoutMs,
+    },
     channels: [],
     fusion: null,
     policy: null,
@@ -888,7 +939,10 @@ function countReasons(items) {
 
 module.exports = {
   DEFAULT_SOURCES,
+  PURPOSES,
   normalizeSources,
+  normalizePurpose,
+  normalizeCategories,
   createPlan,
   executeSearch,
   scopeAllows,

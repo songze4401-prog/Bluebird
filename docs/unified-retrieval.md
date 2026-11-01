@@ -245,7 +245,7 @@ signals: rrf（相对最高分归一）/ lexical / vector 余弦 / recency / gra
 | GET | `/retrieval/sources` | 来源元数据列表 |
 | GET | `/retrieval/sources/:id` | 单来源元数据 |
 | GET | `/retrieval/consistency` | 一致性检查 |
-| POST | `/retrieval/search` | 查询；不修改业务源数据，但会按需幂等刷新 memory/conversation 派生索引并补齐缺失向量；`query/sessionId/sources/limit/tokenBudget/asOf` |
+| POST | `/retrieval/search` | 查询；不修改业务源数据，但会按需幂等刷新 memory/conversation 派生索引并补齐缺失向量；`query/sessionId/sources/limit/tokenBudget/asOf/purpose/categories`。`purpose` ∈ `chat_context/agent_tool/api_search`（默认 `api_search`）；`categories` ∈ `memory/conversation/knowledge/document/web/code`，与 `sources` 取交集；非法值 400。向量补齐/embedding/重排均以 `timeoutMs` 为预算，超时只降级对应通道并返回 `partial_success` |
 | POST | `/retrieval/ingest` | 写索引；`type=document/code` + `path`，或 `type=web` + `url`；完成后只补缺失向量 |
 | POST | `/retrieval/sync` | 刷新外部来源；`sourceId` 刷新单个，缺省刷新所有 document/code；web 需同时提供 `url` |
 | POST | `/retrieval/vectors/backfill` | 批量补齐缺失/失效向量；不重建来源索引；未配置 Embedding 返回 409 |

@@ -42,11 +42,12 @@ function sanitizeReason(value) {
   return sanitizeText(value);
 }
 
-function createTrace({ task, sessionId, ts } = {}) {
+function createTrace({ task, sessionId, ts, requestId } = {}) {
   const trace = {
     ts: ts || new Date().toISOString(),
     taskLength: textLength(typeof task === 'string' ? task : ''),
     sessionId: typeof sessionId === 'string' ? sessionId : null,
+    requestId: sanitizeId(requestId),
     history: {
       totalMessages: 0,
       recent: 0,

@@ -2325,6 +2325,9 @@ app.post('/memory/delete', requireAuth, async (req, res) => {
 // 校验失败返回 { error: [status, body] }，路由直接回 JSON（此时未切 SSE）；
 // 成功返回 { ctx }。
 async function prepareChatRequest(req) {
+  // 每个聊天请求一个 requestId：贯穿上下文 trace、日志、记忆提取与响应，
+  // 便于把「主控检索 → 过滤 → 注入 → 写入」整条链路的日志串起来排查。
+  const requestId = `req_${crypto.randomUUID()}`;
   const { message, history = [], mode, attachmentIds, stickerIds } = req.body;
   const sessionId = resolveSessionId(req, 'body');
 
@@ -2656,6 +2659,7 @@ async function prepareChatRequest(req) {
     contextRuntime = await runContextRuntime({
       task: memoryQuery,
       sessionId,
+      requestId,
       projectedMessages: projectedHistory,
       renderMessage: item =>
         renderProjectedHistoryMessage(item, {
@@ -2745,11 +2749,15 @@ async function prepareChatRequest(req) {
 
   console.log(
     `[context] runtime session=${sessionId}` +
+      ` req=${requestId}` +
       ` history=${contextRuntime.trace.history.totalMessages}` +
       ` recent=${contextRuntime.trace.history.recent}` +
       ` recalled=${contextRuntime.trace.history.recalled}` +
       ` summary=${contextRuntime.summary.count}` +
       ` memory=${contextRuntime.memory.accepted.length}/${contextRuntime.trace.retrieval.candidates}` +
+      ` memStatus=${contextRuntime.memoryStatus}` +
+      ` memState=${contextRuntime.memoryState}` +
+      ` memError=${contextRuntime.memoryError || '-'}` +
       ` dropped=${contextRuntime.dropped.length}` +
       ` window=${contextRuntime.measurement.window.tokens}` +
       ` windowSource=${contextRuntime.measurement.window.source}` +
@@ -2759,6 +2767,7 @@ async function prepareChatRequest(req) {
 
   return {
     ctx: {
+      requestId,
       sessionId,
       isContinue,
       userText,
@@ -2779,6 +2788,10 @@ async function prepareChatRequest(req) {
       contextSummary: contextRuntime.summary,
       contextDropped: contextRuntime.dropped,
       contextIds: contextRuntime.contextIds,
+      // 记忆编排状态（阶段3 可观测性）：memoryState 为标准契约状态
+      // （ok / empty / degraded / failed），memoryStatus 为内部检索状态。
+      contextMemoryState: contextRuntime.memoryState || 'empty',
+      contextMemoryStatus: contextRuntime.memoryStatus || 'no_result',
       providerId: modelTarget.providerId,
       providerName: modelTarget.provider.name,
       modelId: modelTarget.modelId,
@@ -3041,6 +3054,7 @@ function scheduleMemoryExtraction(
           reason: outcome.written ? null : outcome.reason,
           extra: {
             sessionId,
+            requestId: options.requestId || null,
             written: outcome.written === true,
             id: outcome.id || null,
             supersededId: outcome.supersededId || null,
@@ -3060,7 +3074,7 @@ function scheduleMemoryExtraction(
           level: 'error',
           error,
           action: 'extract',
-          extra: { sessionId },
+          extra: { sessionId, requestId: options.requestId || null },
         });
       });
   });
@@ -3312,10 +3326,16 @@ app.post('/chat', requireAuth, async (req, res) => {
       sessionId: ctx.sessionId,
       // 新图触发了 Agent 工具互斥时给用户的提示（不落盘、不进历史）
       ...(agentGate.notice ? { agentNotice: agentGate.notice } : {}),
+      // 记忆编排状态（阶段3 可观测性，additive）：标准契约状态 ok/empty/degraded/failed
+      memoryState: ctx.contextMemoryState,
+      memoryStatus: ctx.contextMemoryStatus,
+      // 请求级追踪标识：贯穿上下文 trace 与记忆提取日志
+      requestId: ctx.requestId,
     });
 
     scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments, {
       messageId: result.userMessageId || null,
+      requestId: ctx.requestId,
     });
   } catch (error) {
     emitContextTrace(ctxForTrace);
@@ -3791,11 +3811,12 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   });
   finishSse('completed');
 
-  sendEvent({ type: 'done', ...result, ...(agentGate.notice ? { agentNotice: agentGate.notice } : {}), model, providerId: ctx.providerId, upstreamModel, modelRoute: ctx.modelRoute, sessionId: ctx.sessionId });
+  sendEvent({ type: 'done', ...result, ...(agentGate.notice ? { agentNotice: agentGate.notice } : {}), model, providerId: ctx.providerId, upstreamModel, modelRoute: ctx.modelRoute, sessionId: ctx.sessionId, memoryState: ctx.contextMemoryState, memoryStatus: ctx.contextMemoryStatus, requestId: ctx.requestId });
   res.end();
 
   scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments, {
     messageId: result && result.userMessageId ? result.userMessageId : null,
+    requestId: ctx.requestId,
   });
 });
 

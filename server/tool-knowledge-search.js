@@ -129,6 +129,7 @@ const definition = Object.freeze({
       query: args.query,
       sessionId,
       sources,
+      purpose: 'agent_tool',
       limit: args.limit,
       tokenBudget: 1600,
       asOf: args.asOf,

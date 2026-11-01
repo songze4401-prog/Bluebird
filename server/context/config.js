@@ -46,6 +46,7 @@ const RETRIEVAL_SCHEMA = {
   memoryMaxItems: 'number',
   memoryPerItemMax: 'number',
   memoryTotalMax: 'number',
+  memoryTimeoutMs: 'number',
   coverageSkipThreshold: 'number',
   coveragePartialThreshold: 'number',
   pairwiseDedupeThreshold: 'number',
@@ -187,7 +188,7 @@ function validateConfig(raw) {
   errors.push(
     ...requirePositiveNumbers(
       raw.retrieval,
-      ['memoryMaxItems', 'memoryPerItemMax', 'memoryTotalMax'],
+      ['memoryMaxItems', 'memoryPerItemMax', 'memoryTotalMax', 'memoryTimeoutMs'],
       'config.retrieval'
     )
   );
