@@ -76,6 +76,8 @@ const NOTES = {
     'explicit update/merge/supersede/archive/withdraw/delete, approval lifecycle, permissions',
   'agent-dispatch':
     'main tool → Bot task, parent-memory read/write scope, approval delivery, result SSE/snapshot, failure delivery, dedupe, outbox recovery',
+  'agent-router':
+    'router decision chain, task contract v1, fast/slow budgets, idempotency/priority queue, route events privacy, delegate_to_bot compatibility',
   'monitoring-api':
     'monitoring API + real HTTP/context/agent/SSE/persistence instrumentation (model SDK stubbed)',
   'agent-runtime-guards':

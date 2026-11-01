@@ -18,10 +18,47 @@ const MEMORY_BOT_PROMPT = `
 - 若当前会话没有对应的记忆或工具能力，直接说明，不要猜测。
 `.trim();
 
+const MEMORY_BOT_TOOLS = Object.freeze([
+  'memory_search',
+  'memory_remember',
+  'knowledge_search',
+]);
+
+// 任务契约的输入 schema。路由层按这份声明做确定性校验，
+// 不依赖 createTask 里的零散长度判断；输出 schema 描述结果字段，供
+// 后续 Worker/前端消费，当前任务结果已按此形状落库。
+function taskContract({ maxGoalChars = 2000 } = {}) {
+  return Object.freeze({
+    input: Object.freeze({
+      goal: Object.freeze({ type: 'string', required: true, maxChars: maxGoalChars }),
+      context: Object.freeze({ type: 'string', maxChars: 8000 }),
+      contextRef: Object.freeze({ type: 'string', maxChars: 200 }),
+      allowedTools: Object.freeze({
+        type: 'array',
+        items: 'string',
+        maxItems: 6,
+        values: MEMORY_BOT_TOOLS,
+      }),
+      deadlineMs: Object.freeze({ type: 'integer', min: 5000, max: 120000 }),
+      priority: Object.freeze({ type: 'string', values: Object.freeze(['high', 'normal', 'low']) }),
+      idempotencyKey: Object.freeze({ type: 'string', maxChars: 120 }),
+    }),
+    output: Object.freeze([
+      'status',
+      'summary',
+      'toolSteps',
+      'evidence',
+      'changes',
+      'requiresConfirmation',
+      'errorCode',
+    ]),
+  });
+}
+
 const MEMORY_BOT_MANIFEST = Object.freeze({
   botId: MEMORY_BOT_ID,
   displayName: 'Memory Bot',
-  version: '1.0.0',
+  version: '1.1.0',
   description: '专注长期记忆检索、解释与维护的专业 Agent。',
   capabilities: Object.freeze([
     'memory.search',
@@ -33,13 +70,19 @@ const MEMORY_BOT_MANIFEST = Object.freeze({
     'memory.search',
     'memory.explain',
   ]),
+  // 只有 acceptedTaskTypes 里的任务可被路由；每个任务类型的输入/输出契约必须存在。
+  taskContracts: Object.freeze({
+    'memory.search': taskContract(),
+    'memory.explain': taskContract(),
+  }),
   entrypoints: Object.freeze(['direct_chat', 'delegated_task']),
-  toolAllowlist: Object.freeze([
-    'memory_search',
-    'memory_remember',
-    'knowledge_search',
-  ]),
+  toolAllowlist: MEMORY_BOT_TOOLS,
   permissionProfileId: 'memory-bot-default',
+  concurrencyLimit: 2,
+  defaultTimeoutMs: 60000,
+  minTimeoutMs: 5000,
+  maxTimeoutMs: 120000,
+  routingPriority: 100,
 });
 
 const MANIFESTS = Object.freeze({

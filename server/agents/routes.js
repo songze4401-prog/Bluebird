@@ -11,6 +11,7 @@ const credentials = require('./credentials');
 const sessions = require('./sessions');
 const tasks = require('./tasks');
 const runtime = require('./runtime');
+const agentRouter = require('./router');
 const resultDelivery = require('./result-delivery');
 const mainSessions = require('../sessions');
 const approvals = require('./approvals');
@@ -436,30 +437,38 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
     '/agent-tasks',
     route(async (req, res) => {
       const body = req.body || {};
-      const botId = body.botId || 'memory';
-      if (body.sessionId && !sessions.getSession(botId, body.sessionId)) {
+      const agentId = body.agentId || body.botId || 'memory';
+      if (body.sessionId && !sessions.getSession(agentId, body.sessionId)) {
         return res.status(404).json({
           error: 'Bot 会话不存在',
           code: 'agent_session_not_found',
         });
       }
-      const task = tasks.createTask({
-        botId,
-        taskType: body.taskType,
-        goal: body.goal,
-        context: body.context,
-        sessionId: body.sessionId,
-        allowedTools: body.allowedTools,
-        deadlineMs: body.deadlineMs,
-        parentSessionId: body.parentSessionId,
-        parentMessageId: body.parentMessageId,
-      });
+      // 直接建任务的 API 与 delegate_to_bot 走同一条 Router 决策链，
+      // 不再各自校验能力/工具/预算。
+      const { task } = agentRouter.dispatch(
+        {
+          agentId,
+          taskType: body.taskType,
+          goal: body.goal,
+          context: body.context,
+          contextRef: body.contextRef,
+          allowedTools: body.allowedTools,
+          deadlineMs: body.deadlineMs,
+          priority: body.priority,
+          idempotencyKey: body.idempotencyKey,
+          workerSessionId: body.sessionId,
+          parentSessionId: body.parentSessionId,
+          parentMessageId: body.parentMessageId,
+          parentUserText: body.parentUserText,
+        },
+        { source: 'api' }
+      );
       audit(req, 'agent.task.create', {
         target: 'agent_task',
         sessionId: task.sessionId,
         reason: task.taskType,
       });
-      runtime.startTask(task.taskId);
       res.status(202).json({ task: tasks.getTask(task.taskId) });
     })
   );

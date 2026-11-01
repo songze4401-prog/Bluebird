@@ -90,22 +90,31 @@ function allowedToolsFor(config, manifest, taskTools) {
   return configTools.filter(name => taskSet.has(name));
 }
 
-function buildPolicy({ config, allowedTools, toolsSupported }) {
+function buildPolicy({ config, allowedTools, toolsSupported, budget = null }) {
+  const planned = budget && Number.isInteger(budget.maxRounds) ? budget : null;
   return {
     schemaVersion: 1,
     mode: 'bounded_autonomy',
     planning: {
-      generatePlan: false,
+      generatePlan: planned ? planned.generatePlan === true : false,
       stagedExecution: false,
       resultSummary: false,
     },
     tools: {
       allowedTools: toolsSupported ? allowedTools.slice(0, MAX_TASK_TOOLS) : [],
-      maxToolCalls: toolsSupported ? MAX_TASK_TOOL_CALLS : 0,
-      maxReadOnlyRetries: toolsSupported ? 1 : 0,
+      maxToolCalls: toolsSupported
+        ? planned
+          ? planned.maxToolCalls
+          : MAX_TASK_TOOL_CALLS
+        : 0,
+      maxReadOnlyRetries: toolsSupported
+        ? planned
+          ? planned.maxReadOnlyRetries
+          : 1
+        : 0,
     },
     budgets: {
-      maxRounds: 3,
+      maxRounds: planned ? planned.maxRounds : 3,
       maxTotalMs: config.modelProfile.timeoutMs,
     },
   };
@@ -187,6 +196,7 @@ async function execute({
   userText = '',
   taskId = null,
   taskTools = null,
+  budget = null,
   mode = 'direct_chat',
   signal = null,
   onToolEvent = null,
@@ -202,7 +212,7 @@ async function execute({
   );
   const toolsSupported = Boolean(model.capabilities && model.capabilities.tools === true);
   const allowedTools = allowedToolsFor(config, manifest, taskTools);
-  const policy = buildPolicy({ config, allowedTools, toolsSupported });
+  const policy = buildPolicy({ config, allowedTools, toolsSupported, budget });
   const evidence = [];
   const changes = [];
   const runId = `run_${crypto.randomUUID()}`;
@@ -507,6 +517,8 @@ async function runTask(taskId) {
       userText: task.parentUserText || task.goal,
       taskId: task.taskId,
       taskTools: task.allowedTools,
+      // 路由层冻结的 Fast/Slow 预算随任务落库，执行时不再读当前配置。
+      budget: task.budget || null,
       mode: 'delegated_task',
       signal: controller.signal,
     });

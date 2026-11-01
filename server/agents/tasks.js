@@ -31,6 +31,13 @@ const GOAL_MAX = 2000;
 const CONTEXT_MAX = 8000;
 const PARENT_USER_TEXT_MAX = 4000;
 const RESULT_SUMMARY_MAX = 8000;
+// Task Contract v1：这些字段是 Router/Worker 之间的冻结契约。
+// 旧字段 botId / sessionId 保留为同一值的别名，避免破坏既有 API 与前端。
+const CONTRACT_VERSION = 1;
+const CONTEXT_REF_MAX = 200;
+const IDEMPOTENCY_KEY_MAX = 120;
+const PRIORITIES = Object.freeze(['high', 'normal', 'low']);
+const PRIORITY_RANK = Object.freeze({ high: 0, normal: 1, low: 2 });
 
 const STATUSES = Object.freeze([
   'queued',
@@ -48,6 +55,8 @@ const EVENT_TYPES = Object.freeze([
   'task.created',
   'task.accepted',
   'task.recovered',
+  'route.decided',
+  'route.rejected',
   'task.started',
   'model.requested',
   'model.completed',
@@ -85,6 +94,19 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'decision',
   'messageId',
   'pending',
+  'routeId',
+  'path',
+  'pathReason',
+  'capability',
+  'candidateCount',
+  'candidates',
+  'rejected',
+  'selected',
+  'degraded',
+  'priority',
+  'contractVersion',
+  'idempotent',
+  'policyDigest',
 ]);
 
 let taskCache = null;
@@ -119,6 +141,28 @@ function emptyOutbox() {
   return { version: SCHEMA_VERSION, events: [] };
 }
 
+// 旧任务只有 botId/sessionId；读取时补齐 Task Contract v1 的规范字段，
+// 值与原字段一致，不改变任何任务语义。迁移只在内存中补齐并尽力回写一次。
+function normalizeStoredTask(task) {
+  if (!task || typeof task !== 'object') return false;
+  let changed = false;
+  const setIfMissing = (key, value) => {
+    if (task[key] === undefined) {
+      task[key] = value;
+      changed = true;
+    }
+  };
+  setIfMissing('agentId', task.botId || null);
+  setIfMissing('workerSessionId', task.sessionId || null);
+  setIfMissing('contractVersion', CONTRACT_VERSION);
+  setIfMissing('priority', 'normal');
+  setIfMissing('contextRef', null);
+  setIfMissing('idempotencyKey', null);
+  setIfMissing('route', null);
+  setIfMissing('budget', null);
+  return changed;
+}
+
 function loadTasks() {
   if (taskCache) return taskCache;
   ensureDir();
@@ -136,6 +180,17 @@ function loadTasks() {
     throw new AgentError('agent_tasks_corrupted', 'Bot 任务存储结构无效', 500);
   }
   taskCache = parsed;
+  let migrated = false;
+  for (const task of Object.values(taskCache.tasks)) {
+    if (normalizeStoredTask(task)) migrated = true;
+  }
+  if (migrated) {
+    try {
+      saveTasks();
+    } catch (_) {
+      // 存储暂不可写时保留内存中的规范视图；下一次成功写入会一并落盘。
+    }
+  }
   return taskCache;
 }
 
@@ -327,14 +382,25 @@ function listEvents(botId, { limit = 50 } = {}) {
 
 function publicTask(task, { includeResult = true } = {}) {
   if (!task) return null;
+  const agentId = task.agentId || task.botId;
+  const workerSessionId = task.workerSessionId || task.sessionId;
   return {
     taskId: task.taskId,
-    botId: task.botId,
+    // Task Contract v1（规范字段）；botId/sessionId 是同一值的兼容别名。
+    contractVersion: task.contractVersion || CONTRACT_VERSION,
+    agentId,
+    workerSessionId,
+    botId: agentId,
     taskType: task.taskType,
     goal: task.goal,
-    sessionId: task.sessionId,
+    sessionId: workerSessionId,
     parentSessionId: task.parentSessionId || null,
     parentMessageId: task.parentMessageId || null,
+    priority: task.priority || 'normal',
+    contextRef: task.contextRef || null,
+    idempotencyKey: task.idempotencyKey || null,
+    route: task.route ? clone(task.route) : null,
+    budget: task.budget ? clone(task.budget) : null,
     deliveredToParentAt: task.deliveredToParentAt || null,
     deliveryMessageId: task.deliveryMessageId || null,
     deliveryStatus: task.deliveryStatus || 'not_applicable',
@@ -378,20 +444,83 @@ function pruneDeliveredTerminalTasks(tasks) {
   return removed;
 }
 
+function normalizeBudget(budget) {
+  if (budget === null || budget === undefined) return null;
+  if (typeof budget !== 'object' || Array.isArray(budget)) {
+    throw new AgentError('invalid_task', 'budget 必须是对象或 null');
+  }
+  const maxRounds = Number(budget.maxRounds);
+  const maxToolCalls = Number(budget.maxToolCalls);
+  const maxReadOnlyRetries = Number(budget.maxReadOnlyRetries);
+  if (!Number.isInteger(maxRounds) || maxRounds < 2 || maxRounds > 5) {
+    throw new AgentError('invalid_task', 'budget.maxRounds 必须在 2 到 5 之间');
+  }
+  if (!Number.isInteger(maxToolCalls) || maxToolCalls < 1 || maxToolCalls > 12) {
+    throw new AgentError('invalid_task', 'budget.maxToolCalls 必须在 1 到 12 之间');
+  }
+  if (
+    !Number.isInteger(maxReadOnlyRetries) ||
+    maxReadOnlyRetries < 0 ||
+    maxReadOnlyRetries > 1
+  ) {
+    throw new AgentError('invalid_task', 'budget.maxReadOnlyRetries 必须在 0 到 1 之间');
+  }
+  return {
+    maxRounds,
+    maxToolCalls,
+    maxReadOnlyRetries,
+    generatePlan: budget.generatePlan === true,
+  };
+}
+
+function normalizeRoute(route) {
+  if (route === null || route === undefined) return null;
+  if (typeof route !== 'object' || Array.isArray(route)) {
+    throw new AgentError('invalid_task', 'route 必须是对象或 null');
+  }
+  return {
+    routeId: String(route.routeId || '').slice(0, 80),
+    path: route.path === 'slow' ? 'slow' : 'fast',
+    capability: String(route.capability || '').slice(0, 80),
+    policyDigest: String(route.policyDigest || '').slice(0, 32),
+    decidedAt: typeof route.decidedAt === 'string' ? route.decidedAt : null,
+  };
+}
+
+function findByIdempotencyKey(agentId, idempotencyKey) {
+  const key = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : '';
+  if (!key) return null;
+  const tasks = loadTasks();
+  const match = Object.values(tasks.tasks).find(
+    task =>
+      (task.agentId || task.botId) === agentId &&
+      (task.idempotencyKey || null) === key
+  );
+  return match ? publicTask(match) : null;
+}
+
 function createTask({
-  botId,
+  agentId = null,
+  botId = null,
   taskType,
   goal,
   context = '',
+  workerSessionId = null,
   sessionId = null,
   allowedTools = null,
   deadlineMs = 60000,
+  priority = 'normal',
+  contextRef = null,
+  idempotencyKey = null,
+  route = null,
+  budget = null,
   parentSessionId = null,
   parentMessageId = null,
   parentUserText = null,
 } = {}) {
-  assertBot(botId);
-  const manifest = getManifest(botId);
+  const resolvedAgentId = String(agentId || botId || '');
+  assertBot(resolvedAgentId);
+  const manifest = getManifest(resolvedAgentId);
   if (!manifest.acceptedTaskTypes.includes(taskType)) {
     throw new AgentError('invalid_task_type', '该 Bot 不接受此任务类型');
   }
@@ -403,7 +532,11 @@ function createTask({
     throw new AgentError('invalid_task', '任务上下文过长');
   }
   const cleanSession =
-    typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null;
+    typeof workerSessionId === 'string' && workerSessionId.trim()
+      ? workerSessionId.trim()
+      : typeof sessionId === 'string' && sessionId.trim()
+        ? sessionId.trim()
+        : null;
   const cleanParentSession =
     typeof parentSessionId === 'string' && parentSessionId.trim()
       ? parentSessionId.trim()
@@ -441,6 +574,30 @@ function createTask({
     }
   }
 
+  const cleanPriority = priority === null || priority === undefined ? 'normal' : String(priority);
+  if (!PRIORITIES.includes(cleanPriority)) {
+    throw new AgentError('invalid_task', 'priority 必须是 high、normal 或 low');
+  }
+  const cleanContextRef =
+    typeof contextRef === 'string' && contextRef.trim() ? contextRef.trim() : null;
+  if (cleanContextRef && cleanContextRef.length > CONTEXT_REF_MAX) {
+    throw new AgentError('invalid_task', `contextRef 不能超过 ${CONTEXT_REF_MAX} 字`);
+  }
+  const cleanIdempotencyKey =
+    typeof idempotencyKey === 'string' && idempotencyKey.trim()
+      ? idempotencyKey.trim()
+      : null;
+  if (cleanIdempotencyKey && cleanIdempotencyKey.length > IDEMPOTENCY_KEY_MAX) {
+    throw new AgentError('invalid_task', `idempotencyKey 不能超过 ${IDEMPOTENCY_KEY_MAX} 字`);
+  }
+  const cleanRoute = normalizeRoute(route);
+  const cleanBudget = normalizeBudget(budget);
+
+  // 同一 Agent 的相同幂等键返回既有任务，不重复创建、不重复入队。
+  // Router 在建立 Worker 会话之前也会先查一次，避免产生空会话。
+  const existing = findByIdempotencyKey(resolvedAgentId, cleanIdempotencyKey);
+  if (existing) return { ...existing, idempotent: true };
+
   const tasks = loadTasks();
   const pruned =
     Object.keys(tasks.tasks).length >= TASK_MAX
@@ -457,17 +614,26 @@ function createTask({
   const t = nowIso();
   const task = {
     taskId: `task_${crypto.randomUUID()}`,
-    botId,
+    contractVersion: CONTRACT_VERSION,
+    agentId: resolvedAgentId,
+    workerSessionId: cleanSession,
+    // 兼容别名：与上面的规范字段保持同值，旧调用方/前端继续可读。
+    botId: resolvedAgentId,
+    sessionId: cleanSession,
     taskType,
     goal: cleanGoal,
     context: cleanContext,
-    sessionId: cleanSession,
+    priority: cleanPriority,
+    contextRef: cleanContextRef,
+    idempotencyKey: cleanIdempotencyKey,
+    route: cleanRoute,
+    budget: cleanBudget,
     parentSessionId: cleanParentSession,
     parentMessageId: cleanParentMessage,
     parentUserText: cleanParentUserText,
     deliveredToParentAt: null,
     deliveryMessageId: null,
-    deliveryStatus: parentSessionId ? 'pending' : 'not_applicable',
+    deliveryStatus: cleanParentSession ? 'pending' : 'not_applicable',
     deliveryErrorCode: null,
     allowedTools: tools,
     deadlineMs: cleanDeadline,
@@ -492,7 +658,7 @@ function createTask({
     throw error;
   }
   appendEvent({
-    botId,
+    botId: resolvedAgentId,
     taskId: task.taskId,
     eventType: 'task.created',
     payload: { status: 'queued', taskType, mode: 'delegated_task' },
@@ -520,7 +686,7 @@ function listTasks(botId, { limit = 20, parentSessionId = null } = {}) {
       ? parentSessionId.trim()
       : null;
   return Object.values(tasks.tasks)
-    .filter(task => task.botId === botId)
+    .filter(task => (task.agentId || task.botId) === botId)
     .filter(task => !parent || task.parentSessionId === parent)
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
     .slice(0, max)
@@ -623,13 +789,24 @@ function allTasks() {
   return Object.values(loadTasks().tasks);
 }
 
+function priorityRank(priority) {
+  return PRIORITY_RANK[priority] === undefined ? PRIORITY_RANK.normal : PRIORITY_RANK[priority];
+}
+
+// 队列顺序：优先级（high → normal → low）优先，同级按创建时间，最后用 taskId
+// 兜底，保证相同输入集合下的出队顺序是确定的。
 function nextQueuedTask() {
   const current = loadTasks();
   return (
     Object.values(current.tasks)
       .filter(task => task.status === 'queued' && task.cancelRequested !== true)
-      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))[0] ||
-    null
+      .sort((a, b) => {
+        const byPriority = priorityRank(a.priority) - priorityRank(b.priority);
+        if (byPriority !== 0) return byPriority;
+        const byCreated = String(a.createdAt).localeCompare(String(b.createdAt));
+        if (byCreated !== 0) return byCreated;
+        return String(a.taskId).localeCompare(String(b.taskId));
+      })[0] || null
   );
 }
 
@@ -671,6 +848,8 @@ module.exports = {
   OUTBOX_FILE,
   OUTBOX_MAX,
   STATUSES,
+  CONTRACT_VERSION,
+  PRIORITIES,
   createTask,
   getTask,
   getRawTask,
@@ -685,5 +864,7 @@ module.exports = {
   nextQueuedTask,
   queuedCount,
   recoverInterrupted,
+  findByIdempotencyKey,
+  priorityRank,
   reloadForTests,
 };

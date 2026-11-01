@@ -6,9 +6,7 @@
  * 也不允许主控直接调用记忆维护接口。
  */
 const { getManifest } = require('./agents/manifest');
-const registry = require('./agents/registry');
-const botSessions = require('./agents/sessions');
-const tasks = require('./agents/tasks');
+const router = require('./agents/router');
 const mainSessions = require('./sessions');
 const { textLength } = require('./text-utils');
 
@@ -16,6 +14,16 @@ const BOT_ID = 'memory';
 const GOAL_MAX = 2000;
 const CONTEXT_MAX = 8000;
 const ALLOWED_TOOLS_MAX = 6;
+// 路由错误码 → 工具错误码。旧调用方依赖 bot_not_ready 等既有短码，
+// 适配器负责翻译，不把控制面内部错误码暴露给模型。
+const TOOL_ERROR_CODES = Object.freeze({
+  agent_not_available: 'bot_not_ready',
+  agent_not_found: 'bot_not_ready',
+  capability_not_found: 'invalid_task_type',
+  tool_not_allowed: 'invalid_args',
+  invalid_task: 'invalid_args',
+  agent_queue_full: 'agent_queue_full',
+});
 
 function validate(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
@@ -119,47 +127,47 @@ const definition = Object.freeze({
       };
     }
 
-    const agent = registry.getAgent(args.botId);
-    if (agent.status !== 'enabled') {
+    // 兼容适配器：工具 schema 与成功返回形状保持不变，创建/排队统一走 Router。
+    try {
+      const { task, idempotent } = router.dispatch(
+        {
+          agentId: args.botId,
+          taskType: args.taskType,
+          goal: args.goal,
+          context: args.context || '',
+          allowedTools: args.allowedTools || null,
+          // 父会话同时是委派任务的记忆 scope；Bot session 只承载执行轨迹。
+          parentSessionId: mainSessionId,
+          parentMessageId: context.userMessageId || null,
+          parentUserText: context.userText || '',
+        },
+        { source: 'delegate_to_bot' }
+      );
+
       return {
-        ok: false,
-        code: 'bot_not_ready',
-        error: `Memory Bot 尚未就绪（${agent.statusReason || agent.status}）`,
+        ok: true,
+        taskId: task.taskId,
+        botId: task.botId,
+        taskType: task.taskType,
+        status: task.status,
+        sessionId: task.sessionId,
+        parentSessionId: mainSessionId,
+        routeId: task.route ? task.route.routeId : null,
+        path: task.route ? task.route.path : null,
+        idempotent: idempotent === true,
+        resultPending: true,
+        summary: '已提交给 Memory Bot，状态与结果可从任务页或当前会话接收。',
       };
+    } catch (error) {
+      if (error && typeof error.code === 'string' && TOOL_ERROR_CODES[error.code]) {
+        return {
+          ok: false,
+          code: TOOL_ERROR_CODES[error.code],
+          error: error.message || '派发任务失败',
+        };
+      }
+      throw error;
     }
-
-    const botSession = botSessions.createSession(args.botId, {
-      title: args.goal.slice(0, 30),
-    });
-    const task = tasks.createTask({
-      botId: args.botId,
-      taskType: args.taskType,
-      goal: args.goal,
-      context: args.context || '',
-      sessionId: botSession.id,
-      // 父会话同时是委派任务的记忆 scope；Bot session 只承载执行轨迹。
-      parentSessionId: mainSessionId,
-      parentMessageId: context.userMessageId || null,
-      parentUserText: context.userText || '',
-      allowedTools: args.allowedTools || null,
-      deadlineMs: 60000,
-    });
-
-    // 延迟 require：agent-runtime 在加载时注册本工具，顶层反向 require 会成环。
-    const runtime = require('./agents/runtime');
-    runtime.startTask(task.taskId);
-
-    return {
-      ok: true,
-      taskId: task.taskId,
-      botId: task.botId,
-      taskType: task.taskType,
-      status: 'queued',
-      sessionId: task.sessionId,
-      parentSessionId: mainSessionId,
-      resultPending: true,
-      summary: '已提交给 Memory Bot，状态与结果可从任务页或当前会话接收。',
-    };
   },
 });
 
