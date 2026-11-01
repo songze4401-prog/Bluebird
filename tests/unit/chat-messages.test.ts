@@ -161,6 +161,7 @@ describe('buildReplyBubbles', () => {
 
     expect(bubbles[0].memoryNote).toBeUndefined();
     expect(bubbles[1].memoryNote).toContain('降级');
+    expect(bubbles[1].memoryNote).toContain('部分记忆');
 
     const failed = buildReplyBubbles({ memoryState: 'failed' } as never, [
       { id: 'f1', content: '一' },

@@ -410,14 +410,25 @@ async function search(options = {}) {
   // 以 plan.deadline 为上限，各自超时后标记降级并继续返回部分结果）。
   // 这里不再套整体 Promise.race：词法/精确是同步扫描无法被抢占，
   // 而竞速在 deadline 到达时会丢掉已完成的降级结果，把 partial_success
-  // 误报成整体失败。
-  const result = await engine.executeSearch({
-    store,
-    embedding,
-    reranker,
-    config,
-    plan,
-  });
+  // 误报成整体失败。外层 try/catch 仍保留：引擎出现未预期抛出时统一归一为
+  // retrieval_failed，而不是让异常逃逸到路由或对话主链路。
+  let result;
+  try {
+    result = await engine.executeSearch({
+      store,
+      embedding,
+      reranker,
+      config,
+      plan,
+    });
+  } catch (error) {
+    return failure((error && error.code) || 'retrieval_failed', {
+      status: 'failed',
+      evidence: [],
+      citations: [],
+      trace: null,
+    });
+  }
   if (result.ok && result.trace) {
     result.trace.sync = sync;
     result.trace.vectorSync = vectorSync;

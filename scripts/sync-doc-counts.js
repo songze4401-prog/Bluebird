@@ -74,6 +74,16 @@ const NOTES = {
     'Memory Bot registry/config, AES-256-GCM vault, Bot sessions, tool loop and budget finalization, delivered-terminal task pruning, queue/SSE',
   'memory-maintenance':
     'explicit update/merge/supersede/archive/withdraw/delete, approval lifecycle, permissions',
+  'memory-golden-path':
+    'golden path: real /chat + stubbed provider, write→recall→inject into final request, session isolation, response memoryState empty→ok, requestId format',
+  'memory-lifecycle-golden':
+    'lifecycle golden path: supersede/delete/withdraw visibility in final request and unified search, session isolation',
+  'memory-state-units':
+    'normalizeMemoryState mapping, breaker/exception/timeout degradation without blocking, requestId in engine/trace, time budget',
+  'memory-degradation-golden':
+    'real server with MEMORY_ENABLED=false: chat still works, memoryState=empty, no memory block injected, stable across turns',
+  'memory-budget-golden':
+    'budget trimming: 10 memories → memoryMaxItems=8 → final request injects ≤8, token budget enforced',
   'agent-dispatch':
     'main tool → Bot task, parent-memory read/write scope, approval delivery, result SSE/snapshot, failure delivery, dedupe, outbox recovery',
   'agent-router':

@@ -206,14 +206,16 @@ export function removeStreamBubble(
 // 只有 degraded/failed 需要解释「这轮为什么没用上记忆」；
 // ok/empty 属于正常状态，不打扰用户。文案只陈述服务端返回的状态，
 // 不猜测具体原因（熔断、超时、异常都由后端区分）。
+// 注意：超时降级时服务端仍会注入已取回的部分记忆，所以 degraded
+// 只能说「可能仅引用部分记忆」，不能说「未引用记忆」。
 export function buildMemoryNote(
   state?: MemoryState,
   status?: string
 ): string | undefined {
   if (state === 'degraded') {
     return status === 'retrieval_error'
-      ? '长期记忆本轮降级（检索熔断或超时），未引用记忆'
-      : '长期记忆本轮降级，未引用记忆';
+      ? '长期记忆本轮降级（检索熔断或超时），可能仅引用部分记忆'
+      : '长期记忆本轮降级，可能仅引用部分记忆';
   }
   if (state === 'failed') {
     return '长期记忆检索失败，本轮未引用记忆；对话不受影响';
