@@ -452,15 +452,20 @@ test('任务：结果落库包含统一 schema 字段', () => {
     finishedAt: '2026-11-01T00:00:02.000Z',
   });
   const updated = tasks.updateTask(task.taskId, {
+    status: 'accepted',
+  });
+  tasks.updateTask(task.taskId, {
     status: 'failed',
     errorCode: 'model_server',
     result,
   });
-  assert.equal(updated.result.status, 'failed');
-  assert.equal(updated.result.errorCode, 'model_server');
-  assert.equal(updated.result.runId, 'run_store');
-  assert.equal(updated.result.finishedAt, '2026-11-01T00:00:02.000Z');
-  assert.equal(updated.result.requiresApproval, false);
+  const failedTask = tasks.getTask(task.taskId);
+  assert.equal(failedTask.result.status, 'failed');
+  assert.equal(failedTask.result.errorCode, 'model_server');
+  assert.equal(failedTask.result.runId, 'run_store');
+  assert.equal(failedTask.result.finishedAt, '2026-11-01T00:00:02.000Z');
+  assert.equal(failedTask.result.requiresApproval, false);
+  assert.equal(updated.checkpoint, null);
 });
 
 test('任务：运行开始可为旧任务补建 Worker 会话且不改写已有会话', () => {
@@ -482,6 +487,11 @@ test('执行：完成态写入 runId、checkpoint、心跳与统一结果，并�
   assert.ok(finished.runStartedAt);
   assert.ok(finished.heartbeatAt);
   assert.ok(finished.checkpoint);
+  assert.equal(finished.lease, null);
+  assert.ok(finished.checkpointVersion >= 1);
+  assert.equal(finished.runs.length, 1);
+  assert.equal(finished.runs[0].runId, finished.runId);
+  assert.equal(finished.runs[0].status, 'completed');
   assert.equal(finished.result.status, 'completed');
   assert.equal(finished.result.runId, finished.runId);
   assert.ok(finished.result.finishedAt);
@@ -603,6 +613,7 @@ test('执行：单个 Worker 失败不破坏并发中的另一个 Worker', async
 test('执行：会话被运行中的其他任务占用时明确失败，不写入对方会话', async () => {
   const session = sessions.createSession('memory', { title: '占用中', scope: 'worker' });
   const owner = makeTask({ goal: 'SLOW_TASK 占用任务', sessionId: session.id });
+  tasks.updateTask(owner.taskId, { status: 'accepted' });
   tasks.updateTask(owner.taskId, { status: 'running' });
   sessions.attachOwner('memory', session.id, {
     agentId: 'memory',

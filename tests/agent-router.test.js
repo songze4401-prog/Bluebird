@@ -631,6 +631,7 @@ test('负载统计：排队与运行中的任务计入队列深度与并发', ()
   const b = createTask({ goal: '任务B' });
   const c = createTask({ goal: '任务C' });
   tasks.updateTask(a.taskId, { status: 'accepted' });
+  tasks.updateTask(b.taskId, { status: 'accepted' });
   tasks.updateTask(b.taskId, { status: 'running' });
   const load = routerModule.computeLoad(tasks);
   assert.equal(load.queuedTotal, 3);

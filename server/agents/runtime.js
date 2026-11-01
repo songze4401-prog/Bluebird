@@ -31,6 +31,12 @@ const HEARTBEAT_MS = Math.min(
   60000,
   Math.max(20, Number(process.env.BLUEBIRD_AGENT_HEARTBEAT_MS) || 5000)
 );
+// 单进程部署的写者身份：pid + 进程内唯一实例 id。租约据此判断"是否还是我"。
+const WORKER_OWNER_ID = `${process.pid}:${crypto.randomUUID()}`;
+const LEASE_TTL_MS = Math.min(
+  300000,
+  Math.max(15000, Number(process.env.BLUEBIRD_AGENT_LEASE_MS) || 60000)
+);
 const activeRuns = new Map();
 const TASK_CONCURRENCY = Math.min(
   4,
@@ -58,11 +64,18 @@ function scheduleTaskQueue() {
         try {
           const task = tasks.getRawTask(next.taskId);
           if (task && !tasks.isTerminalStatus(task.status)) {
-            tasks.updateTask(next.taskId, {
-              status: 'failed',
-              completedAt: new Date().toISOString(),
-              errorCode: (error && error.code) || 'agent_task_failed',
-            });
+            if (task.status === 'queued') {
+              // 未能进入 accepted 的失败：延后重试而不是原地热循环。
+              tasks.updateTask(next.taskId, {
+                retryAt: new Date(Date.now() + 2000).toISOString(),
+              });
+            } else {
+              tasks.updateTask(next.taskId, {
+                status: 'failed',
+                completedAt: new Date().toISOString(),
+                errorCode: (error && error.code) || 'agent_task_failed',
+              });
+            }
           }
         } catch (_) {
           // 存储损坏时保持显式失败日志，避免队列无限重试同一任务。
@@ -478,6 +491,7 @@ async function runTask(taskId) {
   activeRuns.set(task.taskId, controller);
   const runId = `run_${crypto.randomUUID()}`;
   let deadlineExceeded = false;
+  let leaseLost = false;
   let deadlineTimer = null;
   let heartbeatTimer = null;
 
@@ -489,7 +503,7 @@ async function runTask(taskId) {
       at: nowIso(),
     };
     try {
-      tasks.updateTask(task.taskId, { checkpoint, heartbeatAt: checkpoint.at });
+      tasks.recordCheckpoint(task.taskId, checkpoint);
     } catch (_) {
       // checkpoint 落盘失败不中止执行；事件仍提供可追溯信号。
     }
@@ -507,6 +521,41 @@ async function runTask(taskId) {
   };
 
   try {
+    // ---- accept ----
+    // 先拿租约：已有其他存活 Worker 持有时不执行；租约在手才进入 accepted。
+    tasks.acquireLease(task.taskId, {
+      ownerId: WORKER_OWNER_ID,
+      ttlMs: LEASE_TTL_MS,
+    });
+    tasks.recordRunStart(task.taskId, {
+      runId,
+      attempt: (Number.isInteger(task.attempts) ? task.attempts : 0) + 1,
+      startedAt: nowIso(),
+    });
+    tasks.updateTask(task.taskId, {
+      status: 'accepted',
+      runId,
+      runStartedAt: nowIso(),
+      heartbeatAt: nowIso(),
+      checkpoint: null,
+    });
+    safeEvent(
+      task.botId,
+      'task.accepted',
+      { status: 'accepted', taskType: task.taskType },
+      { taskId: task.taskId, runId, sessionId: task.sessionId }
+    );
+
+    const afterAccept = tasks.getRawTask(task.taskId);
+    if (
+      !afterAccept ||
+      tasks.isTerminalStatus(afterAccept.status) ||
+      afterAccept.status === 'waiting_approval' ||
+      afterAccept.cancelRequested
+    ) {
+      return;
+    }
+
     // ---- Worker 会话：缺失时补建，归属检查 + 生命周期 ----
     let workerSessionId = task.sessionId;
     if (!workerSessionId) {
@@ -548,32 +597,6 @@ async function runTask(taskId) {
     });
     sessions.markRunning(task.botId, workerSessionId, runId);
 
-    // ---- accept ----
-    tasks.updateTask(task.taskId, {
-      status: 'accepted',
-      attempts: (Number.isInteger(task.attempts) ? task.attempts : 0) + 1,
-      runId,
-      runStartedAt: nowIso(),
-      heartbeatAt: nowIso(),
-      checkpoint: null,
-    });
-    safeEvent(
-      task.botId,
-      'task.accepted',
-      { status: 'accepted', taskType: task.taskType },
-      { taskId: task.taskId, runId, sessionId: task.sessionId }
-    );
-
-    const afterAccept = tasks.getRawTask(task.taskId);
-    if (
-      !afterAccept ||
-      tasks.isTerminalStatus(afterAccept.status) ||
-      afterAccept.status === 'waiting_approval' ||
-      afterAccept.cancelRequested
-    ) {
-      return;
-    }
-
     // ---- start ----
     const runningSince = Date.now();
     tasks.updateTask(task.taskId, {
@@ -589,9 +612,20 @@ async function runTask(taskId) {
 
     heartbeatTimer = setInterval(() => {
       try {
+        tasks.renewLease(task.taskId, {
+          ownerId: WORKER_OWNER_ID,
+          ttlMs: LEASE_TTL_MS,
+        });
         tasks.updateTask(task.taskId, { heartbeatAt: nowIso() });
-      } catch (_) {
-        // 心跳落盘失败只影响可观测性，不中止执行。
+      } catch (error) {
+        if (error && error.code === 'task_lease_lost') {
+          leaseLost = true;
+          if (heartbeatTimer) clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+          controller.abort();
+          return;
+        }
+        // 其他心跳写入失败只影响可观测性，不中止执行。
       }
       safeEvent(
         task.botId,
@@ -686,6 +720,12 @@ async function runTask(taskId) {
       completedAt: finalResult.finishedAt,
       result: finalResult,
     });
+    tasks.recordRunFinish(task.taskId, {
+      runId,
+      status: 'completed',
+      finishedAt: finalResult.finishedAt,
+    });
+    tasks.releaseLease(task.taskId);
     safeEvent(
       task.botId,
       'task.completed',
@@ -706,6 +746,59 @@ async function runTask(taskId) {
     if (!latest || tasks.isTerminalStatus(latest.status)) return;
     if (latest.status === 'waiting_approval') return;
 
+    // 租约已被其他 Worker 持有：本实例不执行，稍后再试，不改变任务状态。
+    if (error && error.code === 'task_lease_held') {
+      try {
+        tasks.updateTask(task.taskId, {
+          retryAt: new Date(Date.now() + 2000).toISOString(),
+        });
+      } catch (_) {
+        // 状态竞争不影响结论。
+      }
+      safeEvent(
+        task.botId,
+        'task.recovered',
+        { status: 'queued', errorCode: 'task_lease_held', mode: 'retry' },
+        { taskId: task.taskId, sessionId: task.sessionId }
+      );
+      return;
+    }
+
+    // 心跳续租失败：租约丢失后必须停止执行，不能继续写入结果。
+    if (leaseLost) {
+      const lostResult = normalizeWorkerResult({
+        status: 'failed',
+        summary: '',
+        errorCode: 'task_lease_lost',
+        runId,
+        finishedAt: nowIso(),
+      });
+      tasks.updateTask(task.taskId, {
+        status: 'failed',
+        completedAt: lostResult.finishedAt,
+        errorCode: 'task_lease_lost',
+        result: lostResult,
+      });
+      tasks.recordRunFinish(task.taskId, {
+        runId,
+        status: 'failed',
+        errorCode: 'task_lease_lost',
+        finishedAt: lostResult.finishedAt,
+      });
+      resultDelivery.deliverTaskOutcome(task.taskId, {
+        status: 'failed',
+        result: lostResult,
+        errorCode: 'task_lease_lost',
+      });
+      safeEvent(
+        task.botId,
+        'task.failed',
+        { status: 'failed', errorCode: 'task_lease_lost' },
+        { taskId: task.taskId, runId, sessionId: task.sessionId }
+      );
+      return;
+    }
+
     // 截止时间到期的中止在 execute() 里会被归一成 cancelled（信号已断），
     // 这里必须先认出来：它是超时，不是用户取消，且不可重试。
     const cancelled =
@@ -724,18 +817,23 @@ async function runTask(taskId) {
       attempts < maxAttempts;
 
     if (retryable) {
-      tasks.updateTask(task.taskId, {
-        status: 'queued',
-        recoveredAt: nowIso(),
+      tasks.recordRunFinish(task.taskId, {
+        runId,
+        status: 'retry',
         errorCode,
-        // 下一次尝试会分配新的 runId；上一个 run 的 checkpoint 只作审计。
-        runId: null,
-        heartbeatAt: null,
+        finishedAt: nowIso(),
       });
+      const retried = tasks.setRetry(task.taskId, { errorCode });
       safeEvent(
         task.botId,
         'task.recovered',
-        { status: 'queued', errorCode, mode: 'retry' },
+        {
+          status: 'queued',
+          errorCode,
+          mode: 'retry',
+          attempts: retried.attempts,
+          ...(retried.retryAt ? { retryAt: retried.retryAt } : {}),
+        },
         { taskId: task.taskId, sessionId: task.sessionId }
       );
       return;
@@ -756,6 +854,13 @@ async function runTask(taskId) {
       errorCode,
       result: failureResult,
     });
+    tasks.recordRunFinish(task.taskId, {
+      runId,
+      status,
+      errorCode,
+      finishedAt: failureResult.finishedAt,
+    });
+    tasks.releaseLease(task.taskId);
     resultDelivery.deliverTaskOutcome(task.taskId, {
       status,
       result: failureResult,
@@ -775,6 +880,15 @@ async function runTask(taskId) {
     if (deadlineTimer) clearTimeout(deadlineTimer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     activeRuns.delete(task.taskId);
+    // 租约只在本次运行结束时释放；释放失败由过期机制兜底。
+    try {
+      const finalTask = tasks.getRawTask(task.taskId);
+      if (finalTask && finalTask.lease) {
+        tasks.releaseLease(task.taskId);
+      }
+    } catch (_) {
+      // 忽略释放失败，避免影响任务终态。
+    }
     // Worker 会话生命周期收口：终态沿用任务状态，暂停/异常退出标记 closed。
     try {
       const finalTask = tasks.getRawTask(task.taskId);
@@ -804,16 +918,13 @@ function startTask(taskId) {
 
 function initializeTaskQueue() {
   try {
-    resultDelivery.recoverPending();
-  } catch (_) {
-    // 结果投递恢复失败不阻塞任务队列；下次 SSE/snapshot 或启动再试。
-  }
-  try {
     tasks.flushEventOutbox();
   } catch (_) {
     // 事件主文件不可写时 outbox 仍在磁盘，下一次读取会继续重试。
   }
-  const recovered = tasks.recoverInterrupted();
+  // 单进程部署：启动时不存在仍存活的其他 Worker，旧租约一律视为过期。
+  // 多 Worker 场景由调用方传入存活 owner 集合，未过期的租约保持 running。
+  const recovered = tasks.recoverInterrupted({ ownerId: null });
   for (const taskId of recovered.taskIds || []) {
     const task = tasks.getRawTask(taskId);
     if (!task) continue;
@@ -824,9 +935,27 @@ function initializeTaskQueue() {
       { taskId }
     );
   }
+  for (const taskId of recovered.uncertainTaskIds || []) {
+    const task = tasks.getRawTask(taskId);
+    if (!task) continue;
+    safeEvent(
+      task.botId,
+      'task.uncertain',
+      { status: 'uncertain', errorCode: 'recovery_uncertain_side_effects' },
+      { taskId }
+    );
+  }
+  try {
+    // 恢复后再补投递：终态（含 uncertain）且未投递的结果会在这里补发一次。
+    resultDelivery.recoverPending();
+  } catch (_) {
+    // 结果投递恢复失败不阻塞任务队列；下次 SSE/snapshot 或启动再试。
+  }
   scheduleTaskQueue();
   return {
     recovered: recovered.recovered,
+    uncertain: recovered.uncertain,
+    leftRunning: recovered.leftRunning,
     queued: tasks.queuedCount(),
     concurrency: TASK_CONCURRENCY,
   };
@@ -837,6 +966,7 @@ function getQueueStats() {
     concurrency: TASK_CONCURRENCY,
     active: activeRuns.size,
     queued: tasks.queuedCount(),
+    health: tasks.healthSnapshot(),
   };
 }
 

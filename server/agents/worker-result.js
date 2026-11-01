@@ -14,6 +14,7 @@ const TERMINAL_STATUSES = Object.freeze([
   'failed',
   'cancelled',
   'timed_out',
+  'uncertain',
 ]);
 const SUMMARY_MAX = 8000;
 
