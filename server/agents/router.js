@@ -12,6 +12,7 @@
  */
 const crypto = require('crypto');
 const { AgentError } = require('./errors');
+const intakeControl = require('./intake-control');
 
 const CONTRACT_VERSION = 1;
 const PRIORITY_VALUES = Object.freeze(['high', 'normal', 'low']);
@@ -412,6 +413,14 @@ function createRouter(overrides = {}) {
   const now = overrides.now || Date.now;
 
   function dispatch(input, context = {}) {
+    const intake = intakeControl.getState();
+    if (intake.paused) {
+      throw new AgentError(
+        'agent_intake_paused',
+        `Watchdog 已暂停接收新任务（${intake.reason || 'paused'}）`,
+        503
+      );
+    }
     const request = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
     const { config, digest } = getConfig();
     const internal = decideInternal(request, {

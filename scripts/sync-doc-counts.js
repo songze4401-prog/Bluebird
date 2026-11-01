@@ -82,6 +82,8 @@ const NOTES = {
     'worker lifecycle/runId, session owner/scope/lifecycle, context projection, tool gateway audit, unified result schema, cancel/timeout/model-failure terminal states, concurrency isolation',
   'agent-recovery':
     'state machine transitions, task-store schema migration, leases/retry backoff/checkpoint version/run history, restart recovery (queued/uncertain/live lease), SIGKILL fault injection, delivery idempotency and crash redelivery',
+  'agent-watchdog':
+    'watchdog health classification, action planning with whitelist/cooldown/breaker, intake pause and resume, offline recovery, escalation, audit fields, dry-run, external supervisor restart drill',
   'monitoring-api':
     'monitoring API + real HTTP/context/agent/SSE/persistence instrumentation (model SDK stubbed)',
   'agent-runtime-guards':

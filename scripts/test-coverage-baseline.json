@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "updateRule": "新增/删除 tests/*.test.js 或改变用例数时，必须在同一变更中更新 files、backendTotal、nodeTestSuiteTotal、runnerTotal、frontend；不得只改总数或删除条目。nodeTestSuiteFiles 只包含由 node --test 七套命令执行的文件；runnerFiles 包含 CI 自定义 runner 逐文件执行的 47 个条目（其中 17 个仍使用 node:test 但按单文件退出码执行）。CI 清单必须覆盖所有 files 条目，verify-test-coverage.js 会检查。文档里的所有计数由 scripts/sync-doc-counts.js 从本文件生成，不要手工改数字。",
-  "backendTotal": 1722,
+  "updateRule": "新增/删除 tests/*.test.js 或改变用例数时，必须在同一变更中更新 files、backendTotal、nodeTestSuiteTotal、runnerTotal、frontend；不得只改总数或删除条目。nodeTestSuiteFiles 只包含由 node --test 七套命令执行的文件；runnerFiles 包含 CI 自定义 runner 逐文件执行的 48 个条目（其中 18 个仍使用 node:test 但按单文件退出码执行）。CI 清单必须覆盖所有 files 条目，verify-test-coverage.js 会检查。文档里的所有计数由 scripts/sync-doc-counts.js 从本文件生成，不要手工改数字。",
+  "backendTotal": 1748,
   "nodeTestSuiteTotal": 221,
-  "runnerTotal": 1501,
+  "runnerTotal": 1527,
   "frontend": {
     "suites": 22,
     "tests": 179
@@ -62,6 +62,7 @@
     "agent-router",
     "agent-worker",
     "agent-recovery",
+    "agent-watchdog",
     "monitoring-api",
     "agent-runtime-guards",
     "agent-storage-limits"
@@ -111,6 +112,7 @@
     "agent-router": { "format": "node", "count": 48, "runner": true },
     "agent-worker": { "format": "node", "count": 26, "runner": true },
     "agent-recovery": { "format": "node", "count": 26, "runner": true },
+    "agent-watchdog": { "format": "node", "count": 26, "runner": true },
     "memory": { "format": "node", "count": 40, "runner": false },
     "emotion": { "format": "node", "count": 34, "runner": false },
     "sticker-markers": { "format": "node", "count": 12, "runner": false },
