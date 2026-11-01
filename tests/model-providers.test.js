@@ -520,14 +520,21 @@ async function main() {
   const beforeEdit = await req(`/model-providers/${customId}`);
   const patched = await req(`/model-providers/${customId}`, {
     method: 'PATCH',
-    body: { name: 'Mock 服务商（改）' },
+    body: {
+      name: 'Mock 服务商（改）',
+      models: [{ id: 'mock-model' }, { id: 'mock-vision' }],
+    },
   });
   check(
-    'PATCH 改 name 成功且保留原密钥（keyHint 不变）',
+    'PATCH 改 name + 只提交模型 id 时保留名称/能力与原密钥',
     patched.status === 200 &&
       patched.json.provider.name === 'Mock 服务商（改）' &&
       patched.json.provider.keyHint === beforeEdit.json.provider.keyHint &&
-      patched.json.provider.keyConfigured === true
+      patched.json.provider.keyConfigured === true &&
+      patched.json.provider.models.find(model => model.id === 'mock-model').name ===
+        'Mock 文本模型' &&
+      patched.json.provider.models.find(model => model.id === 'mock-vision')
+        .capabilities.vision === true
   );
 
   // 编辑：传新 key 才覆盖
@@ -1199,6 +1206,43 @@ async function main() {
 
   const publicOk = await adapter.assertPublicUrl('http://93.184.216.34/v1');
   check('公网 IP 字面量放行', publicOk && publicOk.addresses.includes('93.184.216.34'));
+
+  // 调用期 DNS：保存/测试之后重新解析到私网，聊天调用必须再次拦截。
+  const rebindProvider = configs.addModelProvider({
+    name: 'DNS Rebind',
+    baseUrl: `http://rebind.example:${MOCK_PORT}/v1`,
+    apiKey: CUSTOM_KEY,
+    models: [{ id: 'rebind-model' }],
+  }).provider;
+  const dnsModule = require('dns');
+  const originalLookup = dnsModule.promises.lookup;
+  const savedAllow = process.env.BLUEBIRD_ALLOW_PRIVATE_BASE_URL;
+  const requestsBefore = mockState.requests.length;
+  let callTimeBlocked = false;
+  process.env.BLUEBIRD_ALLOW_PRIVATE_BASE_URL = '';
+  dnsModule.promises.lookup = async () => [{ address: '10.0.0.5', family: 4 }];
+  try {
+    await adapter.createChatCompletion({
+      providerId: rebindProvider.id,
+      modelId: 'rebind-model',
+      messages: [{ role: 'user', content: 'dns rebind test' }],
+      timeout: 1000,
+    });
+  } catch (error) {
+    callTimeBlocked =
+      error &&
+      error.kind === 'bad_request' &&
+      String(error.detail || '').includes('内网');
+  } finally {
+    dnsModule.promises.lookup = originalLookup;
+    process.env.BLUEBIRD_ALLOW_PRIVATE_BASE_URL = savedAllow;
+    configs.deleteModelProvider(rebindProvider.id);
+  }
+  check('调用期 DNS 复验：保存后改解析到私网仍被拦截', callTimeBlocked);
+  check(
+    '调用期 DNS 拦截发生在发出模型请求之前',
+    mockState.requests.length === requestsBefore
+  );
 
   // ================= G. 持久化与重启 =================
   ORIG_LOG('\nG. 持久化与重启行为');

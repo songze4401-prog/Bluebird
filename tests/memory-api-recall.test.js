@@ -229,6 +229,7 @@ async function waitReady() {
 
   const memory = require(path.join(__dirname, '..', 'server', 'memory.js'));
   const sessions = require(path.join(__dirname, '..', 'server', 'sessions.js'));
+  const retrieval = require(path.join(__dirname, '..', 'server', 'retrieval'));
 
   origLog('\n鉴权与参数校验');
   {
@@ -239,10 +240,10 @@ async function waitReady() {
     });
     check('POST /memory/clear-session 无 token 返回 401', noToken.status === 401, `实际 ${noToken.status}`);
 
-    const missing = await req('/memory/clear-session', { method: 'POST', body: {} });
+    const missing = await req('/memory/clear-session', { method: 'POST', body: { confirm: true } });
     check('缺 sessionId 返回 400（空 sessionId 不允许等于全库清空）', missing.status === 400, `实际 ${missing.status}`);
 
-    const blank = await req('/memory/clear-session', { method: 'POST', body: { sessionId: '   ' } });
+    const blank = await req('/memory/clear-session', { method: 'POST', body: { sessionId: '   ', confirm: true } });
     check('空白 sessionId 返回 400', blank.status === 400, `实际 ${blank.status}`);
 
     const noBody = await req('/memory/delete', { method: 'POST', body: {} });
@@ -344,6 +345,19 @@ async function waitReady() {
     ]);
     memory.loadMemories();
 
+    const target = memory
+      .getMemories()
+      .find(item => item.content === '用户喝咖啡只喝拿铁');
+    await retrieval.search({
+      query: '拿铁',
+      sessionId,
+      sources: ['memory'],
+    });
+    check(
+      '基线：撤回目标记忆派生索引存在',
+      Boolean(retrieval.getSource(`memory:${target.id}`))
+    );
+
     const recalled = await req('/history/recall', {
       method: 'POST',
       body: { messageId: message.id, sessionId },
@@ -371,6 +385,10 @@ async function waitReady() {
       '记忆确实从磁盘消失，且别的会话的记忆没被连带删除',
       !diskMemory().some(item => item.content === '用户喝咖啡只喝拿铁') &&
         diskMemory().some(item => item.content === '用户喝咖啡只喝美式')
+    );
+    check(
+      '撤回后派生索引同步清理',
+      retrieval.getSource(`memory:${target.id}`) === null
     );
     check(
       '返回条数 = 内存视图条数 = 磁盘条数',
@@ -461,7 +479,7 @@ async function waitReady() {
 
     const retry = await req('/history/clear', {
       method: 'POST',
-      body: { sessionId },
+      body: { sessionId, confirm: true },
     });
     check('聊天记录清掉后接口仍正常（不受上一次失败影响）', retry.status === 200, `实际 ${retry.status}`);
 
@@ -522,7 +540,7 @@ async function waitReady() {
 
     const noop = await req('/memory/clear-session', {
       method: 'POST',
-      body: { sessionId: 's-从没说过话' },
+      body: { sessionId: 's-从没说过话', confirm: true },
     });
     check(
       '没有匹配贡献 → 200 + 全 0 计数 + 明确说明',
@@ -535,7 +553,7 @@ async function waitReady() {
 
     const cleared = await req('/memory/clear-session', {
       method: 'POST',
-      body: { sessionId: SESSION_A },
+      body: { sessionId: SESSION_A, confirm: true },
     });
 
     check(

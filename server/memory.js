@@ -1213,6 +1213,47 @@ async function applyCandidate(raw, options = {}) {
     const record = (action, reason) =>
       decisionRecord(action, reason, candidate, options.actor, nowIso);
 
+    // Agent 工具路径：改写/合并/替代已有记忆必须由用户确认，不能自动落盘。
+    // 自动记忆抽取仍保留既有策略，避免改变主控聊天既有行为。
+    const mutationDecisions = new Set([
+      DECISION.UPDATE,
+      DECISION.MERGE,
+      DECISION.SUPERSEDE,
+    ]);
+    if (
+      options.requireMutationConfirmation === true &&
+      mutationDecisions.has(decision.decision)
+    ) {
+      const pendingTargetId = decision.target
+        ? decision.target.id
+        : candidate.targetId || null;
+      const pending = storedCandidate(candidate, {
+        status: STATUS_PENDING,
+        pendingReason: 'mutation_requires_confirmation',
+        pendingAt: nowIso,
+        pendingTargetId,
+        pendingMutation: decision.decision,
+        lastDecision: record('needs_confirmation', 'mutation_requires_confirmation'),
+      });
+
+      next.push(pending);
+      trimToCapacity(next);
+      if (!(await persist())) return abortedResult();
+      memories = next;
+
+      return {
+        written: false,
+        action: 'pending',
+        reason: 'mutation_requires_confirmation',
+        id: pending.id,
+        supersededId: null,
+        targetId: pendingTargetId,
+        decision: DECISION.NEEDS_CONFIRMATION,
+        status: STATUS_PENDING,
+        durable: true,
+      };
+    }
+
     if (decision.decision === DECISION.REJECT) {
       return {
         ...base,
@@ -1254,20 +1295,34 @@ async function applyCandidate(raw, options = {}) {
     ) {
       const index = next.findIndex(item => item.id === decision.target.id);
       const existing = next[index];
-      const updated = storedCandidate(candidate, {
-        id: existing.id,
-        status: STATUS_ACTIVE,
-        createdAt: existing.createdAt || candidate.createdAt,
-        validFrom: existing.validFrom || candidate.validFrom,
-        validTo: null,
-        supersededBy: null,
-        contributions: mergeContributions(
-          existing.contributions,
-          candidate.contributions
-        ),
-        updatedAt: nowIso,
-        lastDecision: record(decision.decision, decision.reason),
-      });
+      const contributions = mergeContributions(
+        existing.contributions,
+        candidate.contributions
+      );
+      // 合并到别的会话的条目时，只追加贡献：对方条目的正文、类型、关键词、
+      // 置信度保持原样，否则一次写入会改写别的会话已经存下来的事实。
+      const updated =
+        decision.reason === 'same_fact_other_session'
+          ? {
+              ...existing,
+              status: STATUS_ACTIVE,
+              validTo: null,
+              supersededBy: null,
+              contributions,
+              updatedAt: nowIso,
+              lastDecision: record(decision.decision, decision.reason),
+            }
+          : storedCandidate(candidate, {
+              id: existing.id,
+              status: STATUS_ACTIVE,
+              createdAt: existing.createdAt || candidate.createdAt,
+              validFrom: existing.validFrom || candidate.validFrom,
+              validTo: null,
+              supersededBy: null,
+              contributions,
+              updatedAt: nowIso,
+              lastDecision: record(decision.decision, decision.reason),
+            });
 
       next[index] = updated;
       trimToCapacity(next);
@@ -1698,6 +1753,12 @@ const INJECT_CAP = 10;
 // sessionId 为空 = 调用方没有会话身份（旧数据 / 老调用）。这时绝不退回
 // 「全库可见」：只注入无归属的旧数据，属于具名会话的记忆一律不露。
 // 线上路径必须显式传 sessionId —— 这是 P0 修掉的隐私外泄口子。
+//
+// 注意：这不是生产注入路径。线上注入走 Context Runtime v3
+// （server/context/retriever.js → searchMemories → server/context/builder.js
+// 的 renderMemoryBlock）。本函数保留给固定评测（tests/memory-eval/）与
+// 作用域回归断言使用：它与 searchMemories 共用 scopeOf / visiblePool /
+// rankMemories，因此评测里的作用域结论与线上读路径一致。
 function buildMemoryContext(message, sessionId = null) {
   if (!MEMORY_ENABLED) return '';
 
@@ -1737,7 +1798,7 @@ function buildMemoryContext(message, sessionId = null) {
   }
 }
 
-// 相关性算分与选取：buildMemoryContext（会话内注入）与 Agent 工具检索
+// 相关性算分与选取：buildMemoryContext（评测注入渲染器）与 Agent 工具检索
 // （searchMemories，scope 化）共用同一套算分，不另造轮子。
 // current 传原始查询串：关键词命中按归一化文本比较，内容二元组按原文计算。
 // identity 类型优先（≤2 条），保证身份类事实不会因字面 0 分被丢弃；
@@ -2416,6 +2477,26 @@ function searchMemories({
 
 loadMemories();
 
+// 记忆是 canonical source，检索索引是派生数据。删除/归档/撤回后立即同步，
+// 避免已删除内容或已失去会话可见性的 chunk 继续留在 index.json。
+// 索引失败不回滚已落盘的记忆删除；派生索引可由下一次 search/rebuild 修复。
+function refreshDerivedMemoryIndex(reason) {
+  try {
+    const retrieval = require('./retrieval');
+    const result = retrieval.cleanupMemoryIndex();
+    if (result && result.ok === false) {
+      console.error(
+        `[retrieval] 记忆索引同步失败（${reason}）：${result.errorCode || result.status || 'unknown'}`
+      );
+    }
+  } catch (error) {
+    console.error(
+      `[retrieval] 记忆索引同步异常（${reason}）：`,
+      error && error.message ? error.message : error
+    );
+  }
+}
+
 // 三个写入口（processMemory / recall / delete / clear）统一遵守同一顺序：
 // 先在副本上算出新库 → await 落盘成功 → 才把内存换成新库。
 // 落盘失败时异常原样抛给调用方（内存与磁盘都还是旧的，两边一致），
@@ -2430,6 +2511,8 @@ async function clearMemories() {
     await saveMemories([]);
 
     memories = [];
+
+    refreshDerivedMemoryIndex('clear');
 
     console.log(`Memory cleared: ${removedEntries}`);
 
@@ -2495,6 +2578,8 @@ async function clearSessionMemories(sessionId) {
     await saveMemories(remaining);
 
     memories = remaining;
+
+    refreshDerivedMemoryIndex('clear_session');
 
     console.log(
       `Memory session cleared: ${target} entries=${removedEntries} contributions=${removedContributions}`
@@ -2625,6 +2710,8 @@ async function recallMemoryBySourceQuote(
 
     memories = remaining;
 
+    refreshDerivedMemoryIndex('recall');
+
     console.log(
       `Memory recalled: entries=${removedEntries} contributions=${removedContributions}`
     );
@@ -2703,6 +2790,8 @@ async function deleteMemory({ id, createdAt, content } = {}) {
 
     memories = next;
 
+    refreshDerivedMemoryIndex('delete');
+
     console.log('Memory deleted');
 
     return {
@@ -2747,7 +2836,7 @@ async function confirmPending(id) {
       return { updated: 0, reason: 'not-pending' };
     }
 
-    const { pendingReason, pendingAt, pendingTargetId, ...rest } = item;
+    const { pendingReason, pendingAt, pendingTargetId, pendingMutation, ...rest } = item;
     const now = new Date().toISOString();
     const next = current.slice();
     const targetIndex = pendingTargetId
@@ -2761,6 +2850,57 @@ async function confirmPending(id) {
 
     if (targetIndex >= 0) {
       const target = current[targetIndex];
+
+      if (pendingMutation === DECISION.SUPERSEDE) {
+        const replacement = {
+          ...rest,
+          status: STATUS_ACTIVE,
+          validFrom: now,
+          validTo: item.validTo || null,
+          supersededBy: null,
+          supersedes: target.id,
+          updatedAt: now,
+          lastDecision: {
+            action: 'confirm',
+            reason: 'user_confirmed_supersede',
+            at: now,
+            actor: 'user',
+            sourceType: 'user',
+          },
+        };
+        const rewritten = current
+          .filter((_, position) => position !== index)
+          .map(candidate =>
+            candidate.id === target.id
+              ? {
+                  ...candidate,
+                  status: STATUS_SUPERSEDED,
+                  validTo: now,
+                  supersededBy: item.id,
+                  updatedAt: now,
+                  lastDecision: {
+                    action: 'confirm_supersede',
+                    reason: 'user_confirmed_supersede',
+                    at: now,
+                    actor: 'user',
+                    sourceType: 'user',
+                  },
+                }
+              : candidate
+          );
+        rewritten.push(replacement);
+
+        await saveMemories(rewritten);
+        memories = rewritten;
+
+        return {
+          updated: 1,
+          reason: 'ok',
+          id: replacement.id,
+          supersededId: target.id,
+          status: STATUS_ACTIVE,
+        };
+      }
 
       next[targetIndex] = {
         ...target,
@@ -2881,6 +3021,8 @@ async function archiveMemory(id) {
 
     await saveMemories(next);
     memories = next;
+
+    refreshDerivedMemoryIndex('archive');
 
     return { updated: 1, reason: 'ok', id: targetId, status: STATUS_ARCHIVED };
   });
@@ -3277,6 +3419,7 @@ async function withdrawMemory({ id, sessionId = null, actor = 'user' } = {}) {
 
     await saveMemories(next);
     memories = next;
+    refreshDerivedMemoryIndex('withdraw');
     return {
       withdrawn: 1,
       reason: 'ok',

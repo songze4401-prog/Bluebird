@@ -5,7 +5,8 @@
  * 1) 两个真实 server/index.js 同时启动：单实例锁只放行一个；
  * 2) memory.json 缺失时两个进程同时初始化：最终仍是合法空数组，无 tmp 残留；
  * 3) 故障注入：把“检查文件不存在”与“写入 []”之间的窗口拉大，验证
- *    排他创建后 B 遇到 EEXIST 会读取 A 的记忆，不会覆盖已写入数据（修复回归）。
+ *    排他创建后 B 遇到 EEXIST 会读取 A 的记忆，不会覆盖已写入数据（修复回归）；
+ * 4) 数据目录不可用（路径存在但不是目录）时启动期显式拒绝，不进入监听。
  *
  * 运行：node tests/memory-startup-lock.test.js
  */
@@ -315,6 +316,48 @@ async function realLockTrial() {
   await waitExit(first, 5000).catch(() => {});
 }
 
+// 数据目录不可用（路径存在但不是目录）：必须在启动期显式拒绝，
+// 而不是带着"写不进去的目录"继续监听、把故障留到运行期的静默写失败。
+async function unusableDataDirTrial() {
+  const base = path.join(TMP_ROOT, 'unusable');
+  fs.mkdirSync(base, { recursive: true });
+  const dataDir = path.join(base, 'blocker');
+
+  fs.writeFileSync(dataDir, 'not-a-directory', 'utf8');
+
+  const child = spawn(process.execPath, [SERVER_ENTRY], {
+    env: baseEnv(dataDir),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+
+  child.stdout.on('data', chunk => {
+    stdout += chunk.toString();
+  });
+  child.stderr.on('data', chunk => {
+    stderr += chunk.toString();
+  });
+
+  const code = await waitExit(child, 20000).catch(() => null);
+
+  check(
+    '数据目录不可用：进程以退出码 1 结束',
+    code === 1,
+    `exit=${code}`
+  );
+  check(
+    '数据目录不可用：给出显式拒绝原因',
+    /启动被拒绝/.test(stderr) && /数据目录不可用/.test(stderr),
+    stderr.slice(-300)
+  );
+  check(
+    '数据目录不可用：从未进入监听',
+    !stdout.includes('Bluebird API running'),
+    stdout.slice(-200)
+  );
+}
+
 function fileStateTrial() {
   const emptyDir = path.join(TMP_ROOT, 'state-empty');
   fs.mkdirSync(emptyDir, { recursive: true });
@@ -550,7 +593,10 @@ fs.writeFileSync(path.join(dir, 'B_DONE'), '1');
   console.log('\n4) 故障注入：锁前检查与写入之间的窗口');
   await faultInjectionTrial();
 
-  console.log('\n5) 合法空文件 / 非空文件 / 零字节文件');
+  console.log('\n5) 数据目录不可用时拒绝启动');
+  await unusableDataDirTrial();
+
+  console.log('\n6) 合法空文件 / 非空文件 / 零字节文件');
   fileStateTrial();
 
   console.log(`\n通过 ${passed} 项，失败 ${failed} 项`);

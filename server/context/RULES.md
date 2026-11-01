@@ -111,7 +111,7 @@ user 历史走第 4 节；doc/web 没有真实读取器；工具结果由 Agent 
 | `expired` 实时数据 | 排除，记录 `expired_realtime_refetch` |
 
 按类型配置（`ttl`）：`realtime_data` 30s / refetch / TTL 必填；
-`user_preference` 30d / demote_to_pending；`project_fact` 7d / revalidate。
+`user_preference` 30d / revalidate；`project_fact` 7d / revalidate。两者过期都保留注入并标记待验证，与 `memory_search` 仍可检索到一致，不静默丢弃。
 禁止 `on_expire: ignore`。
 
 ## 8. 输入保护（唯一的“预算”层）

@@ -4,6 +4,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { logDataEvent } = require('./data-events');
 const { registerCorruptionHandler, handleCorruption } = require('./corruption');
+const { writeFileAtomicSync } = require('./atomic-write');
 const { truncateText } = require('./text-utils');
 
 // 数据目录可通过 BLUEBIRD_DATA_DIR 覆盖：测试用临时目录，避免碰到真实数据。
@@ -20,6 +21,10 @@ const DEFAULT_SESSION_ID = 'default';
 const DEFAULT_SESSION_TITLE = '默认会话';
 const NEW_SESSION_TITLE = '新会话';
 const SESSION_MESSAGE_MAX = 1000;
+// 主会话数量上限：sessions.json 每条聊天都会整份重写，会话数无上限会让
+// 单文件无限变大。超过上限时先回收最老且没有消息的空会话（不含默认会话）；
+// 没有可回收的空会话就明确报错，绝不为了腾位置删掉有对话的会话。
+const SESSION_MAX = 200;
 // /history 单次响应上限：旧客户端仍可一次拿 200 条；更大的保留量靠向
 // 前翻页读取，不用一次把 1000 条全塞进响应和前端列表。
 const HISTORY_PAGE_MAX = 200;
@@ -412,26 +417,14 @@ function saveStore() {
   try {
     fs.mkdirSync(DATA_DIR, { recursive: true });
 
-    // 与 memory.js / emotion.js 同款：临时文件名带 pid，避免多实例抢同一路径触发 EPERM
-    const tmpFile = `${STORE_FILE}.tmp.${process.pid}`;
     const payload = JSON.stringify(store, null, 2);
 
-    // 先写临时文件并 fsync 落盘，再原子 rename 覆盖目标。
-    // 只 writeFile + rename 的话，rename 可能先于数据落盘被提交，
-    // 断电后目标文件可能变成空文件或旧内容；fsync 把"数据已写稳"钉在
-    // rename 之前，把这个窗口关掉。
-    // 注：memory.js / emotion.js 的同一套原子写已抽到 server/atomic-write.js
-    // （额外做父目录 fsync），三模块现已一致。
-    const fd = fs.openSync(tmpFile, 'w');
-
-    try {
-      fs.writeFileSync(fd, payload, 'utf8');
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-
-    fs.renameSync(tmpFile, STORE_FILE);
+    // 走 server/atomic-write.js 的统一原子写：临时文件以 'wx' 独占创建
+    // （多实例不会互踩同一路径）、写完 fsync、再 rename 覆盖、最后尽力
+    // fsync 父目录。此前这里自己拼 `${STORE_FILE}.tmp.${pid}` 并用 'w'
+    // 打开，临时文件不独占、也没有父目录 fsync，与 memory/emotion 的
+    // 实际保证并不对等。
+    writeFileAtomicSync(STORE_FILE, payload);
 
     console.log('Session store saved:', store.sessions.length, 'sessions');
     return true;
@@ -488,9 +481,38 @@ function getSession(sessionId) {
   };
 }
 
+// 回收最老的空会话：只回收没有消息、且不是默认会话的空壳。
+// 有对话的会话一律不删——容量压力不能变成"删掉用户的聊天记录"。
+function pruneEmptySessions(current) {
+  const candidates = current.sessions
+    .filter(meta => meta.id !== DEFAULT_SESSION_ID)
+    .filter(meta => (current.messages[meta.id] || []).length === 0)
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+
+  const removed = [];
+  while (current.sessions.length >= SESSION_MAX && candidates.length) {
+    const victim = candidates.shift();
+    current.sessions = current.sessions.filter(item => item.id !== victim.id);
+    delete current.messages[victim.id];
+    removed.push(victim);
+  }
+  return removed;
+}
+
 function createSession({ title } = {}) {
   const current = loadStore();
   const t = nowIso();
+
+  // 会话数量上限：先回收空会话；没有可回收的就明确拒绝，绝不删有内容的会话。
+  let pruned = [];
+  if (current.sessions.length >= SESSION_MAX) {
+    pruned = pruneEmptySessions(current);
+    if (current.sessions.length >= SESSION_MAX) {
+      const limitError = new Error('会话数量已达上限');
+      limitError.code = 'session_limit';
+      throw limitError;
+    }
+  }
 
   const meta = {
     id: crypto.randomUUID(),
@@ -509,7 +531,23 @@ function createSession({ title } = {}) {
     // 落盘失败：回滚内存，保证内存视图与磁盘事实一致
     current.sessions.pop();
     delete current.messages[meta.id];
+    for (const restored of pruned) {
+      current.sessions.push(restored);
+      current.messages[restored.id] = [];
+    }
     return null;
+  }
+
+  if (pruned.length) {
+    logDataEvent({
+      module: 'sessions',
+      file: STORE_FILE,
+      event: 'session_pruned',
+      level: 'info',
+      reason: 'session_limit',
+      action: 'prune_empty_sessions',
+      extra: { removed: pruned.length },
+    });
   }
 
   return { ...meta, messageCount: 0 };
@@ -770,6 +808,7 @@ module.exports = {
   DEFAULT_SESSION_TITLE,
   NEW_SESSION_TITLE,
   SESSION_MESSAGE_MAX,
+  SESSION_MAX,
   HISTORY_PAGE_MAX,
   HISTORY_PAGE_DEFAULT,
   getHistoryPage,

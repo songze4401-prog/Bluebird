@@ -722,7 +722,7 @@ async function main() {
   // D4 清空会话 → 级联删除剩余附件
   const clear = await req('/history/clear', {
     method: 'POST',
-    body: { sessionId },
+    body: { sessionId, confirm: true },
   });
   check('清空会话成功', clear.status === 200);
   check(

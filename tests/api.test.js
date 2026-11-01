@@ -62,14 +62,23 @@ function check(name, cond, extra = '') {
   }
 }
 
-async function req(path, { method = 'GET', token = TOKEN, body } = {}) {
+async function req(
+  path,
+  { method = 'GET', token = TOKEN, body, rawBody, headers = {} } = {}
+) {
   const res = await fetch(BASE + path, {
     method,
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...headers,
     },
-    body: body ? JSON.stringify(body) : undefined,
+    body:
+      rawBody !== undefined
+        ? rawBody
+        : body
+          ? JSON.stringify(body)
+          : undefined,
   });
   let json = null;
   try {
@@ -77,7 +86,7 @@ async function req(path, { method = 'GET', token = TOKEN, body } = {}) {
   } catch (_) {
     /* 非 JSON 响应 */
   }
-  return { status: res.status, json };
+  return { status: res.status, json, headers: res.headers };
 }
 
 /* ---------------- 纵深防御 ----------------
@@ -208,6 +217,65 @@ async function waitReady() {
     process.exit(1);
   }
 
+  origLog('\nHTTP 边界：CORS、鉴权前 body、认证失败锁定');
+  {
+    const preflight = await req('/memory', {
+      method: 'OPTIONS',
+      token: null,
+      headers: {
+        Origin: 'http://localhost:8081',
+        'Access-Control-Request-Method': 'GET',
+      },
+    });
+    check(
+      '允许来源的预检返回 CORS 头',
+      (preflight.status === 204 || preflight.status === 200) &&
+        preflight.headers.get('access-control-allow-origin') ===
+          'http://localhost:8081',
+      `实际 ${preflight.status}`
+    );
+
+    const evil = await req('/memory', {
+      headers: { Origin: 'https://evil.example' },
+    });
+    check('未授权来源返回 403', evil.status === 403, `实际 ${evil.status}`);
+
+    const bigUnauth = await req('/uploads/image', {
+      method: 'POST',
+      token: null,
+      rawBody: '{' + 'x'.repeat(2 * 1024 * 1024),
+    });
+    check(
+      '未认证的大 body 在鉴权阶段被拒绝（401，不进入 8MB parser）',
+      bigUnauth.status === 401,
+      `实际 ${bigUnauth.status}`
+    );
+
+    const badJson = await req('/presence/report', {
+      method: 'POST',
+      rawBody: '{',
+    });
+    check(
+      '合法鉴权后的非法 JSON 返回 400 JSON 错误',
+      badJson.status === 400 &&
+        badJson.json &&
+        badJson.json.error === '请求体不是合法 JSON' &&
+        String(badJson.headers.get('content-type')).includes('application/json'),
+      `实际 ${badJson.status} / ${JSON.stringify(badJson.json)}`
+    );
+
+    let lastStatus = 0;
+    for (let i = 0; i < 11; i++) {
+      const r = await req('/emotion', { token: 'bad-token' });
+      lastStatus = r.status;
+      if (r.status === 429) break;
+    }
+    check('连续认证失败超过阈值后返回 429 锁定', lastStatus === 429, `实际 ${lastStatus}`);
+
+    const recovered = await req('/memory');
+    check('正确 token 不受失败锁定影响', recovered.status === 200, `实际 ${recovered.status}`);
+  }
+
   origLog('\n接口鉴权');
   {
     const r = await req('/', { token: null });
@@ -230,6 +298,40 @@ async function waitReady() {
     );
   }
 
+  origLog('\nHTTP 语义：JSON 404、统一错误体、版本号（P3-10 / P3-02）');
+  {
+    const missing = await req('/no-such-route');
+    check(
+      '未知路由返回 404 JSON（error + code）',
+      missing.status === 404 &&
+        missing.json &&
+        missing.json.code === 'not_found' &&
+        typeof missing.json.error === 'string' &&
+        String(missing.headers.get('content-type')).includes('application/json'),
+      `实际 ${missing.status} / ${JSON.stringify(missing.json)}`
+    );
+
+    const invalidJson = await req('/presence/report', {
+      method: 'POST',
+      rawBody: '{',
+    });
+    check(
+      '非法 JSON 的错误体带机器可读 code',
+      invalidJson.status === 400 &&
+        invalidJson.json &&
+        invalidJson.json.code === 'invalid_json',
+      `实际 ${invalidJson.status} / ${JSON.stringify(invalidJson.json)}`
+    );
+
+    const pkg = require(path.join(__dirname, '..', 'package.json'));
+    const root = await req('/', { token: null });
+    check(
+      'GET / 返回的 version 与 package.json 一致',
+      root.status === 200 && root.json && root.json.version === pkg.version,
+      `实际 ${JSON.stringify(root.json)} / package.json ${pkg.version}`
+    );
+  }
+
   origLog('\n记忆与情绪接口');
   {
     const emo = await req('/emotion');
@@ -245,7 +347,7 @@ async function waitReady() {
       JSON.stringify(emo.json)
     );
 
-    const cleared = await req('/memory/clear', { method: 'POST' });
+    const cleared = await req('/memory/clear', { method: 'POST', body: { confirm: true } });
     check('POST /memory/clear 返回 200', cleared.status === 200, `实际 ${cleared.status}`);
 
     const after = await req('/memory');
@@ -259,36 +361,38 @@ async function waitReady() {
     );
   }
 
-  origLog('\n数据目录隔离守卫（D-2）');
+  origLog('\n破坏性操作的二次确认守卫（P3-12，与数据目录无关）');
   {
-    // 把「有效数据目录」临时指向真实 server/data（非临时目录）：无 confirm 的
-    // clear 必须被 403 拦截。守卫在写盘之前返回，不会触碰任何数据；
-    // 且各数据模块的 DATA_DIR 在加载时已固定为临时目录，即便误放行也只会清临时数据。
-    const prevDir = process.env.BLUEBIRD_DATA_DIR;
-    process.env.BLUEBIRD_DATA_DIR = path.join(__dirname, '..', 'server', 'data');
+    // 守卫与数据目录无关：临时目录、真实目录一律要求 confirm: true。
+    // 这里在临时数据目录下再验一次，证明它不是"只有真实目录才拦"。
+    const memGuard = await req('/memory/clear', { method: 'POST' });
+    check(
+      '临时目录下 POST /memory/clear 无 confirm 也返回 403',
+      memGuard.status === 403,
+      `实际 ${memGuard.status}`
+    );
+    check(
+      '403 响应带 requireConfirm 标记',
+      memGuard.json && memGuard.json.requireConfirm === true,
+      JSON.stringify(memGuard.json)
+    );
 
-    try {
-      const memGuard = await req('/memory/clear', { method: 'POST' });
-      check(
-        '真实目录下 POST /memory/clear 无 confirm 返回 403',
-        memGuard.status === 403,
-        `实际 ${memGuard.status}`
-      );
-      check(
-        '403 响应带 requireConfirm 标记',
-        memGuard.json && memGuard.json.requireConfirm === true,
-        JSON.stringify(memGuard.json)
-      );
+    const histGuard = await req('/history/clear', { method: 'POST' });
+    check(
+      '临时目录下 POST /history/clear 无 confirm 也返回 403',
+      histGuard.status === 403,
+      `实际 ${histGuard.status}`
+    );
 
-      const histGuard = await req('/history/clear', { method: 'POST' });
-      check(
-        '真实目录下 POST /history/clear 无 confirm 返回 403',
-        histGuard.status === 403,
-        `实际 ${histGuard.status}`
-      );
-    } finally {
-      process.env.BLUEBIRD_DATA_DIR = prevDir;
-    }
+    const sessionGuard = await req('/memory/clear-session', {
+      method: 'POST',
+      body: { sessionId: 'default' },
+    });
+    check(
+      'POST /memory/clear-session 无 confirm 返回 403',
+      sessionGuard.status === 403,
+      `实际 ${sessionGuard.status}`
+    );
   }
 
   origLog('\n聊天历史接口');
@@ -306,7 +410,7 @@ async function waitReady() {
     const notFound = await req('/history/recall', { method: 'POST', body: { messageId: 'not-exist-id' } });
     check('POST /history/recall 未知 id 返回 404', notFound.status === 404, `实际 ${notFound.status}`);
 
-    const cleared = await req('/history/clear', { method: 'POST' });
+    const cleared = await req('/history/clear', { method: 'POST', body: { confirm: true } });
     check('POST /history/clear 返回 200', cleared.status === 200, `实际 ${cleared.status}`);
   }
 
@@ -330,7 +434,7 @@ async function waitReady() {
     check('续写模式不因缺少 message 报 400', cont.status !== 400, `实际 ${cont.status}`);
   }
 
-  origLog('\n限流（60 次/分钟，按 IP+token）');
+  origLog('\n限流（60 次/分钟，按 IP）');
   {
     let sawRateLimit = false;
     let used = 0;
@@ -348,7 +452,11 @@ async function waitReady() {
     check('配额未重置前持续拦截', stillBlocked.status === 429, `实际 ${stillBlocked.status}`);
 
     const wrongToken = await req('/emotion', { token: 'another-token' });
-    check('错误 token 在限流期间仍走鉴权返回 401', wrongToken.status === 401, `实际 ${wrongToken.status}`);
+    check(
+      '旋转错误 token 不能绕过限流（仍返回 429）',
+      wrongToken.status === 429,
+      `实际 ${wrongToken.status}`
+    );
   }
 
   // 守卫 2（后置）：确认整轮跑下来真实数据目录一个字节都没变。

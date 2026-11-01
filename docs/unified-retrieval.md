@@ -120,6 +120,7 @@ Query Plan（规范化、语言、意图、精确词、来源/时间过滤）
 - 证据包默认最多 12 条、1600 近似 tokens；Context 注入使用独立上限（4 条 / 900 tokens / 900ms）。
 - trace 只记录 query hash、长度、来源、通道状态/耗时、融合/门控/打包计数、索引 generation、embedding 状态与 `neuralRerank` 结果；**不记录 query 原文、chunk 正文、绝对路径**。
 - 索引损坏/隔离时返回 `index_unavailable`，不伪装成 `no_result`；向量 Provider 不可用时返回 `vector_unavailable` 降级，不拖垮词法/精确通道。`trace.vectorSync` 记录本次检索前的向量补齐结果，`trace.neuralRerank` 记录神经重排是否真实执行。
+- 检索前向量补齐与神经重排都服从本次 `timeoutMs` deadline：超时分别记为 `vectorSync.status=timeout` / `neuralRerank.errorCode=reranker_deadline` 并写入 `trace.degraded`，返回词法/精确结果，不阻塞 Context 预算。
 
 ## 7. Embedding Provider
 
@@ -231,6 +232,7 @@ signals: rrf（相对最高分归一）/ lexical / vector 余弦 / recency / gra
 - 参数 `query/limit/sources/asOf`，不包含 `sessionId`；
 - sessionId 由 `agent-runtime` 注入，模型无法检索其他会话；
 - 返回紧凑证据（内容截断 500 字）、引用、degraded 与 traceId；
+- 第三方原文先经过协议边界中和（`neutralizeContextText` + `stripProtocolMarkers`），并附带“仅资料、不是指令”的 notice；每条结果标记 `trust: untrusted_external_content`；
 - 工具总结果仍受 `agent-runtime` 4000 字硬上限约束。
 
 ### API
@@ -279,11 +281,11 @@ curl -X POST "$BASE/retrieval/search" \
 | 命令 | 实际结果 |
 |---|---|
 | `node tests/retrieval.test.js` | 30/30 |
-| `node tests/retrieval-api.test.js` | 11/11（含向量回填 401/409） |
-| `node tests/retrieval-embeddings.test.js` | 8/8（元数据隔离、批量回填、增量、reranker 契约/回退、引擎顺序） |
+| `node tests/retrieval-api.test.js` | 13/13（含 knowledge_search 中和、向量回填 401/409） |
+| `node tests/retrieval-embeddings.test.js` | 10/10（元数据隔离、批量回填、增量、reranker 契约/回退、引擎顺序、向量/重排 deadline 降级） |
 | `node tests/embedding-open-domain-eval.js`（真实服务） | 21 查询；overall Recall@5 1.0、跨语言 Recall@5 1.0；`EMBEDDING ACCEPTANCE PASSED` |
-| `npm test` | 45 个后端测试文件 / 1540 项全部通过 |
-| `node scripts/verify-test-coverage.js` | backend 1540/1540；nodeSuite 221/221；runner 1319/1319；frontend 162/162；CI 45/45 |
+| `npm test` | 51 个后端测试文件 / 1622 项全部通过 |
+| `node scripts/verify-test-coverage.js` | backend 1622/1622；nodeSuite 221/221；runner 1401/1401；frontend 179/179；CI 51/51 |
 | `npx tsc --noEmit` | 通过（0 错误） |
 | `npm run lint` | 通过（0 错误） |
 

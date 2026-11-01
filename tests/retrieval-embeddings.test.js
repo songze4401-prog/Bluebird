@@ -72,10 +72,17 @@ const embeddingServer = http.createServer((req, res) => {
     }
     const inputs = Array.isArray(parsed.input) ? parsed.input : [parsed.input];
     embeddingLog.push(inputs.slice());
-    jsonResponse(res, 200, {
-      data: inputs.map(text => ({ embedding: vectorFor(String(text)) })),
-      usage: { prompt_tokens: inputs.length, total_tokens: inputs.length },
-    });
+    const respond = () => {
+      jsonResponse(res, 200, {
+        data: inputs.map(text => ({ embedding: vectorFor(String(text)) })),
+        usage: { prompt_tokens: inputs.length, total_tokens: inputs.length },
+      });
+    };
+    if (inputs.some(text => String(text).includes('DEADLINE-SLOW'))) {
+      setTimeout(respond, 600);
+    } else {
+      respond();
+    }
   });
 });
 
@@ -105,13 +112,18 @@ const rerankServer = http.createServer((req, res) => {
       });
       return;
     }
-    jsonResponse(res, 200, {
+    const respond = () => jsonResponse(res, 200, {
       results: documents.map((document, index) => ({
         index,
         relevance_score: String(document).includes('NEURAL-WIN') ? 0.99 : 0.01,
       })),
       meta: { billed_units: { search_units: 1 } },
     });
+    if (documents.some(document => String(document).includes('DEADLINE-SLOW'))) {
+      setTimeout(respond, 600);
+    } else {
+      respond();
+    }
   });
 });
 
@@ -705,4 +717,51 @@ test('检索门面：混合召回 + 神经重排 + 向量同步状态可追溯',
   assert.ok(result.trace.fusion.rerank.applied);
   assert.ok(!JSON.stringify(result.trace).includes('BETA-UNIQUE'));
   assert.ok(result.citations.length >= 1);
+});
+
+test('检索 deadline：向量补齐超时降级，不阻塞本次响应', async () => {
+  fs.writeFileSync(
+    path.join(FIXTURE_ROOT, 'docs', 'deadline.md'),
+    '# Deadline\n\nDEADLINE-SLOW 延迟预算资料。\n',
+    'utf8'
+  );
+  const ingest = await retrieval.ingest({
+    type: 'document',
+    inputPath: 'docs/deadline.md',
+  });
+  assert.equal(ingest.ok, true);
+
+  retrieval.store.clearVectors();
+  const startedAt = Date.now();
+  const result = await retrieval.search({
+    query: 'DEADLINE-SLOW',
+    sources: ['document'],
+    limit: 3,
+    timeoutMs: 120,
+  });
+  const elapsed = Date.now() - startedAt;
+
+  assert.equal(result.ok, true);
+  assert.ok(elapsed < 500, `检索耗时 ${elapsed}ms，超过 deadline 降级预期`);
+  assert.equal(result.trace.vectorSync.status, 'timeout');
+  assert.ok(result.trace.degraded.includes('vector_sync_deadline'));
+  assert.equal(result.trace.vectorSync.errorCode, 'deadline');
+});
+
+test('检索 deadline：神经重排超时回退确定性排序', async () => {
+  await new Promise(resolve => setTimeout(resolve, 700));
+  await retrieval.backfillVectors();
+  const startedAt = Date.now();
+  const result = await retrieval.search({
+    query: 'DEADLINE-SLOW NEURAL-WIN BETA-UNIQUE ALPHA-UNIQUE',
+    sources: ['document'],
+    limit: 3,
+    timeoutMs: 150,
+  });
+  const elapsed = Date.now() - startedAt;
+
+  assert.equal(result.ok, true);
+  assert.ok(elapsed < 600, `检索耗时 ${elapsed}ms，超过 reranker deadline 预期`);
+  assert.equal(result.trace.neuralRerank.errorCode, 'reranker_deadline');
+  assert.ok(result.trace.degraded.includes('reranker_deadline'));
 });

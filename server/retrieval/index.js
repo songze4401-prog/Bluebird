@@ -49,6 +49,24 @@ function enqueueMutation(task) {
   return run;
 }
 
+function withDeadline(promise, deadline, errorCode) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    const error = new Error(errorCode);
+    error.code = errorCode;
+    return Promise.reject(error);
+  }
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(errorCode);
+      error.code = errorCode;
+      reject(error);
+    }, remaining);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 const ERROR_MESSAGES = Object.freeze({
   query_required: '检索内容不能为空',
   query_too_long: `检索内容超过 ${config.limits.maxQueryChars} 字上限`,
@@ -334,16 +352,32 @@ async function search(options = {}) {
     sync.conversation = syncConversation(sessionId);
   }
 
+  // 向量补齐必须服从本次检索 deadline：它是派生数据的增量维护，
+  // 不能因为一次 embedding 往返把聊天/工具调用拖过预算。
   let vectorSync = null;
-  try {
-    vectorSync = await ensureVectorCoverage({ reason: 'search' });
-  } catch (error) {
+  if (plan.deadline - Date.now() <= 20) {
     vectorSync = {
-      status: 'failed',
-      errorCode:
-        (error && error.code) || error && error.name || 'vector_sync_failed',
+      status: 'timeout',
+      reason: 'retrieval_deadline',
+      errorCode: 'deadline',
       count: 0,
     };
+  } else {
+    try {
+      vectorSync = await withDeadline(
+        ensureVectorCoverage({ reason: 'search' }),
+        plan.deadline,
+        'vector_sync_deadline'
+      );
+    } catch (error) {
+      const code =
+        (error && error.code) || error && error.name || 'vector_sync_failed';
+      vectorSync = {
+        status: code === 'vector_sync_deadline' ? 'timeout' : 'failed',
+        errorCode: code === 'vector_sync_deadline' ? 'deadline' : code,
+        count: 0,
+      };
+    }
   }
 
   let result;
@@ -376,6 +410,10 @@ async function search(options = {}) {
     if (vectorSync && vectorSync.status === 'failed') {
       result.trace.degraded.push(
         `vector_sync_${vectorSync.errorCode || 'failed'}`
+      );
+    } else if (vectorSync && vectorSync.status === 'timeout') {
+      result.trace.degraded.push(
+        `vector_sync_${vectorSync.errorCode || 'timeout'}`
       );
     } else if (vectorSync && vectorSync.truncated) {
       result.trace.degraded.push('vector_sync_truncated');
@@ -1114,7 +1152,7 @@ function publicCapabilities() {
       'PDF/DOCX 未接入解析运行时，明确不支持而不是伪装成功',
       '代码符号为轻量启发式解析，不是完整 AST',
       '未配置 Embedding Provider 时向量通道不可用，词法/精确照常工作',
-      '网页抓取存在 DNS 解析与连接之间的 TOCTOU 风险（已知限制）',
+      '网页抓取在 DNS 解析后校验全部地址并把已校验地址固定给本次连接（每跳重定向重新解析、重新校验、重新固定），DNS 重绑定窗口已消除；仅取首个通过校验的地址，未实现多地址故障切换',
     ],
   };
 }
@@ -1210,6 +1248,46 @@ async function searchForContext({ query, sessionId, now = Date.now() } = {}) {
   };
 }
 
+// 会话已删除时立即移除派生索引；不等下一次 search/rebuild 才发现来源缺失。
+// 失败只返回结构化错误，不抛异常——会话数据已经删除，派生索引可重建。
+function cleanupConversationIndex(sessionId) {
+  if (!config.enabled) {
+    return { ok: true, status: 'disabled', removed: false, chunks: 0 };
+  }
+  const id = typeof sessionId === 'string' ? sessionId.trim() : '';
+  if (!id) return { ok: false, status: 'invalid', errorCode: 'session_required' };
+
+  initialize();
+  if (initError) {
+    return { ok: false, status: 'failed', errorCode: 'index_unavailable' };
+  }
+
+  const sourceId = `conversation:${id}`;
+  const result = store.deleteSource(sourceId);
+  syncState.conversations.delete(id);
+  return {
+    ok: true,
+    status: result.removed ? 'ok' : 'unchanged',
+    sourceId,
+    removed: result.removed,
+    chunks: result.chunks,
+  };
+}
+
+// 记忆删除/归档/撤回后重建记忆派生来源：removed entries 的来源和向量被清掉，
+// 仍存在但贡献变化的条目会刷新 scope，避免已删会话继续检索到旧记忆。
+function cleanupMemoryIndex() {
+  if (!config.enabled) {
+    return { ok: true, status: 'disabled', count: 0 };
+  }
+  initialize();
+  if (initError) {
+    return { ok: false, status: 'failed', errorCode: 'index_unavailable' };
+  }
+  const result = syncMemory({ force: true });
+  return { ok: result.status !== 'failed', ...result };
+}
+
 module.exports = {
   config,
   initialize,
@@ -1224,6 +1302,8 @@ module.exports = {
   getStatus,
   getSources,
   getSource,
+  cleanupConversationIndex,
+  cleanupMemoryIndex,
   checkConsistency,
   describeError,
   store,

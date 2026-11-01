@@ -99,7 +99,7 @@ export function AgentToolsScreen({
         >
           <Text style={styles.title}>工具边界</Text>
           <Text style={styles.subtitle}>
-            工具只在当前会话需要时调用。读取可以自动执行，写入必须经过你的确认。
+            工具只在当前会话需要时调用。读取可以自动执行；新候选可自动创建，改写、合并或替代已有记忆会先进入待确认。
           </Text>
 
           {loading && !data ? (

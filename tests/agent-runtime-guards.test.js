@@ -1,0 +1,303 @@
+/**
+ * 审计 P2 遗留项的运行时守卫：
+ *   - P2-05：轮次上限按本次 policy 的 maxRounds 判定（不是全局 MAX_ROUNDS）；
+ *   - P2-06：一次请求里连续调用工具时，外部 AbortSignal 上不留累积监听器；
+ *   - P2-04：任务的 deadlineMs 在运行时真的被执行（到期收敛成 timed_out）。
+ *
+ * 隔离保证：落盘全部指向系统临时目录；模型走注入的桩，不请求外部服务。
+ * 运行：node --test tests/agent-runtime-guards.test.js
+ */
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { getEventListeners } = require('events');
+const test = require('node:test');
+const assert = require('node:assert');
+
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-runtime-guards-'));
+const SERVER = path.join(__dirname, '..', 'server');
+
+process.env.BLUEBIRD_DATA_DIR = TMP;
+process.env.MEMORY_ENABLED = 'true';
+process.env.DEEPSEEK_API_KEY = 'stub-key-runtime-guards';
+process.env.BLUEBIRD_AGENT_TOOLS = '';
+process.env.BLUEBIRD_MONITORING = '0';
+process.env.BLUEBIRD_ALLOW_PRIVATE_BASE_URL = '1';
+// 全局硬上限拉到 5：只有这样，policy 里的 maxRounds=2 才可能被区分出来。
+process.env.BLUEBIRD_AGENT_MAX_ROUNDS = '5';
+
+// ---- 模型桩：可返回文本、工具调用，或挂起直到被 abort ----
+let modelResponder = null;
+
+function abortError() {
+  const error = new Error('The operation was aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
+const openaiTarget = require.resolve('openai', { paths: [SERVER] });
+require.cache[openaiTarget] = {
+  id: openaiTarget,
+  filename: openaiTarget,
+  loaded: true,
+  exports: class StubOpenAI {
+    constructor() {
+      this.chat = {
+        completions: {
+          create: (body, options) => {
+            const responder = modelResponder || (() => textCompletion('（无响应）'));
+            return Promise.resolve(responder(body, options));
+          },
+        },
+      };
+    }
+  },
+};
+
+function textCompletion(content) {
+  return {
+    model: 'stub-model',
+    choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+  };
+}
+
+function toolCallCompletion(name, args) {
+  return {
+    model: 'stub-model',
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            {
+              id: `call_${name}`,
+              type: 'function',
+              function: { name, arguments: JSON.stringify(args) },
+            },
+          ],
+        },
+        finish_reason: 'tool_calls',
+      },
+    ],
+  };
+}
+
+// 挂起直到 signal 被中止：用来证明任务 deadline 真的能打断上游模型调用。
+function hangingCompletion(options) {
+  return new Promise((resolve, reject) => {
+    const signal = options && options.signal;
+
+    if (!signal) {
+      reject(new Error('模型调用没有收到 abort 信号'));
+      return;
+    }
+
+    if (signal.aborted) {
+      reject(abortError());
+      return;
+    }
+
+    signal.addEventListener('abort', () => reject(abortError()), { once: true });
+  });
+}
+
+const agentRuntime = require(path.join(SERVER, 'agent-runtime.js'));
+
+agentRuntime.registerTool({
+  name: 'guard_probe',
+  description: '守卫探针：记录一次调用并返回固定结果',
+  parameters: {
+    type: 'object',
+    properties: { seq: { type: 'number' } },
+  },
+  validate: args => ({ ok: true, args: args && typeof args === 'object' ? args : {} }),
+  handler: async args => ({
+    ok: true,
+    summary: 'probe',
+    seq: args && args.seq,
+  }),
+  readOnly: true,
+  risk: 'read',
+  timeoutMs: 2000,
+});
+
+function policyWith(budgets = {}) {
+  return {
+    schemaVersion: 1,
+    mode: 'bounded_autonomy',
+    planning: { generatePlan: false, stagedExecution: false },
+    tools: {
+      allowedTools: ['guard_probe'],
+      maxToolCalls: 8,
+      maxReadOnlyRetries: 0,
+    },
+    budgets: {
+      maxRounds: 2,
+      maxTotalMs: 30000,
+      ...budgets,
+    },
+  };
+}
+
+function abortListenerCount(signal) {
+  return getEventListeners(signal, 'abort').length;
+}
+
+test('P2-05：轮次上限按 policy 的 maxRounds 判定，不用全局 MAX_ROUNDS', async () => {
+  modelResponder = body => {
+    const hasToolResult = (body.messages || []).some(m => m.role === 'tool');
+    return hasToolResult
+      ? textCompletion('已完成。')
+      : toolCallCompletion('guard_probe', { seq: 1 });
+  };
+
+  const outcome = await agentRuntime.runAgentTurn({
+    messages: [{ role: 'user', content: '跑一次探针' }],
+    sessionId: 's-guard',
+    policy: policyWith({ maxRounds: 2 }),
+  });
+
+  assert.equal(outcome.rounds, 2, `实际轮次 ${outcome.rounds}`);
+  assert.equal(outcome.maxRounds, 2, `实际上限 ${outcome.maxRounds}`);
+  assert.equal(
+    outcome.reachedMaxRounds,
+    true,
+    '按 policy 的 maxRounds=2 跑满两轮，应判定为到达轮次上限'
+  );
+});
+
+test('P2-06：连续工具调用不会在外部 AbortSignal 上累积监听器', async () => {
+  const controller = new AbortController();
+  const cache = new Map();
+
+  for (let i = 0; i < 15; i += 1) {
+    const result = await agentRuntime.executeToolCall(
+      'guard_probe',
+      { seq: i },
+      {
+        sessionId: 's-guard',
+        userText: '探针',
+        cache,
+        abortSignal: controller.signal,
+      }
+    );
+    assert.equal(result.ok, true);
+  }
+
+  assert.equal(
+    abortListenerCount(controller.signal),
+    0,
+    `外部信号上仍有 ${abortListenerCount(controller.signal)} 个 abort 监听器`
+  );
+});
+
+test('P2-06：外部信号已中止时，工具调用立即返回而不挂监听器', async () => {
+  const controller = new AbortController();
+  controller.abort();
+
+  const result = await agentRuntime.executeToolCall(
+    'guard_probe',
+    { seq: 99 },
+    {
+      sessionId: 's-guard',
+      userText: '探针',
+      cache: new Map(),
+      abortSignal: controller.signal,
+    }
+  );
+
+  assert.ok(result, '应返回结构化结果而不是抛异常');
+  assert.equal(abortListenerCount(controller.signal), 0);
+});
+
+// ---- P2-04：任务 deadlineMs 在运行时被执行 ----
+
+const BOT_KEY = 'guard-bot-key-1234567890';
+const GLOBAL_KEY = 'global-key-must-not-be-used';
+
+test.before(async () => {
+  const apiConfigs = require(path.join(SERVER, 'api-configs.js'));
+  const config = require(path.join(SERVER, 'agents', 'config.js'));
+  const credentials = require(path.join(SERVER, 'agents', 'credentials.js'));
+
+  const added = apiConfigs.addModelProvider({
+    name: 'Guard Test Provider',
+    baseUrl: 'http://127.0.0.1:65535/v1',
+    apiKey: GLOBAL_KEY,
+    models: [
+      {
+        id: 'guard-test-model',
+        name: 'Guard Test Model',
+        capabilities: { tools: true, vision: false },
+      },
+    ],
+  });
+  assert.ok(added.provider, `provider setup failed: ${JSON.stringify(added)}`);
+
+  config.updateConfig('memory', {
+    enabled: true,
+    modelProfile: {
+      providerId: added.provider.id,
+      modelId: 'guard-test-model',
+      temperature: 0.2,
+      maxTokens: 512,
+      timeoutMs: 60000,
+    },
+  });
+
+  const credential = credentials.putCredential({
+    botId: 'memory',
+    providerId: added.provider.id,
+    apiKey: BOT_KEY,
+  });
+  config.setCredentialId('memory', credential.credentialId);
+});
+
+test.after(async () => {
+  try {
+    fs.rmSync(TMP, { recursive: true, force: true });
+  } catch (_) {
+    /* ignore */
+  }
+});
+
+async function waitForTask(tasks, taskId, timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const task = tasks.getTask(taskId);
+    if (task && tasks.isTerminalStatus(task.status)) return task;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  return tasks.getTask(taskId);
+}
+
+test('P2-04：任务超过 deadlineMs 后收敛为 timed_out', async () => {
+  const tasks = require(path.join(SERVER, 'agents', 'tasks.js'));
+  const runtime = require(path.join(SERVER, 'agents', 'runtime.js'));
+
+  modelResponder = (body, options) => hangingCompletion(options);
+
+  const task = tasks.createTask({
+    botId: 'memory',
+    taskType: 'memory.search',
+    goal: '检索一条不存在的记忆',
+    allowedTools: ['memory_search'],
+    deadlineMs: 5000,
+  });
+
+  const startedAt = Date.now();
+  runtime.startTask(task.taskId);
+  const finished = await waitForTask(tasks, task.taskId, 20000);
+  const elapsed = Date.now() - startedAt;
+
+  assert.equal(finished.status, 'timed_out', `实际状态 ${finished.status}`);
+  assert.equal(
+    finished.errorCode,
+    'deadline_exceeded',
+    `实际错误码 ${finished.errorCode}`
+  );
+  assert.ok(elapsed >= 4500, `不应早于 deadline 结束，实际 ${elapsed}ms`);
+  assert.ok(elapsed < 15000, `应贴着 deadline 结束，实际 ${elapsed}ms`);
+});

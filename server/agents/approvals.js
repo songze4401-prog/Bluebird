@@ -14,6 +14,7 @@ const memoryService = require('../memory-service');
 const permissions = require('./permissions');
 const tasks = require('./tasks');
 const sessions = require('./sessions');
+const resultDelivery = require('./result-delivery');
 const { isKnownBot } = require('./manifest');
 const { AgentError } = require('./errors');
 
@@ -110,6 +111,15 @@ function recordEvent(botId, eventType, payload, context = {}) {
         (error && error.code) || 'event_failed'
       }`
     );
+  }
+}
+
+function deliverTaskResult(taskId, outcome) {
+  if (!taskId) return;
+  try {
+    resultDelivery.deliverTaskOutcome(taskId, outcome);
+  } catch (_) {
+    // 结果投递失败不能把已经完成的审批伪装成失败；任务侧保留 failed 状态。
   }
 }
 
@@ -278,14 +288,23 @@ function decide(approvalId, decision, { actor = permissions.SINGLE_USER_ACTOR, r
   if (decision === 'reject' && record.taskId) {
     const task = tasks.getRawTask(record.taskId);
     if (task && !tasks.isTerminalStatus(task.status)) {
+      let updated = false;
       try {
         tasks.updateTask(record.taskId, {
           status: 'cancelled',
           completedAt: now,
           errorCode: 'approval_rejected',
         });
+        updated = true;
       } catch (_) {
         // 任务状态竞争不影响审批结果。
+      }
+      if (updated) {
+        deliverTaskResult(record.taskId, {
+          status: 'cancelled',
+          result: null,
+          errorCode: 'approval_rejected',
+        });
       }
     }
   }
@@ -329,6 +348,17 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
     throw new AgentError('operation_not_allowed', '当前权限不允许执行该操作', 403);
   }
 
+  if (record.taskId) {
+    const linked = tasks.getRawTask(record.taskId);
+    if (!linked || linked.status !== 'waiting_approval') {
+      throw new AgentError(
+        'task_not_waiting_approval',
+        '关联任务不在等待审批状态，不能执行该审批',
+        409
+      );
+    }
+  }
+
   record.status = 'executing';
   record.executedBy = String(actor || permissions.SINGLE_USER_ACTOR).slice(0, 80);
   record.executedAt = nowIso();
@@ -361,33 +391,43 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
 
   if (record.taskId) {
     const task = tasks.getRawTask(record.taskId);
-    if (task && !tasks.isTerminalStatus(task.status)) {
+    if (task && task.status === 'waiting_approval') {
       try {
         if (record.status === 'completed') {
+          const taskResult = {
+            summary: `已执行审批操作：${record.operation}`,
+            toolSteps: [],
+            evidence: Array.isArray(summary.supersededIds)
+              ? summary.supersededIds.map(id => ({ kind: 'memory', id }))
+              : summary.id
+                ? [{ kind: 'memory', id: summary.id }]
+                : [],
+            changes: summary.id
+              ? [{ kind: 'memory', id: summary.id, decision: record.operation }]
+              : [],
+            requiresConfirmation: false,
+            rounds: 0,
+            stopReason: null,
+            model: null,
+          };
           tasks.updateTask(record.taskId, {
             status: 'completed',
             completedAt: now,
-            result: {
-              summary: `已执行审批操作：${record.operation}`,
-              toolSteps: [],
-              evidence: Array.isArray(summary.supersededIds)
-                ? summary.supersededIds.map(id => ({ kind: 'memory', id }))
-                : summary.id
-                  ? [{ kind: 'memory', id: summary.id }]
-                  : [],
-              changes: summary.id
-                ? [{ kind: 'memory', id: summary.id, decision: record.operation }]
-                : [],
-              requiresConfirmation: false,
-              rounds: 0,
-              stopReason: null,
-              model: null,
-            },
+            result: taskResult,
+          });
+          deliverTaskResult(record.taskId, {
+            status: 'completed',
+            result: taskResult,
           });
         } else {
           tasks.updateTask(record.taskId, {
             status: 'failed',
             completedAt: now,
+            errorCode: record.errorCode,
+          });
+          deliverTaskResult(record.taskId, {
+            status: 'failed',
+            result: null,
             errorCode: record.errorCode,
           });
         }
@@ -431,14 +471,23 @@ function recoverInterrupted() {
       if (record.taskId) {
         const task = tasks.getRawTask(record.taskId);
         if (task && !tasks.isTerminalStatus(task.status)) {
+          let updated = false;
           try {
             tasks.updateTask(record.taskId, {
               status: 'failed',
               completedAt: nowIso(),
               errorCode: 'approval_interrupted',
             });
+            updated = true;
           } catch (_) {
             // 任务状态竞争不影响审批恢复。
+          }
+          if (updated) {
+            deliverTaskResult(record.taskId, {
+              status: 'failed',
+              result: null,
+              errorCode: 'approval_interrupted',
+            });
           }
         }
       }

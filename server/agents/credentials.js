@@ -221,11 +221,19 @@ function getCredential(credentialId, botId) {
   return record;
 }
 
-function getCredentialKey(credentialId, botId) {
+function getCredentialKey(credentialId, botId, expectedProviderId = null) {
   assertBot(botId);
   const record = getCredential(credentialId, botId);
   if (!record) {
     throw new AgentError('credential_not_configured', 'Memory Bot 未配置 API Key', 409);
+  }
+  const expected = typeof expectedProviderId === 'string' ? expectedProviderId.trim() : '';
+  if (expected && record.providerId !== expected) {
+    throw new AgentError(
+      'credential_provider_mismatch',
+      'Bot 凭证与当前模型服务商不匹配，请重新配置该 Bot 的 API Key',
+      409
+    );
   }
   return decryptKey(readMasterKey(), record);
 }
@@ -277,11 +285,19 @@ function deleteCredential(credentialId, botId) {
   return { deleted: true, credentialId: record.credentialId };
 }
 
-async function verifyCredential(credentialId, botId) {
+async function verifyCredential(credentialId, botId, expectedProviderId = null) {
   assertBot(botId);
   const record = getCredential(credentialId, botId);
   if (!record) {
     throw new AgentError('credential_not_found', '凭证不存在', 404);
+  }
+  const expected = typeof expectedProviderId === 'string' ? expectedProviderId.trim() : '';
+  if (expected && record.providerId !== expected) {
+    throw new AgentError(
+      'credential_provider_mismatch',
+      'Bot 凭证与当前模型服务商不匹配，请重新配置该 Bot 的 API Key',
+      409
+    );
   }
   const key = decryptKey(readMasterKey(), record);
   const result = await testProviderConnection(record.providerId, {

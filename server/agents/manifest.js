@@ -32,8 +32,6 @@ const MEMORY_BOT_MANIFEST = Object.freeze({
   acceptedTaskTypes: Object.freeze([
     'memory.search',
     'memory.explain',
-    'memory.maintain',
-    'memory.audit',
   ]),
   entrypoints: Object.freeze(['direct_chat', 'delegated_task']),
   toolAllowlist: Object.freeze([

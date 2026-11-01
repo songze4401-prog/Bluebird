@@ -19,9 +19,9 @@
  *   阻断环回 / 私网 / 链路本地 / 云元数据地址（详见 assertPublicUrl）。
  *
  * 已知限制（交付报告同步说明）：
- * - DNS 解析与真实请求之间存在 TOCTOU 窗口（DNS rebinding），本模块用
- *   "保存时校验 + 每 5 分钟复检"缓解，无法根除；彻底方案是请求时固定 IP，
- *   留待后续。
+ * - 自定义 Provider 在每次聊天调用前重新解析并校验，连接固定到本次解析出的
+ *   公网地址（保留 hostname 的 Host/SNI），不跟随重定向；内置 DeepSeek 的
+ *   baseURL 是硬编码常量，跳过 DNS。
  * - 测试旁路 BLUEBIRD_ALLOW_PRIVATE_BASE_URL=1 会跳过内网拦截，仅供
  *   本地 mock 服务商测试使用，生产环境绝不允许设置（启动时有警告）。
  */
@@ -29,6 +29,7 @@ const dns = require('dns').promises;
 const net = require('net');
 const http = require('http');
 const https = require('https');
+const { Readable } = require('stream');
 const { URL } = require('url');
 const OpenAI = require('openai');
 const monitoring = require('./monitoring');
@@ -61,6 +62,7 @@ const ERROR_STATUS = Object.freeze({
   bad_request: 400,
   not_configured: 500,
   capability: 400,
+  cancelled: 499,
 });
 
 const ERROR_MESSAGE = Object.freeze({
@@ -73,6 +75,7 @@ const ERROR_MESSAGE = Object.freeze({
   bad_request: '请求格式不被模型服务商接受',
   not_configured: '未配置可用的模型服务商',
   capability: '当前模型不支持该能力',
+  cancelled: '客户端已断开，模型调用已取消',
 });
 
 class ModelCallError extends Error {
@@ -242,6 +245,143 @@ async function assertPublicUrl(rawUrl) {
   return { url, addresses };
 }
 
+function pinnedLookup(addresses) {
+  const records = [...new Set(addresses || [])]
+    .filter(address => net.isIP(address))
+    .map(address => ({ address, family: net.isIP(address) }));
+  if (!records.length) return undefined;
+  return (hostname, options, callback) => {
+    if (options && options.all) {
+      callback(null, records);
+      return;
+    }
+    callback(null, records[0].address, records[0].family);
+  };
+}
+
+function abortError() {
+  const error = new Error('The operation was aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
+// 用调用期解析出的地址建立连接，保留原 hostname 作为 Host/SNI。
+// 这样 DNS 在复验后即使被重绑定，本次连接也不会改连到别的 IP。
+function createPinnedFetch(baseUrl, addressSource) {
+  const base = new URL(baseUrl);
+  const resolveAddresses =
+    typeof addressSource === 'function'
+      ? addressSource
+      : async () => addressSource;
+
+  return async function pinnedFetch(input, init = {}) {
+    const target = new URL(String(input));
+    if (target.origin !== base.origin) {
+      throw new TypeError('pinned fetch origin mismatch');
+    }
+
+    const lookup = pinnedLookup(await resolveAddresses());
+    if (!lookup) {
+      throw new ModelCallError('bad_request', 'Provider 没有可固定的公网地址');
+    }
+
+    const headers = {};
+    new Headers(init.headers || {}).forEach((value, key) => {
+      headers[key] = value;
+    });
+    // 自定义 fetch 不经过 undici 的自动解压；显式要求 identity，避免
+    // 服务商回 gzip 后 JSON 解析失败。
+    delete headers['accept-encoding'];
+    delete headers['Accept-Encoding'];
+
+    let body = null;
+    if (init.body !== undefined && init.body !== null) {
+      if (typeof init.body === 'string') body = Buffer.from(init.body);
+      else if (Buffer.isBuffer(init.body)) body = init.body;
+      else if (init.body instanceof Uint8Array) body = Buffer.from(init.body);
+      else if (typeof init.body.getReader === 'function') {
+        body = Buffer.from(await new Response(init.body).arrayBuffer());
+      } else {
+        body = Buffer.from(String(init.body));
+      }
+      if (!headers['content-length'] && !headers['Content-Length']) {
+        headers['content-length'] = String(body.length);
+      }
+    }
+
+    const transport = target.protocol === 'https:' ? https : http;
+    const hostname = target.hostname.replace(/^\[|\]$/g, '');
+    const options = {
+      method: String(init.method || 'GET').toUpperCase(),
+      hostname,
+      path: `${target.pathname}${target.search}`,
+      headers,
+      lookup,
+      ...(target.port ? { port: target.port } : {}),
+      ...(target.protocol === 'https:' ? { servername: hostname } : {}),
+    };
+
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      let response = null;
+      const cleanup = () => {
+        if (init.signal) init.signal.removeEventListener('abort', onAbort);
+      };
+      const finishError = error => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+
+      const request = transport.request(options, res => {
+        response = res;
+        if (settled) {
+          res.resume();
+          return;
+        }
+        settled = true;
+        const responseHeaders = new Headers();
+        for (const [key, value] of Object.entries(res.headers)) {
+          if (value === undefined) continue;
+          responseHeaders.set(
+            key,
+            Array.isArray(value) ? value.join(', ') : String(value)
+          );
+        }
+        const nullBody =
+          res.statusCode === 204 || res.statusCode === 205 || res.statusCode === 304;
+        resolve(
+          new Response(nullBody ? null : Readable.toWeb(res), {
+            status: res.statusCode,
+            statusText: res.statusMessage,
+            headers: responseHeaders,
+          })
+        );
+        res.once('close', cleanup);
+        res.once('end', cleanup);
+      });
+
+      const onAbort = () => {
+        request.destroy(abortError());
+        if (response) response.destroy(abortError());
+      };
+
+      if (init.signal) {
+        if (init.signal.aborted) {
+          cleanup();
+          reject(abortError());
+          return;
+        }
+        init.signal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      request.on('error', finishError);
+      request.end(body || undefined);
+    });
+  };
+}
+
 // ---- 目标解析 ----
 
 /**
@@ -338,8 +478,13 @@ function resolveVisionTarget({ providerId, modelId, keyOverride = null } = {}) {
 // 密钥变更后由路由层调 invalidateProviderCache。
 const clientCache = new Map();
 
-function getClient(provider, key) {
-  const cached = clientCache.get(provider.id);
+function getClient(provider, key, pinnedAddresses = null) {
+  const pins =
+    Array.isArray(pinnedAddresses) && pinnedAddresses.length
+      ? [...new Set(pinnedAddresses)].sort()
+      : null;
+  const cacheKey = `${provider.id}|${pins ? pins.join(',') : 'default'}`;
+  const cached = clientCache.get(cacheKey);
   if (cached && cached.key === key && cached.baseUrl === provider.baseUrl) {
     return cached.client;
   }
@@ -348,14 +493,41 @@ function getClient(provider, key) {
     apiKey: key,
     baseURL: provider.baseUrl,
     maxRetries: 0, // 重试策略由上层决定（V1 不自动重试，避免非幂等重复）
+    ...(pins ? { fetch: createPinnedFetch(provider.baseUrl, pins) } : {}),
   });
 
-  clientCache.set(provider.id, { key, baseUrl: provider.baseUrl, client });
+  clientCache.set(cacheKey, { key, baseUrl: provider.baseUrl, client });
+  return client;
+}
+
+// 同步路径（记忆提取 / 表情包语义）拿不到预解析地址，用一个在每次 fetch
+// 时重新解析并校验的 guarded client；仍然按目标地址固定连接。
+function getGuardedClient(provider, key) {
+  const cacheKey = `${provider.id}|guarded`;
+  const cached = clientCache.get(cacheKey);
+  if (cached && cached.key === key && cached.baseUrl === provider.baseUrl) {
+    return cached.client;
+  }
+  const client = new OpenAI({
+    apiKey: key,
+    baseURL: provider.baseUrl,
+    maxRetries: 0,
+    fetch: createPinnedFetch(provider.baseUrl, async () => {
+      const resolved = await assertPublicUrl(provider.baseUrl);
+      return resolved.addresses;
+    }),
+  });
+  clientCache.set(cacheKey, { key, baseUrl: provider.baseUrl, client });
   return client;
 }
 
 function invalidateProviderCache(providerId) {
-  clientCache.delete(String(providerId || ''));
+  const prefix = `${String(providerId || '')}|`;
+  for (const key of clientCache.keys()) {
+    if (key === String(providerId || '') || key.startsWith(prefix)) {
+      clientCache.delete(key);
+    }
+  }
 }
 
 /**
@@ -372,7 +544,10 @@ function getMemoryClient() {
   try {
     const target = resolveTarget({});
     const key = getProviderKey(target.providerId);
-    return getClient(target.provider, key);
+    if (target.provider.id === BUILTIN_PROVIDER_ID) {
+      return getClient(target.provider, key);
+    }
+    return getGuardedClient(target.provider, key);
   } catch (_) {
     return null;
   }
@@ -421,7 +596,13 @@ async function createChatCompletion({
 
   let result;
   try {
-    result = await getClient(target.provider, key).chat.completions.create(
+    // 自定义 Provider 每次调用都重新解析并固定地址；内置 DeepSeek 的
+    // baseURL 是硬编码可信常量，跳过 DNS 以免测试/离线环境依赖解析。
+    const pinnedAddresses =
+      target.provider.id === BUILTIN_PROVIDER_ID
+        ? null
+        : (await assertPublicUrl(target.provider.baseUrl)).addresses;
+    result = await getClient(target.provider, key, pinnedAddresses).chat.completions.create(
       {
         model: target.modelId,
         temperature,
@@ -570,6 +751,10 @@ function normalizeSdkError(error, key) {
   if (name === 'APIConnectionError') {
     return new ModelCallError('connection', message);
   }
+  // 客户端断开造成的中止：不是服务商故障，监控不能算作 provider 失败。
+  if (name === 'AbortError' || name === 'APIUserAbortError') {
+    return new ModelCallError('cancelled', message);
+  }
   if (error && error.code === 'ETIMEDOUT') {
     return new ModelCallError('timeout', message);
   }
@@ -628,14 +813,15 @@ async function testProviderConnection(providerId, { keyOverride = null } = {}) {
   const started = Date.now();
 
   let provider;
+  let pinnedAddresses = null;
   try {
     provider = findProvider(String(providerId || ''));
     if (!provider) throw new ModelCallError('not_configured', '服务商不存在');
 
     // 内置服务商 URL 是硬编码可信常量，跳过 SSRF 解析（省一次 DNS）；
-    // 自定义服务商必须先过 SSRF 校验，再发探测请求。
+    // 自定义服务商必须先过 SSRF 校验，并把解析结果固定到本次探测连接。
     if (provider.id !== BUILTIN_PROVIDER_ID) {
-      await assertPublicUrl(provider.baseUrl);
+      pinnedAddresses = (await assertPublicUrl(provider.baseUrl)).addresses;
     }
   } catch (error) {
     const info = classifyError(error);
@@ -683,6 +869,7 @@ async function testProviderConnection(providerId, { keyOverride = null } = {}) {
           Authorization: `Bearer ${key}`,
           Accept: 'application/json',
         },
+        ...(pinnedAddresses ? { lookup: pinnedLookup(pinnedAddresses) } : {}),
       },
       res => {
         let size = 0;

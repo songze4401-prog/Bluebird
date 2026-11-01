@@ -181,6 +181,71 @@ describe('写入决策六类', { concurrency: 1 }, () => {
     assert.equal(memory.getMemories().some(item => item.id === old.id), false);
   });
 
+  test('requireMutationConfirmation：UPDATE/MERGE/SUPERSEDE 先 pending，确认后生效', async () => {
+    const created = await memory.applyCandidate(base(), USER);
+
+    const mergePending = await memory.applyCandidate(base(), {
+      ...USER,
+      requireMutationConfirmation: true,
+    });
+    assert.equal(mergePending.decision, 'needs_confirmation');
+    assert.equal(mergePending.status, 'pending');
+    assert.equal(mergePending.targetId, created.id);
+    assert.equal(
+      memory.getMemories().filter(item => item.content === '用户喜欢喝美式咖啡').length,
+      1
+    );
+    const merged = await memory.confirmPending(mergePending.id);
+    assert.equal(merged.updated, 1);
+    assert.equal(
+      memory.getMemories().filter(item => item.content === '用户喜欢喝美式咖啡').length,
+      1
+    );
+
+    const updatePending = await memory.applyCandidate(
+      {
+        content: '用户喜欢喝美式咖啡，不加糖',
+        type: 'preference',
+        keywords: ['咖啡', '美式', '不加糖'],
+        confidence: 0.96,
+        sourceQuote: '我喜欢喝美式不加糖',
+        targetId: created.id,
+      },
+      { ...USER, intent: 'correction', requireMutationConfirmation: true }
+    );
+    assert.equal(updatePending.decision, 'needs_confirmation');
+    assert.equal(updatePending.status, 'pending');
+    const updated = await memory.confirmPending(updatePending.id);
+    assert.equal(updated.updated, 1);
+    assert.equal(
+      memory.getMemories().find(item => item.id === created.id).content,
+      '用户喜欢喝美式咖啡，不加糖'
+    );
+
+    const supersedePending = await memory.applyCandidate(
+      {
+        content: '用户喜欢喝拿铁咖啡',
+        type: 'preference',
+        keywords: ['咖啡', '拿铁'],
+        confidence: 0.95,
+        sourceQuote: '我喜欢喝拿铁咖啡',
+      },
+      { ...USER, requireMutationConfirmation: true }
+    );
+    assert.equal(supersedePending.decision, 'needs_confirmation');
+    assert.equal(supersedePending.status, 'pending');
+    const superseded = await memory.confirmPending(supersedePending.id);
+    assert.equal(superseded.updated, 1);
+    assert.equal(superseded.supersededId, created.id);
+    const all = memory.getMemories({ includeSuperseded: true });
+    assert.equal(all.find(item => item.id === created.id).status, 'superseded');
+    assert.ok(
+      memory.getMemories().some(
+        item => item.status === 'active' && item.content === '用户喜欢喝拿铁咖啡'
+      )
+    );
+  });
+
   test('reject：临时状态不会写入长期偏好', async () => {
     const result = await memory.applyCandidate(
       {
@@ -504,5 +569,79 @@ describe('生命周期与历史查询', { concurrency: 1 }, () => {
 
     assert.equal(result.decision, 'reject');
     assert.equal(result.reason, 'unauthorized_target');
+  });
+});
+
+describe('跨会话去重与可见范围', { concurrency: 1 }, () => {
+  test('合并到别的会话条目时不改写对方的正文与类型', async () => {
+    seed([
+      base({
+        content: '用户喜欢喝美式咖啡',
+        type: 'preference',
+        keywords: ['咖啡', '美式'],
+        sourceQuote: '我喜欢喝美式咖啡',
+        sessionId: 's-other',
+      }),
+    ]);
+    const otherBefore = memory.getMemories()[0];
+
+    const result = await memory.applyCandidate(
+      {
+        content: '用户喜欢喝美式咖啡',
+        type: 'fact',
+        keywords: ['咖啡'],
+        confidence: 0.93,
+        sourceQuote: '我喜欢喝美式咖啡',
+      },
+      USER
+    );
+
+    // 全局去重仍是既有能力：同一条事实合并到同一条目。
+    assert.equal(result.decision, 'merge');
+    assert.equal(result.id, otherBefore.id);
+    assert.equal(memory.getMemories().length, 1);
+
+    const saved = memory.getMemories()[0];
+    // 但对方的条目内容不得被本次写入改写。
+    assert.equal(saved.content, '用户喜欢喝美式咖啡');
+    assert.equal(saved.type, 'preference');
+    assert.deepEqual(saved.keywords, ['咖啡', '美式']);
+    // 贡献追加：这条事实现在两个会话都认。
+    assert.deepEqual(
+      saved.contributions.map(item => item.sessionId).sort(),
+      ['s-decision', 's-other']
+    );
+  });
+
+  test('同会话内的合并仍刷新正文与类型', async () => {
+    const first = await memory.applyCandidate(
+      {
+        content: '用户喜欢喝美式咖啡',
+        type: 'preference',
+        keywords: ['咖啡', '美式'],
+        confidence: 0.95,
+        sourceQuote: '我喜欢喝美式咖啡',
+      },
+      USER
+    );
+    assert.equal(first.decision, 'create');
+
+    const second = await memory.applyCandidate(
+      {
+        content: '用户喜欢喝美式咖啡',
+        type: 'fact',
+        keywords: ['咖啡'],
+        confidence: 0.93,
+        sourceQuote: '我喜欢喝美式咖啡',
+      },
+      USER
+    );
+
+    assert.equal(second.decision, 'merge');
+    assert.equal(second.id, first.id);
+
+    const saved = memory.getMemories()[0];
+    assert.equal(saved.type, 'fact');
+    assert.deepEqual(saved.keywords, ['咖啡']);
   });
 });

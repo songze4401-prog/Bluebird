@@ -4,6 +4,7 @@
 // Expo Go 均支持，不新增依赖），按 SSE 的 \n\n 分帧、解析 data: 行 JSON。
 
 import { API_TOKEN } from './constants';
+import { API_BASE } from './api/client';
 import { API_PATHS } from './api/endpoints';
 import type { ChatResponse } from './api/types';
 import type { ToolStreamEvent } from './types';
@@ -239,7 +240,7 @@ export function streamChatRequest(
 
     try {
       if (aborted || finished) return;
-      xhr.open('POST', `${process.env.EXPO_PUBLIC_API_URL}${API_PATHS.chatStream}`);
+      xhr.open('POST', `${API_BASE}${API_PATHS.chatStream}`);
       xhr.setRequestHeader('Content-Type', 'application/json');
       xhr.setRequestHeader('Authorization', `Bearer ${API_TOKEN}`);
       xhr.timeout = 60000;

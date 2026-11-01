@@ -40,6 +40,10 @@ export const API_PATHS = {
     `/agents/${encodeURIComponent(botId)}/sessions/${encodeURIComponent(sessionId)}`,
   agentChat: (botId: string) =>
     `/agents/${encodeURIComponent(botId)}/chat`,
+  agentChatStream: (botId: string) =>
+    `/agents/${encodeURIComponent(botId)}/chat/stream`,
+  agentResultsStream: (sessionId: string) =>
+    `/agent-results/stream?sessionId=${encodeURIComponent(sessionId)}`,
   agentEvents: (botId: string, limit = 30) =>
     `/agents/${encodeURIComponent(botId)}/events?limit=${limit}`,
   agentPermissions: (botId: string) =>

@@ -23,8 +23,13 @@ const OUTBOX_FILE = path.join(AGENTS_DIR, 'agent-event-outbox.json');
 const SCHEMA_VERSION = 1;
 const TASK_MAX = 500;
 const EVENT_MAX = 3000;
+// 事件 outbox 的增长硬上限：主事件文件写不进去时，事件会先堆在 outbox 里。
+// 没有上限时磁盘可能被写满；超出后只保留最近的 OUTBOX_MAX 条并记录被丢弃的条数，
+// 不假装"全都保存了"。
+const OUTBOX_MAX = 500;
 const GOAL_MAX = 2000;
 const CONTEXT_MAX = 8000;
+const PARENT_USER_TEXT_MAX = 4000;
 const RESULT_SUMMARY_MAX = 8000;
 
 const STATUSES = Object.freeze([
@@ -252,6 +257,23 @@ function appendEvent({
   };
   const outbox = loadOutbox();
   outbox.events.push(event);
+  if (outbox.events.length > OUTBOX_MAX) {
+    const dropped = outbox.events.length - OUTBOX_MAX;
+    outbox.events = outbox.events.slice(-OUTBOX_MAX);
+    console.error(
+      JSON.stringify({
+        ts: nowIso(),
+        level: 'error',
+        event: 'agent_event_outbox_overflow',
+        module: 'agents',
+        file: OUTBOX_FILE,
+        reason: 'outbox_overflow',
+        action: 'drop_oldest',
+        dropped,
+        cap: OUTBOX_MAX,
+      })
+    );
+  }
   saveOutbox();
 
   try {
@@ -333,6 +355,29 @@ function publicTask(task, { includeResult = true } = {}) {
   };
 }
 
+// 只有“终态且已投递（或无需投递）”的任务可以被裁剪。未完成的队列任务、
+// waiting_approval 和投递失败的任务仍需要恢复/展示，不能在容量压力下被删掉。
+function isDeliveredTerminal(task) {
+  if (!task || !TERMINAL.has(task.status)) return false;
+  return (
+    task.deliveryStatus === 'delivered' ||
+    task.deliveryStatus === 'not_applicable'
+  );
+}
+
+function pruneDeliveredTerminalTasks(tasks) {
+  const removable = Object.values(tasks.tasks)
+    .filter(isDeliveredTerminal)
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  const removed = [];
+  for (const item of removable) {
+    if (Object.keys(tasks.tasks).length < TASK_MAX) break;
+    removed.push(item);
+    delete tasks.tasks[item.taskId];
+  }
+  return removed;
+}
+
 function createTask({
   botId,
   taskType,
@@ -343,6 +388,7 @@ function createTask({
   deadlineMs = 60000,
   parentSessionId = null,
   parentMessageId = null,
+  parentUserText = null,
 } = {}) {
   assertBot(botId);
   const manifest = getManifest(botId);
@@ -366,6 +412,11 @@ function createTask({
     typeof parentMessageId === 'string' && parentMessageId.trim()
       ? parentMessageId.trim()
       : null;
+  // 委派写入的接地来源是主控用户原话，不是模型生成的 goal。
+  const cleanParentUserText =
+    typeof parentUserText === 'string'
+      ? parentUserText.trim().slice(0, PARENT_USER_TEXT_MAX)
+      : '';
   const cleanDeadline = Number(deadlineMs);
   if (
     !Number.isInteger(cleanDeadline) ||
@@ -391,12 +442,16 @@ function createTask({
   }
 
   const tasks = loadTasks();
+  const pruned =
+    Object.keys(tasks.tasks).length >= TASK_MAX
+      ? pruneDeliveredTerminalTasks(tasks)
+      : [];
   if (Object.keys(tasks.tasks).length >= TASK_MAX) {
-    const oldest = Object.values(tasks.tasks)
-      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
-      .slice(0, 50)
-      .map(item => item.taskId);
-    for (const id of oldest) delete tasks.tasks[id];
+    throw new AgentError(
+      'agent_task_limit',
+      '任务数量已达上限，且没有可裁剪的已投递终态任务',
+      409
+    );
   }
 
   const t = nowIso();
@@ -409,6 +464,7 @@ function createTask({
     sessionId: cleanSession,
     parentSessionId: cleanParentSession,
     parentMessageId: cleanParentMessage,
+    parentUserText: cleanParentUserText,
     deliveredToParentAt: null,
     deliveryMessageId: null,
     deliveryStatus: parentSessionId ? 'pending' : 'not_applicable',
@@ -428,7 +484,13 @@ function createTask({
     result: null,
   };
   tasks.tasks[task.taskId] = task;
-  saveTasks();
+  try {
+    saveTasks();
+  } catch (error) {
+    for (const removed of pruned) tasks.tasks[removed.taskId] = removed;
+    delete tasks.tasks[task.taskId];
+    throw error;
+  }
   appendEvent({
     botId,
     taskId: task.taskId,
@@ -607,6 +669,7 @@ module.exports = {
   TASKS_FILE,
   EVENTS_FILE,
   OUTBOX_FILE,
+  OUTBOX_MAX,
   STATUSES,
   createTask,
   getTask,

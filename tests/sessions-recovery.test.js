@@ -193,10 +193,27 @@ async function main() {
   const created = d.createSession({ title: '可写' });
   check('D 正常状态下可新建会话', !!created && !!created.id);
 
-  // 注入失败：把临时文件路径占成目录，openSync('w') 必然失败。
-  // 临时文件名带 pid（与 sessions.js 一致），占位路径必须同步带上。
-  const TMP_OCCUPIER = path.join(dirD, `sessions.json.tmp.${process.pid}`);
-  fs.mkdirSync(TMP_OCCUPIER);
+  // 注入失败：sessions.json 现在走统一原子写，临时文件是
+  // sessions.json.tmp-<pid>-<ts>-<rand>（随机后缀），没法再像旧实现那样
+  // 靠"占成目录"命中固定路径；这里改为拦截 openSync，让临时文件的
+  // 独占创建必然失败，写盘路径因此整体失败。
+  const realOpenSync = fs.openSync;
+  const openSyncDesc = Object.getOwnPropertyDescriptor(fs, 'openSync');
+  Object.defineProperty(fs, 'openSync', {
+    configurable: true,
+    writable: true,
+    value: (filePath, ...rest) => {
+      if (
+        typeof filePath === 'string' &&
+        filePath.startsWith(path.join(dirD, 'sessions.json.tmp-'))
+      ) {
+        const error = new Error('forced temp file failure');
+        error.code = 'EACCES';
+        throw error;
+      }
+      return realOpenSync.call(fs, filePath, ...rest);
+    },
+  });
 
   const before = d.listSessions().length;
   check('D 落盘失败时新建会话返回失败', d.createSession({ title: '失败' }) === null);
@@ -225,7 +242,13 @@ async function main() {
     errorLines.some(line => line.includes('save FAILED'))
   );
 
-  fs.rmdirSync(TMP_OCCUPIER);
+  check(
+    'D 失败后没有残留半写的临时文件',
+    fs.readdirSync(dirD).filter(name => name.includes('.tmp-')).length === 0,
+    fs.readdirSync(dirD).filter(name => name.includes('.tmp-')).join(', ')
+  );
+
+  if (openSyncDesc) Object.defineProperty(fs, 'openSync', openSyncDesc);
 
   const recovered = d.createSession({ title: '恢复' });
   check(
@@ -353,15 +376,15 @@ async function main() {
       body: { title: '新' },
     });
     check(
-      'E POST /sessions 返回 500（不再假装成功）',
-      create.status === 500,
+      'E POST /sessions 返回 503（存储只读，不再假装成功）',
+      create.status === 503,
       `实际 ${create.status}`
     );
 
-    const clear = await req('/history/clear', { method: 'POST', body: {} });
+    const clear = await req('/history/clear', { method: 'POST', body: { confirm: true } });
     check(
-      'E POST /history/clear 返回 500',
-      clear.status === 500,
+      'E POST /history/clear 返回 503',
+      clear.status === 503,
       `实际 ${clear.status}`
     );
 
@@ -371,8 +394,8 @@ async function main() {
       body: { messageId: userId },
     });
     check(
-      'E POST /history/recall 返回 500（消息未删除）',
-      recall.status === 500,
+      'E POST /history/recall 返回 503（消息未删除）',
+      recall.status === 503,
       `实际 ${recall.status}`
     );
 

@@ -34,6 +34,9 @@ function evaluateStatus(config, credential) {
   if (!model) return { status: 'degraded', reason: 'model_not_found' };
   if (model.enabled === false) return { status: 'degraded', reason: 'model_disabled' };
   if (!credential) return { status: 'degraded', reason: 'credential_not_configured' };
+  if (credential.providerId !== config.modelProfile.providerId) {
+    return { status: 'degraded', reason: 'credential_provider_mismatch' };
+  }
   return { status: 'enabled', reason: null };
 }
 

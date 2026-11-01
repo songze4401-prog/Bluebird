@@ -1,10 +1,11 @@
 /* global __dirname */
-const os = require('os');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const express = require('express');
 const cors = require('cors');
+// 版本号单一来源：package.json。GET / 不再自带一份会漂移的字面量。
+const { version: SERVER_VERSION } = require('../package.json');
 const retrieval = require('./retrieval');
 const { createRetrievalRouter } = require('./retrieval/routes');
 const { createAgentRouter } = require('./agents/routes');
@@ -23,7 +24,100 @@ const { createMonitoringRouter } = require('./monitoring/routes');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+// 统一错误体：{ error: 中文短句, code: 机器可读码 }。
+// 前端 ApiError 直接读这两个字段（lib/api/errors.ts），不再各自拼文案。
+// 503 = 服务当前不可用但没坏（存储只读、限流锁定）；500 只留给真正的内部错误。
+function storeUnavailable(res, message) {
+  return res.status(503).json({ error: message, code: 'store_unavailable' });
+}
+
+// CORS 只放行显式来源；原生客户端/curl 不携带 Origin，不受影响。
+// 默认仅本地 Expo Web 开发端口，生产必须用 BLUEBIRD_CORS_ORIGINS 配置。
+const DEFAULT_CORS_ORIGINS = [
+  'http://localhost:8081',
+  'http://127.0.0.1:8081',
+  'http://localhost:19006',
+  'http://127.0.0.1:19006',
+];
+const CORS_ALLOWED_ORIGINS = (() => {
+  const raw = process.env.BLUEBIRD_CORS_ORIGINS;
+  const list = (typeof raw === 'string' ? raw : '')
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean);
+  return new Set(list.length ? list : DEFAULT_CORS_ORIGINS);
+})();
+
+function isAllowedCorsOrigin(origin) {
+  return Boolean(origin) && CORS_ALLOWED_ORIGINS.has(origin);
+}
+
+// 不在允许列表的浏览器来源直接 403，避免把 CORS 配置错误伪装成业务错误。
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && !isAllowedCorsOrigin(origin)) {
+    return res.status(403).json({ error: 'Origin 不在允许列表' });
+  }
+  next();
+});
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || isAllowedCorsOrigin(origin)) {
+        callback(null, origin || false);
+        return;
+      }
+      callback(null, false);
+    },
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    maxAge: 600,
+  })
+);
+
+// 简单内存限流：客户端 bundle 里必然带 EXPO_PUBLIC_ token（纯前端无法隐藏），
+// 这是缓解 token 泄露后被暴力/盗刷的基本防线。按 IP 限频，不能靠旋转
+// Authorization 换桶绕过；认证失败另有独立锁定计数。
+const RATE_LIMIT_WINDOW = 60 * 1000;
+const AUTH_FAILURE_WINDOW = 5 * 60 * 1000;
+const AUTH_FAILURE_MAX = 10;
+const rateBuckets = new Map();
+const authFailures = new Map();
+
+function clientIp(req) {
+  return req.ip || req.socket.remoteAddress || 'unknown';
+}
+
+function rateLimit({ maxPerWindow = 60 } = {}) {
+  return (req, res, next) => {
+    const key = clientIp(req);
+    const now = Date.now();
+    const bucket = rateBuckets.get(key);
+
+    if (!bucket || now - bucket.start > RATE_LIMIT_WINDOW) {
+      rateBuckets.set(key, { start: now, count: 1 });
+      return next();
+    }
+
+    if (bucket.count >= maxPerWindow) {
+      res.set('Retry-After', String(Math.ceil((bucket.start + RATE_LIMIT_WINDOW - now) / 1000)));
+      return res.status(429).json({ error: '请求过于频繁，请稍后再试' });
+    }
+
+    bucket.count++;
+    next();
+  };
+}
+
+app.use(rateLimit());
+
+// 鉴权必须先于 body 解析：未认证请求即使带 8MB JSON 也不会进入 body-parser。
+// 只放行根路径（版本探测）与 CORS 预检；所有业务路由仍保留各自的 requireAuth。
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS') return next();
+  if (req.method === 'GET' && req.path === '/') return next();
+  return requireAuth(req, res, next);
+});
 
 // 图片上传路由单独放宽 body limit（base64 比原图大约 33%，5MB 图约 6.7MB）。
 // 必须注册在全局 1mb parser 之前：body-parser 按注册顺序消费请求体，
@@ -34,39 +128,9 @@ app.use('/uploads/image', express.json({ limit: '8mb' }));
 app.use('/sticker-repo', express.json({ limit: '8mb' }));
 app.use(express.json({ limit: '1mb' }));
 
-// 埋点中间件注册在 body 解析之后（需要 sessionId 生成脱敏 session_ref），
-// 在限流之前（429 也是真实请求终态）；/monitoring 自身跳过，避免查询噪声。
+// 埋点中间件注册在 body 解析之后（需要 sessionId 生成脱敏 session_ref）。
 // 监控初始化放在单实例锁之后（见文件末尾），避免被拒绝启动的实例先写监控文件。
 app.use(monitoring.monitoringMiddleware());
-
-// 简单内存限流：客户端 bundle 里必然带 EXPO_PUBLIC_ token（纯前端无法隐藏），
-// 这是缓解 token 泄露后被暴力/盗刷的基本防线。按 IP+token 每分钟限频。
-const RATE_LIMIT_WINDOW = 60 * 1000;
-const rateBuckets = new Map();
-
-function rateLimit({ maxPerWindow = 60 } = {}) {
-  return (req, res, next) => {
-    const ip = req.ip || req.socket.remoteAddress || 'unknown';
-    const token = String(req.headers.authorization || '').slice(7) || 'anon';
-    const key = `${ip}:${token}`;
-    const now = Date.now();
-    const bucket = rateBuckets.get(key);
-
-    if (!bucket || now - bucket.start > RATE_LIMIT_WINDOW) {
-      rateBuckets.set(key, { start: now, count: 1 });
-      return next();
-    }
-
-    if (bucket.count >= maxPerWindow) {
-      return res.status(429).json({ error: '请求过于频繁，请稍后再试' });
-    }
-
-    bucket.count++;
-    next();
-  };
-}
-
-app.use(rateLimit());
 
 // 统一检索：查询只读，摄取/删除/重建写索引；全部复用 Bearer 鉴权与全局限流。
 app.use('/retrieval', createRetrievalRouter({ requireAuth }));
@@ -80,6 +144,9 @@ setInterval(() => {
   const now = Date.now();
   for (const [key, bucket] of rateBuckets) {
     if (now - bucket.start > RATE_LIMIT_WINDOW) rateBuckets.delete(key);
+  }
+  for (const [key, failure] of authFailures) {
+    if (now - failure.start > AUTH_FAILURE_WINDOW) authFailures.delete(key);
   }
 }, RATE_LIMIT_WINDOW).unref();
 
@@ -120,15 +187,45 @@ ${v.year}年${v.month}月${v.day}日 ${v.weekday} ${v.hour}:${v.minute}
   }
 }
 
+function tokenMatches(provided, expected) {
+  const { timingSafeEqual } = require('crypto');
+  const actual = Buffer.from(String(provided || ''));
+  const wanted = Buffer.from(String(expected || ''));
+  if (!wanted.length) return false;
+  if (actual.length !== wanted.length) {
+    // 长度不同也走一次恒定时间比较，避免用长度快速探测 token。
+    timingSafeEqual(wanted, wanted);
+    return false;
+  }
+  return timingSafeEqual(actual, wanted);
+}
+
 function requireAuth(req, res, next) {
   const expected = process.env.BLUEBIRD_API_TOKEN;
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
 
-  if (!expected || token !== expected) {
+  if (!expected || !tokenMatches(token, expected)) {
+    const key = clientIp(req);
+    const now = Date.now();
+    let failure = authFailures.get(key);
+    if (!failure || now - failure.start > AUTH_FAILURE_WINDOW) {
+      failure = { start: now, count: 0 };
+    }
+    failure.count += 1;
+    authFailures.set(key, failure);
+    res.set('WWW-Authenticate', 'Bearer');
+    if (failure.count > AUTH_FAILURE_MAX) {
+      res.set(
+        'Retry-After',
+        String(Math.ceil((failure.start + AUTH_FAILURE_WINDOW - now) / 1000))
+      );
+      return res.status(429).json({ error: '认证失败次数过多，请稍后再试' });
+    }
     return res.status(401).json({ error: "Unauthorized" });
   }
 
+  authFailures.delete(clientIp(req));
   next();
 }
 
@@ -885,7 +982,7 @@ app.get('/', (req, res) => {
   res.json({
     name: 'Bluebird API',
     status: 'online',
-    version: '0.3.0',
+    version: SERVER_VERSION,
   });
 });
 
@@ -908,13 +1005,18 @@ app.post('/sessions', requireAuth, (req, res) => {
     const session = createSession({ title });
 
     if (!session) {
-      return res.status(500).json({
-        error: '新建会话失败：聊天存储当前不可写',
-      });
+      return storeUnavailable(res, '新建会话失败：聊天存储当前不可写');
     }
 
     res.status(201).json({ session });
   } catch (error) {
+    // 会话数量上限：明确拒绝，不伪装成"写入失败"，也不删有对话的会话。
+    if (error && error.code === 'session_limit') {
+      return res.status(409).json({
+        error: '会话数量已达上限，请先删除旧会话',
+        code: 'session_limit',
+      });
+    }
     console.error('Session create error:', error);
     res.status(500).json({ error: '新建会话失败' });
   }
@@ -940,6 +1042,9 @@ app.get('/sessions/:id', requireAuth, (req, res) => {
 // default 被删时会立即重建为空会话（sessions.js 的不变量），客户端可安全切回。
 app.delete('/sessions/:id', requireAuth, (req, res) => {
   try {
+    // 删除前先保留该会话的附件引用；删除后全局扫描剩余消息，
+    // 只回收不再被任何会话引用的文件，跨会话共享的图片不受影响。
+    const deletedMessages = getMessages(req.params.id) || [];
     const result = deleteSession(req.params.id);
 
     if (result === null) {
@@ -953,9 +1058,7 @@ app.delete('/sessions/:id', requireAuth, (req, res) => {
         sessionId: req.params.id,
         reason: 'store_read_only',
       });
-      return res.status(500).json({
-        error: '删除失败：聊天存储当前不可写',
-      });
+      return storeUnavailable(res, '删除失败：聊天存储当前不可写');
     }
 
     auditAction(req, 'session.delete', {
@@ -968,6 +1071,25 @@ app.delete('/sessions/:id', requireAuth, (req, res) => {
       forgetSession(req.params.id);
     } catch (error) {
       console.error('Presence forget error:', error);
+    }
+
+    // 附件与派生索引都按删除后的 canonical 数据重新计算；清理失败不把
+    // 已成功的会话删除回滚为失败，但必须留日志，便于后续重建/人工清理。
+    try {
+      releaseOrphanAttachments(deletedMessages.map(message => message && message.attachments));
+    } catch (error) {
+      console.error('Session attachment cleanup error:', error);
+    }
+    try {
+      const indexCleanup = retrieval.cleanupConversationIndex(req.params.id);
+      if (indexCleanup && indexCleanup.ok === false) {
+        console.error(
+          'Session index cleanup failed:',
+          indexCleanup.errorCode || indexCleanup.status
+        );
+      }
+    } catch (error) {
+      console.error('Session index cleanup error:', error);
     }
 
     res.json({ ok: true, sessionId: req.params.id, message: '会话已删除' });
@@ -1033,32 +1155,16 @@ app.get('/history', requireAuth, (req, res) => {
   }
 });
 
-// 清理类接口的数据目录隔离守卫（D-2）。
-// clear 会整体清空数据文件：测试/临时实例（BLUEBIRD_DATA_DIR 指向系统临时
-// 目录）直接放行；指向真实 server/data 时必须二次确认（body.confirm === true），
-// 防止测试或误调用把真实记忆/历史抹成空数组（历史事故见 AGENTS.md）。
-function resolveDataDirForGuard() {
-  return process.env.BLUEBIRD_DATA_DIR
-    ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
-    : path.join(__dirname, 'data');
-}
-
-function isTemporaryDataDir() {
-  const norm = p => (process.platform === 'win32' ? p.toLowerCase() : p);
-  const dir = norm(resolveDataDirForGuard());
-  const tmpRoot = norm(path.resolve(os.tmpdir()));
-  const rel = path.relative(tmpRoot, dir);
-
-  // 位于临时目录内部才算（rel 为空=就是临时根；以 .. 开头/绝对路径=不在其内）
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
-}
-
-// 返回 null 表示允许；否则返回拒绝原因。temp 目录无需确认。
+// 清理类接口的确认闸门（D-2）。
+// clear 会整体清空数据：此前"数据目录位于系统临时目录"就直接放行，于是容器化
+// 或临时部署的真实实例会静默失去二次确认（审计 P3-12）。现在确认与否只取决于
+// 请求方是否显式声明 intent（body.confirm === true），与目录位置无关：
+// 前端在用户点确认后本来就带这个字段，能力不受影响。
+// 返回 null 表示允许；否则返回拒绝原因。
 function clearGuardError(req) {
-  if (isTemporaryDataDir()) return null;
   if (req.body && req.body.confirm === true) return null;
 
-  return '该操作会清空真实数据，需要二次确认（请求体传 confirm: true）';
+  return '该操作会清空数据，需要二次确认（请求体传 confirm: true）';
 }
 
 // 清空指定会话的消息，互不影响其他会话
@@ -1086,9 +1192,7 @@ app.post('/history/clear', requireAuth, (req, res) => {
     const stale = getMessages(sessionId) || [];
 
     if (!replaceMessages(sessionId, [])) {
-      return res.status(500).json({
-        error: '清理失败：聊天存储当前不可写',
-      });
+      return storeUnavailable(res, '清理失败：聊天存储当前不可写');
     }
 
     // 消息已清空：回收本会话图片附件中不再被其他消息引用的文件
@@ -1158,9 +1262,7 @@ app.post('/history/recall', requireAuth, async (req, res) => {
 
     // 落盘失败就不动记忆：消息没删成，记忆也不该删
     if (!saved) {
-      return res.status(500).json({
-        error: '撤回失败：聊天存储当前不可写',
-      });
+      return storeUnavailable(res, '撤回失败：聊天存储当前不可写');
     }
 
     // 回收被删消息的图片附件（确认无其他消息引用后删文件）
@@ -2307,6 +2409,11 @@ async function prepareChatRequest(req) {
       ? message.trim()
       : '';
 
+  // 用户消息 id 在模型回合之前生成：Agent 工具（tasks.createTask 的
+  // parentMessageId、memory_remember 的 messageId）要引用这条消息，
+  // id 必须先于工具调用存在。落盘时复用同一个 id（completeChatTurn）。
+  const userMessageId = isContinue ? null : crypto.randomUUID();
+
   // 上下文历史以服务端存储为准：不同会话严格隔离，客户端就算传来别的
   // 会话的历史也不会串进来。图片消息在这里转成模型可用的形态。
   const storedItems = getMessages(sessionId) || [];
@@ -2655,6 +2762,7 @@ async function prepareChatRequest(req) {
       sessionId,
       isContinue,
       userText,
+      userMessageId,
       attachments,
       hasNewImage,
       includeHistoryImages,
@@ -2707,7 +2815,7 @@ function completeChatTurn({
   userMessageReceivedAt,
   toolSteps,
 }) {
-  const { sessionId, isContinue, userText, attachments, personaConfig } = ctx;
+  const { sessionId, isContinue, userText, userMessageId, attachments, personaConfig } = ctx;
 
   const { reply: cleanedReply, mood } = stripMoodTags(rawReply);
 
@@ -2748,7 +2856,9 @@ function completeChatTurn({
     ? assistantMessages
     : [
         {
-          id: crypto.randomUUID(),
+          // 复用模型回合前生成的 id：Agent 工具里引用的 parentMessageId
+          // 与落盘后的用户消息 id 是同一个值。
+          id: userMessageId || crypto.randomUUID(),
           role: 'user',
           content: userText,
           createdAt: now,
@@ -3093,6 +3203,7 @@ app.post('/chat', requireAuth, async (req, res) => {
         modelId: ctx.modelId,
         sessionId: ctx.sessionId,
         userText: ctx.userText,
+        userMessageId: ctx.userMessageId,
         temperature: 0.8,
         maxTokens: 1200,
         timeout: 90000,
@@ -3146,6 +3257,8 @@ app.post('/chat', requireAuth, async (req, res) => {
         maxTokens: 1200,
         timeout: 90000,
         messages: ctx.requestMessages,
+        // 客户端断开时中止上游调用，不让模型把额度耗在没人要的回复上
+        signal: disconnect.signal,
       });
 
       rawReply = completion.choices?.[0]?.message?.content;
@@ -3206,6 +3319,19 @@ app.post('/chat', requireAuth, async (req, res) => {
     });
   } catch (error) {
     emitContextTrace(ctxForTrace);
+    // 客户端已断开：不再往已关闭的连接写响应（会抛 ERR_STREAM_WRITE_AFTER_END），
+    // 只按取消记账，不落盘。
+    if (clientGone) {
+      monitoring.recordTask({
+        status: 'cancelled',
+        termination: 'client_closed',
+        durationMs: Date.now() - userMessageReceivedAt,
+        rounds: lastAgentRounds || 1,
+        toolCount: lastAgentToolCount,
+        errorCode: 'client_closed',
+      });
+      return;
+    }
     // 模型调用类错误：按 kind 映射 HTTP 状态，返回结构化错误（已脱敏）；
     // 其余（内部 bug）保持原有 500 语义不变。
     if (error instanceof ModelCallError) {
@@ -3448,6 +3574,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         modelId: ctx.modelId,
         sessionId: ctx.sessionId,
         userText: ctx.userText,
+        userMessageId: ctx.userMessageId,
         temperature: 0.8,
         maxTokens: 1200,
         timeout: 90000,
@@ -3672,7 +3799,38 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   });
 });
 
-// 先抢占数据目录锁：已有实例在跑就直接退出，绝不带病启动造成静默覆盖
+// 未匹配的路由统一回 JSON 404：不再落回 Express 默认的 HTML 页面，
+// 前端拿到的始终是 { error, code }。
+app.use((req, res) => {
+  res.status(404).json({ error: '接口不存在', code: 'not_found' });
+});
+
+// 统一 JSON 错误出口：body-parser 的 400/413 与未捕获路由错误不再返回
+// Express 默认 HTML 堆栈页；只回受控短句，不泄露内部实现。
+app.use((error, req, res, next) => {
+  if (res.headersSent) return next(error);
+  const status = Number(error && (error.status || error.statusCode)) || 500;
+  let message = '请求格式无效';
+  let code = 'bad_request';
+  if (status === 413) {
+    message = '请求体过大';
+    code = 'payload_too_large';
+  } else if (status === 400 && error && error.type === 'entity.parse.failed') {
+    message = '请求体不是合法 JSON';
+    code = 'invalid_json';
+  } else if (status >= 500) {
+    message = '服务器内部错误';
+    code = 'internal_error';
+    console.error(
+      'Unhandled request error:',
+      error && error.message ? error.message : error
+    );
+  }
+  res.status(status).json({ error: message, code });
+});
+
+// 先抢占数据目录锁：已有实例在跑、或数据目录不可用，都直接退出，
+// 绝不带病启动造成静默覆盖（acquireSingleInstance 失败时不会返回）。
 acquireSingleInstance({ port: PORT });
 
 // 检索索引初始化失败不阻止聊天服务启动：状态接口会显式返回 degraded，

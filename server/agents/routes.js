@@ -187,7 +187,12 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
           code: 'credential_not_configured',
         });
       }
-      const result = await credentials.verifyCredential(credentialId, botId);
+      const runtimeConfig = config.getRuntimeConfig(botId);
+      const result = await credentials.verifyCredential(
+        credentialId,
+        botId,
+        runtimeConfig.modelProfile.providerId
+      );
       audit(req, 'agent.credential.verify', {
         target: 'agent_credential',
         result: result.ok ? 'success' : 'failed',

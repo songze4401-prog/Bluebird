@@ -1,0 +1,105 @@
+# Bluebird 系统架构现状
+
+> 基线：`a3569e340945baa9d9aa5e50357b1f8f08e098b7`（与 `origin/main` `6af05fe51bd97899e6d6768dae4aaf5747c29512` 树一致）  
+> 本文件只描述当前实际实现；未实现的边界显式标注。
+
+## 1. 系统上下文
+
+```mermaid
+flowchart LR
+  User[单用户 / 浏览器或 Expo] -->|HTTP Bearer| API[Express API]
+  API --> Chat[Chat & Context Runtime]
+  API --> Agent[Agent Runtime / Tools]
+  API --> Bot[Memory Bot Runtime]
+  API --> Memory[Memory Engine]
+  API --> Retrieval[Unified Retrieval]
+  API --> Domain[Emotion / Persona / Presence / Stickers]
+  API --> Monitoring[Monitoring]
+  Chat --> Model[OpenAI-compatible Provider]
+  Agent --> Model
+  Bot --> Model
+  Bot --> Delivery[Result Delivery]
+  Delivery --> SSE[Main Result SSE]
+  SSE --> User
+  Chat --> Stores[(JSON Data Stores)]
+  Bot --> Stores
+  Memory --> Stores
+  Retrieval --> Index[(retrieval/index.json)]
+  Domain --> Stores
+```
+
+## 2. 模块层级
+
+- **Bluebird** — 单用户本地 Agent 应用（运行中）
+  - **客户端 (Expo / React Native / Web)** — 聊天、Bot 工作台、记忆中心、模型/策略/监控 UI（部分实现）
+    - **App 壳 / 导航** — 聊天/任务页、设置抽屉、各 Screen（已验证）
+    - **聊天 Hooks** — useChatSession、历史、附件、流式、结果注入（部分实现 / 竞态）
+    - **Bot UI** — MemoryBotScreen、TasksPanel、审批/维护表单（部分实现）
+    - **API 客户端** — apiFetch、stream、agent-stream、agent-results-stream（已验证 / 路径分散）
+  - **HTTP API (Express)** — 鉴权、限流、会话/聊天/域服务路由（已验证）
+    - **Auth / Rate / CORS** — Bearer、60/min、CORS（有硬化缺口）
+    - **Chat 路由** — /chat、/chat/stream、Context Runtime（已验证）
+    - **Agent Runtime** — 工具注册、预算、执行、去重（已验证）
+    - **Memory Bot** — registry/config/vault/sessions/tasks/approvals/delivery（P0 scope 缺陷）
+    - **Memory Engine** — 搜索、候选、生命周期、贡献（已验证 / 设计取舍）
+    - **统一检索** — connectors、store、BM25/exact/vector、RRF（backend 已验证；无 UI）
+    - **域服务** — emotion/persona/presence/stickers/uploads（已验证）
+    - **持久化** — sessions/memory/tasks/events/outbox/index（原子写；保留策略有缺口）
+    - **监控** — trace、metrics、alerts、health（已验证 / 只读）
+  - **工程保障** — 测试、CI、覆盖率、文档（通过 / 有漂移）
+    - **后端测试** — 48 文件 / 1563 项；真实 HTTP + stub（通过）
+    - **前端测试** — 18 套 / 166 项；apiFetch mock（通过 / 无 App E2E）
+    - **CI** — GitHub Actions；push+PR 双跑（通过 / 有超时风险）
+    - **文档** — AGENTS/docs/README（多处过期计数/声明）
+
+## 3. 服务端模块职责
+
+| 层 | 模块 | 职责 | 当前状态 |
+|---|---|---|---|
+| API | `server/index.js` | 路由、鉴权、限流、聊天、域服务、监控挂载 | 已验证；边界硬化有缺口 |
+| 编排 | `server/context/*` | 历史选择、摘要、记忆/知识检索、上下文构建、输入保护 | 已验证 |
+| Agent | `server/agent-runtime.js`, `agent-policy.js`, `tool-*.js` | 工具注册、策略、预算、执行、结果归一化 | 已验证 |
+| 子 Agent | `server/agents/*` | Bot registry/config/vault/sessions/tasks/approvals/result delivery | 部分实现；P0-01 |
+| 记忆 | `server/memory*.js` | 搜索、候选、生命周期、贡献、落盘 | 已验证；作用域/merge 口径需明确 |
+| 检索 | `server/retrieval/*` | 五类来源、BM25/精确/可选向量、RRF、门控、索引 | backend 已验证；无 UI |
+| 域服务 | `server/emotion.js`, `persona.js`, `presence.js`, `uploads.js`, `sticker-repo.js` | 情绪、人格、在线、上传、贴纸 | 已验证 |
+| 持久化 | `server/atomic-write.js`, `sessions.js`, `agents/tasks.js` | 原子写、会话、任务、事件 | 有恢复测试；保留策略缺口 |
+| 运维 | `server/monitoring/*` | trace、metrics、alerts、health | 已验证只读 |
+
+## 4. 核心数据流
+
+- **记忆注入**：`prepareChatRequest` → `runContextRuntime` → `retrieveMemory` → `memory.searchMemories`（session scope）→ `buildContext` → 模型。
+- **外部知识**：`retrieveKnowledge` → `retrieval.searchForContext` → 只注入 document/web/code；memory/conversation 走独立记忆通道。
+- **主控工具**：`runAgentTurn` → `executeToolCall` → `memory_search`/`memory_remember`/`knowledge_search`/`delegate_to_bot`。
+- **委派**：`delegate_to_bot` → Bot 会话 + task → queue → Bot Runtime → tools → result delivery → 父会话。
+- **审批**：approval API → `memory-service` → `memory.js` → atomic write；结果投递未闭合（P1-04）。
+- **落盘**：sessions/memory/emotion/presence/agents/tasks/events 各有独立 JSON 文件；没有跨文件事务。
+
+## 5. 运行时拓扑与单点
+
+- 单 Node 进程；单实例锁保护数据目录（但获取失败返回值被忽略，P2-13）。
+- 单文件 JSON 存储；无数据库、无外部队列、无跨进程 Worker。
+- 模型调用依赖外部 OpenAI-compatible provider；没有 Provider 时聊天失败，检索可词法降级。
+- Memory Bot 任务队列 `TASK_CONCURRENCY` 默认 2（1–4），进程内 `activeRuns`。
+- Result Delivery 使用进程内 EventEmitter；SSE 只是通知，消息写入父会话才是持久事实。
+- 单点：`sessions.json`、`memory.json`、`agent-tasks.json`、`retrieval/index.json`、provider。
+
+## 6. 信任边界
+
+1. **网络边界**：除 `GET /` 外 Bearer；CORS 全开、HTTP/0.0.0.0（当前单用户本地假设）。
+2. **用户边界**：单用户 `local-owner`；任意 Bearer 可访问任意 sessionId。
+3. **Agent 边界**：主控与 Bot 工具 allowlist、policy budget、高风险 deny-only；Bot Key 独立加密。
+4. **记忆边界**：按会话贡献隔离；legacy 无归属回退；跨会话 merge 是全局设计。
+5. **模型边界**：Provider 返回是外部不可信数据；Context 对知识做 neutralization，工具路径尚未完全对齐（P2-07）。
+6. **存储边界**：JSON at-rest；API Key 明文/前端 token 内嵌；Bot Vault 加密但备份包含主密钥（P1-05）。
+
+## 7. 已知缺席/非目标
+
+- 多用户 ACL、分布式任务队列、跨进程 result pub/sub。
+- PDF/DOCX 解析、Query Rewrite、完整 AST/语言服务器。
+- 真实生产 embedding/reranker、真实模型质量 CI 验收。
+- 统一检索前端页面；维护任务执行器；任务取消 UI。
+
+## 8. 架构结论
+
+当前架构是**模块化单体 + 单用户本地持久化**，不是微服务。主控聊天、Context、记忆、检索、Agent 工具与审批均有真实调用链；但 Memory Bot 的“Bot 会话”与“记忆 scope”被错误地绑定在一起，形成 P0-01。任何多实例/多用户化都必须先拆分这两类身份，并补齐真实 ACL、结果投递和索引清理。

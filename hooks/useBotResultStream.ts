@@ -13,15 +13,19 @@ export function useBotResultStream({
   sessionId,
   onResult,
   onDeliveryFailed,
+  onError,
 }: {
   sessionId: string;
   onResult: (result: AgentResultPush) => void;
   onDeliveryFailed?: (taskId: string, errorCode?: string) => void;
+  onError?: (message: string) => void;
 }) {
   const resultRef = useRef(onResult);
   const failedRef = useRef(onDeliveryFailed);
+  const errorRef = useRef(onError);
   resultRef.current = onResult;
   failedRef.current = onDeliveryFailed;
+  errorRef.current = onError;
 
   useEffect(() => {
     if (!sessionId) return;
@@ -35,8 +39,10 @@ export function useBotResultStream({
       controller = new AbortController();
       void subscribeAgentResults(sessionId, {
         signal: controller.signal,
-        onResult: result => {
+        onOpen: () => {
           retryDelay = 1000;
+        },
+        onResult: result => {
           resultRef.current(result);
         },
         onDeliveryFailed: event => {
@@ -46,6 +52,10 @@ export function useBotResultStream({
         controller = null;
         if (disposed) return;
         if (outcome.kind === 'error') {
+          if (outcome.retryable === false) {
+            errorRef.current?.(outcome.message);
+            return;
+          }
           retryTimer = setTimeout(connect, retryDelay);
           retryDelay = Math.min(15000, retryDelay * 2);
         }

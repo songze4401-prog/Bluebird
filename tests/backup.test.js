@@ -1006,8 +1006,16 @@ describe('密钥备份策略（默认排除，可选加密）', { concurrency: 1
     return { dataDir, outRoot };
   }
 
-  test('默认排除 api-keys.json：不进快照、不进恢复、明文不出现', () => {
+  test('默认排除 api-keys.json / Bot Vault 主密钥与密文：不进快照、不进恢复', () => {
     const { dataDir, outRoot } = withSecret('secret-excl');
+    writeFile(
+      path.join(dataDir, 'agents', 'agent-vault.key'),
+      'a'.repeat(64)
+    );
+    writeFile(
+      path.join(dataDir, 'agents', 'agent-credentials.json'),
+      JSON.stringify({ version: 1, credentials: {} })
+    );
 
     const result = backup.createBackup({ dataDir, outRoot });
 
@@ -1020,8 +1028,18 @@ describe('密钥备份策略（默认排除，可选加密）', { concurrency: 1
 
     assert.ok(!paths.includes('api-keys.json'), '密钥不得进快照');
     assert.ok(
-      manifest.skippedSecrets.includes('api-keys.json'),
-      '密钥应记入 skippedSecrets'
+      !paths.includes('agents/agent-vault.key'),
+      'Bot Vault 主密钥不得进快照'
+    );
+    assert.ok(
+      !paths.includes('agents/agent-credentials.json'),
+      'Bot Vault 密文不得进快照'
+    );
+    assert.ok(
+      manifest.skippedSecrets.includes('api-keys.json') &&
+        manifest.skippedSecrets.includes('agents/agent-vault.key') &&
+        manifest.skippedSecrets.includes('agents/agent-credentials.json'),
+      '三类密钥文件都应记入 skippedSecrets'
     );
 
     const target = path.join(TMP_ROOT, 'secret-restore');
@@ -1031,6 +1049,14 @@ describe('密钥备份策略（默认排除，可选加密）', { concurrency: 1
     assert.ok(
       !fs.existsSync(path.join(target, 'api-keys.json')),
       '恢复不得产生密钥文件'
+    );
+    assert.ok(
+      !fs.existsSync(path.join(target, 'agents', 'agent-vault.key')),
+      '恢复不得产生 Bot Vault 主密钥'
+    );
+    assert.ok(
+      !fs.existsSync(path.join(target, 'agents', 'agent-credentials.json')),
+      '恢复不得产生 Bot Vault 密文'
     );
 
     const manifestDump = fs.readFileSync(

@@ -182,6 +182,8 @@ async function execute({
   botId,
   messages,
   sessionId = null,
+  // 记忆作用域独立于 Bot 对话会话；委派任务由 runTask 传入父主控 session。
+  memoryScopeSessionId = null,
   userText = '',
   taskId = null,
   taskTools = null,
@@ -193,7 +195,11 @@ async function execute({
 }) {
   const { config, model } = assertRunnable(botId);
   const manifest = getManifest(botId);
-  const credentialKey = getCredentialKey(config.modelProfile.credentialId, botId);
+  const credentialKey = getCredentialKey(
+    config.modelProfile.credentialId,
+    botId,
+    config.modelProfile.providerId
+  );
   const toolsSupported = Boolean(model.capabilities && model.capabilities.tools === true);
   const allowedTools = allowedToolsFor(config, manifest, taskTools);
   const policy = buildPolicy({ config, allowedTools, toolsSupported });
@@ -212,6 +218,7 @@ async function execute({
       modelId: config.modelProfile.modelId,
       messages,
       sessionId,
+      memoryScopeSessionId,
       userText,
       temperature: config.modelProfile.temperature,
       maxTokens: config.modelProfile.maxTokens,
@@ -435,10 +442,16 @@ async function chat(botId, {
 async function runTask(taskId) {
   const task = tasks.getRawTask(taskId);
   if (!task) return;
-  if (tasks.isTerminalStatus(task.status)) return;
+  // waiting_approval 是暂停态，不是终态；由 approvals.execute/reject 收尾。
+  if (tasks.isTerminalStatus(task.status) || task.status === 'waiting_approval') return;
 
   const controller = new AbortController();
   activeRuns.set(task.taskId, controller);
+  // deadlineMs 此前只被存储与校验，运行时不执行，任务可以无限跑。
+  // 这里在任务真正开始执行时起算截止时间：到期中止本次运行，
+  // 并把任务收敛成 timed_out（而不是被误判成用户取消）。
+  let deadlineExceeded = false;
+  let deadlineTimer = null;
 
   try {
     tasks.updateTask(task.taskId, {
@@ -450,17 +463,34 @@ async function runTask(taskId) {
     });
 
     const afterAccept = tasks.getRawTask(task.taskId);
-    if (!afterAccept || tasks.isTerminalStatus(afterAccept.status) || afterAccept.cancelRequested) {
+    if (
+      !afterAccept ||
+      tasks.isTerminalStatus(afterAccept.status) ||
+      afterAccept.status === 'waiting_approval' ||
+      afterAccept.cancelRequested
+    ) {
       return;
     }
 
+    const runningSince = Date.now();
     tasks.updateTask(task.taskId, {
       status: 'running',
-      startedAt: new Date().toISOString(),
+      startedAt: new Date(runningSince).toISOString(),
     });
     safeEvent(task.botId, 'task.started', { status: 'running', taskType: task.taskType }, {
       taskId: task.taskId,
     });
+
+    const deadlineMs =
+      Number.isInteger(task.deadlineMs) && task.deadlineMs > 0 ? task.deadlineMs : null;
+    if (deadlineMs) {
+      const remaining = Math.max(0, deadlineMs - (Date.now() - runningSince));
+      deadlineTimer = setTimeout(() => {
+        deadlineExceeded = true;
+        controller.abort();
+      }, remaining);
+      if (typeof deadlineTimer.unref === 'function') deadlineTimer.unref();
+    }
 
     const config = require('./config').getRuntimeConfig(task.botId);
     const messages = [
@@ -471,7 +501,10 @@ async function runTask(taskId) {
       botId: task.botId,
       messages,
       sessionId: task.sessionId,
-      userText: task.goal,
+      // 委派任务：Bot 会话只承载执行轨迹，记忆读写归属父主控会话。
+      memoryScopeSessionId: task.parentSessionId || task.sessionId,
+      // 写入接地优先使用主控用户原话；旧任务或直接任务才回落到 goal。
+      userText: task.parentUserText || task.goal,
       taskId: task.taskId,
       taskTools: task.allowedTools,
       mode: 'delegated_task',
@@ -480,6 +513,10 @@ async function runTask(taskId) {
 
     const latest = tasks.getRawTask(task.taskId);
     if (!latest || tasks.isTerminalStatus(latest.status) || latest.cancelRequested) {
+      return;
+    }
+    if (latest.status === 'waiting_approval') {
+      // 审批在模型执行期间创建：保留等待态，不覆盖为 completed。
       return;
     }
 
@@ -526,12 +563,17 @@ async function runTask(taskId) {
   } catch (error) {
     const latest = tasks.getRawTask(task.taskId);
     if (!latest || tasks.isTerminalStatus(latest.status)) return;
+    if (latest.status === 'waiting_approval') return;
 
+    // 截止时间到期的中止在 execute() 里会被归一成 cancelled（信号已断），
+    // 这里必须先认出来：它是超时，不是用户取消，且不可重试。
     const cancelled =
-      latest.cancelRequested || (error && error.code === 'cancelled');
-    const timedOut = error && error.code === 'model_timeout';
-    const errorCode =
-      (error && error.code) || (timedOut ? 'model_timeout' : 'agent_failed');
+      !deadlineExceeded &&
+      (latest.cancelRequested || (error && error.code === 'cancelled'));
+    const timedOut = deadlineExceeded || (error && error.code === 'model_timeout');
+    const errorCode = deadlineExceeded
+      ? 'deadline_exceeded'
+      : (error && error.code) || (timedOut ? 'model_timeout' : 'agent_failed');
     const attempts = Number.isInteger(latest.attempts) ? latest.attempts : 0;
     const maxAttempts = Number.isInteger(latest.maxAttempts) ? latest.maxAttempts : 1;
     const retryable =
@@ -577,6 +619,7 @@ async function runTask(taskId) {
       { taskId: task.taskId }
     );
   } finally {
+    if (deadlineTimer) clearTimeout(deadlineTimer);
     activeRuns.delete(task.taskId);
     scheduleTaskQueue();
   }
