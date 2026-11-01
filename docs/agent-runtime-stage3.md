@@ -24,7 +24,7 @@
 - **决策**：`server/agents/task-store.js` 是任务持久化的唯一入口：`read()` / `write()` / `migrate()`；业务层不碰文件名与 JSON 结构。
 - **当前实现**：单机原子文件（`writeFileAtomicSync`），由启动单实例锁保证单写者；替换 SQLite/PostgreSQL 时保持同一接口。
 - **schema 迁移**：v1（基础任务）→ v2（run / checkpoint / lease / 重试元数据），读取时补齐并尽力回写；重复读取幂等；未知版本或损坏结构报 `agent_tasks_corrupted`。
-- **备份/恢复演练**：Agent 数据位于 `<DATA_DIR>/agents/`，现有 `scripts/bluebird-backup.js` / `bluebird-restore-drill.js` 递归包含该目录；恢复演练读取真实模块校验计数与哈希。
+- **备份/恢复演练**：Agent 数据位于 `<DATA_DIR>/agents/`，现有 `scripts/bluebird-backup.js` 递归包含该目录；但 `scripts/bluebird-restore-drill.js` 目前只校验 sessions / memory / emotion / persona，**尚未校验 agent task store**——这是本期已知缺口，恢复演练需手动核对 `agent-tasks.json` 的结构与计数。
 
 ### ADR-03：租约、心跳、运行历史与 checkpoint 版本
 
@@ -92,3 +92,4 @@
 - 多进程 Worker 未启用；Store 仍是单写者原子文件，事务能力与迁移演练的自动化留给阶段 4 前置工作。
 - 进程外 Watchdog、受控自愈、故障演练报告属于阶段 4；本期只提供健康快照与恢复接口。
 - `uncertain` 任务没有自动复核工具，需人工处理。
+- agent task store 的自动恢复演练尚未接入 `bluebird-restore-drill.js`（备份已递归覆盖目录，但演练未校验任务文件）。
