@@ -40,6 +40,10 @@ function evaluateStatus(config, credential) {
   return { status: 'enabled', reason: null };
 }
 
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
 function buildAgent(botId) {
   const manifest = getManifest(botId);
   if (!manifest) throw new AgentError('agent_not_found', 'Agent 不存在', 404);
@@ -65,11 +69,24 @@ function buildAgent(botId) {
     description: manifest.description,
     capabilities: [...manifest.capabilities],
     acceptedTaskTypes: [...manifest.acceptedTaskTypes],
+    // Task Contract v1：路由层按这份 schema 校验输入，Worker 按它产出结果。
+    taskContracts: clone(manifest.taskContracts),
     entrypoints: [...manifest.entrypoints],
     permissionProfileId: config.permissionProfileId,
     toolAllowlist: [...config.toolAllowlist],
     availableTools: [...manifest.toolAllowlist],
     permission: permissions.getPermissionProfile(botId),
+    // 健康状态是运行时计算值（配置/服务商/凭证），不写进 Manifest。
+    health: {
+      status: evaluated.status,
+      reason: evaluated.reason,
+      checkedAt: new Date().toISOString(),
+    },
+    concurrencyLimit: manifest.concurrencyLimit,
+    routingPriority: manifest.routingPriority,
+    defaultTimeoutMs: manifest.defaultTimeoutMs,
+    minTimeoutMs: manifest.minTimeoutMs,
+    maxTimeoutMs: manifest.maxTimeoutMs,
     status: evaluated.status,
     statusReason: evaluated.reason,
     enabled: config.enabled,

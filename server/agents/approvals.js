@@ -15,6 +15,7 @@ const permissions = require('./permissions');
 const tasks = require('./tasks');
 const sessions = require('./sessions');
 const resultDelivery = require('./result-delivery');
+const { normalizeWorkerResult } = require('./worker-result');
 const { isKnownBot } = require('./manifest');
 const { AgentError } = require('./errors');
 
@@ -289,11 +290,19 @@ function decide(approvalId, decision, { actor = permissions.SINGLE_USER_ACTOR, r
     const task = tasks.getRawTask(record.taskId);
     if (task && !tasks.isTerminalStatus(task.status)) {
       let updated = false;
+      const rejectResult = normalizeWorkerResult({
+        status: 'cancelled',
+        summary: '',
+        errorCode: 'approval_rejected',
+        runId: task.runId || null,
+        finishedAt: now,
+      });
       try {
         tasks.updateTask(record.taskId, {
           status: 'cancelled',
           completedAt: now,
           errorCode: 'approval_rejected',
+          result: rejectResult,
         });
         updated = true;
       } catch (_) {
@@ -302,9 +311,17 @@ function decide(approvalId, decision, { actor = permissions.SINGLE_USER_ACTOR, r
       if (updated) {
         deliverTaskResult(record.taskId, {
           status: 'cancelled',
-          result: null,
+          result: rejectResult,
           errorCode: 'approval_rejected',
         });
+        try {
+          sessions.closeSession(record.botId, task.sessionId, {
+            status: 'cancelled',
+            reason: 'approval_rejected',
+          });
+        } catch (_) {
+          // 会话收口失败不影响审批结果。
+        }
       }
     }
   }
@@ -394,7 +411,8 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
     if (task && task.status === 'waiting_approval') {
       try {
         if (record.status === 'completed') {
-          const taskResult = {
+          const taskResult = normalizeWorkerResult({
+            status: 'completed',
             summary: `已执行审批操作：${record.operation}`,
             toolSteps: [],
             evidence: Array.isArray(summary.supersededIds)
@@ -409,7 +427,9 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
             rounds: 0,
             stopReason: null,
             model: null,
-          };
+            runId: task.runId || null,
+            finishedAt: now,
+          });
           tasks.updateTask(record.taskId, {
             status: 'completed',
             completedAt: now,
@@ -418,17 +438,33 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
           deliverTaskResult(record.taskId, {
             status: 'completed',
             result: taskResult,
+          });
+          sessions.closeSession(record.botId, task.sessionId, {
+            status: 'completed',
+            reason: null,
           });
         } else {
+          const failureResult = normalizeWorkerResult({
+            status: 'failed',
+            summary: '',
+            errorCode: record.errorCode,
+            runId: task.runId || null,
+            finishedAt: now,
+          });
           tasks.updateTask(record.taskId, {
             status: 'failed',
             completedAt: now,
             errorCode: record.errorCode,
+            result: failureResult,
           });
           deliverTaskResult(record.taskId, {
             status: 'failed',
-            result: null,
+            result: failureResult,
             errorCode: record.errorCode,
+          });
+          sessions.closeSession(record.botId, task.sessionId, {
+            status: 'failed',
+            reason: record.errorCode,
           });
         }
       } catch (_) {

@@ -86,7 +86,11 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - 取消：`POST /agent-tasks/:taskId/cancel` 标记取消并中止模型/工具调用；终态任务不可回写。
 - 流式：`POST /agents/:botId/chat/stream` 使用真实 Token 级 delta（来自 Provider 流式响应），保留 `tool_start`/`tool_end` 状态事件；工具轮不把参数或内部推理下发。UI 通过 XHR SSE 逐字渲染，并保留工具摘要。
 - 工作台交互：流式期间提供停止按钮；切换会话/新建会话会 abort 当前流并丢弃迟到结果，不会把旧会话回复写进新会话。工作台直接创建的是独立 Bot 任务（无 `parentSessionId`），任务卡明确显示归属；主控委派任务才显示父会话归属。维护表单的 update 默认不下发 `type`（保持原类型），withdraw 的记忆 scope 只写入 `payload.sessionId`，不把 Bot 会话混作记忆 scope。
-- 主控派发：主 Agent 工具表新增 `delegate_to_bot`（仅主控可用，Bot 自身 allowlist 不包含它）；它校验 Bot 就绪、任务类型与工具边界，调用现有 `tasks.createTask` + `runtime.startTask`，任务带 `parentSessionId` / `parentMessageId`。`parentMessageId` 取本轮用户消息 id：id 在模型回合之前生成（`prepareChatRequest`），经 `ctx.userMessageId` 传入 `runAgentTurn` 再传给工具，落盘时复用同一个 id，所以任务里的引用与 `/history` 里的用户消息是同一条（续写模式没有新用户消息，`parentMessageId` 为 null）。主控任务页读取 `GET /agent-tasks?parentSessionId=...`，不是静态占位。
+- 主控派发：主 Agent 工具表新增 `delegate_to_bot`（仅主控可用，Bot 自身 allowlist 不包含它）；工具 schema 与成功返回形状保持不变，内部改为兼容适配器，把任务交给 Router 的统一决策链（能力匹配 → Policy 校验 → 创建任务 → 入队），任务带 `parentSessionId` / `parentMessageId`。`parentMessageId` 取本轮用户消息 id：id 在模型回合之前生成（`prepareChatRequest`），经 `ctx.userMessageId` 传入 `runAgentTurn` 再传给工具，落盘时复用同一个 id，所以任务里的引用与 `/history` 里的用户消息是同一条（续写模式没有新用户消息，`parentMessageId` 为 null）。主控任务页读取 `GET /agent-tasks?parentSessionId=...`，不是静态占位。
+- 控制面一期：`delegate_to_bot` 与 `POST /agent-tasks` 统一走 `server/agents/router.js`；任务新增 `contractVersion` / `agentId` / `workerSessionId` / `priority` / `contextRef` / `idempotencyKey` / `route` / `budget`（`botId` / `sessionId` 是同值兼容别名），Fast/Slow 预算在创建时快照、执行时不再读配置；路由决策写 `route.decided` / `route.rejected` 事件（不含正文）。详见 `docs/agent-runtime-stage1.md`。
+- Worker 执行协议：每次任务执行有独立 `runId`、心跳与 checkpoint 事件、会话 owner/作用域/生命周期和统一结果 schema（completed/failed/cancelled/timed_out 同形）；上下文只投影任务指令与授权数据，工具调用先过任务白名单网关。详见 `docs/agent-runtime-stage2.md`。
+- 状态持久化与恢复：任务迁移由 `state-machine.js` 校验，Store 接口 `task-store.js` 负责 schema v1→v2；租约/心跳/retryAt/lastErrorCode/checkpointVersion/runs 落库；重启时只读任务重排队、含写工具的任务标记 `uncertain` 需人工处理；结果投递按 taskId 幂等。详见 `docs/agent-runtime-stage3.md`。
+- 进程外监督：`scripts/bluebird-watchdog.js` 检测心跳/租约/队列/存储/磁盘/投递，按白名单执行告警、暂停接单、离线恢复与升级人工（冷却+次数上限+熔断）；`scripts/bluebird-supervisor.js` 按退避重启主服务。暂停接单通过 `agents/intake-pause.json` 生效，Router 返回 503。详见 `docs/agent-runtime-stage4.md`。
 - 记忆作用域：委派任务把 `parentSessionId` 作为 `memoryScopeSessionId` 传给 Bot 工具；Bot 的 `bs_*` 会话只承载执行轨迹和工具日志，不再充当记忆 scope。这样主控会话的长期记忆可被委派 Bot 检索，Bot 的 `memory_remember` 也归属父会话；直接 Bot 对话没有父会话时仍回落 Bot 会话 scope。
 - 凭证绑定：Bot 的 `credential.providerId` 必须与当前 `modelProfile.providerId` 一致；registry 会显示 `credential_provider_mismatch`，运行时会拒绝把旧 Key 发往新服务商。切换服务商后必须重新录入该 Bot 的 Key。
 - 委派写入接地：任务保存主控用户原话 `parentUserText`；Bot 的 `memory_remember` 用该原话做 `sourceQuote` 接地，不再信任主控模型生成的 goal。旧任务/直接任务才回落到 goal。
@@ -184,7 +188,7 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - `npx jest tests/unit/agent-results-stream.test.ts`：1 项，覆盖结果 SSE 的 401 永久失败、5xx/200 干净关闭可重试、主动 abort 为 `closed` 的连接分类。
 - `npx jest tests/unit/use-bot-result-stream.test.tsx`：2 项，覆盖 Hook 对永久错误只提示不重连、可重试错误按 1s 退避重连、snapshot 打开后重置延迟。
 - `npx jest tests/unit/app-smoke.test.tsx`：1 项，覆盖 App 组合根聊天首屏与设置抽屉的 Agent 团队入口。
-- 全量：`npm test` 51 个后端文件 / 1622 项；Jest 22 套 / 179 项；覆盖率校验 backend 1622/1622、runner 1401/1401、frontend 179/179；tsc/lint 通过（以最终交付命令输出为准）。
+- 全量：`npm test` 55 个后端文件 / 1748 项；Jest 22 套 / 179 项；覆盖率校验 backend 1748/1748、runner 1527/1527、frontend 179/179；tsc/lint 通过（以最终交付命令输出为准）。
 - Expo Web export 成功；浏览器 DOM 核对：Agent 团队入口、真实 Memory Bot 状态、工作台三页签、配置页真实服务商/脱敏 Key、维护申请表单与审批列表可渲染；浏览器实际提交一条 update 维护申请后，服务端返回 pending 并在审批列表显示。
 
 ### 8.1 Stub 与真实模型测试区分
@@ -221,4 +225,4 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 | P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；工具预算截断后无工具总结；任务裁剪只删已投递终态；Provider token delta；停止/切会话 abort；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 9 项；SSE/tool event 测试；Jest 5 项工作台测试 + 1 项 App 冒烟 |
 | P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；维护申请表单；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验、真实模型 HTTP SSE E2E |
 
-“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1622/1622、nodeSuite 221/221、runner 1401/1401、frontend 179/179、CI 51/51。
+“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1748/1748、nodeSuite 221/221、runner 1527/1527、frontend 179/179、CI 55/55。

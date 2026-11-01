@@ -12,15 +12,20 @@ const crypto = require('crypto');
 const { writeFileAtomicSync } = require('../atomic-write');
 const { getManifest, isKnownBot } = require('./manifest');
 const { AgentError } = require('./errors');
+const taskStore = require('./task-store');
+const stateMachine = require('./state-machine');
+const { normalizeWorkerResult } = require('./worker-result');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
   : path.join(__dirname, '..', 'data');
 const AGENTS_DIR = path.join(DATA_DIR, 'agents');
-const TASKS_FILE = path.join(AGENTS_DIR, 'agent-tasks.json');
+const TASKS_FILE = taskStore.TASKS_FILE;
 const EVENTS_FILE = path.join(AGENTS_DIR, 'agent-events.json');
 const OUTBOX_FILE = path.join(AGENTS_DIR, 'agent-event-outbox.json');
-const SCHEMA_VERSION = 1;
+// 任务存储用 Store 的 schema 版本；事件/outbox 仍使用自己的 v1 结构。
+const TASK_SCHEMA_VERSION = taskStore.SCHEMA_VERSION;
+const AUX_SCHEMA_VERSION = 1;
 const TASK_MAX = 500;
 const EVENT_MAX = 3000;
 // 事件 outbox 的增长硬上限：主事件文件写不进去时，事件会先堆在 outbox 里。
@@ -31,24 +36,27 @@ const GOAL_MAX = 2000;
 const CONTEXT_MAX = 8000;
 const PARENT_USER_TEXT_MAX = 4000;
 const RESULT_SUMMARY_MAX = 8000;
+// Task Contract v1：这些字段是 Router/Worker 之间的冻结契约。
+// 旧字段 botId / sessionId 保留为同一值的别名，避免破坏既有 API 与前端。
+const CONTRACT_VERSION = 1;
+const CONTEXT_REF_MAX = 200;
+const IDEMPOTENCY_KEY_MAX = 120;
+const PRIORITIES = Object.freeze(['high', 'normal', 'low']);
+const PRIORITY_RANK = Object.freeze({ high: 0, normal: 1, low: 2 });
 
-const STATUSES = Object.freeze([
-  'queued',
-  'accepted',
-  'running',
-  'waiting_approval',
-  'completed',
-  'failed',
-  'cancelled',
-  'timed_out',
-]);
-const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'timed_out']);
+const STATUSES = stateMachine.STATUSES;
+const TERMINAL = stateMachine.TERMINAL;
 
 const EVENT_TYPES = Object.freeze([
   'task.created',
   'task.accepted',
   'task.recovered',
+  'route.decided',
+  'route.rejected',
   'task.started',
+  'worker.checkpoint',
+  'worker.heartbeat',
+  'tool.denied',
   'model.requested',
   'model.completed',
   'model.failed',
@@ -65,6 +73,7 @@ const EVENT_TYPES = Object.freeze([
   'task.failed',
   'task.cancelled',
   'task.timed_out',
+  'task.uncertain',
 ]);
 
 const SAFE_PAYLOAD_KEYS = new Set([
@@ -85,6 +94,24 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'decision',
   'messageId',
   'pending',
+  'routeId',
+  'path',
+  'pathReason',
+  'capability',
+  'candidateCount',
+  'candidates',
+  'rejected',
+  'selected',
+  'degraded',
+  'priority',
+  'contractVersion',
+  'idempotent',
+  'policyDigest',
+  'round',
+  'phase',
+  'attempts',
+  'leaseOwner',
+  'retryAt',
 ]);
 
 let taskCache = null;
@@ -109,33 +136,29 @@ function readJson(file, code) {
 }
 
 function emptyTasks() {
-  return { version: SCHEMA_VERSION, tasks: {} };
+  return taskStore.empty();
 }
 function emptyEvents() {
-  return { version: SCHEMA_VERSION, events: [] };
+  return { version: AUX_SCHEMA_VERSION, events: [] };
 }
 
 function emptyOutbox() {
-  return { version: SCHEMA_VERSION, events: [] };
+  return { version: AUX_SCHEMA_VERSION, events: [] };
 }
 
+// Task Store 接口负责读取、schema 迁移（v1 → v2）与结构校验；
+// 这里只缓存业务层视图，并在迁移发生后尽力回写一次。
 function loadTasks() {
   if (taskCache) return taskCache;
-  ensureDir();
-  const parsed = readJson(TASKS_FILE, 'agent_tasks_corrupted');
-  if (!parsed) {
-    taskCache = emptyTasks();
-    return taskCache;
+  const result = taskStore.read();
+  taskCache = result.store;
+  if (result.migrated) {
+    try {
+      saveTasks();
+    } catch (_) {
+      // 存储暂不可写时保留内存中的规范视图；下一次成功写入会一并落盘。
+    }
   }
-  if (
-    parsed.version !== SCHEMA_VERSION ||
-    !parsed.tasks ||
-    typeof parsed.tasks !== 'object' ||
-    Array.isArray(parsed.tasks)
-  ) {
-    throw new AgentError('agent_tasks_corrupted', 'Bot 任务存储结构无效', 500);
-  }
-  taskCache = parsed;
   return taskCache;
 }
 
@@ -147,7 +170,7 @@ function loadEvents() {
     eventCache = emptyEvents();
     return eventCache;
   }
-  if (parsed.version !== SCHEMA_VERSION || !Array.isArray(parsed.events)) {
+  if (parsed.version !== AUX_SCHEMA_VERSION || !Array.isArray(parsed.events)) {
     throw new AgentError('agent_events_corrupted', 'Bot 事件存储结构无效', 500);
   }
   eventCache = parsed;
@@ -155,8 +178,7 @@ function loadEvents() {
 }
 
 function saveTasks() {
-  ensureDir();
-  writeFileAtomicSync(TASKS_FILE, JSON.stringify(taskCache, null, 2));
+  taskStore.write(taskCache);
 }
 function saveEvents() {
   ensureDir();
@@ -171,7 +193,7 @@ function loadOutbox() {
     outboxCache = emptyOutbox();
     return outboxCache;
   }
-  if (parsed.version !== SCHEMA_VERSION || !Array.isArray(parsed.events)) {
+  if (parsed.version !== AUX_SCHEMA_VERSION || !Array.isArray(parsed.events)) {
     throw new AgentError('agent_event_outbox_corrupted', '事件投递队列结构无效', 500);
   }
   outboxCache = parsed;
@@ -327,14 +349,39 @@ function listEvents(botId, { limit = 50 } = {}) {
 
 function publicTask(task, { includeResult = true } = {}) {
   if (!task) return null;
+  const agentId = task.agentId || task.botId;
+  const workerSessionId = task.workerSessionId || task.sessionId;
   return {
     taskId: task.taskId,
-    botId: task.botId,
+    // Task Contract v1（规范字段）；botId/sessionId 是同一值的兼容别名。
+    contractVersion: task.contractVersion || CONTRACT_VERSION,
+    agentId,
+    workerSessionId,
+    botId: agentId,
     taskType: task.taskType,
     goal: task.goal,
-    sessionId: task.sessionId,
+    sessionId: workerSessionId,
     parentSessionId: task.parentSessionId || null,
     parentMessageId: task.parentMessageId || null,
+    priority: task.priority || 'normal',
+    contextRef: task.contextRef || null,
+    idempotencyKey: task.idempotencyKey || null,
+    route: task.route ? clone(task.route) : null,
+    budget: task.budget ? clone(task.budget) : null,
+    // Worker 运行期元数据（不属于 Task Contract 字段，随执行更新）。
+    runId: task.runId || null,
+    runStartedAt: task.runStartedAt || null,
+    heartbeatAt: task.heartbeatAt || null,
+    checkpoint: task.checkpoint ? clone(task.checkpoint) : null,
+    // 阶段 3：租约、重试与运行历史。
+    lease: task.lease ? clone(task.lease) : null,
+    retryAt: task.retryAt || null,
+    lastErrorCode: task.lastErrorCode || null,
+    checkpointVersion: Number.isInteger(task.checkpointVersion)
+      ? task.checkpointVersion
+      : 0,
+    runs: Array.isArray(task.runs) ? clone(task.runs) : [],
+    requiresReview: task.requiresReview === true,
     deliveredToParentAt: task.deliveredToParentAt || null,
     deliveryMessageId: task.deliveryMessageId || null,
     deliveryStatus: task.deliveryStatus || 'not_applicable',
@@ -378,20 +425,83 @@ function pruneDeliveredTerminalTasks(tasks) {
   return removed;
 }
 
+function normalizeBudget(budget) {
+  if (budget === null || budget === undefined) return null;
+  if (typeof budget !== 'object' || Array.isArray(budget)) {
+    throw new AgentError('invalid_task', 'budget 必须是对象或 null');
+  }
+  const maxRounds = Number(budget.maxRounds);
+  const maxToolCalls = Number(budget.maxToolCalls);
+  const maxReadOnlyRetries = Number(budget.maxReadOnlyRetries);
+  if (!Number.isInteger(maxRounds) || maxRounds < 2 || maxRounds > 5) {
+    throw new AgentError('invalid_task', 'budget.maxRounds 必须在 2 到 5 之间');
+  }
+  if (!Number.isInteger(maxToolCalls) || maxToolCalls < 1 || maxToolCalls > 12) {
+    throw new AgentError('invalid_task', 'budget.maxToolCalls 必须在 1 到 12 之间');
+  }
+  if (
+    !Number.isInteger(maxReadOnlyRetries) ||
+    maxReadOnlyRetries < 0 ||
+    maxReadOnlyRetries > 1
+  ) {
+    throw new AgentError('invalid_task', 'budget.maxReadOnlyRetries 必须在 0 到 1 之间');
+  }
+  return {
+    maxRounds,
+    maxToolCalls,
+    maxReadOnlyRetries,
+    generatePlan: budget.generatePlan === true,
+  };
+}
+
+function normalizeRoute(route) {
+  if (route === null || route === undefined) return null;
+  if (typeof route !== 'object' || Array.isArray(route)) {
+    throw new AgentError('invalid_task', 'route 必须是对象或 null');
+  }
+  return {
+    routeId: String(route.routeId || '').slice(0, 80),
+    path: route.path === 'slow' ? 'slow' : 'fast',
+    capability: String(route.capability || '').slice(0, 80),
+    policyDigest: String(route.policyDigest || '').slice(0, 32),
+    decidedAt: typeof route.decidedAt === 'string' ? route.decidedAt : null,
+  };
+}
+
+function findByIdempotencyKey(agentId, idempotencyKey) {
+  const key = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : '';
+  if (!key) return null;
+  const tasks = loadTasks();
+  const match = Object.values(tasks.tasks).find(
+    task =>
+      (task.agentId || task.botId) === agentId &&
+      (task.idempotencyKey || null) === key
+  );
+  return match ? publicTask(match) : null;
+}
+
 function createTask({
-  botId,
+  agentId = null,
+  botId = null,
   taskType,
   goal,
   context = '',
+  workerSessionId = null,
   sessionId = null,
   allowedTools = null,
   deadlineMs = 60000,
+  priority = 'normal',
+  contextRef = null,
+  idempotencyKey = null,
+  route = null,
+  budget = null,
   parentSessionId = null,
   parentMessageId = null,
   parentUserText = null,
 } = {}) {
-  assertBot(botId);
-  const manifest = getManifest(botId);
+  const resolvedAgentId = String(agentId || botId || '');
+  assertBot(resolvedAgentId);
+  const manifest = getManifest(resolvedAgentId);
   if (!manifest.acceptedTaskTypes.includes(taskType)) {
     throw new AgentError('invalid_task_type', '该 Bot 不接受此任务类型');
   }
@@ -403,7 +513,11 @@ function createTask({
     throw new AgentError('invalid_task', '任务上下文过长');
   }
   const cleanSession =
-    typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null;
+    typeof workerSessionId === 'string' && workerSessionId.trim()
+      ? workerSessionId.trim()
+      : typeof sessionId === 'string' && sessionId.trim()
+        ? sessionId.trim()
+        : null;
   const cleanParentSession =
     typeof parentSessionId === 'string' && parentSessionId.trim()
       ? parentSessionId.trim()
@@ -441,6 +555,30 @@ function createTask({
     }
   }
 
+  const cleanPriority = priority === null || priority === undefined ? 'normal' : String(priority);
+  if (!PRIORITIES.includes(cleanPriority)) {
+    throw new AgentError('invalid_task', 'priority 必须是 high、normal 或 low');
+  }
+  const cleanContextRef =
+    typeof contextRef === 'string' && contextRef.trim() ? contextRef.trim() : null;
+  if (cleanContextRef && cleanContextRef.length > CONTEXT_REF_MAX) {
+    throw new AgentError('invalid_task', `contextRef 不能超过 ${CONTEXT_REF_MAX} 字`);
+  }
+  const cleanIdempotencyKey =
+    typeof idempotencyKey === 'string' && idempotencyKey.trim()
+      ? idempotencyKey.trim()
+      : null;
+  if (cleanIdempotencyKey && cleanIdempotencyKey.length > IDEMPOTENCY_KEY_MAX) {
+    throw new AgentError('invalid_task', `idempotencyKey 不能超过 ${IDEMPOTENCY_KEY_MAX} 字`);
+  }
+  const cleanRoute = normalizeRoute(route);
+  const cleanBudget = normalizeBudget(budget);
+
+  // 同一 Agent 的相同幂等键返回既有任务，不重复创建、不重复入队。
+  // Router 在建立 Worker 会话之前也会先查一次，避免产生空会话。
+  const existing = findByIdempotencyKey(resolvedAgentId, cleanIdempotencyKey);
+  if (existing) return { ...existing, idempotent: true };
+
   const tasks = loadTasks();
   const pruned =
     Object.keys(tasks.tasks).length >= TASK_MAX
@@ -457,17 +595,36 @@ function createTask({
   const t = nowIso();
   const task = {
     taskId: `task_${crypto.randomUUID()}`,
-    botId,
+    contractVersion: CONTRACT_VERSION,
+    agentId: resolvedAgentId,
+    workerSessionId: cleanSession,
+    // 兼容别名：与上面的规范字段保持同值，旧调用方/前端继续可读。
+    botId: resolvedAgentId,
+    sessionId: cleanSession,
     taskType,
     goal: cleanGoal,
     context: cleanContext,
-    sessionId: cleanSession,
+    priority: cleanPriority,
+    contextRef: cleanContextRef,
+    idempotencyKey: cleanIdempotencyKey,
+    route: cleanRoute,
+    budget: cleanBudget,
+    runId: null,
+    runStartedAt: null,
+    heartbeatAt: null,
+    checkpoint: null,
+    lease: null,
+    retryAt: null,
+    lastErrorCode: null,
+    checkpointVersion: 0,
+    runs: [],
+    requiresReview: false,
     parentSessionId: cleanParentSession,
     parentMessageId: cleanParentMessage,
     parentUserText: cleanParentUserText,
     deliveredToParentAt: null,
     deliveryMessageId: null,
-    deliveryStatus: parentSessionId ? 'pending' : 'not_applicable',
+    deliveryStatus: cleanParentSession ? 'pending' : 'not_applicable',
     deliveryErrorCode: null,
     allowedTools: tools,
     deadlineMs: cleanDeadline,
@@ -492,7 +649,7 @@ function createTask({
     throw error;
   }
   appendEvent({
-    botId,
+    botId: resolvedAgentId,
     taskId: task.taskId,
     eventType: 'task.created',
     payload: { status: 'queued', taskType, mode: 'delegated_task' },
@@ -520,7 +677,7 @@ function listTasks(botId, { limit = 20, parentSessionId = null } = {}) {
       ? parentSessionId.trim()
       : null;
   return Object.values(tasks.tasks)
-    .filter(task => task.botId === botId)
+    .filter(task => (task.agentId || task.botId) === botId)
     .filter(task => !parent || task.parentSessionId === parent)
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
     .slice(0, max)
@@ -533,9 +690,7 @@ function updateTask(taskId, patch = {}) {
   if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
 
   if (patch.status !== undefined) {
-    if (!STATUSES.includes(patch.status)) {
-      throw new AgentError('invalid_task_status', '任务状态无效');
-    }
+    stateMachine.assertTransition(task.status, patch.status);
     task.status = patch.status;
   }
   if (patch.cancelRequested !== undefined) {
@@ -547,6 +702,65 @@ function updateTask(taskId, patch = {}) {
   if (patch.startedAt !== undefined) task.startedAt = patch.startedAt;
   if (patch.completedAt !== undefined) task.completedAt = patch.completedAt;
   if (patch.errorCode !== undefined) task.errorCode = patch.errorCode;
+  if (patch.runId !== undefined) task.runId = patch.runId;
+  if (patch.runStartedAt !== undefined) task.runStartedAt = patch.runStartedAt;
+  if (patch.heartbeatAt !== undefined) task.heartbeatAt = patch.heartbeatAt;
+  // 旧任务/直接建任务可能没有 Worker 会话：运行开始时补建并回填，
+  // 只允许从空值变为实际会话，不允许改写已存在的会话身份。
+  if (
+    (patch.workerSessionId !== undefined || patch.sessionId !== undefined) &&
+    !task.sessionId
+  ) {
+    const next = String(patch.workerSessionId || patch.sessionId || '').trim();
+    if (next) {
+      task.workerSessionId = next;
+      task.sessionId = next;
+    }
+  }
+  if (patch.checkpoint !== undefined) {
+    if (patch.checkpoint === null) {
+      task.checkpoint = null;
+    } else if (typeof patch.checkpoint === 'object') {
+      task.checkpoint = {
+        round: Number.isInteger(patch.checkpoint.round) ? patch.checkpoint.round : 0,
+        toolCalls: Number.isInteger(patch.checkpoint.toolCalls)
+          ? patch.checkpoint.toolCalls
+          : 0,
+        phase: String(patch.checkpoint.phase || '').slice(0, 40),
+        at: typeof patch.checkpoint.at === 'string' ? patch.checkpoint.at : nowIso(),
+      };
+    }
+  }
+  if (patch.retryAt !== undefined) {
+    task.retryAt = typeof patch.retryAt === 'string' ? patch.retryAt : null;
+  }
+  if (patch.lastErrorCode !== undefined) {
+    task.lastErrorCode =
+      typeof patch.lastErrorCode === 'string'
+        ? patch.lastErrorCode.slice(0, 60)
+        : null;
+  }
+  if (patch.requiresReview !== undefined) {
+    task.requiresReview = patch.requiresReview === true;
+  }
+  if (patch.lease !== undefined) {
+    if (patch.lease === null) {
+      task.lease = null;
+    } else if (typeof patch.lease === 'object') {
+      task.lease = {
+        ownerId: String(patch.lease.ownerId || '').slice(0, 120),
+        acquiredAt:
+          typeof patch.lease.acquiredAt === 'string' ? patch.lease.acquiredAt : null,
+        expiresAt:
+          typeof patch.lease.expiresAt === 'string' ? patch.lease.expiresAt : null,
+        heartbeatAt:
+          typeof patch.lease.heartbeatAt === 'string' ? patch.lease.heartbeatAt : null,
+      };
+    }
+  }
+  if (Number.isInteger(patch.checkpointVersion) && patch.checkpointVersion >= 0) {
+    task.checkpointVersion = patch.checkpointVersion;
+  }
   if (patch.deliveredToParentAt !== undefined) {
     task.deliveredToParentAt = patch.deliveredToParentAt;
   }
@@ -565,10 +779,22 @@ function updateTask(taskId, patch = {}) {
     }
     const result = patch.result;
     task.result = {
+      // 统一结果 schema：终态（completed/failed/cancelled/timed_out）都按
+      // 这一形状落库，status/errorCode 不再只存在于任务顶层。
+      status: STATUSES.includes(result.status) ? result.status : null,
       summary:
         typeof result.summary === 'string'
           ? result.summary.slice(0, RESULT_SUMMARY_MAX)
           : '',
+      artifacts: Array.isArray(result.artifacts)
+        ? result.artifacts
+            .filter(item => item && typeof item === 'object')
+            .slice(0, 40)
+            .map(item => ({
+              kind: String(item.kind || '').slice(0, 40),
+              id: String(item.id || '').slice(0, 120),
+            }))
+        : [],
       toolSteps: Array.isArray(result.toolSteps)
         ? result.toolSteps.slice(0, 20).map(step => ({
             name: String(step && step.name ? step.name : '').slice(0, 60),
@@ -600,6 +826,12 @@ function updateTask(taskId, patch = {}) {
             }))
         : [],
       requiresConfirmation: result.requiresConfirmation === true,
+      requiresApproval:
+        result.requiresApproval === true || result.requiresConfirmation === true,
+      errorCode:
+        typeof result.errorCode === 'string' ? result.errorCode.slice(0, 60) : null,
+      runId: typeof result.runId === 'string' ? result.runId.slice(0, 80) : null,
+      finishedAt: typeof result.finishedAt === 'string' ? result.finishedAt : null,
       rounds: Number.isInteger(result.rounds) ? result.rounds : 0,
       stopReason: typeof result.stopReason === 'string' ? result.stopReason : null,
       model: result.model && typeof result.model === 'object'
@@ -623,13 +855,307 @@ function allTasks() {
   return Object.values(loadTasks().tasks);
 }
 
-function nextQueuedTask() {
+function priorityRank(priority) {
+  return PRIORITY_RANK[priority] === undefined ? PRIORITY_RANK.normal : PRIORITY_RANK[priority];
+}
+
+// ---- 阶段 3：租约、运行历史、重试与恢复 ----
+
+const SIDE_EFFECT_TOOLS = Object.freeze(['memory_remember']);
+const LEASE_TTL_DEFAULT_MS = 60000;
+const RUN_HISTORY_MAX = 5;
+
+function leaseExpired(lease, nowMs = Date.now()) {
+  if (!lease || !lease.expiresAt) return true;
+  const expires = Date.parse(lease.expiresAt);
+  return !Number.isFinite(expires) || expires <= nowMs;
+}
+
+function acquireLease(
+  taskId,
+  { ownerId = '', ttlMs = LEASE_TTL_DEFAULT_MS, now = Date.now() } = {}
+) {
+  const state = loadTasks();
+  const task = state.tasks[String(taskId || '')];
+  if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+  if (!ownerId) throw new AgentError('invalid_lease_owner', '租约 owner 不能为空');
+  if (stateMachine.isTerminal(task.status)) {
+    throw new AgentError('task_lease_terminal', '终态任务不能再获取租约', 409);
+  }
+  if (task.lease && task.lease.ownerId !== ownerId && !leaseExpired(task.lease, now)) {
+    throw new AgentError('task_lease_held', '任务租约由其他 Worker 持有', 409);
+  }
+  const iso = new Date(now).toISOString();
+  task.lease = {
+    ownerId: String(ownerId).slice(0, 120),
+    acquiredAt: iso,
+    expiresAt: new Date(now + Math.max(1000, ttlMs)).toISOString(),
+    heartbeatAt: iso,
+  };
+  task.updatedAt = iso;
+  saveTasks();
+  return publicTask(task);
+}
+
+function renewLease(
+  taskId,
+  { ownerId = '', ttlMs = LEASE_TTL_DEFAULT_MS, now = Date.now() } = {}
+) {
+  const state = loadTasks();
+  const task = state.tasks[String(taskId || '')];
+  if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+  if (
+    !task.lease ||
+    task.lease.ownerId !== ownerId ||
+    leaseExpired(task.lease, now)
+  ) {
+    throw new AgentError('task_lease_lost', '任务租约已丢失', 409);
+  }
+  const iso = new Date(now).toISOString();
+  task.lease.heartbeatAt = iso;
+  task.lease.expiresAt = new Date(now + Math.max(1000, ttlMs)).toISOString();
+  task.heartbeatAt = iso;
+  task.updatedAt = iso;
+  saveTasks();
+  return publicTask(task);
+}
+
+function releaseLease(taskId) {
+  const state = loadTasks();
+  const task = state.tasks[String(taskId || '')];
+  if (!task) return null;
+  task.lease = null;
+  task.updatedAt = nowIso();
+  saveTasks();
+  return publicTask(task);
+}
+
+function recordRunStart(taskId, { runId, attempt, startedAt } = {}) {
+  const state = loadTasks();
+  const task = state.tasks[String(taskId || '')];
+  if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+  const at = typeof startedAt === 'string' ? startedAt : nowIso();
+  task.runId = runId || task.runId || null;
+  task.runStartedAt = at;
+  if (Number.isInteger(attempt) && attempt >= 0) task.attempts = attempt;
+  const runs = Array.isArray(task.runs) ? task.runs : [];
+  runs.push({
+    runId: task.runId,
+    attempt: Number.isInteger(task.attempts) ? task.attempts : 0,
+    startedAt: at,
+    finishedAt: null,
+    status: 'running',
+    errorCode: null,
+  });
+  task.runs = runs.slice(-RUN_HISTORY_MAX);
+  task.updatedAt = at;
+  saveTasks();
+  return publicTask(task);
+}
+
+function recordRunFinish(taskId, { runId, status, errorCode = null, finishedAt } = {}) {
+  const state = loadTasks();
+  const task = state.tasks[String(taskId || '')];
+  if (!task) return null;
+  const at = typeof finishedAt === 'string' ? finishedAt : nowIso();
+  const runs = Array.isArray(task.runs) ? task.runs : [];
+  const entry =
+    runs.find(item => item.runId === runId && !item.finishedAt) ||
+    runs.find(item => item.runId === runId) ||
+    null;
+  if (entry) {
+    entry.finishedAt = at;
+    entry.status = status || entry.status;
+    entry.errorCode = errorCode || null;
+  } else {
+    runs.push({
+      runId: runId || task.runId || null,
+      attempt: Number.isInteger(task.attempts) ? task.attempts : 0,
+      startedAt: task.runStartedAt || at,
+      finishedAt: at,
+      status: status || null,
+      errorCode: errorCode || null,
+    });
+  }
+  task.runs = runs.slice(-RUN_HISTORY_MAX);
+  task.updatedAt = at;
+  saveTasks();
+  return publicTask(task);
+}
+
+function recordCheckpoint(taskId, checkpoint = {}, now = Date.now()) {
+  const state = loadTasks();
+  const task = state.tasks[String(taskId || '')];
+  if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+  const at = typeof checkpoint.at === 'string' ? checkpoint.at : new Date(now).toISOString();
+  task.checkpoint = {
+    round: Number.isInteger(checkpoint.round) ? checkpoint.round : 0,
+    toolCalls: Number.isInteger(checkpoint.toolCalls) ? checkpoint.toolCalls : 0,
+    phase: String(checkpoint.phase || 'progress').slice(0, 40),
+    at,
+  };
+  task.checkpointVersion =
+    (Number.isInteger(task.checkpointVersion) ? task.checkpointVersion : 0) + 1;
+  task.heartbeatAt = at;
+  task.updatedAt = at;
+  saveTasks();
+  return publicTask(task);
+}
+
+function setRetry(taskId, { errorCode, retryAt, now = Date.now() } = {}) {
+  const state = loadTasks();
+  const task = state.tasks[String(taskId || '')];
+  if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+  stateMachine.assertTransition(task.status, 'queued');
+  const at = new Date(now).toISOString();
+  task.status = 'queued';
+  task.retryAt =
+    typeof retryAt === 'string'
+      ? retryAt
+      : new Date(now + Math.min(30000, 1000 * Math.max(1, task.attempts || 1))).toISOString();
+  task.lastErrorCode =
+    typeof errorCode === 'string' ? errorCode.slice(0, 60) : null;
+  task.errorCode = null;
+  task.recoveredAt = at;
+  task.runId = null;
+  task.heartbeatAt = null;
+  task.lease = null;
+  task.updatedAt = at;
+  saveTasks();
+  return publicTask(task);
+}
+
+function hasSideEffectTools(task) {
+  return (
+    Array.isArray(task.allowedTools) &&
+    task.allowedTools.some(name => SIDE_EFFECT_TOOLS.includes(name))
+  );
+}
+
+// 启动恢复：租约仍由未过期且不同的 owner 持有时保持 running；
+// 只读任务重新排队；可能产生副作用的任务标记 uncertain 等待人工处理，
+// 绝不凭空报告成功。
+function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
+  const state = loadTasks();
+  const at = new Date(now).toISOString();
+  let recovered = 0;
+  let uncertain = 0;
+  let leftRunning = 0;
+  const taskIds = [];
+  const uncertainTaskIds = [];
+  let changed = false;
+
+  for (const task of Object.values(state.tasks)) {
+    if (!stateMachine.isRecoverable(task.status)) continue;
+    if (
+      task.lease &&
+      ownerId &&
+      task.lease.ownerId !== ownerId &&
+      !leaseExpired(task.lease, now)
+    ) {
+      leftRunning += 1;
+      continue;
+    }
+    changed = true;
+    task.updatedAt = at;
+    task.lease = null;
+    task.retryAt = null;
+    task.heartbeatAt = null;
+    if (hasSideEffectTools(task)) {
+      task.status = 'uncertain';
+      task.completedAt = at;
+      task.errorCode = 'recovery_uncertain_side_effects';
+      task.lastErrorCode = 'recovery_uncertain_side_effects';
+      task.requiresReview = true;
+      task.result = normalizeWorkerResult({
+        status: 'uncertain',
+        summary: '',
+        errorCode: 'recovery_uncertain_side_effects',
+        runId: task.runId || null,
+        finishedAt: at,
+      });
+      uncertain += 1;
+      uncertainTaskIds.push(task.taskId);
+    } else {
+      task.status = 'queued';
+      task.recoveredAt = at;
+      task.lastErrorCode = 'recovered_after_restart';
+      task.errorCode = null;
+      task.requiresReview = false;
+      recovered += 1;
+      taskIds.push(task.taskId);
+    }
+  }
+  if (changed) saveTasks();
+  return {
+    recovered,
+    uncertain,
+    leftRunning,
+    taskIds,
+    uncertainTaskIds,
+    queued: Object.values(state.tasks).filter(task => task.status === 'queued').length,
+  };
+}
+
+// 给 Watchdog / 运维读取的稳定健康快照：只有计数与时间点，不含任务正文。
+function healthSnapshot(now = Date.now()) {
+  const state = loadTasks();
+  const counts = {
+    queued: 0,
+    accepted: 0,
+    running: 0,
+    waitingApproval: 0,
+    terminal: 0,
+    uncertain: 0,
+  };
+  let expiredLeases = 0;
+  let retryScheduled = 0;
+  let oldestQueuedAt = null;
+  for (const task of Object.values(state.tasks)) {
+    if (task.status === 'waiting_approval') counts.waitingApproval += 1;
+    else if (task.status === 'uncertain') counts.uncertain += 1;
+    else if (stateMachine.isTerminal(task.status)) counts.terminal += 1;
+    else if (task.status === 'queued') {
+      counts.queued += 1;
+      if (!oldestQueuedAt || String(task.createdAt) < oldestQueuedAt) {
+        oldestQueuedAt = task.createdAt || null;
+      }
+      if (task.retryAt && Date.parse(task.retryAt) > now) retryScheduled += 1;
+    } else if (task.status === 'accepted') counts.accepted += 1;
+    else if (task.status === 'running') counts.running += 1;
+
+    if (
+      (task.status === 'accepted' || task.status === 'running') &&
+      leaseExpired(task.lease, now)
+    ) {
+      expiredLeases += 1;
+    }
+  }
+  return {
+    schemaVersion: TASK_SCHEMA_VERSION,
+    counts,
+    oldestQueuedAt,
+    retryScheduled,
+    expiredLeases,
+    checkedAt: new Date(now).toISOString(),
+  };
+}
+
+// 队列顺序：优先级（high → normal → low）优先，同级按创建时间，最后用 taskId
+// 兜底。尚未到 retryAt 的任务暂不出队，避免失败后立即重试形成风暴。
+function nextQueuedTask(now = Date.now()) {
   const current = loadTasks();
   return (
     Object.values(current.tasks)
       .filter(task => task.status === 'queued' && task.cancelRequested !== true)
-      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))[0] ||
-    null
+      .filter(task => !task.retryAt || Date.parse(task.retryAt) <= now)
+      .sort((a, b) => {
+        const byPriority = priorityRank(a.priority) - priorityRank(b.priority);
+        if (byPriority !== 0) return byPriority;
+        const byCreated = String(a.createdAt).localeCompare(String(b.createdAt));
+        if (byCreated !== 0) return byCreated;
+        return String(a.taskId).localeCompare(String(b.taskId));
+      })[0] || null
   );
 }
 
@@ -637,26 +1163,6 @@ function queuedCount() {
   return Object.values(loadTasks().tasks).filter(
     task => task.status === 'queued' && task.cancelRequested !== true
   ).length;
-}
-
-// 进程重启恢复：crash 时停在 accepted/running 的任务重新入队；
-// waiting_approval 不自动执行，交给人工审批。
-function recoverInterrupted() {
-  const current = loadTasks();
-  const now = nowIso();
-  let recovered = 0;
-  const taskIds = [];
-  for (const task of Object.values(current.tasks)) {
-    if (task.status === 'accepted' || task.status === 'running') {
-      task.status = 'queued';
-      task.recoveredAt = now;
-      task.updatedAt = now;
-      recovered += 1;
-      taskIds.push(task.taskId);
-    }
-  }
-  if (recovered) saveTasks();
-  return { recovered, taskIds, queued: queuedCount() };
 }
 
 function reloadForTests() {
@@ -671,6 +1177,10 @@ module.exports = {
   OUTBOX_FILE,
   OUTBOX_MAX,
   STATUSES,
+  CONTRACT_VERSION,
+  PRIORITIES,
+  SIDE_EFFECT_TOOLS,
+  TASK_SCHEMA_VERSION,
   createTask,
   getTask,
   getRawTask,
@@ -685,5 +1195,16 @@ module.exports = {
   nextQueuedTask,
   queuedCount,
   recoverInterrupted,
+  findByIdempotencyKey,
+  priorityRank,
+  acquireLease,
+  renewLease,
+  releaseLease,
+  leaseExpired,
+  recordRunStart,
+  recordRunFinish,
+  recordCheckpoint,
+  setRetry,
+  healthSnapshot,
   reloadForTests,
 };
