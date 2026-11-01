@@ -39,7 +39,7 @@ const NOTES = {
   sessions:
     'sessions: legacy migration, CRUD/isolation, 1000-message retention, /history cursor pagination, trim metadata',
   persona:
-    'persona panel: split-reply rules (incl. short-segment regression), /persona API, customPrompt (defaults, old-file migration, strict type/length/body-size validation with the stored file left byte-identical, reset clears it), custom block in the final /chat and /chat/stream model request, empty value = legacy prompt, malicious text neutralized and tool gating unchanged, prompt injection, per-mode splitting, corruption protection',
+    'persona panel: split-reply rules (single-message default, 400-char hard limit, short-segment regression), /persona API, customPrompt (defaults, old-file migration, strict type/length/body-size validation with the stored file left byte-identical, reset clears it), custom block in the final /chat and /chat/stream model request, empty value = legacy prompt, malicious text neutralized and tool gating unchanged, prompt injection, corruption protection',
   'chat-stream':
     'SSE streaming: stream-strip rules, /chat/stream framing/deltas/done fields, persistence timing, continue mode, mid-stream error, pure-image memory extraction, /chat coexistence',
   multimodal:
@@ -94,6 +94,8 @@ const NOTES = {
     'state machine transitions, task-store schema migration, leases/retry backoff/checkpoint version/run history, restart recovery (queued/uncertain/live lease), SIGKILL fault injection, delivery idempotency and crash redelivery',
   'agent-watchdog':
     'watchdog health classification, action planning with whitelist/cooldown/breaker, intake pause and resume, offline recovery, escalation, audit fields, dry-run, external supervisor restart drill',
+  'reply-segmentation':
+    'single-message default with a 400-char configurable hard limit, semantic split order (paragraph/newline/sentence), code-block and Markdown-link protection, English word boundaries',
   'monitoring-api':
     'monitoring API + real HTTP/context/agent/SSE/persistence instrumentation (model SDK stubbed)',
   'agent-runtime-guards':

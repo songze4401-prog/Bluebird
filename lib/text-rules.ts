@@ -13,7 +13,7 @@
 // 若新增调用方直接 import './streaming-segments'，边界即被打破。
 
 export {
-  MAX_SEGMENTS,
+  DEFAULT_MAX_CHARS,
   splitReplyIntoSegments,
 } from './split-reply';
 

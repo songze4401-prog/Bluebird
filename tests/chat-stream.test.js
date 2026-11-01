@@ -470,11 +470,10 @@ async function main() {
   const done3 = sse3.events.find(e => e.type === 'done');
 
   check(
-    '分条：done.replies 拆成 3 条',
+    '分条：短文多段 done.replies 仍为 1 条并保留换行',
     !!done3 &&
-      done3.replies.length === 3 &&
-      done3.replies[0].content === '第一段。' &&
-      done3.replies[2].content === '第三段。',
+      done3.replies.length === 1 &&
+      done3.replies[0].content === '第一段。\n\n第二段。\n\n第三段。',
     done3 ? `=${done3.replies.length}` : 'no done'
   );
 
