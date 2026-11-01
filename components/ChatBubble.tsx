@@ -268,6 +268,11 @@ export function ChatBubble({
             <Text style={styles.modelNote}>{item.agentNotice}</Text>
           )}
 
+          {/* 记忆链路降级/失败：只在本轮确实没有记忆可用时提示，不猜测原因 */}
+          {!!item.memoryNote && (
+            <Text style={styles.modelNote}>{item.memoryNote}</Text>
+          )}
+
           {!!item.retryText && (
             <TouchableOpacity
               style={styles.retryButton}

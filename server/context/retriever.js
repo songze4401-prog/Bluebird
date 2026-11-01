@@ -112,8 +112,37 @@ function mapMemoryResult(result, config) {
   });
 }
 
-async function fetchMemory({ task, sessionId, config, injected, attempt = 1 }) {
+// 记忆检索超时的统一结果：时间预算耗尽时不冒充空结果，也不阻断主控。
+function memoryTimeoutOutcome(timeoutMs, { partialItems = [], elapsedMs = null } = {}) {
+  return {
+    status: 'retrieval_error',
+    count: partialItems.length,
+    items: partialItems,
+    error:
+      elapsedMs !== null
+        ? `记忆检索超出时间预算（${elapsedMs}ms > ${timeoutMs}ms），已降级`
+        : `记忆检索超时（超出 ${timeoutMs}ms 时间预算），已降级`,
+    timeout: true,
+    retried: false,
+  };
+}
+
+async function fetchMemory({
+  task,
+  sessionId,
+  config,
+  injected,
+  attempt = 1,
+  deadline = null,
+}) {
+  const timeoutMs = config.retrieval.memoryTimeoutMs;
   const monitor = monitoring.beginMemorySearch({ source: 'memory', attempt });
+
+  // 同步检索无法被抢占：入口先查一次剩余预算，预算耗尽就不再开始新的扫描。
+  if (deadline && Date.now() >= deadline) {
+    monitor.complete({ status: 'timeout', count: 0, errorCode: 'retrieval_timeout' });
+    return memoryTimeoutOutcome(timeoutMs);
+  }
   const injectedEntries = Array.isArray(injected.memory) ? injected.memory : [];
   if (injectedEntries.length) {
     const items = injectedEntries
@@ -147,6 +176,7 @@ async function fetchMemory({ task, sessionId, config, injected, attempt = 1 }) {
     };
   }
 
+  const startedAt = Date.now();
   try {
     const found = searchMemories({
       query: task,
@@ -168,10 +198,22 @@ async function fetchMemory({ task, sessionId, config, injected, attempt = 1 }) {
     }
 
     const items = found.results.map(result => mapMemoryResult(result, config));
+
+    // 同步扫描不可抢占：完成后按真实耗时判断是否已超预算。
+    // 已拿到的结果照常注入，但必须显式标记超时，让 memoryState 降为 degraded，
+    // 而不是把一次超预算的检索伪装成健康。
+    const elapsedMs = Date.now() - startedAt;
+    const expired = deadline !== null && Date.now() > deadline;
+
     monitor.complete({
-      status: items.length ? 'success' : 'no_result',
+      status: expired ? 'timeout' : items.length ? 'success' : 'no_result',
       count: items.length,
+      ...(expired ? { errorCode: 'retrieval_timeout' } : {}),
     });
+
+    if (expired) {
+      return memoryTimeoutOutcome(timeoutMs, { partialItems: items, elapsedMs });
+    }
 
     return {
       status: items.length ? 'ok' : 'no_result',
@@ -207,10 +249,30 @@ async function retrieveMemory({
     };
   }
 
+  // 时间预算只覆盖本轮检索（含重试）；超时不再重试，避免把一次慢查询放大成多次。
+  const timeoutMs = config.retrieval.memoryTimeoutMs;
+  const deadline =
+    Number.isFinite(timeoutMs) && timeoutMs > 0 ? now + timeoutMs : null;
+
   let lastError = null;
   for (let attempt = 0; attempt <= config.retry.maxRetries; attempt += 1) {
+    if (deadline !== null && Date.now() >= deadline) {
+      lastError = memoryTimeoutOutcome(timeoutMs);
+      break;
+    }
     try {
-      const outcome = await fetchMemory({ task, sessionId, config, injected, attempt: attempt + 1 });
+      const outcome = await fetchMemory({
+        task,
+        sessionId,
+        config,
+        injected,
+        attempt: attempt + 1,
+        deadline,
+      });
+      if (outcome.timeout) {
+        recordRetrievalFailure('memory', config, now);
+        return outcome;
+      }
       if (outcome.status === 'retrieval_error') {
         lastError = outcome;
         continue;

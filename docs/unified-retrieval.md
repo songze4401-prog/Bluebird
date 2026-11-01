@@ -245,7 +245,7 @@ signals: rrf（相对最高分归一）/ lexical / vector 余弦 / recency / gra
 | GET | `/retrieval/sources` | 来源元数据列表 |
 | GET | `/retrieval/sources/:id` | 单来源元数据 |
 | GET | `/retrieval/consistency` | 一致性检查 |
-| POST | `/retrieval/search` | 查询；不修改业务源数据，但会按需幂等刷新 memory/conversation 派生索引并补齐缺失向量；`query/sessionId/sources/limit/tokenBudget/asOf` |
+| POST | `/retrieval/search` | 查询；不修改业务源数据，但会按需幂等刷新 memory/conversation 派生索引并补齐缺失向量；`query/sessionId/sources/limit/tokenBudget/asOf/purpose/categories`。`purpose` ∈ `chat_context/agent_tool/api_search`（默认 `api_search`）；`categories` ∈ `memory/conversation/knowledge/document/web/code`，与 `sources` 取交集；非法值 400。`limit`/`tokenBudget` 必须是正整数，非法值 400（不再静默归一）。向量补齐/embedding/重排均以 `timeoutMs` 为预算，超时只降级对应通道并返回 `partial_success` |
 | POST | `/retrieval/ingest` | 写索引；`type=document/code` + `path`，或 `type=web` + `url`；完成后只补缺失向量 |
 | POST | `/retrieval/sync` | 刷新外部来源；`sourceId` 刷新单个，缺省刷新所有 document/code；web 需同时提供 `url` |
 | POST | `/retrieval/vectors/backfill` | 批量补齐缺失/失效向量；不重建来源索引；未配置 Embedding 返回 409 |
@@ -281,11 +281,11 @@ curl -X POST "$BASE/retrieval/search" \
 | 命令 | 实际结果 |
 |---|---|
 | `node tests/retrieval.test.js` | 30/30 |
-| `node tests/retrieval-api.test.js` | 13/13（含 knowledge_search 中和、向量回填 401/409） |
+| `node tests/retrieval-api.test.js` | 14/14（含 knowledge_search 中和、向量回填 401/409） |
 | `node tests/retrieval-embeddings.test.js` | 10/10（元数据隔离、批量回填、增量、reranker 契约/回退、引擎顺序、向量/重排 deadline 降级） |
 | `node tests/embedding-open-domain-eval.js`（真实服务） | 21 查询；overall Recall@5 1.0、跨语言 Recall@5 1.0；`EMBEDDING ACCEPTANCE PASSED` |
-| `npm test` | 55 个后端测试文件 / 1748 项全部通过 |
-| `node scripts/verify-test-coverage.js` | backend 1748/1748；nodeSuite 221/221；runner 1527/1527；frontend 179/179；CI 55/55 |
+| `npm test` | 60 个后端测试文件 / 1822 项全部通过 |
+| `node scripts/verify-test-coverage.js` | backend 1822/1822；nodeSuite 221/221；runner 1601/1601；frontend 181/181；CI 60/60 |
 | `npx tsc --noEmit` | 通过（0 错误） |
 | `npm run lint` | 通过（0 错误） |
 

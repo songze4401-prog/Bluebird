@@ -4,6 +4,7 @@
 // 同时让这些规则可以被单独验证（不再埋在 1400 行组件里）。
 
 import {
+  MemoryState,
   Message,
   ModelRoute,
   ReplyMode,
@@ -201,6 +202,27 @@ export function removeStreamBubble(
   return prev.filter(m => !isStreamingBubble(m, tempId));
 }
 
+// 记忆链路状态 → 用户提示文案。
+// 只有 degraded/failed 需要解释「这轮为什么没用上记忆」；
+// ok/empty 属于正常状态，不打扰用户。文案只陈述服务端返回的状态，
+// 不猜测具体原因（熔断、超时、异常都由后端区分）。
+// 注意：超时降级时服务端仍会注入已取回的部分记忆，所以 degraded
+// 只能说「可能仅引用部分记忆」，不能说「未引用记忆」。
+export function buildMemoryNote(
+  state?: MemoryState,
+  status?: string
+): string | undefined {
+  if (state === 'degraded') {
+    return status === 'retrieval_error'
+      ? '长期记忆本轮降级（检索熔断或超时），可能仅引用部分记忆'
+      : '长期记忆本轮降级，可能仅引用部分记忆';
+  }
+  if (state === 'failed') {
+    return '长期记忆检索失败，本轮未引用记忆；对话不受影响';
+  }
+  return undefined;
+}
+
 // 服务端最终回复（流式 done 或非流式 /chat）统一切成气泡数组。
 // 两条路径共用这一个切分函数，避免"复制消息处理逻辑"：边界、mood、
 // modelNote、附件透传全部在此处，done 与回退路径零差异。
@@ -213,11 +235,15 @@ export function buildReplyBubbles(
     toolSteps?: ToolStep[];
     // 新图触发 Agent 工具互斥时的用户提示，只挂最后一格
     agentNotice?: string;
+    // 记忆链路状态（旧服务端不返回，缺省即不提示）
+    memoryState?: MemoryState;
+    memoryStatus?: string;
   },
   segments: ReplySegment[]
 ): { bubbles: Message[]; replyMood: string } {
   const replyMood = typeof data.mood === 'string' ? data.mood : 'calm';
   const modelNote = buildModelNote(data.modelRoute);
+  const memoryNote = buildMemoryNote(data.memoryState, data.memoryStatus);
   const lastIndex = segments.length - 1;
 
   const bubbles: Message[] = segments.map((seg, index) => {
@@ -243,6 +269,11 @@ export function buildReplyBubbles(
       ...(index === lastIndex && data.agentNotice
         ? { agentNotice: data.agentNotice }
         : {}),
+      // 记忆状态只挂最后一格：状态字段始终保留，提示文案仅降级/失败时出现
+      ...(index === lastIndex && data.memoryState
+        ? { memoryState: data.memoryState }
+        : {}),
+      ...(index === lastIndex && memoryNote ? { memoryNote } : {}),
     };
   });
 

@@ -7,6 +7,7 @@
 import {
   applyStreamingText,
   applyToolEvent,
+  buildMemoryNote,
   buildModelNote,
   buildReplyBubbles,
   buildWelcomeMessages,
@@ -133,6 +134,40 @@ describe('buildReplyBubbles', () => {
 
     expect(bubbles[0].agentNotice).toBeUndefined();
     expect(bubbles[1].agentNotice).toContain('工具暂不可用');
+  });
+
+  it('memoryState 透传到最后一格，normal 状态不产生提示', () => {
+    const { bubbles } = buildReplyBubbles(
+      { memoryState: 'ok' } as never,
+      [
+        { id: 'm1', content: '一' },
+        { id: 'm2', content: '二' },
+      ]
+    );
+
+    expect(bubbles[0].memoryState).toBeUndefined();
+    expect(bubbles[1].memoryState).toBe('ok');
+    expect(bubbles[1].memoryNote).toBeUndefined();
+  });
+
+  it('记忆降级/失败时只在最后一格给出提示', () => {
+    const { bubbles } = buildReplyBubbles(
+      { memoryState: 'degraded', memoryStatus: 'retrieval_error' } as never,
+      [
+        { id: 'd1', content: '一' },
+        { id: 'd2', content: '二' },
+      ]
+    );
+
+    expect(bubbles[0].memoryNote).toBeUndefined();
+    expect(bubbles[1].memoryNote).toContain('降级');
+    expect(bubbles[1].memoryNote).toContain('部分记忆');
+
+    const failed = buildReplyBubbles({ memoryState: 'failed' } as never, [
+      { id: 'f1', content: '一' },
+    ]);
+    expect(failed.bubbles[0].memoryNote).toContain('检索失败');
+    expect(failed.bubbles[0].memoryNote).toContain('对话不受影响');
   });
 
   it('附件挂在对应分段上', () => {

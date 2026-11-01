@@ -8,6 +8,7 @@ import type {
   AgentPolicyConfig,
   AgentPolicyTool,
   Attachment,
+  MemoryState,
   ModelDefaults,
   ModelProvider,
   ModelRoute,
@@ -276,6 +277,13 @@ export type ChatResponse = {
   // Agent 工具执行摘要：有则同时出现在顶层与 replies 最后一格，
   // 无则整个字段不出现（旧响应零变化）
   toolSteps?: ToolStep[];
+  // 请求级追踪标识：日志/trace/响应共用同一个 requestId（旧服务端不返回）
+  requestId?: string;
+  // 记忆链路状态（服务端 Context Runtime 产出）：
+  // ok=有记忆注入；empty=确实没有相关记忆；degraded=熔断或超时降级；
+  // failed=检索失败但本轮对话未受阻。前端据此提示降级，不猜测原因。
+  memoryState?: MemoryState;
+  memoryStatus?: 'ok' | 'no_result' | 'source_unavailable' | 'retrieval_error';
 };
 
 // ---- 在线状态 ----

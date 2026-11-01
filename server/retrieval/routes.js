@@ -18,6 +18,10 @@ function statusCodeFor(code) {
     code === 'query_too_long' ||
     code === 'sources_empty' ||
     code === 'invalid_source' ||
+    code === 'invalid_purpose' ||
+    code === 'invalid_category' ||
+    code === 'invalid_token_budget' ||
+    code === 'invalid_limit' ||
     code === 'session_required' ||
     code === 'invalid_as_of' ||
     code === 'path_required' ||
@@ -35,6 +39,7 @@ function statusCodeFor(code) {
   if (code === 'retrieval_disabled') return 503;
   if (code === 'index_unavailable' || code === 'index_isolation_failed') return 503;
   if (code === 'roots_not_configured') return 503;
+
   if (code === 'retrieval_failed' || code === 'ingest_failed') return 500;
   return 400;
 }
@@ -109,11 +114,35 @@ function createRetrievalRouter({ requireAuth }) {
       });
     }
 
+    // 显式字段做显式校验：非法值回 400，不静默回退默认预算。
+    if (
+      body.limit !== undefined &&
+      (!Number.isInteger(body.limit) || body.limit <= 0)
+    ) {
+      return res.status(400).json({
+        ok: false,
+        code: 'invalid_limit',
+        error: retrieval.describeError('invalid_limit'),
+      });
+    }
+    if (
+      body.tokenBudget !== undefined &&
+      (!Number.isFinite(body.tokenBudget) || body.tokenBudget <= 0)
+    ) {
+      return res.status(400).json({
+        ok: false,
+        code: 'invalid_token_budget',
+        error: retrieval.describeError('invalid_token_budget'),
+      });
+    }
+
     try {
       const result = await retrieval.search({
         query: body.query,
         sessionId,
         sources: body.sources,
+        purpose: body.purpose,
+        categories: body.categories,
         limit: body.limit,
         tokenBudget: body.tokenBudget,
         asOf: body.asOf,

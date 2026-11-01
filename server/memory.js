@@ -1328,6 +1328,7 @@ async function applyCandidate(raw, options = {}) {
       trimToCapacity(next);
       if (!(await persist())) return abortedResult();
       memories = next;
+      refreshDerivedMemoryIndex('merge_update');
 
       return {
         written: true,
@@ -1365,6 +1366,7 @@ async function applyCandidate(raw, options = {}) {
       trimToCapacity(next);
       if (!(await persist())) return abortedResult();
       memories = next;
+      refreshDerivedMemoryIndex('supersede');
 
       return {
         written: true,
@@ -1388,6 +1390,7 @@ async function applyCandidate(raw, options = {}) {
     trimToCapacity(next);
     if (!(await persist())) return abortedResult();
     memories = next;
+    refreshDerivedMemoryIndex('create');
 
     return {
       written: true,
@@ -2892,6 +2895,7 @@ async function confirmPending(id) {
 
         await saveMemories(rewritten);
         memories = rewritten;
+        refreshDerivedMemoryIndex('confirm_supersede');
 
         return {
           updated: 1,
@@ -2927,6 +2931,7 @@ async function confirmPending(id) {
 
       await saveMemories(next);
       memories = next;
+      refreshDerivedMemoryIndex('confirm_update');
 
       return {
         updated: 1,
@@ -2954,6 +2959,7 @@ async function confirmPending(id) {
 
     await saveMemories(next);
     memories = next;
+    refreshDerivedMemoryIndex('confirm');
 
     return { updated: 1, reason: 'ok', id: targetId, status: STATUS_ACTIVE };
   });
