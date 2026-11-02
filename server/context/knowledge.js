@@ -19,7 +19,12 @@ function mapFreshness(freshness) {
   };
 }
 
-async function retrieveKnowledge({ task, sessionId = null, now = Date.now() } = {}) {
+async function retrieveKnowledge({
+  task,
+  sessionId = null,
+  userId = null,
+  now = Date.now(),
+} = {}) {
   if (!retrieval.config.enabled || !retrieval.config.contextEnabled) {
     return { status: 'disabled', count: 0, items: [], trace: null };
   }
@@ -33,6 +38,7 @@ async function retrieveKnowledge({ task, sessionId = null, now = Date.now() } = 
     const outcome = await retrieval.searchForContext({
       query,
       sessionId,
+      userId,
       now,
     });
 

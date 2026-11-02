@@ -2,12 +2,13 @@
  * 云岫 Bluebird — 长期记忆连接器（retrieval/connectors/memory.js）
  *
  * 长期记忆的 canonical source 仍是 memory.js；本连接器只生成派生 chunk。
- * 只索引带明确会话归属（contributions[].sessionId）的有效记忆：
- * 无法判断归属的旧条目继续走原 memory_search，不进入统一索引，
- * 避免把“无归属”误当成“所有会话可见”。
+ * 作用域是「用户级」（P1）：长期记忆属于用户，不属于某个会话，因此同一用户的
+ * 任意会话都能检索到。派生 chunk 带 visibility='user' + userId，由
+ * retrieval/engine.js 的 scopeAllows 按可信用户身份过滤。
  */
 const memory = require('../../memory');
 const { isEffectiveAt } = require('../../memory-lifecycle');
+const { getInstanceUserId } = require('../../user-scope');
 const {
   createChunk,
   contentHashOf,
@@ -23,7 +24,6 @@ function collectMemoryChunks({ maxChunkChars }) {
   const items = memory.getMemories();
   const sources = [];
   let scanned = 0;
-  let skippedLegacy = 0;
   let skippedNonEffective = 0;
 
   for (const item of items) {
@@ -37,18 +37,11 @@ function collectMemoryChunks({ maxChunkChars }) {
       continue;
     }
 
-    const sessions = [
-      ...new Set(
-        (Array.isArray(item.contributions) ? item.contributions : [])
-          .map(contribution => contribution && contribution.sessionId)
-          .filter(sessionId => typeof sessionId === 'string' && sessionId)
-      ),
-    ];
-
-    if (!sessions.length) {
-      skippedLegacy += 1;
-      continue;
-    }
+    // 归属用户由 stampIdentity 在读盘时补齐；缺失时按实例用户处理（单实例部署）。
+    const userId =
+      typeof item.userId === 'string' && item.userId.trim()
+        ? item.userId.trim()
+        : getInstanceUserId();
 
     const sourceId = `memory:${item.id}`;
     const parts = splitPlainText(item.content, maxChunkChars);
@@ -72,7 +65,7 @@ function collectMemoryChunks({ maxChunkChars }) {
         sourceVersion: sha256(
           [item.id, item.updatedAt || item.createdAt, item.status || 'active'].join('|')
         ).slice(0, 32),
-        scope: { visibility: 'session', sessions },
+        scope: { visibility: 'user', userId },
         metadata: {
           memoryId: item.id,
           memoryType: item.type || 'fact',
@@ -102,7 +95,7 @@ function collectMemoryChunks({ maxChunkChars }) {
         updatedAt: newest,
         metadata: {
           memoryType: item.type || 'fact',
-          sessionCount: sessions.length,
+          ownerUserId: userId,
           chunkCount: chunks.length,
         },
       },
@@ -113,10 +106,9 @@ function collectMemoryChunks({ maxChunkChars }) {
   return {
     sources,
     scanned,
-    skipped: skippedLegacy + skippedNonEffective,
-    skippedLegacy,
+    skipped: skippedNonEffective,
     skippedNonEffective,
-    reason: skippedLegacy ? 'legacy_unscoped_memories_skipped' : null,
+    reason: null,
   };
 }
 
@@ -129,11 +121,7 @@ function sourceIdsForMemory() {
           item &&
           item.id &&
           // 与 collectMemoryChunks 保持同一生命周期口径：只保留当前有效记忆的源。
-          isEffectiveAt(item) &&
-          Array.isArray(item.contributions) &&
-          item.contributions.some(
-            contribution => contribution && contribution.sessionId
-          )
+          isEffectiveAt(item)
       )
       .map(item => `memory:${item.id}`)
   );

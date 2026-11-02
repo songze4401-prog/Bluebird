@@ -100,6 +100,18 @@ const NOTES = {
     'agent runtime guards: cross-session MERGE dedupe scope, task deadlineMs, policy maxRounds, abort-listener cleanup',
   'agent-storage-limits':
     'agent event outbox hard cap, overflow accounting (drop_oldest) and outbox recovery',
+  'memory-observability':
+    'memory retrieval funnel (candidates/returned/injected), filter reason breakdown (expired/superseded/archived/pending/low-relevance), injected token attribution vs char count, sent-content hash, provider-vs-stub usage labeling and token reconciliation',
+  'context-trace-verify':
+    'end-to-end context trace: sent content hash recomputed from what the stub provider actually received, and stub usage labeled usage_source=stub (never counted as real provider usage)',
+  'memory-user-scope':
+    'user-level memory scope (P1): cross-session recall for the same user, strict cross-user denial, fail-closed without trusted identity, index scope visibility=user, write path still session-attributed',
+  'p3-acceptance':
+    'P3 acceptance matrix (10 rows): cross-session recall, irrelevant-injection control, message-history isolation, cross-user denial, project scope (skipped: no Project entity), agent task isolation, withdrawn/expired/superseded exclusion, distinguishable failure states, large-store budget cap, trace content hash',
+  'memory-ownership':
+    'memory API ownership (multi-user P0 blocker): GET /memory + /memory/pending filtered by trusted userId, foreign ids return 403 with data unchanged, clear/clear-session never touch other users, approval executor refuses foreign targets, own operations still work',
+  'session-ownership':
+    'session ownership (multi-user P0 blocker): /sessions list filtered by userId, foreign session ids return 404 on /sessions/:id, /history, /presence, /chat, /chat/stream, /retrieval/search, /history/clear, /history/recall and DELETE with data unchanged, legacy sessions migrated to instance user, own operations still work',
 };
 
 function readBaseline(file = BASELINE_FILE) {

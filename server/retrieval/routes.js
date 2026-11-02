@@ -11,6 +11,7 @@
 const express = require('express');
 const sessions = require('../sessions');
 const retrieval = require('./index');
+const { resolveUserId } = require('../user-scope');
 
 function statusCodeFor(code) {
   if (
@@ -106,7 +107,8 @@ function createRetrievalRouter({ requireAuth }) {
         ? body.sessionId.trim()
         : null;
 
-    if (sessionId && !sessions.getSession(sessionId)) {
+    // 归属校验：不存在与无权同形，避免用别人的 sessionId 检索其对话内容
+    if (sessionId && !sessions.getSessionForUser(sessionId, resolveUserId(req))) {
       return res.status(404).json({
         ok: false,
         code: 'session_missing',
@@ -140,6 +142,8 @@ function createRetrievalRouter({ requireAuth }) {
       const result = await retrieval.search({
         query: body.query,
         sessionId,
+        // 长期记忆 chunk 的作用域是用户级，必须带服务端可信用户身份。
+        userId: resolveUserId(req),
         sources: body.sources,
         purpose: body.purpose,
         categories: body.categories,

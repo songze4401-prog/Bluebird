@@ -244,10 +244,20 @@ function validate(operation, payload) {
   }
 }
 
-async function execute(operation, payload) {
+async function execute(operation, payload, { userId = null } = {}) {
   const checked = validate(operation, payload);
   if (!checked.ok) return { ok: false, code: checked.error };
   const value = checked.value;
+
+  // 归属校验（多用户上线前的 P0 阻断项）：审批执行器不得操作他人记忆。
+  // userId 为空时保持既有行为（单用户内部调用）；HTTP/审批链路必须传入。
+  const targetId = value && (value.id || value.targetId);
+  if (userId && targetId) {
+    const ownership = memory.checkMemoryOwnership(targetId, userId);
+    if (!ownership.ok) {
+      return { ok: false, reason: ownership.reason };
+    }
+  }
 
   switch (operation) {
     case 'update':

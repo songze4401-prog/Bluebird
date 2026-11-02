@@ -87,9 +87,12 @@ flowchart LR
 ## 6. 信任边界
 
 1. **网络边界**：除 `GET /` 外 Bearer；CORS 全开、HTTP/0.0.0.0（当前单用户本地假设）。
-2. **用户边界**：单用户 `local-owner`；任意 Bearer 可访问任意 sessionId。
+2. **用户边界**：单用户 `local-owner`。
+   记忆管理接口（`GET /memory`、`/memory/pending`、delete/archive/confirm/reject/clear/clear-session）与 Memory Bot 审批执行器已按可信 `userId` 做归属校验：越权读不返回、越权写返回 403 且数据不变、清空只清本人。见 `docs/p0-blocker-memory-ownership.md`。
+   主会话已补 `userId` 维度并强制：`/sessions` 只列本人；他人会话 id 在 `/sessions/:id`、`/history`、`/history/clear|recall`、`/presence`、`/chat`、`/chat/stream`、`/retrieval/search` 一律 404 且数据不变。见 `docs/p0-blocker-session-ownership.md`。
+   **多用户上线仍需**：(a) `resolveUserId` 返回真实用户；(b) Bot 会话（`agents/sessions.js`）补 `userId`、默认会话改为每用户一个；(c) 审批记录携带请求者 userId。
 3. **Agent 边界**：主控与 Bot 工具 allowlist、policy budget、高风险 deny-only；Bot Key 独立加密。
-4. **记忆边界**：按会话贡献隔离；legacy 无归属回退；跨会话 merge 是全局设计。
+4. **记忆边界**：长期记忆按**用户级**作用域（`visibility: user` + 服务端可信 `userId`，当前单用户即 `local-owner`）跨会话共享；原始消息历史、短期上下文、任务执行状态仍按会话/任务隔离；无可信身份时 fail-closed 退回会话级，绝不放开全库。跨会话 merge 是全局设计。
 5. **模型边界**：Provider 返回是外部不可信数据；Context 对知识做 neutralization，工具路径尚未完全对齐（P2-07）。
 6. **存储边界**：JSON at-rest；API Key 明文/前端 token 内嵌；Bot Vault 加密但备份包含主密钥（P1-05）。
 

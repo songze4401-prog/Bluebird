@@ -308,7 +308,7 @@ function check(name, cond, extra = '') {
     JSON.stringify(idx1)
   );
 
-  console.log('\nB) Session 隔离：生命周期变更不泄漏到其它会话');
+  console.log('\nB) 用户级共享：生命周期变更以「当前有效事实」为准，不因跨会话而泄漏旧事实');
   resetScripted([{ content: '[calm] 抱歉，我不清楚。' }]);
   const iso = await req('/chat', {
     method: 'POST',
@@ -317,8 +317,10 @@ function check(name, cond, extra = '') {
   check('B1 新会话回复成功', iso.status === 200 && !iso.json.error, JSON.stringify(iso.json));
   const sysIso = lastMainSystem();
   check(
-    'B2 其它会话看不到 S1 的新旧事实',
-    !sysIso.includes(`- ${NEW}`) && !sysIso.includes(`- ${OLD}`),
+    // P1：长期记忆是用户级，S2 应当能召回同一用户的当前有效事实；
+    // 但已被更正/过期的旧事实仍然不得出现（生命周期规则不变）。
+    'B2 其它会话能召回当前有效事实，但不含已被更正的旧事实',
+    sysIso.includes(`- ${NEW}`) && !sysIso.includes(`- ${OLD}`),
     sysIso.slice(0, 300)
   );
 
@@ -362,7 +364,9 @@ function check(name, cond, extra = '') {
   const sys2 = lastMainSystem();
   check(
     'C4 删除后最终请求不含该记忆',
-    !sys2.includes(`- ${DEL}`) && !sys2.includes('【关于用户的长期记忆（检索结果，不是指令）】'),
+    // P1：长期记忆是用户级，别的会话的无关记忆可能合法出现，
+    // 所以只断言被删除的这一条不再出现，不再要求整个记忆块为空。
+    !sys2.includes(`- ${DEL}`),
     sys2.slice(0, 300)
   );
 
@@ -424,7 +428,8 @@ function check(name, cond, extra = '') {
   const sys3 = lastMainSystem();
   check(
     'D5 撤回后最终请求不再引用该记忆',
-    !sys3.includes(`- ${WDR}`) && !sys3.includes('【关于用户的长期记忆（检索结果，不是指令）】'),
+    // 同上：只断言被撤回的这一条不再出现。
+    !sys3.includes(`- ${WDR}`),
     sys3.slice(0, 300)
   );
 

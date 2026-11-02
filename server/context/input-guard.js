@@ -17,7 +17,7 @@
  *   3) 仍超限 → 显式失败，绝不静默截断当前任务或核心安全规则。
  */
 const { config: defaultConfig } = require('./config');
-const { estimateTokens, describeMessageContent } = require('./text');
+const { estimateTokens, describeMessageContent, textLength } = require('./text');
 const { modelMessageId, tagModelMessage } = require('./projection');
 
 function renderSystem(blocks) {
@@ -56,6 +56,23 @@ function measureRequest({
   const history = historyMessages.map(message => measureMessage(message, config));
   const current = currentMessage ? measureMessage(currentMessage, config) : null;
 
+  // 逐块 Token（估算）：让「记忆块占多少 Token」可核对，而不是只给一个总数。
+  // 同一段文本单独估算与拼接后估算可能差几个 token，因此这里按块独立计算，
+  // 并显式标注来源是估算器而不是 Provider。
+  const blocks = systemBlocks
+    .filter(block => block && block.text)
+    .map(block => ({
+      id: block.id || null,
+      kind: block.kind || null,
+      tokens: estimateTokens(String(block.text)),
+      length: textLength(String(block.text)),
+    }));
+  const blockTokensByKind = {};
+  for (const block of blocks) {
+    const kind = block.kind || 'unknown';
+    blockTokensByKind[kind] = (blockTokensByKind[kind] || 0) + block.tokens;
+  }
+
   const rawInputTokens =
     systemTokens +
     history.reduce((sum, item) => sum + item.tokens, 0) +
@@ -71,6 +88,7 @@ function measureRequest({
 
   return {
     estimator: 'heuristic-cjk-ascii-v1',
+    tokenSource: 'estimate',
     estimatorErrorRange: 'CJK≈1/字，ASCII≈0.25/字符；未校准目标模型 tokenizer，按 1.25 保守放大',
     safetyFactor: guard.estimatorSafetyFactor,
     window: {
@@ -84,6 +102,11 @@ function measureRequest({
     systemTokens,
     historyTokens: history.reduce((sum, item) => sum + item.tokens, 0),
     currentTokens: current ? current.tokens : 0,
+    // 上下文块（记忆/知识/摘要/历史摘录）的 Token 归属。
+    blocks,
+    blockTokensByKind,
+    memoryTokens: blockTokensByKind.memory || 0,
+    knowledgeTokens: blockTokensByKind.knowledge || 0,
     rawInputTokens,
     estimatedInputTokens,
     reservedTokens: reserved,
