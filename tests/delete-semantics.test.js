@@ -429,6 +429,112 @@ async function waitReady() {
     );
   }
 
+  origLog('\n5) 删除墓碑、复活防护与抽取幂等');
+  {
+    const owner = 'local-owner';
+    const candidate = {
+      content: '删除后不得复活的事实',
+      type: 'fact',
+      keywords: ['墓碑', '复活'],
+      confidence: 0.95,
+      sourceQuote: '记住删除后不得复活的事实',
+    };
+    const options = {
+      sessionId: a3,
+      userId: owner,
+      messageId: 'm-tombstone-1',
+      userText: '记住删除后不得复活的事实',
+      requireUserGrounding: true,
+    };
+
+    const first = await memory.applyCandidate(candidate, options);
+    check(
+      '墓碑基线：首次写入成功',
+      first.written === true && first.action === 'inserted'
+    );
+
+    const entry = memory
+      .getMemories()
+      .find(item => item.content === candidate.content);
+    check('墓碑基线：条目存在', Boolean(entry));
+
+    const deleted = await memory.deleteMemory({ id: entry.id, userId: owner });
+    check('墓碑：删除成功', deleted.removed === 1);
+
+    const retry = await memory.applyCandidate(candidate, options);
+    check(
+      '墓碑：同源抽取不得复活',
+      retry.written === false && retry.reason === 'deleted_source',
+      JSON.stringify(retry)
+    );
+
+    memory.loadMemories();
+    const afterRestart = memory
+      .getMemories()
+      .find(item => item.content === candidate.content);
+    check('墓碑：重启读盘后仍不复活', !afterRestart);
+
+    const retryAfterRestart = await memory.applyCandidate(candidate, options);
+    check(
+      '墓碑：重启后同源仍被拒',
+      retryAfterRestart.written === false &&
+        retryAfterRestart.reason === 'deleted_source'
+    );
+
+    const newOptions = { ...options, messageId: 'm-tombstone-2' };
+    const reAdded = await memory.applyCandidate(candidate, newOptions);
+    check('墓碑：新消息可重新写入', reAdded.written === true);
+
+    const tombstoneText = fs.readFileSync(
+      path.join(TMP_DATA_DIR, 'memory-tombstones.json'),
+      'utf8'
+    );
+    check(
+      '墓碑：文件不保存正文/原话',
+      !tombstoneText.includes(candidate.content) &&
+        !tombstoneText.includes(candidate.sourceQuote)
+    );
+
+    const duplicate = await memory.applyCandidate(candidate, newOptions);
+    check(
+      '幂等：同一消息同一内容只写一次',
+      duplicate.written === false && duplicate.reason === 'duplicate_source',
+      JSON.stringify(duplicate)
+    );
+
+    const clearCandidate = {
+      content: '清空后不得复活的事实',
+      type: 'fact',
+      keywords: ['清空', '墓碑'],
+      confidence: 0.95,
+      sourceQuote: '记住清空后不得复活的事实',
+    };
+    const clearOptions = {
+      sessionId: a3,
+      userId: owner,
+      messageId: 'm-tombstone-clear',
+      userText: '记住清空后不得复活的事实',
+      requireUserGrounding: true,
+    };
+
+    const clearSeed = await memory.applyCandidate(clearCandidate, clearOptions);
+    check('清空墓碑：基线写入成功', clearSeed.written === true);
+
+    const cleared = await memory.clearMemories(owner);
+    check('清空墓碑：清空成功', cleared.cleared === true);
+
+    const retryAfterClear = await memory.applyCandidate(
+      clearCandidate,
+      clearOptions
+    );
+    check(
+      '清空墓碑：同源抽取不得复活',
+      retryAfterClear.written === false &&
+        retryAfterClear.reason === 'deleted_source',
+      JSON.stringify(retryAfterClear)
+    );
+  }
+
   origLog(`\n通过 ${passed} 项，失败 ${failed} 项`);
 
   try {

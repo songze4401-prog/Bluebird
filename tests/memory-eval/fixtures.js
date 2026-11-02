@@ -293,7 +293,7 @@ const PHASE2_WRITES = [
   {
     key: 'lowConfidenceRejected',
     newId: null,
-    userText: '记住：我最近在学弹吉他',
+    userText: '记一下：我最近在学弹吉他',
     reply: {
       content: '用户在学弹吉他',
       type: 'fact',
@@ -334,7 +334,7 @@ const GATE_PROBES = [
   },
   {
     key: 'confidenceGateProbe',
-    userText: '记住：我最近在学弹吉他',
+    userText: '记一下：我最近在学弹吉他',
     reply: {
       content: '我最近在学弹吉他',
       type: 'goal',

@@ -279,6 +279,49 @@ test('写侧无身份时保持会话级拒绝（旧行为回归）', async () =>
   assert.equal(result.reason, 'unauthorized_target', '没有可信身份时不得跨会话改写');
 });
 
+test('写侧跨用户相似内容：不得 merge 到他人条目', async () => {
+  seed([
+    entry({
+      content: '用户喝咖啡只喝美式',
+      keywords: ['咖啡', '美式'],
+      sessionId: SESSION_A,
+      userId: OTHER_USER,
+    }),
+  ]);
+  const [before] = memory.getMemories();
+
+  const result = await memory.applyCandidate(
+    {
+      content: '用户喝咖啡只喝美式',
+      type: 'preference',
+      keywords: ['咖啡', '美式'],
+      confidence: 0.95,
+      sourceQuote: '我喝咖啡只喝美式',
+    },
+    {
+      sessionId: SESSION_B,
+      userId: INSTANCE_USER,
+      messageId: 'm-cross-user-similar',
+      userText: '我喝咖啡只喝美式',
+      requireUserGrounding: true,
+    }
+  );
+
+  assert.equal(result.written, true);
+  assert.equal(result.action, 'inserted');
+  assert.notEqual(result.id, before.id);
+
+  const items = memory.getMemories();
+  const foreign = items.find(item => item.userId === OTHER_USER);
+  const own = items.find(item => item.userId === INSTANCE_USER);
+
+  assert.equal(foreign.content, '用户喝咖啡只喝美式', '他人条目不得被改写');
+  assert.equal(foreign.contributions.length, 1, '他人条目不得被追加贡献');
+  assert.equal(foreign.contributions[0].sessionId, SESSION_A);
+  assert.ok(own, '当前用户应得到自己的独立条目');
+  assert.equal(own.content, '用户喝咖啡只喝美式');
+});
+
 test('写入路径仍按会话登记贡献（更正/撤回语义未改）', () => {
   seed([]);
 

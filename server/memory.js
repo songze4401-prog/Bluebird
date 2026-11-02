@@ -5,6 +5,13 @@ const path = require('path');
 const { logDataEvent } = require('./data-events');
 const monitoring = require('./monitoring');
 const { writeFileAtomic, writeFileExclusiveSync } = require('./atomic-write');
+const {
+  hashText,
+  loadTombstones,
+  saveTombstones,
+  appendTombstones,
+  tombstoneBlocksCandidate,
+} = require('./memory-tombstones');
 const { registerCorruptionHandler, handleCorruption } = require('./corruption');
 const {
   textLength,
@@ -28,8 +35,22 @@ const {
 } = require('./memory-lifecycle');
 const {
   DECISION,
+  DEFAULT_RULES,
   decide,
 } = require('./memory-decision');
+const {
+  POLICY_VERSION,
+  DECISION_VERSION,
+  PROVENANCE,
+  CATEGORY,
+  VALID_PROVENANCE,
+  getPolicyMode,
+  detectPersistentIntent,
+  resolveProvenance,
+  classifyCategory,
+  buildEvidence,
+  applyEvidencePolicy,
+} = require('./memory-evidence');
 const {
   semanticSimilarity,
   semanticCapability,
@@ -43,7 +64,11 @@ const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   : path.join(__dirname, 'data');
 
 const MEMORY_FILE = path.join(DATA_DIR, 'memory.json');
+const MEMORY_TOMBSTONE_FILE = path.join(DATA_DIR, 'memory-tombstones.json');
 const MEMORY_LIMIT = 100;
+// strict 模式下，只有高相似度的再次表达才合并进同一个偏好候选，
+// 避免把“喜欢美式”和“喜欢拿铁”这类相近但不同的偏好并成一条。
+const PENDING_PREFERENCE_MATCH_MIN = 0.9;
 // 被更正的旧条目不立刻删除（审计与回滚要看得见的），但只留最近的这么多条。
 const SUPERSEDED_HISTORY = 20;
 // 待确认与已归档条目也属于历史留档，必须有显式上限，避免无限堆积。
@@ -54,6 +79,7 @@ const IDENTITY_QUOTA = 20;
 const MEMORY_ENABLED = process.env.MEMORY_ENABLED !== 'false';
 
 let memories = [];
+let memoryTombstones = [];
 let writeQueue = Promise.resolve();
 
 // 记忆触发词：覆盖「记住 / 记下」这类显式指令，以及口语化的
@@ -168,6 +194,13 @@ function stampIdentity(item) {
     validFrom: cleanText(item.validFrom) || createdAt,
     validTo: cleanText(item.validTo),
     supersededBy: cleanText(item.supersededBy),
+    provenance: cleanText(item.provenance) || PROVENANCE.IMPORTED,
+    category: cleanText(item.category) || CATEGORY.LEGACY,
+    observedAt: cleanText(item.observedAt) || createdAt,
+    policyVersion: cleanText(item.policyVersion) || 'legacy',
+    decisionVersion: cleanText(item.decisionVersion) || null,
+    evidence:
+      item.evidence && typeof item.evidence === 'object' ? item.evidence : null,
   };
 }
 
@@ -517,6 +550,15 @@ function normalizeCandidate(raw, options = {}) {
   const sourceType = SOURCE_TYPES.has(sourceTypeCandidate)
     ? sourceTypeCandidate
     : 'user';
+  const provenance = resolveProvenance({ ...source, sourceType }, options);
+  const persistentIntent = detectPersistentIntent(
+    options.userText || source.userText || ''
+  );
+  const category = classifyCategory(
+    { content, type: source.type },
+    provenance
+  );
+  const observedAt = cleanText(source.observedAt) || now;
   const keywords = Array.isArray(source.keywords)
     ? source.keywords
         .filter(item => typeof item === 'string')
@@ -551,6 +593,13 @@ function normalizeCandidate(raw, options = {}) {
     createdAt: cleanText(source.createdAt) || now,
     updatedAt: now,
     sourceType,
+    provenance,
+    category,
+    persistentIntent,
+    observedAt,
+    evidence: null,
+    policyVersion: POLICY_VERSION,
+    decisionVersion: DECISION_VERSION,
     intent: cleanText(options.intent) || cleanText(source.intent) || 'auto',
     targetId: cleanText(options.targetId) || cleanText(source.targetId),
     eventAt: cleanText(source.eventAt),
@@ -590,9 +639,18 @@ function candidateValidationError(candidate, options = {}) {
   if (isSensitive(candidate.content) || isSensitive(quote)) {
     return 'sensitive_content';
   }
+  if (!VALID_PROVENANCE.has(candidate.provenance)) {
+    return 'invalid_provenance';
+  }
   if (
-    candidate.sourceType === 'model' ||
-    candidate.sourceType === 'tool'
+    candidate.sourceType === 'model' &&
+    candidate.provenance !== PROVENANCE.MODEL_INFERRED
+  ) {
+    return 'unsupported_source';
+  }
+  if (
+    candidate.sourceType === 'tool' &&
+    candidate.provenance !== PROVENANCE.TOOL_OBSERVED
   ) {
     return 'unsupported_source';
   }
@@ -626,6 +684,11 @@ function decisionRecord(action, reason, candidate, actor, at) {
     at,
     actor: actor || 'system',
     sourceType: candidate.sourceType || 'user',
+    provenance: candidate.provenance || null,
+    category: candidate.category || null,
+    policyVersion: candidate.policyVersion || POLICY_VERSION,
+    decisionVersion: candidate.decisionVersion || DECISION_VERSION,
+    evidence: candidate.evidence || null,
   };
 }
 
@@ -636,11 +699,68 @@ function storedCandidate(candidate, extra = {}) {
     confirmationReason,
     intent,
     sourceType,
+    persistentIntent,
     ...stored
   } = candidate;
 
   // 归属用户由服务端身份决定，不信任候选里可能夹带的任何 userId。
   return { ...stored, userId: getInstanceUserId(), ...extra };
+}
+
+// 同一条消息的同一事实只处理一次：异步抽取重跑或 Agent 重复提交时
+// 不再产生第二条条目（同一消息里的不同事实内容哈希不同，仍会分别写入）。
+function findDuplicateSourceEntry(current, candidate) {
+  const messageId = cleanText(
+    candidate.contributions[0] && candidate.contributions[0].messageId
+  );
+
+  if (!messageId) return null;
+
+  const contentHash = hashText(candidate.content);
+  if (!contentHash) return null;
+
+  return (
+    current.find(
+      item =>
+        Array.isArray(item.contributions) &&
+        item.contributions.some(
+          contribution =>
+            contribution &&
+            cleanText(contribution.messageId) === messageId
+        ) &&
+        hashText(item.content) === contentHash
+    ) || null
+  );
+}
+
+function rulesForCandidate(candidate) {
+  if (
+    candidate.persistentIntent === true &&
+    candidate.provenance === PROVENANCE.USER_ASSERTED &&
+    candidate.sourceType !== 'agent'
+  ) {
+    return { ...DEFAULT_RULES, minConfidence: 0.6 };
+  }
+
+  return DEFAULT_RULES;
+}
+
+// strict 模式下，同一条单次偏好再次出现时合并到原候选；
+// 独立会话第二次表达或显式持久意图才晋升为 active。
+function findPendingCandidateForPromotion(current, candidate, writeScope) {
+  const matches = current.filter(
+    item =>
+      item &&
+      item.status === STATUS_PENDING &&
+      item.pendingReason === 'single_preference_candidate' &&
+      (writeScope.mode !== 'user' ||
+        scopeOf(item, writeScope) !== 'excluded') &&
+      item.type === candidate.type &&
+      similarity(item.content, candidate.content) >=
+        PENDING_PREFERENCE_MATCH_MIN
+  );
+
+  return matches.length === 1 ? matches[0] : null;
 }
 
 // 容量控制。旧实现只在"全部是 identity"时 next.shift()，等于把
@@ -802,7 +922,27 @@ function hydrateEntries(parsed) {
   );
 }
 
+function loadTombstoneState() {
+  const loaded = loadTombstones(MEMORY_TOMBSTONE_FILE);
+
+  memoryTombstones = loaded.tombstones;
+
+  if (loaded.corrupt) {
+    logDataEvent({
+      module: 'memory',
+      file: MEMORY_TOMBSTONE_FILE,
+      event: 'data_file_corruption',
+      level: 'error',
+      reason: loaded.reason || 'invalid_shape',
+      action: 'tombstones_unavailable',
+      error: loaded.error,
+    });
+  }
+}
+
 function loadMemories() {
+  loadTombstoneState();
+
   if (!fs.existsSync(MEMORY_FILE)) {
     let created = false;
 
@@ -860,6 +1000,49 @@ async function saveMemories(nextMemories) {
   // 原子写（临时文件 'wx' + fsync + rename + 尽力 fsync 父目录），
   // 崩溃时不会出现空文件 / 截断文件。
   await writeFileAtomic(MEMORY_FILE, JSON.stringify(nextMemories, null, 2));
+}
+
+// 删除类操作先写墓碑再落记忆库：宁可删除失败，也不让已删除内容
+// 在异步抽取的下一次写入里复活。记忆库写入失败时回滚墓碑。
+async function commitWithTombstones(nextMemories, tombstoneEntries, reason) {
+  const hasTombstones =
+    Array.isArray(tombstoneEntries) && tombstoneEntries.some(Boolean);
+  const previousTombstones = memoryTombstones;
+
+  if (hasTombstones) {
+    const nextTombstones = appendTombstones(
+      previousTombstones,
+      tombstoneEntries,
+      { reason, now: new Date().toISOString() }
+    );
+
+    await saveTombstones(MEMORY_TOMBSTONE_FILE, nextTombstones);
+    memoryTombstones = nextTombstones;
+  }
+
+  try {
+    await saveMemories(nextMemories);
+  } catch (error) {
+    if (hasTombstones) {
+      memoryTombstones = previousTombstones;
+
+      try {
+        await saveTombstones(MEMORY_TOMBSTONE_FILE, previousTombstones);
+      } catch (rollbackError) {
+        logDataEvent({
+          module: 'memory',
+          file: MEMORY_TOMBSTONE_FILE,
+          event: 'memory_tombstone_rollback_failed',
+          level: 'error',
+          reason: 'rollback_failed',
+          action: 'tombstone_rollback',
+          error: rollbackError,
+        });
+      }
+    }
+
+    throw error;
+  }
 }
 
 function enqueueWrite(task) {
@@ -957,6 +1140,7 @@ async function extractMemory(client, message, force = false, sessionId = null, o
   "type": "identity|preference|fact|goal|relationship",
   "keywords": ["关键词1", "关键词2", "关键词3"],
   "confidence": 0.0,
+  "inferred": false,
   "sourceQuote": "用户原话中的连续片段"
 }
 
@@ -964,6 +1148,7 @@ content 不要超过 100 个字符。
 keywords 提取 3-5 个与这条记忆直接相关的具体关键词或同义词。
 不要使用“什么”“应该”“这个”“那个”“以后”等低信息量词。
 sourceQuote 必须来自用户原话。
+inferred 只有当你从用户原话归纳出用户没有直接说出的结论时才为 true；直接复述用户原话时为 false。
 `.trim(),
             },
             {
@@ -1034,7 +1219,10 @@ sourceQuote 必须来自用户原话。
 
     if (!ALLOWED_TYPES.has(type)) return skip('type_not_allowed', { type });
 
-    if (!Number.isFinite(confidence) || confidence < 0.85) {
+    const explicitIntent = detectPersistentIntent(message);
+    const minConfidence = explicitIntent ? 0.6 : 0.85;
+
+    if (!Number.isFinite(confidence) || confidence < minConfidence) {
       return skip('low_confidence', { confidence });
     }
 
@@ -1074,6 +1262,7 @@ sourceQuote 必须来自用户原话。
 
     const now = new Date().toISOString();
     const messageId = cleanText(options.messageId);
+    const inferred = candidate.inferred === true;
 
     return {
       entry: {
@@ -1101,6 +1290,9 @@ sourceQuote 必须来自用户原话。
         createdAt: now,
         updatedAt: now,
         sourceType: 'user',
+        provenance: inferred
+          ? PROVENANCE.MODEL_INFERRED
+          : PROVENANCE.USER_ASSERTED,
         intent: options.intent || 'auto',
         targetId: cleanText(options.targetId),
         eventAt: cleanText(options.eventAt),
@@ -1177,6 +1369,33 @@ async function applyCandidate(raw, options = {}) {
     const nowMs = Date.now();
     const effective = next.filter(item => isEffectiveAt(item, nowMs));
 
+    const tombstoneReason = tombstoneBlocksCandidate(
+      memoryTombstones,
+      candidate,
+      {
+        mode: writeScope.mode,
+        userId: writeScope.userId,
+        sessionId,
+      },
+      nowMs
+    );
+
+    if (tombstoneReason) {
+      return {
+        ...base,
+        reason: tombstoneReason,
+        decision: DECISION.REJECT,
+      };
+    }
+
+    if (findDuplicateSourceEntry(current, candidate)) {
+      return {
+        ...base,
+        reason: 'duplicate_source',
+        decision: DECISION.REJECT,
+      };
+    }
+
     let target = null;
 
     if (candidate.targetId) {
@@ -1201,7 +1420,15 @@ async function applyCandidate(raw, options = {}) {
       }
     }
 
-    const matches = effective.map(item => ({
+    // 用户级作用域下，其他用户的条目连候选都不算：既不能 merge，
+    // 也不能参与冲突判断，更不能被本次写入复活。
+    const matches = effective
+      .filter(
+        item =>
+          writeScope.mode !== 'user' ||
+          scopeOf(item, writeScope) !== 'excluded'
+      )
+      .map(item => ({
       item,
       similarity: similarity(item.content, candidate.content),
       sameType: item.type === candidate.type,
@@ -1228,9 +1455,114 @@ async function applyCandidate(raw, options = {}) {
         })(),
     }));
 
-    const decision = decide({ candidate, matches, target });
+    const decision = decide({
+      candidate,
+      matches,
+      target,
+      rules: rulesForCandidate(candidate),
+    });
+    const policyMode = getPolicyMode();
+    const pendingCandidate =
+      policyMode === 'strict' &&
+      candidate.category === CATEGORY.LONG_TERM_PREFERENCE &&
+      decision.decision === DECISION.CREATE
+        ? findPendingCandidateForPromotion(next, candidate, writeScope)
+        : null;
+    const evidence = buildEvidence({
+      candidate,
+      decision,
+      existing: decision.target || pendingCandidate,
+      userText: options.userText || '',
+      policyMode,
+    });
+
+    candidate.evidence = evidence;
+    candidate.policyVersion = POLICY_VERSION;
+    candidate.decisionVersion = DECISION_VERSION;
+
     const record = (action, reason) =>
       decisionRecord(action, reason, candidate, options.actor, nowIso);
+
+    // strict：同一候选再次出现时合并；独立会话第二次表达或显式持久意图才晋升。
+    if (pendingCandidate && decision.decision === DECISION.CREATE) {
+      const index = next.findIndex(item => item.id === pendingCandidate.id);
+      const contributions = mergeContributions(
+        pendingCandidate.contributions,
+        candidate.contributions
+      );
+      const sessions = new Set(
+        contributions
+          .map(contribution => contribution && contribution.sessionId)
+          .filter(Boolean)
+      );
+      const promote =
+        candidate.provenance === PROVENANCE.USER_ASSERTED &&
+        (candidate.persistentIntent === true || sessions.size >= 2);
+      const promotedEvidence = {
+        ...evidence,
+        repetition: contributions.length,
+        independentSessions: sessions.size,
+      };
+
+      candidate.evidence = promotedEvidence;
+
+      const updated = {
+        ...pendingCandidate,
+        contributions,
+        category: candidate.category,
+        provenance: candidate.provenance,
+        evidence: promotedEvidence,
+        policyVersion: POLICY_VERSION,
+        decisionVersion: DECISION_VERSION,
+        observedAt: nowIso,
+        updatedAt: nowIso,
+        status: promote ? STATUS_ACTIVE : STATUS_PENDING,
+        lastDecision: record(
+          promote ? 'reinforce' : 'needs_confirmation',
+          promote
+            ? 'repeated_independent_evidence'
+            : 'single_preference_candidate'
+        ),
+      };
+
+      if (promote) {
+        delete updated.pendingReason;
+        delete updated.pendingAt;
+        delete updated.pendingTargetId;
+        delete updated.pendingMutation;
+      }
+
+      next[index] = updated;
+      trimToCapacity(next);
+      if (!(await persist())) return abortedResult();
+      memories = next;
+      refreshDerivedMemoryIndex(
+        promote ? 'candidate_promoted' : 'candidate_merged'
+      );
+
+      return {
+        written: promote,
+        action: promote ? 'reinforced' : 'pending',
+        reason: promote ? null : 'single_preference_candidate',
+        id: updated.id,
+        supersededId: null,
+        targetId: updated.id,
+        decision: promote ? 'reinforce' : DECISION.NEEDS_CONFIRMATION,
+        status: updated.status,
+        durable: true,
+      };
+    }
+
+    const policy = applyEvidencePolicy({
+      candidate,
+      decision,
+      evidence,
+      policyMode,
+    });
+    const finalDecision =
+      policy.decision === decision.decision
+        ? decision
+        : { ...decision, decision: policy.decision, reason: policy.reason };
 
     // Agent 工具路径：改写/合并/替代已有记忆必须由用户确认，不能自动落盘。
     // 自动记忆抽取仍保留既有策略，避免改变主控聊天既有行为。
@@ -1273,21 +1605,27 @@ async function applyCandidate(raw, options = {}) {
       };
     }
 
-    if (decision.decision === DECISION.REJECT) {
+    if (finalDecision.decision === DECISION.REJECT) {
       return {
         ...base,
-        reason: decision.reason,
-        decision: decision.decision,
+        reason: finalDecision.reason,
+        decision: finalDecision.decision,
       };
     }
 
-    if (decision.decision === DECISION.NEEDS_CONFIRMATION) {
+    if (finalDecision.decision === DECISION.NEEDS_CONFIRMATION) {
+      const pendingTargetId = finalDecision.target
+        ? finalDecision.target.id
+        : candidate.targetId || null;
       const pending = storedCandidate(candidate, {
         status: STATUS_PENDING,
-        pendingReason: decision.reason,
+        pendingReason: finalDecision.reason,
         pendingAt: nowIso,
-        pendingTargetId: candidate.targetId || null,
-        lastDecision: record('needs_confirmation', decision.reason),
+        pendingTargetId,
+        pendingMutation: mutationDecisions.has(decision.decision)
+          ? decision.decision
+          : null,
+        lastDecision: record('needs_confirmation', finalDecision.reason),
       });
 
       next.push(pending);
@@ -1298,22 +1636,34 @@ async function applyCandidate(raw, options = {}) {
       return {
         written: false,
         action: 'pending',
-        reason: decision.reason,
+        reason: finalDecision.reason,
         id: pending.id,
         supersededId: null,
-        targetId: target ? target.id : null,
-        decision: decision.decision,
+        targetId: pendingTargetId,
+        decision: finalDecision.decision,
         status: STATUS_PENDING,
         durable: true,
       };
     }
 
     if (
-      decision.decision === DECISION.MERGE ||
-      decision.decision === DECISION.UPDATE
+      finalDecision.decision === DECISION.MERGE ||
+      finalDecision.decision === DECISION.UPDATE
     ) {
-      const index = next.findIndex(item => item.id === decision.target.id);
+      const index = next.findIndex(item => item.id === finalDecision.target.id);
       const existing = next[index];
+
+      if (
+        writeScope.mode === 'user' &&
+        scopeOf(existing, writeScope) === 'excluded'
+      ) {
+        return {
+          ...base,
+          reason: 'unauthorized_target',
+          decision: DECISION.REJECT,
+        };
+      }
+
       const contributions = mergeContributions(
         existing.contributions,
         candidate.contributions
@@ -1321,7 +1671,7 @@ async function applyCandidate(raw, options = {}) {
       // 合并到别的会话的条目时，只追加贡献：对方条目的正文、类型、关键词、
       // 置信度保持原样，否则一次写入会改写别的会话已经存下来的事实。
       const updated =
-        decision.reason === 'same_fact_other_session'
+        finalDecision.reason === 'same_fact_other_session'
           ? {
               ...existing,
               status: STATUS_ACTIVE,
@@ -1329,7 +1679,10 @@ async function applyCandidate(raw, options = {}) {
               supersededBy: null,
               contributions,
               updatedAt: nowIso,
-              lastDecision: record(decision.decision, decision.reason),
+              lastDecision: record(
+                finalDecision.decision,
+                finalDecision.reason
+              ),
             }
           : storedCandidate(candidate, {
               id: existing.id,
@@ -1340,7 +1693,10 @@ async function applyCandidate(raw, options = {}) {
               supersededBy: null,
               contributions,
               updatedAt: nowIso,
-              lastDecision: record(decision.decision, decision.reason),
+              lastDecision: record(
+                finalDecision.decision,
+                finalDecision.reason
+              ),
             });
 
       next[index] = updated;
@@ -1351,20 +1707,32 @@ async function applyCandidate(raw, options = {}) {
 
       return {
         written: true,
-        action: decision.decision === DECISION.MERGE ? 'merged' : 'updated',
+        action:
+          finalDecision.decision === DECISION.MERGE ? 'merged' : 'updated',
         reason: null,
         id: updated.id,
         supersededId: null,
         targetId: updated.id,
-        decision: decision.decision,
+        decision: finalDecision.decision,
         status: STATUS_ACTIVE,
         durable: true,
       };
     }
 
-    if (decision.decision === DECISION.SUPERSEDE) {
-      const index = next.findIndex(item => item.id === decision.target.id);
+    if (finalDecision.decision === DECISION.SUPERSEDE) {
+      const index = next.findIndex(item => item.id === finalDecision.target.id);
       const outdated = next[index];
+
+      if (
+        writeScope.mode === 'user' &&
+        scopeOf(outdated, writeScope) === 'excluded'
+      ) {
+        return {
+          ...base,
+          reason: 'unauthorized_target',
+          decision: DECISION.REJECT,
+        };
+      }
 
       next[index] = {
         ...outdated,
@@ -1372,7 +1740,7 @@ async function applyCandidate(raw, options = {}) {
         validTo: nowIso,
         supersededBy: candidate.id,
         updatedAt: nowIso,
-        lastDecision: record(DECISION.SUPERSEDE, decision.reason),
+        lastDecision: record(DECISION.SUPERSEDE, finalDecision.reason),
       };
 
       const replacement = storedCandidate(candidate, {
@@ -1394,7 +1762,7 @@ async function applyCandidate(raw, options = {}) {
         id: replacement.id,
         supersededId: outdated.id,
         targetId: outdated.id,
-        decision: decision.decision,
+        decision: finalDecision.decision,
         status: STATUS_ACTIVE,
         durable: true,
       };
@@ -1402,7 +1770,7 @@ async function applyCandidate(raw, options = {}) {
 
     const created = storedCandidate(candidate, {
       status: STATUS_ACTIVE,
-      lastDecision: record(DECISION.CREATE, decision.reason),
+      lastDecision: record(DECISION.CREATE, finalDecision.reason),
     });
 
     next.push(created);
@@ -2702,9 +3070,14 @@ async function clearMemories(userId = null) {
     const remaining = owner
       ? current.filter(item => !ownerAllows(item, owner))
       : [];
-    const removedEntries = current.length - remaining.length;
+    const removed = current.filter(item => !remaining.includes(item));
+    const removedEntries = removed.length;
 
-    await saveMemories(remaining);
+    await commitWithTombstones(
+      remaining,
+      removed,
+      owner ? 'clear_user' : 'clear'
+    );
 
     memories = remaining;
 
@@ -2736,6 +3109,7 @@ async function clearSessionMemories(sessionId, userId = null) {
     const current = Array.isArray(memories) ? memories : [];
 
     const remaining = [];
+    const removedForTombstone = [];
     let removedEntries = 0;
     let removedContributions = 0;
 
@@ -2760,6 +3134,14 @@ async function clearSessionMemories(sessionId, userId = null) {
         continue;
       }
 
+      const removed = contributions.filter(
+        contribution => contribution && contribution.sessionId === target
+      );
+
+      if (removed.length) {
+        removedForTombstone.push({ ...item, contributions: removed });
+      }
+
       removedContributions += contributions.length - kept.length;
 
       if (kept.length) {
@@ -2778,7 +3160,11 @@ async function clearSessionMemories(sessionId, userId = null) {
       };
     }
 
-    await saveMemories(remaining);
+    await commitWithTombstones(
+      remaining,
+      removedForTombstone,
+      'clear_session'
+    );
 
     memories = remaining;
 
@@ -2882,6 +3268,7 @@ async function recallMemoryBySourceQuote(
         : contribution.sessionId === targetSessionId;
 
     const remaining = [];
+    const removedForTombstone = [];
     let removedContributions = 0;
 
     for (const item of current) {
@@ -2889,9 +3276,16 @@ async function recallMemoryBySourceQuote(
         ? item.contributions
         : [];
 
+      const removed = contributions.filter(
+        contribution => isTargeted(contribution) && isMatch(contribution)
+      );
       const kept = contributions.filter(
         contribution => !(isTargeted(contribution) && isMatch(contribution))
       );
+
+      if (removed.length) {
+        removedForTombstone.push({ ...item, contributions: removed });
+      }
 
       removedContributions += contributions.length - kept.length;
 
@@ -2909,7 +3303,7 @@ async function recallMemoryBySourceQuote(
 
     if (!removedContributions && !removedEntries) return empty;
 
-    await saveMemories(remaining);
+    await commitWithTombstones(remaining, removedForTombstone, 'recall');
 
     memories = remaining;
 
@@ -2996,7 +3390,7 @@ async function deleteMemory({ id, createdAt, content, userId = null } = {}) {
 
     next.splice(index, 1);
 
-    await saveMemories(next);
+    await commitWithTombstones(next, [removedItem], 'delete');
 
     memories = next;
 
@@ -3608,6 +4002,9 @@ async function withdrawMemory({ id, sessionId = null, actor = 'user' } = {}) {
     const kept = targetSession
       ? contributions.filter(contribution => contribution.sessionId !== targetSession)
       : [];
+    const removed = targetSession
+      ? contributions.filter(contribution => contribution.sessionId === targetSession)
+      : contributions.slice();
     const removedContributions = contributions.length - kept.length;
     if (!removedContributions) {
       return { withdrawn: 0, reason: 'no-match' };
@@ -3645,7 +4042,11 @@ async function withdrawMemory({ id, sessionId = null, actor = 'user' } = {}) {
       };
     }
 
-    await saveMemories(next);
+    await commitWithTombstones(
+      next,
+      [{ ...item, contributions: removed }],
+      'withdraw'
+    );
     memories = next;
     refreshDerivedMemoryIndex('withdraw');
     return {
