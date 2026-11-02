@@ -22,7 +22,7 @@ const SOURCE_TYPES = Object.freeze([
   'code',
 ]);
 const SOURCE_TYPE_SET = new Set(SOURCE_TYPES);
-const VISIBILITIES = new Set(['global', 'session']);
+const VISIBILITIES = new Set(['global', 'session', 'user']);
 
 const MAX_TITLE = 200;
 const MAX_URI = 500;
@@ -89,6 +89,16 @@ function normalizeScope(scope) {
       : [];
     if (!sessions.length) throw new Error('invalid_scope_sessions');
     return { visibility: 'session', sessions: [...new Set(sessions)] };
+  }
+  // 用户级：长期记忆的读边界（P1）。必须带可信 userId，缺省即非法，
+  // 不允许退化成 global（那会让所有用户互相可见）。
+  if (scope.visibility === 'user') {
+    const userId =
+      typeof scope.userId === 'string' && scope.userId && scope.userId.length <= 120
+        ? scope.userId
+        : '';
+    if (!userId) throw new Error('invalid_scope_user');
+    return { visibility: 'user', userId };
   }
   throw new Error('invalid_scope_visibility');
 }
@@ -214,6 +224,12 @@ function validateChunk(chunk) {
     (!Array.isArray(chunk.scope.sessions) || !chunk.scope.sessions.length)
   ) {
     return 'scope_sessions';
+  }
+  if (
+    chunk.scope.visibility === 'user' &&
+    (typeof chunk.scope.userId !== 'string' || !chunk.scope.userId)
+  ) {
+    return 'scope_user';
   }
   for (const key of ['title', 'uri', 'locator']) {
     if (typeof chunk[key] !== 'string') return key;

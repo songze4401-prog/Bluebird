@@ -70,6 +70,7 @@ const EVENTS = Object.freeze({
   CONTEXT_BUILD_COMPLETED: 'context.build.completed',
   CONTEXT_BUILD_REJECTED: 'context.build.rejected',
   CONTEXT_SENT: 'context.sent',
+  CONTEXT_TOKENS_RECONCILED: 'context.tokens.reconciled',
   MEMORY_SEARCH_STARTED: 'memory.search.started',
   MEMORY_SEARCH_COMPLETED: 'memory.search.completed',
   MEMORY_WRITE_COMPLETED: 'memory.write.completed',

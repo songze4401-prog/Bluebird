@@ -256,8 +256,8 @@ const {
   clearMemories,
   clearSessionMemories,
   recallMemoryBySourceQuote,
-  getMemories,
-  getPendingMemories,
+  getMemoriesForUser,
+  getPendingMemoriesForUser,
   confirmPending,
   rejectPending,
   archiveMemory,
@@ -285,7 +285,8 @@ const {
   HISTORY_PAGE_DEFAULT,
   getHistoryPage,
   listSessions,
-  getSession,
+  getSessionForUser,
+  checkSessionOwnership,
   createSession,
   getMessages,
   appendMessagesDetailed,
@@ -450,6 +451,7 @@ const {
 
 // Context Runtime v3：唯一上下文链路（无兼容双路径）。
 const { runContextRuntime } = require('./context/engine');
+const { resolveUserId } = require('./user-scope');
 const {
   projectStoredMessages,
   toModelMessages,
@@ -988,10 +990,10 @@ app.get('/', (req, res) => {
 
 // ---- 会话管理 ----
 
-// 会话列表：按最近活跃（updatedAt）倒序
+// 会话列表：按最近活跃（updatedAt）倒序；只列本人的会话
 app.get('/sessions', requireAuth, (req, res) => {
   try {
-    res.json({ sessions: listSessions() });
+    res.json({ sessions: listSessions(resolveUserId(req)) });
   } catch (error) {
     console.error('Sessions API Error:', error);
     res.status(500).json({ error: '读取会话列表失败' });
@@ -1002,7 +1004,7 @@ app.get('/sessions', requireAuth, (req, res) => {
 app.post('/sessions', requireAuth, (req, res) => {
   try {
     const { title } = req.body || {};
-    const session = createSession({ title });
+    const session = createSession({ title, userId: resolveUserId(req) });
 
     if (!session) {
       return storeUnavailable(res, '新建会话失败：聊天存储当前不可写');
@@ -1025,7 +1027,7 @@ app.post('/sessions', requireAuth, (req, res) => {
 // 单个会话元数据
 app.get('/sessions/:id', requireAuth, (req, res) => {
   try {
-    const session = getSession(req.params.id);
+    const session = getSessionForUser(req.params.id, resolveUserId(req));
 
     if (!session) {
       return res.status(404).json({ error: '会话不存在' });
@@ -1042,6 +1044,19 @@ app.get('/sessions/:id', requireAuth, (req, res) => {
 // default 被删时会立即重建为空会话（sessions.js 的不变量），客户端可安全切回。
 app.delete('/sessions/:id', requireAuth, (req, res) => {
   try {
+    // 归属校验：不存在与无权都回 404，不泄露会话是否存在。
+    const access = checkSessionOwnership(req.params.id, resolveUserId(req));
+
+    if (!access.ok) {
+      auditAction(req, 'session.delete', {
+        target: 'session',
+        result: 'denied',
+        sessionId: req.params.id,
+        reason: access.reason,
+      });
+      return res.status(404).json({ error: '会话不存在' });
+    }
+
     // 删除前先保留该会话的附件引用；删除后全局扫描剩余消息，
     // 只回收不再被任何会话引用的文件，跨会话共享的图片不受影响。
     const deletedMessages = getMessages(req.params.id) || [];
@@ -1110,7 +1125,7 @@ app.get('/history', requireAuth, (req, res) => {
   try {
     const sessionId = resolveSessionId(req, 'query');
 
-    if (!getSession(sessionId)) {
+    if (!getSessionForUser(sessionId, resolveUserId(req))) {
       return res.status(404).json({ error: '会话不存在' });
     }
 
@@ -1184,7 +1199,7 @@ app.post('/history/clear', requireAuth, (req, res) => {
   try {
     const sessionId = resolveSessionId(req, 'body');
 
-    if (!getSession(sessionId)) {
+    if (!getSessionForUser(sessionId, resolveUserId(req))) {
       return res.status(404).json({ error: '会话不存在' });
     }
 
@@ -1228,7 +1243,7 @@ app.post('/history/recall', requireAuth, async (req, res) => {
       return res.status(400).json({ error: '缺少 messageId' });
     }
 
-    if (!getSession(sessionId)) {
+    if (!getSessionForUser(sessionId, resolveUserId(req))) {
       return res.status(404).json({ error: '会话不存在' });
     }
 
@@ -1828,7 +1843,8 @@ app.post('/memory/clear', requireAuth, async (req, res) => {
   }
 
   try {
-    const result = await clearMemories();
+    // 只清空"本人"名下的记忆：多用户下不能借这个接口清掉别人的库。
+    const result = await clearMemories(resolveUserId(req));
 
     const consistency = verifyStoreConsistency();
 
@@ -1891,8 +1907,10 @@ app.post('/memory/clear-session', requireAuth, async (req, res) => {
     return res.status(400).json({ error: '缺少 sessionId' });
   }
 
+  // 不要求会话仍然存在：长期记忆比会话活得久，删了会话仍应能清理它沉淀的记忆。
+  // 真正的边界是「只摘本人名下的贡献」——由 clearSessionMemories 的 userId 过滤保证。
   try {
-    const result = await clearSessionMemories(sessionId);
+    const result = await clearSessionMemories(sessionId, resolveUserId(req));
 
     if (result.reason === 'invalid') {
       return res.status(400).json({ error: 'sessionId 无效' });
@@ -1967,6 +1985,9 @@ app.post('/memory/clear-session', requireAuth, async (req, res) => {
 // 记忆库：读取当前全部长期记忆（只读，不重置内存数组）。
 // scope=all 是只读审计视图：复用 getMemories 已有的 include* 选项，
 // 返回 pending / archived / superseded，不改变默认 /memory 的“当前有效”语义。
+//
+// 归属过滤（P0 阻断项）：只返回 resolveUserId(req) 名下的记忆。
+// 单用户部署下等价于全库；多用户下不会把别人的记忆列出来。
 app.get('/memory', requireAuth, (req, res) => {
   try {
     const rawScope = req.query.scope;
@@ -1976,15 +1997,19 @@ app.get('/memory', requireAuth, (req, res) => {
     }
 
     const includeAll = rawScope === 'all';
+    const userId = resolveUserId(req);
 
     res.json({
-      memories: includeAll
-        ? getMemories({
-            includeSuperseded: true,
-            includeArchived: true,
-            includePending: true,
-          })
-        : getMemories(),
+      memories: getMemoriesForUser(
+        userId,
+        includeAll
+          ? {
+              includeSuperseded: true,
+              includeArchived: true,
+              includePending: true,
+            }
+          : {}
+      ),
       scope: includeAll ? 'all' : 'active',
     });
   } catch (error) {
@@ -1996,7 +2021,7 @@ app.get('/memory', requireAuth, (req, res) => {
 // 待确认候选：不进入普通检索/注入，需用户明确确认后才转为 active。
 app.get('/memory/pending', requireAuth, (req, res) => {
   try {
-    res.json({ memories: getPendingMemories() });
+    res.json({ memories: getPendingMemoriesForUser(resolveUserId(req)) });
   } catch (error) {
     console.error('Memory pending error:', error);
     res.status(500).json({ error: '读取待确认记忆失败' });
@@ -2009,10 +2034,16 @@ async function lifecycleWriteResponse(req, res, action, okStatus, failStatus) {
   if (!id) return res.status(400).json({ error: '缺少 id' });
 
   try {
-    const result = await action(id);
+    const result = await action(id, resolveUserId(req));
 
     if (result.reason === 'not-found') {
       return res.status(404).json({ error: '记忆不存在', reason: result.reason });
+    }
+
+    // 归属不符：明确回 403，不回 404——避免把"无权"伪装成"不存在"后
+    // 前端反复重试，也让越权尝试在审计里可识别。
+    if (result.reason === 'forbidden') {
+      return res.status(403).json({ error: '无权操作该记忆', reason: result.reason });
     }
 
     if (result.reason === 'not-pending' || result.reason === 'invalid-state') {
@@ -2131,9 +2162,10 @@ app.post('/presence/report', requireAuth, (req, res) => {
       return res.status(400).json({ error: 'sessionId 必须是字符串' });
     }
 
-    // 只接受真实存在的会话，避免上报把等待状态写到任意 id 上
+    // 只接受真实存在且属于本人的会话，避免上报把等待状态写到任意 id 上
     const requested = typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
-    const sessionId = requested && getSession(requested) ? requested : null;
+    const sessionId =
+      requested && getSessionForUser(requested, resolveUserId(req)) ? requested : null;
 
     const result = recordPresenceReport(
       {
@@ -2164,7 +2196,7 @@ app.get('/presence', requireAuth, (req, res) => {
   try {
     const sessionId = resolveSessionId(req, 'query');
 
-    if (!getSession(sessionId)) {
+    if (!getSessionForUser(sessionId, resolveUserId(req))) {
       return res.status(404).json({ error: '会话不存在' });
     }
 
@@ -2272,9 +2304,20 @@ app.post('/memory/delete', requireAuth, async (req, res) => {
         .json({ error: '缺少 id，或缺少 createdAt + content' });
     }
 
-    const result = await deleteMemory(
-      hasId ? { id } : { createdAt, content }
-    );
+    const result = await deleteMemory({
+      ...(hasId ? { id } : { createdAt, content }),
+      userId: resolveUserId(req),
+    });
+
+    // 归属不符：403，且不透露该条是否真实存在。
+    if (result.reason === 'forbidden') {
+      auditAction(req, 'memory.delete', {
+        target: 'memory',
+        result: 'denied',
+        reason: 'forbidden',
+      });
+      return res.status(403).json({ error: '无权操作该记忆', reason: 'forbidden' });
+    }
 
     const consistency = verifyStoreConsistency();
 
@@ -2330,6 +2373,9 @@ async function prepareChatRequest(req) {
   const requestId = `req_${crypto.randomUUID()}`;
   const { message, history = [], mode, attachmentIds, stickerIds } = req.body;
   const sessionId = resolveSessionId(req, 'body');
+  // 可信用户身份：只从服务端身份解析，绝不读 req.body/query 里的 userId。
+  // 长期记忆的读作用域用它（用户级），会话作用域仍用于消息与任务状态。
+  const userId = resolveUserId(req);
 
   // 续写模式：「继续说」不是真实用户消息，只是一次内部 continuation 请求
   const isContinue = mode === 'continue';
@@ -2400,8 +2446,8 @@ async function prepareChatRequest(req) {
     return { error: [400, { error: '消息不能为空' }] };
   }
 
-  // 会话必须已存在：跨会话或未知会话一律拒绝，保证严格隔离
-  if (!getSession(sessionId)) {
+  // 会话必须已存在且属于本人：跨会话或未知会话一律拒绝，保证严格隔离
+  if (!getSessionForUser(sessionId, resolveUserId(req))) {
     return { error: [404, { error: '会话不存在' }] };
   }
 
@@ -2659,6 +2705,7 @@ async function prepareChatRequest(req) {
     contextRuntime = await runContextRuntime({
       task: memoryQuery,
       sessionId,
+      userId,
       requestId,
       projectedMessages: projectedHistory,
       renderMessage: item =>
@@ -2769,6 +2816,7 @@ async function prepareChatRequest(req) {
     ctx: {
       requestId,
       sessionId,
+      userId,
       isContinue,
       userText,
       userMessageId,
@@ -3032,6 +3080,9 @@ function scheduleMemoryExtraction(
     // 具体原因短码由 memory.js 的 reportSkip 与 writeOutcomes 记录。
     processMemory(memoryClient, memoryText, sessionId, {
       messageId: options.messageId || null,
+      // 可信用户身份要一路带到 applyCandidate：否则写侧仍按会话级判定，
+      // 新会话里的"改口"会被拒成 unauthorized_target。
+      userId: options.userId || null,
     })
       .then(outcome => {
         if (!outcome) return;
@@ -3088,7 +3139,11 @@ function recordSentForContext(ctx, { round = 1, messages = ctx.requestMessages, 
     round,
     messages,
     contextIds: ctx.contextIds || [],
-    model: { providerId: ctx.providerId, modelId: ctx.modelId },
+    model: {
+      providerId: ctx.providerId,
+      modelId: ctx.modelId,
+      providerKind: monitoring.providerKind(),
+    },
     toolsCount,
   });
 
@@ -3100,6 +3155,32 @@ function recordSentForContext(ctx, { round = 1, messages = ctx.requestMessages, 
     toolsCount,
     contextCount: Array.isArray(ctx.contextIds) ? ctx.contextIds.length : 0,
     messageCount: list.length,
+  });
+}
+
+// Provider 返回后立即对账：把真实 usage 写进 trace，并与本地估算输入 Token 比对。
+// 桩返回一律标 stub，不参与校准；没有 usage 就记 missing，不猜数字。
+function recordUsageForContext(ctx, completion, round = 1) {
+  if (!ctx) return null;
+
+  const usage =
+    completion && completion.usage && typeof completion.usage === 'object'
+      ? completion.usage
+      : null;
+  const kind = monitoring.providerKind();
+  const estimatedInputTokens =
+    ctx.contextMeasurement && Number.isFinite(ctx.contextMeasurement.estimatedInputTokens)
+      ? ctx.contextMeasurement.estimatedInputTokens
+      : null;
+
+  if (ctx.contextTrace) {
+    ctx.contextTrace.recordProviderUsage({ round, usage, providerKind: kind });
+  }
+
+  return monitoring.recordTokenReconciliation({
+    estimatedInputTokens,
+    promptTokens: usage && Number.isFinite(usage.prompt_tokens) ? usage.prompt_tokens : null,
+    providerKind: kind,
   });
 }
 
@@ -3216,6 +3297,7 @@ app.post('/chat', requireAuth, async (req, res) => {
         providerId: ctx.providerId,
         modelId: ctx.modelId,
         sessionId: ctx.sessionId,
+        userId: ctx.userId,
         userText: ctx.userText,
         userMessageId: ctx.userMessageId,
         temperature: 0.8,
@@ -3253,6 +3335,8 @@ app.post('/chat', requireAuth, async (req, res) => {
             durationMs: step.durationMs,
           });
         }
+        // Provider 真实 usage 必须在 emitContextTrace 之前写入，否则 trace 里没有。
+        recordUsageForContext(ctx, completion, outcome.rounds || 1);
         ctx.contextTrace.recordAgent(outcome);
         emitContextTrace(ctx);
       }
@@ -3276,6 +3360,7 @@ app.post('/chat', requireAuth, async (req, res) => {
       });
 
       rawReply = completion.choices?.[0]?.message?.content;
+      recordUsageForContext(ctx, completion, 1);
     }
 
     if (!rawReply && agentOn && agentOutcome && agentOutcome.stopReason) {
@@ -3336,6 +3421,8 @@ app.post('/chat', requireAuth, async (req, res) => {
     scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments, {
       messageId: result.userMessageId || null,
       requestId: ctx.requestId,
+      // 自动抽取的更正同样按用户级作用域判定可见性：新会话里改口要能覆盖旧记忆。
+      userId: ctx.userId,
     });
   } catch (error) {
     emitContextTrace(ctxForTrace);
@@ -3593,6 +3680,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         providerId: ctx.providerId,
         modelId: ctx.modelId,
         sessionId: ctx.sessionId,
+        userId: ctx.userId,
         userText: ctx.userText,
         userMessageId: ctx.userMessageId,
         temperature: 0.8,
@@ -3641,6 +3729,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
               durationMs: step.durationMs,
             });
           }
+          recordUsageForContext(ctx, outcome.completion, outcome.rounds || 1);
           ctx.contextTrace.recordAgent(outcome);
           emitContextTrace(ctx);
         }
@@ -3662,6 +3751,9 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         messages: ctx.requestMessages,
       });
 
+      // 流式 usage 由供应商在末帧给出（不保证存在）：拿到就记，拿不到记 missing。
+      let streamUsage = null;
+
       for await (const chunk of stream) {
         // 客户端已断开：中止上游流，不落盘，避免幽灵消息
         if (clientGone) {
@@ -3674,6 +3766,9 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         }
 
         if (chunk && typeof chunk.model === 'string') upstreamModel = chunk.model;
+        if (chunk && chunk.usage && typeof chunk.usage === 'object') {
+          streamUsage = chunk.usage;
+        }
 
         const delta =
           chunk &&
@@ -3691,6 +3786,8 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         const emit = stripper.push(delta);
         if (emit && !sendEvent({ type: 'delta', content: emit })) break;
       }
+
+      recordUsageForContext(ctx, { usage: streamUsage }, 1);
     }
   } catch (error) {
     streamError = error;
@@ -3817,6 +3914,8 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments, {
     messageId: result && result.userMessageId ? result.userMessageId : null,
     requestId: ctx.requestId,
+    // 与 /chat 一致：更正按用户级作用域判定，新会话改口能覆盖旧记忆。
+    userId: ctx.userId,
   });
 });
 

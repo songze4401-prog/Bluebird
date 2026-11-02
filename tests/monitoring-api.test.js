@@ -19,6 +19,9 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 process.env.BLUEBIRD_DATA_DIR = DATA_DIR;
 process.env.BLUEBIRD_MONITORING = '1';
 process.env.BLUEBIRD_AGENT_TOOLS = '1';
+// 本文件用桩替换模型 SDK：显式声明端点性质，保证 usage 被标成 stub 而不是
+// 供应商真实用量。这样无论由 npm test 还是单独执行，结论都一致。
+process.env.BLUEBIRD_PROVIDER_KIND = 'stub';
 process.env.DEEPSEEK_API_KEY = 'test-key-for-monitoring';
 process.env.BLUEBIRD_API_TOKEN = 'monitor-test-token';
 process.env.BLUEBIRD_BACKUP_DIR = path.join(TMP_ROOT, 'backups');
@@ -278,8 +281,10 @@ async function main() {
       JSON.stringify(spans)
     );
     check(
-      '模型 usage 来自供应商桩并被计入 Token（含缓存命中）',
-      detail.trace.model.usage_source === 'provider' &&
+      // P2：桩返回的 usage 必须标 stub，不能冒充供应商真实统计（含缓存命中仍照记）。
+      '模型 usage 来自供应商桩、标记为 stub 且不被算作真实用量（含缓存命中）',
+      detail.trace.model.usage_source === 'stub' &&
+        detail.trace.model.provider_kind === 'stub' &&
         detail.trace.model.total_tokens > 0 &&
         detail.trace.model.cached_tokens >= 4
     );
@@ -338,10 +343,13 @@ async function main() {
     cardBy('agent') && cardBy('agent').primary.value >= 1
   );
   check(
-    '总览模型卡显示供应商 Token 与未知费用',
+    '总览模型卡区分供应商 Token 与桩 Token，费用仍为未知',
     cardBy('model') &&
       cardBy('model').metrics.some(
-        metric => metric.label.includes('输入 Token') && metric.value > 0
+        metric => metric.label.includes('桩') && metric.value > 0
+      ) &&
+      cardBy('model').metrics.some(
+        metric => metric.label.includes('供应商') && metric.value === null
       ) &&
       cardBy('model').metrics.some(
         metric => metric.label === '费用' && metric.value === null

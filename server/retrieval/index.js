@@ -328,6 +328,12 @@ async function search(options = {}) {
       ? options.sessionId.trim()
       : null;
 
+  // 可信用户身份：长期记忆 chunk 的 scope 是 visibility='user'，必须用 userId 匹配。
+  const userId =
+    typeof options.userId === 'string' && options.userId.trim()
+      ? options.userId.trim()
+      : null;
+
   // purpose / categories / tokenBudget 是查询契约的显式字段：
   // purpose 进入 plan 与 trace；categories 映射到 sourceType 并与 sources 取交集；
   // tokenBudget 由 createPlan 做正数/上限归一，非法值不静默吞掉。
@@ -355,6 +361,7 @@ async function search(options = {}) {
   const plan = engine.createPlan({
     query: options.query,
     sessionId,
+    userId,
     sources,
     limit: options.limit || 5,
     tokenBudget: options.tokenBudget || config.limits.tokenBudget,
@@ -1171,8 +1178,11 @@ function publicCapabilities() {
     scope: {
       mode: 'single_user',
       globalSources: ['document', 'web', 'code'],
-      sessionScoped: ['memory', 'conversation'],
-      note: '单用户部署下外部知识全局可检索；多用户部署必须新增真实 ACL',
+      // 长期记忆是用户级（P1）：同一用户的任意会话都可检索，按服务端可信 userId 过滤。
+      userScoped: ['memory'],
+      // 原始对话消息仍按会话隔离，不随用户级读放开。
+      sessionScoped: ['conversation'],
+      note: '记忆按可信 userId 跨会话共享，对话消息仍按会话隔离；多用户部署必须新增真实 ACL',
     },
     formats: {
       document: ['.md', '.markdown', '.txt', '.text'],
@@ -1189,7 +1199,7 @@ function publicCapabilities() {
   };
 }
 
-async function searchForContext({ query, sessionId, now = Date.now() } = {}) {
+async function searchForContext({ query, sessionId, userId = null, now = Date.now() } = {}) {
   if (!config.enabled || !config.contextEnabled) {
     return { status: 'disabled', count: 0, items: [], trace: null };
   }
@@ -1226,6 +1236,7 @@ async function searchForContext({ query, sessionId, now = Date.now() } = {}) {
   const result = await search({
     query,
     sessionId,
+    userId,
     sources: config.contextSources,
     purpose: 'chat_context',
     categories: ['knowledge'],

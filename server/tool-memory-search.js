@@ -239,9 +239,13 @@ const definition = Object.freeze({
     // 委派任务：memoryScopeSessionId 指向父主控会话；直接 Bot 对话缺省回落到 Bot 会话。
     const memorySessionId =
       context && (context.memoryScopeSessionId || context.sessionId);
+    // 长期记忆是用户级：userId 来自服务端可信身份（agent-runtime 注入），
+    // 拿到它就按用户级检索；拿不到才退回会话级隔离（fail-closed）。
+    const userId = context && context.userId ? context.userId : null;
     const found = searchMemories({
       query: args.query,
       sessionId: memorySessionId,
+      userId,
       mode: args.mode || 'current',
       asOf: args.asOf || null,
       filters: args.filters || null,

@@ -363,6 +363,7 @@ function publicTask(task, { includeResult = true } = {}) {
     sessionId: workerSessionId,
     parentSessionId: task.parentSessionId || null,
     parentMessageId: task.parentMessageId || null,
+    parentUserId: task.parentUserId || null,
     priority: task.priority || 'normal',
     contextRef: task.contextRef || null,
     idempotencyKey: task.idempotencyKey || null,
@@ -498,6 +499,7 @@ function createTask({
   parentSessionId = null,
   parentMessageId = null,
   parentUserText = null,
+  parentUserId = null,
 } = {}) {
   const resolvedAgentId = String(agentId || botId || '');
   assertBot(resolvedAgentId);
@@ -531,6 +533,11 @@ function createTask({
     typeof parentUserText === 'string'
       ? parentUserText.trim().slice(0, PARENT_USER_TEXT_MAX)
       : '';
+  // 委派任务的记忆归属用户：由服务端可信身份写入，Worker 侧据此按用户级读记忆。
+  const cleanParentUserId =
+    typeof parentUserId === 'string' && parentUserId.trim()
+      ? parentUserId.trim().slice(0, 120)
+      : null;
   const cleanDeadline = Number(deadlineMs);
   if (
     !Number.isInteger(cleanDeadline) ||
@@ -622,6 +629,7 @@ function createTask({
     parentSessionId: cleanParentSession,
     parentMessageId: cleanParentMessage,
     parentUserText: cleanParentUserText,
+    parentUserId: cleanParentUserId,
     deliveredToParentAt: null,
     deliveryMessageId: null,
     deliveryStatus: cleanParentSession ? 'pending' : 'not_applicable',

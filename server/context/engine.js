@@ -96,6 +96,7 @@ function verifyContext({ selection, summary, build, fit }) {
 async function runContextRuntime({
   task = '',
   sessionId = null,
+  userId = null,
   requestId = null,
   projectedMessages = [],
   renderMessage,
@@ -150,7 +151,7 @@ async function runContextRuntime({
 
   let retrieval;
   try {
-    retrieval = await retrieveMemory({ task, sessionId, injected, config, now });
+    retrieval = await retrieveMemory({ task, sessionId, userId, injected, config, now });
   } catch (error) {
     retrieval = {
       status: 'retrieval_error',
@@ -165,6 +166,7 @@ async function runContextRuntime({
     knowledge = await retrieveKnowledge({
       task,
       sessionId,
+      userId,
       now,
     });
   } catch (error) {
@@ -187,7 +189,7 @@ async function runContextRuntime({
     config,
   });
 
-  trace.recordRetrieval(retrieval, build.memory);
+  trace.recordRetrieval(retrieval, build.memory, retrieval.diagnostics || null);
   trace.recordKnowledge(knowledge, build.knowledge);
 
   const fit = fitRequest({

@@ -29,6 +29,9 @@ process.env.BLUEBIRD_RETRIEVAL_ROOTS = [REPO_ROOT, FIXTURE_ROOT].join(path.delim
 const memory = require('../server/memory');
 const sessions = require('../server/sessions');
 const retrieval = require('../server/retrieval');
+const { getInstanceUserId } = require('../server/user-scope');
+// 长期记忆 chunk 是用户级作用域（P1），检索必须带服务端可信用户身份。
+const INSTANCE_USER = getInstanceUserId();
 const { config } = require('../server/retrieval/config');
 const { createStore } = require('../server/retrieval/store');
 const { createChunk } = require('../server/retrieval/contract');
@@ -351,7 +354,7 @@ test('词法检索：BM25 排序并支持来源/作用域预过滤', () => {
   assert.equal(filtered.length, 0);
 });
 
-test('记忆连接器：按会话隔离，旧无归属记忆不进入统一索引', async () => {
+test('记忆连接器：用户级作用域，跨会话可见，跨用户拒绝，旧无归属记忆同样入索引', async () => {
   seedMemory([
     memoryItem({ id: 'm-a', sessionId: 's-a', content: '用户喜欢喝拿铁咖啡' }),
     memoryItem({ id: 'm-b', sessionId: 's-b', content: '用户住在杭州' }),
@@ -361,28 +364,39 @@ test('记忆连接器：按会话隔离，旧无归属记忆不进入统一索�
       contributions: [],
     }),
   ]);
-  const a = await retrieval.search({
-    query: '拿铁 咖啡',
-    sessionId: 's-a',
-    sources: ['memory'],
-    limit: 5,
-  });
-  assert.equal(a.ok, true);
-  assert.equal(a.status, 'success');
-  assert.ok(a.evidence.some(item => item.sourceId === 'memory:m-a'));
-  assert.ok(!a.evidence.some(item => item.sourceId === 'memory:m-b'));
+  await retrieval.rebuild({ vectors: false });
 
-  const b = await retrieval.search({
+  // P1：同一用户的另一个会话能检索到别的会话沉淀的记忆（m-b 属于 s-b）。
+  const cross = await retrieval.search({
     query: '杭州',
-    sessionId: 's-b',
+    sessionId: 's-a',
+    userId: INSTANCE_USER,
     sources: ['memory'],
     limit: 5,
   });
-  assert.ok(b.evidence.some(item => item.sourceId === 'memory:m-b'));
-  assert.ok(!b.evidence.some(item => item.sourceId === 'memory:m-a'));
+  assert.ok(
+    cross.evidence.some(item => item.sourceId === 'memory:m-b'),
+    '同一用户的跨会话记忆应当可见'
+  );
 
-  const legacy = retrieval.store.listSources().find(source => source.id === 'memory:m-legacy');
-  assert.equal(legacy, undefined);
+  // 旧的无归属记忆同样属于该用户，进入统一索引。
+  const legacy = retrieval.store
+    .listSources()
+    .find(source => source.id === 'memory:m-legacy');
+  assert.ok(legacy, '无归属旧记忆不应再被索引排除');
+
+  // 另一个用户检索同一问题：一条都拿不到。
+  const other = await retrieval.search({
+    query: '杭州',
+    sessionId: 's-a',
+    userId: 'user-other-0001',
+    sources: ['memory'],
+    limit: 5,
+  });
+  assert.ok(
+    !other.evidence.some(item => item.sourceId.startsWith('memory:')),
+    '不同用户不得检索到彼此的记忆'
+  );
 });
 
 test('历史对话连接器：只索引当前会话，跨 sessionId 不泄漏', async () => {
@@ -1177,6 +1191,7 @@ test('记忆全链路：新增命中→更新后旧内容失效→删除后不�
   const hit1 = await retrieval.search({
     query: 'M4 Max 电脑配置',
     sessionId: sid,
+    userId: INSTANCE_USER,
     sources: ['memory'],
     limit: 5,
     tokenBudget: 800,
@@ -1195,6 +1210,7 @@ test('记忆全链路：新增命中→更新后旧内容失效→删除后不�
   const hit2 = await retrieval.search({
     query: 'M5 Pro 64G',
     sessionId: sid,
+    userId: INSTANCE_USER,
     sources: ['memory'],
     limit: 5,
     tokenBudget: 800,
@@ -1204,6 +1220,7 @@ test('记忆全链路：新增命中→更新后旧内容失效→删除后不�
   const oldQuery = await retrieval.search({
     query: 'M4 Max 32G',
     sessionId: sid,
+    userId: INSTANCE_USER,
     sources: ['memory'],
     limit: 5,
     tokenBudget: 800,
@@ -1215,6 +1232,7 @@ test('记忆全链路：新增命中→更新后旧内容失效→删除后不�
   const hit3 = await retrieval.search({
     query: 'M5 Pro 64G',
     sessionId: sid,
+    userId: INSTANCE_USER,
     sources: ['memory'],
     limit: 5,
     tokenBudget: 800,
