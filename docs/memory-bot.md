@@ -220,7 +220,7 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 
 | 阶段 | 实际实现 | 验收证据 |
 |---|---|---|
-| P0 主控派发 + 结果回传 + 事件 outbox | 主 Agent `delegate_to_bot` 工具、`parentSessionId`、父会话记忆读/写 scope、审批结果投递、Result Delivery SSE、任务页真实读取、事件 outbox | `tests/agent-dispatch.test.js` 10 项 |
+| P0 主控派发 + 结果回传 + 事件 outbox | 主 Agent `delegate_to_bot` 工具、显式委派意图的运行时强制派发、`parentSessionId`、父会话记忆读/写 scope、审批结果投递、Result Delivery SSE、任务页真实读取、事件 outbox | `tests/agent-dispatch.test.js` 13 项 |
 | P0 记忆维护 + 人工审批 | `memory.updateMemory/mergeMemories/supersedeMemory/withdrawMemory` + `archive/delete` 复用；`memory-service` 白名单；`approvals` 状态机与 API | `tests/memory-maintenance.test.js` 5 项；审批 API 前后状态测试 |
 | P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；工具预算截断后无工具总结；任务裁剪只删已投递终态；Provider token delta；停止/切会话 abort；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 9 项；SSE/tool event 测试；Jest 5 项工作台测试 + 1 项 App 冒烟 |
 | P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；维护申请表单；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验、真实模型 HTTP SSE E2E |

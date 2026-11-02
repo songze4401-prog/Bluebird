@@ -181,7 +181,7 @@ query                   cand(b/a)   items(b/a)   tokens(b/a)    Δtokens
 - delete / archive / confirm / reject 对他人 id 返回 **403** 且数据不变；
 - `clear` 只清本人，`clear-session` 不越界摘他人贡献；
 - Memory Bot 审批执行器（`memory-service.execute`）增加归属预检；
-- 新增 `tests/memory-ownership.test.js`（27 项）覆盖上述行为。
+- 新增 `tests/memory-ownership.test.js`（29 项）覆盖上述行为。
 
 **仍未解决的多用户前置条件**（不属于本阻断项，但上线前必须做）：
 
