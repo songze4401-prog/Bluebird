@@ -51,6 +51,39 @@ function isEffectiveAt(item, at = Date.now()) {
   return true;
 }
 
+// 不可见原因分类（P2 可观测性）：只用于解释「为什么这条记忆没进候选池」。
+// 与 isEffectiveAt 严格互补——isEffectiveAt 为 true 时本函数返回 null。
+// 撤回 / 删除是操作结果而非持久状态（见文件头注释），条目已被物理删除，
+// 检索层看不到它们，因此这里不存在 'withdrawn' 分支。
+const INEFFECTIVE_REASONS = Object.freeze({
+  PENDING: 'pending',
+  SUPERSEDED: 'superseded',
+  ARCHIVED: 'archived',
+  NOT_YET_VALID: 'not_yet_valid',
+  EXPIRED: 'expired',
+  UNKNOWN_STATUS: 'unknown_status',
+});
+
+function classifyIneffective(item, at = Date.now()) {
+  if (!item) return INEFFECTIVE_REASONS.UNKNOWN_STATUS;
+
+  const status = item.status;
+
+  if (status === STATUS_PENDING) return INEFFECTIVE_REASONS.PENDING;
+  if (status === STATUS_SUPERSEDED) return INEFFECTIVE_REASONS.SUPERSEDED;
+  if (status === STATUS_ARCHIVED) return INEFFECTIVE_REASONS.ARCHIVED;
+
+  if (!isActiveStatus(item)) return INEFFECTIVE_REASONS.UNKNOWN_STATUS;
+
+  const from = parseTimestamp(item.validFrom);
+  if (from !== null && from > at) return INEFFECTIVE_REASONS.NOT_YET_VALID;
+
+  const to = parseTimestamp(item.validTo);
+  if (to !== null && to <= at) return INEFFECTIVE_REASONS.EXPIRED;
+
+  return null;
+}
+
 // 历史视图：包含当时有效、后来被取代或归档的条目；不包含 pending。
 function isHistoricalAt(item, at = Date.now()) {
   const status = item && item.status;
@@ -91,6 +124,8 @@ module.exports = {
   isPending,
   parseTimestamp,
   isEffectiveAt,
+  classifyIneffective,
+  INEFFECTIVE_REASONS,
   isHistoricalAt,
   canTransition,
 };

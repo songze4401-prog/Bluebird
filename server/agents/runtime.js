@@ -204,6 +204,8 @@ async function execute({
   sessionId = null,
   // 记忆作用域独立于 Bot 对话会话；委派任务由 runTask 传入父主控 session。
   memoryScopeSessionId = null,
+  // 长期记忆是用户级：委派任务沿用父请求的可信用户身份。
+  userId = null,
   userText = '',
   taskId = null,
   taskTools = null,
@@ -247,6 +249,7 @@ async function execute({
       messages,
       sessionId,
       memoryScopeSessionId,
+      userId,
       userText,
       temperature: config.modelProfile.temperature,
       maxTokens: config.modelProfile.maxTokens,
@@ -415,6 +418,8 @@ function emptyReplyError(stopReason) {
 async function chat(botId, {
   sessionId = null,
   message,
+  // 可信用户身份：直接对话没有父主控会话，但仍要按用户级读长期记忆。
+  userId = null,
   signal = null,
   onToolEvent = null,
   stream = false,
@@ -443,6 +448,7 @@ async function chat(botId, {
     botId,
     messages,
     sessionId: session.id,
+    userId,
     userText: text,
     mode: 'direct_chat',
     signal,
@@ -665,6 +671,7 @@ async function runTask(taskId) {
       sessionId: task.sessionId,
       // 委派任务：Bot 会话只承载执行轨迹，记忆读写归属父主控会话。
       memoryScopeSessionId: projection.memoryScopeSessionId,
+      userId: projection.userId,
       // 写入接地优先使用主控用户原话；旧任务或直接任务才回落到 goal。
       userText: projection.userText,
       taskId: task.taskId,

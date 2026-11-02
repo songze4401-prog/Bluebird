@@ -22,6 +22,7 @@ const {
   isPending,
   isEffectiveAt,
   isHistoricalAt,
+  classifyIneffective,
   parseTimestamp,
   canTransition,
 } = require('./memory-lifecycle');
@@ -33,6 +34,7 @@ const {
   semanticSimilarity,
   semanticCapability,
 } = require('./memory-semantic');
+const { getInstanceUserId } = require('./user-scope');
 
 // 数据目录可通过 BLUEBIRD_DATA_DIR 覆盖：测试用临时目录，避免碰到真实数据。
 // 未设置时与 sessions.js / emotion.js 保持一致，落在 server/data/。
@@ -150,6 +152,10 @@ function issuedId() {
 // 只补字段，不改正文、不改时间、不删条目：缺省值全部由已有字段推出。
 // 已有 id / status 的原样保留，所以重复执行迁移是恒等操作；补出来的字段
 // 要落盘只能等下一次真实写入 —— 读盘路径绝不写文件。
+//
+// userId 是 P1 引入的用户级作用域键：长期记忆的读边界从「会话」上提到「用户」。
+// 旧数据没有这个字段，读盘时一律归到实例用户（单实例部署下本来就同属一个用户），
+// 因此迁移是幂等的，也不会改变任何既有条目的正文与归属。
 function stampIdentity(item) {
   const status = cleanText(item.status) || STATUS_ACTIVE;
   const createdAt = cleanText(item.createdAt);
@@ -158,6 +164,7 @@ function stampIdentity(item) {
     ...item,
     id: cleanText(item.id) || derivedId(item),
     status,
+    userId: cleanText(item.userId) || getInstanceUserId(),
     validFrom: cleanText(item.validFrom) || createdAt,
     validTo: cleanText(item.validTo),
     supersededBy: cleanText(item.supersededBy),
@@ -632,7 +639,8 @@ function storedCandidate(candidate, extra = {}) {
     ...stored
   } = candidate;
 
-  return { ...stored, ...extra };
+  // 归属用户由服务端身份决定，不信任候选里可能夹带的任何 userId。
+  return { ...stored, userId: getInstanceUserId(), ...extra };
 }
 
 // 容量控制。旧实现只在"全部是 identity"时 next.shift()，等于把
@@ -1138,6 +1146,15 @@ async function applyCandidate(raw, options = {}) {
   }
 
   const sessionId = cleanText(options.sessionId);
+  // 写侧与读侧共用同一作用域判定：拿到可信 userId 就是用户级 —— 同一用户的
+  // 任意会话都能更正 / 合并 / 替代自己的记忆（否则新会话里说「我改名叫X」
+  // 会被拒，旧名字与新名字作为两条记忆同时被注入）。
+  // 没有可信 userId 时回落到会话级隔离，跨用户仍然拒绝。
+  const writeScope = resolveReadScope({
+    scope: options.scope,
+    userId: options.userId,
+    sessionId,
+  });
   const abortedResult = () => ({
     ...base,
     reason: 'aborted',
@@ -1173,7 +1190,9 @@ async function applyCandidate(raw, options = {}) {
         };
       }
 
-      if (scopeOf(target, sessionId) === 'excluded') {
+      // 更正/合并/替代的目标按当前作用域判定可见性：用户级下同一用户的
+      // 任意会话都可以改自己的记忆；跨用户仍然拒绝。
+      if (scopeOf(target, writeScope) === 'excluded') {
         return {
           ...base,
           reason: 'unauthorized_target',
@@ -1187,7 +1206,7 @@ async function applyCandidate(raw, options = {}) {
       similarity: similarity(item.content, candidate.content),
       sameType: item.type === candidate.type,
       sharedKeyword: shareKeyword(item.keywords, candidate.keywords),
-      visible: scopeOf(item, sessionId) !== 'excluded',
+      visible: scopeOf(item, writeScope) !== 'excluded',
       contextConflict:
         (() => {
           const currentEvent = Date.parse(candidate.eventAt || '');
@@ -1701,13 +1720,39 @@ function renderMemoryContext(items, options = {}) {
     .trim();
 }
 
-// 会话作用域：一条记忆在「当前会话」眼里算什么。
-//   primary  —— 有一条贡献就属于本会话
-//   legacy   —— 没有任何带归属的旧数据（无贡献，或贡献的 sessionId 为空）
-//   excluded —— 贡献全部登记在别的会话名下
+// 记忆读作用域。两种模式，语义完全不同：
+//
+//   session —— 会话级隔离（P0 修隐私外泄时引入的旧语义，保留用于兼容与回归）
+//     primary  : 有一条贡献属于本会话
+//     legacy   : 没有任何带归属的旧数据（无贡献，或贡献的 sessionId 为空）
+//     excluded : 贡献全部登记在别的会话名下
+//
+//   user —— 用户级共享（P1 目标语义：长期记忆是用户的认知，不是会话的）
+//     primary  : 条目归属用户 == 当前可信用户
+//     excluded : 归属用户不同，或无法建立可信身份（fail-closed）
+//
 // 三条读路径（注入 / 工具检索 / 引擎检索）必须共用这一个函数：
 // 只要还有一条路径自己判断归属，跨会话串读就只是"少了一条"而不是"没有"。
-function scopeOf(item, targetSessionId) {
+//
+// 注意：user 模式不是"关掉隔离"，而是把边界从会话换成用户。没有可信 userId
+// 时一律 excluded，绝不退回"全库可见"。
+function normalizeScopeInput(input) {
+  if (typeof input === 'string' || input === null || input === undefined) {
+    return { mode: 'session', userId: null, sessionId: cleanText(input) };
+  }
+
+  if (typeof input === 'object') {
+    return {
+      mode: input.mode === 'user' ? 'user' : 'session',
+      userId: cleanText(input.userId),
+      sessionId: cleanText(input.sessionId),
+    };
+  }
+
+  return { mode: 'session', userId: null, sessionId: null };
+}
+
+function sessionScopeOf(item, targetSessionId) {
   const contributions = Array.isArray(item.contributions)
     ? item.contributions
     : [];
@@ -1730,9 +1775,79 @@ function scopeOf(item, targetSessionId) {
   return 'excluded';
 }
 
-// 当前会话可用的候选池：先按状态与时间窗口过滤（被更正、归档、过期、
+function userScopeOf(item, userId) {
+  // 无法建立可信用户身份：不放行任何记忆（fail-closed，绝不退回全库可见）。
+  if (!userId) return 'excluded';
+
+  const owner = cleanText(item && item.userId);
+
+  // 没有归属用户的条目（未经 stampIdentity 的对象）同样不放行：
+  // 读盘路径一定会补上 userId，走到这里说明来源不可信。
+  if (!owner) return 'excluded';
+
+  return owner === userId ? 'primary' : 'excluded';
+}
+
+function scopeOf(item, rawScope) {
+  const scope = normalizeScopeInput(rawScope);
+
+  return scope.mode === 'user'
+    ? userScopeOf(item, scope.userId)
+    : sessionScopeOf(item, scope.sessionId);
+}
+
+// ---- 归属校验（多用户上线前的 P0 阻断项） ----
+// 管理类接口（读列表 / 删除 / 归档 / 清空）过去是「全库」语义。单用户部署下
+// 全库 == 本人，所以看不出问题；一旦接入真实多用户，任意已认证用户就能读写
+// 他人的记忆。这里把归属判断收敛成一个函数，读写两侧共用：
+//
+//   userId 为空  → 不做限制（内部调用 / 兼容旧调用点，保持既有行为）
+//   userId 非空  → 必须与条目 userId 完全一致，否则拒绝
+//
+// 注意：空 userId 不做限制是"兼容内部调用"，不是"放行外部请求"。
+// HTTP 层必须显式传 resolveUserId(req)，不得省略。
+function ownerAllows(item, userId) {
+  const owner = cleanText(userId);
+  if (!owner) return true;
+  return cleanText(item && item.userId) === owner;
+}
+
+// 按归属用户读取。无可信身份时返回空数组（fail-closed），绝不退回全库。
+function getMemoriesForUser(userId, options = {}) {
+  const owner = cleanText(userId);
+  if (!owner) return [];
+  return getMemories(options).filter(item => ownerAllows(item, owner));
+}
+
+function getPendingMemoriesForUser(userId) {
+  const owner = cleanText(userId);
+  if (!owner) return [];
+  return getPendingMemories().filter(item => ownerAllows(item, owner));
+}
+
+// 变更前的归属预检：返回 { ok, reason }，不修改任何数据。
+// 供管理接口与审批执行器在"执行动作"之前先判断能不能动这条记忆。
+function checkMemoryOwnership(id, userId) {
+  const targetId = cleanText(id);
+  const owner = cleanText(userId);
+
+  if (!targetId) return { ok: false, reason: 'invalid' };
+
+  const item = (Array.isArray(memories) ? memories : []).find(
+    entryItem => entryItem && entryItem.id === targetId
+  );
+
+  if (!item) return { ok: false, reason: 'not-found' };
+  if (!ownerAllows(item, owner)) return { ok: false, reason: 'forbidden' };
+
+  return { ok: true, reason: null };
+}
+
+// 当前作用域可用的候选池：先按状态与时间窗口过滤（被更正、归档、过期、
 // 未到生效时间的旧条目不再对外生效），再按作用域过滤。
-function visiblePool(targetSessionId, list = memories) {
+function visiblePool(rawScope, list = memories) {
+  const scope = normalizeScopeInput(rawScope);
+
   const valid = list.filter(
     item =>
       item &&
@@ -1741,28 +1856,29 @@ function visiblePool(targetSessionId, list = memories) {
       isEffectiveAt(item)
   );
 
-  const primary = valid.filter(
-    item => scopeOf(item, targetSessionId) === 'primary'
-  );
+  const primary = valid.filter(item => scopeOf(item, scope) === 'primary');
 
   if (primary.length) return primary;
 
-  return valid.filter(item => scopeOf(item, targetSessionId) === 'legacy');
+  return valid.filter(item => scopeOf(item, scope) === 'legacy');
 }
 
 // 注入上限：与旧实现一致，相关性过滤后最多注入 10 条。
 const INJECT_CAP = 10;
 
-// sessionId 为空 = 调用方没有会话身份（旧数据 / 老调用）。这时绝不退回
-// 「全库可见」：只注入无归属的旧数据，属于具名会话的记忆一律不露。
-// 线上路径必须显式传 sessionId —— 这是 P0 修掉的隐私外泄口子。
+// scope 支持两种形态：
+//   - 字符串 / 省略：按会话级隔离（旧语义，等同于 { mode: 'session', sessionId }）
+//   - 对象：{ mode: 'user', userId } 按用户级共享；{ mode: 'session', sessionId } 按会话隔离
+//
+// 作用域为空时绝不退回「全库可见」：会话模式下只注入无归属的旧数据，
+// 用户模式下没有可信 userId 则一律不注入。线上路径必须显式给作用域。
 //
 // 注意：这不是生产注入路径。线上注入走 Context Runtime v3
 // （server/context/retriever.js → searchMemories → server/context/builder.js
 // 的 renderMemoryBlock）。本函数保留给固定评测（tests/memory-eval/）与
 // 作用域回归断言使用：它与 searchMemories 共用 scopeOf / visiblePool /
 // rankMemories，因此评测里的作用域结论与线上读路径一致。
-function buildMemoryContext(message, sessionId = null) {
+function buildMemoryContext(message, scope = null) {
   if (!MEMORY_ENABLED) return '';
 
   try {
@@ -1772,8 +1888,7 @@ function buildMemoryContext(message, sessionId = null) {
       return '';
     }
 
-    const target = cleanText(sessionId);
-    const pool = visiblePool(target);
+    const pool = visiblePool(scope);
 
     if (!pool.length) {
       return '';
@@ -2132,7 +2247,7 @@ function matchesTimeRange(item, range) {
 }
 
 function selectSearchCandidates({
-  sessionId,
+  scope,
   history,
   asOfMs,
   filters,
@@ -2145,6 +2260,16 @@ function selectSearchCandidates({
     status: 0,
     source: 0,
     time: 0,
+  };
+  // 不可见原因分解（P2）：过期的、被替代的、归档的、待确认的分别计数，
+  // 这样 Trace 能回答「这条记忆为什么没进候选池」，而不是只有一个总数。
+  const visibilityReasons = {
+    pending: 0,
+    superseded: 0,
+    archived: 0,
+    not_yet_valid: 0,
+    expired: 0,
+    unknown_status: 0,
   };
   const base = [];
 
@@ -2164,18 +2289,23 @@ function selectSearchCandidates({
 
     if (!visible) {
       exclusions.visibility += 1;
+      const reason = classifyIneffective(item, asOfMs);
+      if (reason && visibilityReasons[reason] !== undefined) {
+        visibilityReasons[reason] += 1;
+      } else {
+        visibilityReasons.unknown_status += 1;
+      }
       continue;
     }
 
     base.push(item);
   }
 
-  const primary = base.filter(
-    item => scopeOf(item, sessionId) === 'primary'
-  );
-  const legacy = base.filter(item => scopeOf(item, sessionId) === 'legacy');
+  const primary = base.filter(item => scopeOf(item, scope) === 'primary');
+  const legacy = base.filter(item => scopeOf(item, scope) === 'legacy');
   const pool = primary.length ? primary : legacy;
 
+  // 用户模式下没有 legacy 兜底语义：primary 为空就是"没有可见记忆"。
   exclusions.session_scope = base.length - pool.length;
 
   let filtered = pool;
@@ -2204,24 +2334,50 @@ function selectSearchCandidates({
     exclusions.time += before - filtered.length;
   }
 
-  return { pool: filtered, exclusions };
+  return {
+    pool: filtered,
+    exclusions,
+    visibilityReasons,
+    storeTotal: all.length,
+    eligible: base.length,
+  };
 }
 
 // ---- Agent 工具 / 上下文引擎专用：scope 化记忆检索 ----
 // 与 buildMemoryContext 的差异：结构化返回 + 四维过滤 + 多类预算；相同的部分：
 // 候选池由 selectSearchCandidates() 复用同一个 scopeOf 规则生成，所以两条读
-// 路径不可能对「这条记忆当前会话能不能看」给出不同答案。
+// 路径不可能对「这条记忆当前能不能看」给出不同答案。
 // 预算（条数 / 单条长度 / 字符 / 近似 token）由调用方传入，工具层再兜底；
 // 长度一律按 text-utils 的码点规则计算并截断。
+//
+// 作用域选择（显式优先，缺省按是否给了可信 userId 推导）：
+//   传 userId           → 用户级共享（P1 生产路径）
+//   只传 sessionId      → 会话级隔离（旧行为，兼容老调用与回归测试）
+//   两者都没传          → 会话级、且 sessionId 为空 ⇒ 只见无归属旧数据（fail-closed）
+function resolveReadScope({ scope, userId, sessionId }) {
+  if (scope !== undefined && scope !== null) {
+    return normalizeScopeInput(scope);
+  }
+
+  const uid = cleanText(userId);
+
+  return uid
+    ? { mode: 'user', userId: uid, sessionId: cleanText(sessionId) }
+    : { mode: 'session', userId: null, sessionId: cleanText(sessionId) };
+}
+
 function searchMemories({
   query,
   sessionId,
+  userId,
+  scope,
   limits = {},
   mode = 'current',
   asOf = null,
   filters: rawFilters = null,
 } = {}) {
   const history = mode === 'history';
+  const readScope = resolveReadScope({ scope, userId, sessionId });
   const maxItems =
     Number.isFinite(limits.maxItems) && limits.maxItems > 0
       ? Math.min(Math.floor(limits.maxItems), 50)
@@ -2251,6 +2407,26 @@ function searchMemories({
       time: 0,
       irrelevant: 0,
     },
+    // 不可见原因分解：与 excluded.visibility 是同一个集合的细分。
+    visibilityReasons: {
+      pending: 0,
+      superseded: 0,
+      archived: 0,
+      not_yet_valid: 0,
+      expired: 0,
+      unknown_status: 0,
+    },
+    // 检索漏斗：库总量 → 状态/时间可见 → 作用域可见 → 过滤 → 命中。
+    // 撤回/删除是物理删除，不在此处计数（见 docs/p2-memory-observability.md）。
+    funnel: {
+      store_total: 0,
+      eligible: 0,
+      candidates: 0,
+      returned: 0,
+    },
+    // 作用域模式进 diagnostics：Trace 里能区分「用户级没命中」与「会话级被隔离」。
+    scopeMode: readScope.mode,
+    scopeUserId: readScope.mode === 'user' ? readScope.userId : null,
     truncatedItems: 0,
     limitTruncated: false,
     budgetTruncated: false,
@@ -2280,8 +2456,6 @@ function searchMemories({
   const current = String(query || '').trim();
   if (!current) return emptyResult('empty_query');
 
-  const targetSessionId = cleanText(sessionId);
-
   let asOfMs = Date.now();
 
   if (history) {
@@ -2303,7 +2477,7 @@ function searchMemories({
   }
 
   const selection = selectSearchCandidates({
-    sessionId: targetSessionId,
+    scope: readScope,
     history,
     asOfMs,
     filters: normalizedFilters.filters,
@@ -2314,6 +2488,16 @@ function searchMemories({
     excluded: {
       ...emptyDiagnostics.excluded,
       ...selection.exclusions,
+    },
+    visibilityReasons: {
+      ...emptyDiagnostics.visibilityReasons,
+      ...(selection.visibilityReasons || {}),
+    },
+    funnel: {
+      store_total: selection.storeTotal || 0,
+      eligible: selection.eligible || 0,
+      candidates: selection.pool.length,
+      returned: 0,
     },
   };
 
@@ -2444,7 +2628,7 @@ function searchMemories({
         confidenceWeight: +entry.weight.toFixed(6),
       },
       sourceTypes: entry.sourceTypes,
-      scope: scopeOf(item, targetSessionId),
+      scope: scopeOf(item, readScope),
       contentTruncated: itemCut,
     });
     total += cost;
@@ -2461,6 +2645,7 @@ function searchMemories({
   if (results.length < ranked.length) truncated = true;
 
   diagnostics.returned = results.length;
+  if (diagnostics.funnel) diagnostics.funnel.returned = results.length;
   diagnostics.truncatedItems = truncatedItems;
   diagnostics.limitTruncated = limitTruncated;
   diagnostics.budgetTruncated = budgetTruncated;
@@ -2507,15 +2692,23 @@ function refreshDerivedMemoryIndex(reason) {
 
 // 清空整库。removedEntries 是真正被删掉的条目数（含已被更正的历史条目），
 // 回 0 会让调用方以为「库本来就是空的」。
-async function clearMemories() {
+//
+// userId 非空时只清掉该用户名下的条目：管理接口在多用户下不能"清空别人的记忆"。
+async function clearMemories(userId = null) {
+  const owner = cleanText(userId);
+
   return enqueueWrite(async () => {
-    const removedEntries = Array.isArray(memories) ? memories.length : 0;
+    const current = Array.isArray(memories) ? memories : [];
+    const remaining = owner
+      ? current.filter(item => !ownerAllows(item, owner))
+      : [];
+    const removedEntries = current.length - remaining.length;
 
-    await saveMemories([]);
+    await saveMemories(remaining);
 
-    memories = [];
+    memories = remaining;
 
-    refreshDerivedMemoryIndex('clear');
+    refreshDerivedMemoryIndex(owner ? 'clear_user' : 'clear');
 
     console.log(`Memory cleared: ${removedEntries}`);
 
@@ -2526,8 +2719,9 @@ async function clearMemories() {
 // 按会话清理：只摘掉登记在该会话名下的贡献，贡献被摘空的条目整条删除。
 // 别的会话说过的同一事实（还有其它贡献）必须留着 —— 与撤回同一条规则，
 // 否则"删掉我这个会话的记忆"会把别人的会话记录一并抹掉。
-async function clearSessionMemories(sessionId) {
+async function clearSessionMemories(sessionId, userId = null) {
   const target = cleanText(sessionId);
+  const owner = cleanText(userId);
 
   if (!target) {
     return {
@@ -2546,6 +2740,12 @@ async function clearSessionMemories(sessionId) {
     let removedContributions = 0;
 
     for (const item of current) {
+      // 不属于该用户的条目一律原样保留（多用户下不能借 sessionId 越界删除）。
+      if (!ownerAllows(item, owner)) {
+        remaining.push(item);
+        continue;
+      }
+
       const contributions = Array.isArray(item.contributions)
         ? item.contributions
         : [];
@@ -2758,10 +2958,11 @@ function getMemories(options = {}) {
 //   2) createdAt + content —— 旧数据与旧客户端仍在用的定位键，保留不废。
 // 必须走 enqueueWrite，与 processMemory 的自动写入串行化，
 // 否则会出现"用户刚删除 → 后台提取写入"把这次删除覆盖掉。
-async function deleteMemory({ id, createdAt, content } = {}) {
+async function deleteMemory({ id, createdAt, content, userId = null } = {}) {
   const targetId = cleanText(id);
   const targetCreatedAt = typeof createdAt === 'string' ? createdAt : '';
   const targetContent = typeof content === 'string' ? content : '';
+  const owner = cleanText(userId);
 
   if (!targetId && !(targetCreatedAt && targetContent)) {
     return { removed: 0, reason: 'invalid' };
@@ -2782,6 +2983,12 @@ async function deleteMemory({ id, createdAt, content } = {}) {
 
     if (index < 0) {
       return { removed: 0, reason: 'not-found' };
+    }
+
+    // 归属不符：不删、不暴露目标是否存在（reason 与 not-found 同属拒绝语义，
+    // 但分开返回便于调用方区分"不存在"与"无权"）。
+    if (!ownerAllows(current[index], owner)) {
+      return { removed: 0, reason: 'forbidden' };
     }
 
     const next = current.slice();
@@ -2822,8 +3029,9 @@ function getPendingMemories() {
     }));
 }
 
-async function confirmPending(id) {
+async function confirmPending(id, userId = null) {
   const targetId = cleanText(id);
+  const owner = cleanText(userId);
 
   if (!targetId) return { updated: 0, reason: 'invalid' };
 
@@ -2832,6 +3040,10 @@ async function confirmPending(id) {
     const index = current.findIndex(item => item && item.id === targetId);
 
     if (index < 0) return { updated: 0, reason: 'not-found' };
+
+    if (!ownerAllows(current[index], owner)) {
+      return { updated: 0, reason: 'forbidden' };
+    }
 
     const item = current[index];
 
@@ -2965,8 +3177,9 @@ async function confirmPending(id) {
   });
 }
 
-async function rejectPending(id) {
+async function rejectPending(id, userId = null) {
   const targetId = cleanText(id);
+  const owner = cleanText(userId);
 
   if (!targetId) return { removed: 0, reason: 'invalid' };
 
@@ -2975,6 +3188,10 @@ async function rejectPending(id) {
     const index = current.findIndex(item => item && item.id === targetId);
 
     if (index < 0) return { removed: 0, reason: 'not-found' };
+
+    if (!ownerAllows(current[index], owner)) {
+      return { removed: 0, reason: 'forbidden' };
+    }
 
     if (!isPending(current[index]) || !canTransition(STATUS_PENDING, 'deleted')) {
       return { removed: 0, reason: 'not-pending' };
@@ -2990,8 +3207,9 @@ async function rejectPending(id) {
   });
 }
 
-async function archiveMemory(id) {
+async function archiveMemory(id, userId = null) {
   const targetId = cleanText(id);
+  const owner = cleanText(userId);
 
   if (!targetId) return { updated: 0, reason: 'invalid' };
 
@@ -3000,6 +3218,10 @@ async function archiveMemory(id) {
     const index = current.findIndex(item => item && item.id === targetId);
 
     if (index < 0) return { updated: 0, reason: 'not-found' };
+
+    if (!ownerAllows(current[index], owner)) {
+      return { updated: 0, reason: 'forbidden' };
+    }
 
     const item = current[index];
     const status = item.status || STATUS_ACTIVE;
@@ -3536,7 +3758,10 @@ module.exports = {
   STATUS_ARCHIVED,
   loadMemories,
   getMemories,
+  getMemoriesForUser,
   getPendingMemories,
+  getPendingMemoriesForUser,
+  checkMemoryOwnership,
   confirmPending,
   rejectPending,
   archiveMemory,

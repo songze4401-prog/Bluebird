@@ -8,8 +8,9 @@
  * 隐私：只记录稳定标识、数量、长度、来源、阶段、原因、计量与模型标识；
  * 绝不记录用户任务原文、历史正文、记忆正文、工具参数或工具结果正文。
  */
-const { textLength, truncateText } = require('../text-utils');
+const { textLength, truncateText, estimateTokens } = require('../text-utils');
 const { modelMessageId } = require('./projection');
+const crypto = require('crypto');
 
 const SENSITIVE_PATTERN =
   /(密码|口令|私钥|助记词|验证码|信用卡|银行卡|身份证|手机号|cvv|api[\s_-]?key|secret|bearer|token\s*[:=]|sk-[a-zA-Z0-9_-]{8,}|(?:\d[\s-]?){11,})/i;
@@ -42,6 +43,39 @@ function sanitizeReason(value) {
   return sanitizeText(value);
 }
 
+// 发送内容的稳定指纹：只序列化 role / content / tool_calls 三个字段后取 sha256。
+// 用途是核对「Trace 里这一轮 == 真正发给 Provider 的那一份」，
+// 不把正文写进 trace，也不需要保存原始请求体。
+function hashMessages(list) {
+  try {
+    const canonical = list.map(message => ({
+      role: (message && message.role) || null,
+      content:
+        message && typeof message.content === 'string' ? message.content : null,
+      ...(message && message.tool_calls ? { tool_calls: message.tool_calls } : {}),
+    }));
+    return crypto
+      .createHash('sha256')
+      .update(JSON.stringify(canonical))
+      .digest('hex');
+  } catch (_) {
+    return null;
+  }
+}
+
+// 与 input-guard 的估算口径一致：文本 token + 每条消息固定开销。
+// 这是估算值，不能当作 Provider 的 prompt_tokens。
+const MESSAGE_OVERHEAD_TOKENS = 4;
+
+function estimateMessagesTokens(list) {
+  let total = 0;
+  for (const message of list) {
+    const text = message && typeof message.content === 'string' ? message.content : '';
+    total += estimateTokens(text) + MESSAGE_OVERHEAD_TOKENS;
+  }
+  return total;
+}
+
 function createTrace({ task, sessionId, ts, requestId } = {}) {
   const trace = {
     ts: ts || new Date().toISOString(),
@@ -62,7 +96,12 @@ function createTrace({ task, sessionId, ts, requestId } = {}) {
       source: 'memory',
       status: null,
       candidates: 0,
+      returned: 0,
       accepted: 0,
+      scopeMode: null,
+      funnel: null,
+      excluded: null,
+      visibilityReasons: null,
       skipped: [],
       conflicts: [],
       error: null,
@@ -95,6 +134,7 @@ function createTrace({ task, sessionId, ts, requestId } = {}) {
     },
     sent: {
       rounds: [],
+      usage: [],
       consumed: null,
       consumedNote: '未采集模型实际消费证据；HTTP 成功不等于模型已消费',
     },
@@ -141,12 +181,30 @@ function createTrace({ task, sessionId, ts, requestId } = {}) {
       trace.stages.candidate = selection.tokens.totalMessages || 0;
     },
 
-    recordRetrieval(outcome, adjudication) {
+    recordRetrieval(outcome, adjudication, diagnostics) {
+      const funnel = diagnostics && diagnostics.funnel ? diagnostics.funnel : null;
+      const excluded = diagnostics && diagnostics.excluded ? diagnostics.excluded : null;
+      const reasons =
+        diagnostics && diagnostics.visibilityReasons
+          ? diagnostics.visibilityReasons
+          : null;
+
       trace.retrieval = {
         source: 'memory',
         status: outcome.status || null,
-        candidates: outcome.count || 0,
+        // candidates 是候选池大小（进入排序之前的可见记忆数），
+        // returned 是本次实际返回条数；两者必须分开，不能互相冒充。
+        candidates: funnel && Number.isFinite(funnel.candidates)
+          ? funnel.candidates
+          : outcome.count || 0,
+        returned: funnel && Number.isFinite(funnel.returned)
+          ? funnel.returned
+          : outcome.count || 0,
         accepted: adjudication ? adjudication.accepted.length : 0,
+        scopeMode: diagnostics ? diagnostics.scopeMode || null : null,
+        funnel,
+        excluded,
+        visibilityReasons: reasons,
         skipped: adjudication
           ? adjudication.skipped.slice(0, 100).map(item => ({
               id: sanitizeId(item.id),
@@ -236,6 +294,8 @@ function createTrace({ task, sessionId, ts, requestId } = {}) {
     },
 
     recordBuild(build, inputFit) {
+      const measurement = inputFit ? inputFit.measurement : null;
+
       trace.build = {
         ok: build.ok === true && (!inputFit || inputFit.ok !== false),
         error: build.error
@@ -260,7 +320,17 @@ function createTrace({ task, sessionId, ts, requestId } = {}) {
           reason: sanitizeReason(item.reason),
           ...(Number.isFinite(item.priority) ? { priority: item.priority } : {}),
         })),
-        measurement: inputFit ? inputFit.measurement : null,
+        measurement,
+        // 上下文块 Token 归属（估算器口径，非 Provider 计数）。
+        blockTokens: measurement && Array.isArray(measurement.blocks)
+          ? measurement.blocks.map(block => ({
+              id: sanitizeId(block.id),
+              kind: block.kind,
+              tokens: block.tokens,
+            }))
+          : [],
+        memoryTokens: measurement ? measurement.memoryTokens ?? null : null,
+        tokenSource: measurement ? measurement.tokenSource || 'estimate' : null,
       };
 
       const injectedMessageIds =
@@ -314,14 +384,75 @@ function createTrace({ task, sessionId, ts, requestId } = {}) {
         toolsCount,
         providerId: sanitizeId(model.providerId),
         modelId: sanitizeId(model.modelId),
+        providerKind: model.providerKind || null,
         systemLength: list[0] && list[0].role === 'system'
           ? textLength(String(list[0].content || ''))
           : 0,
+        // 发送内容的指纹：可用来核对「实际发出去的就是这一份」，
+        // 而不必把正文写进 trace（隐私）。
+        contentHash: hashMessages(list),
+        estimatedTokens: estimateMessagesTokens(list),
+        tokenSource: 'estimate',
       });
       trace.stages.sent = Math.max(
         trace.stages.sent,
         nonSystem.length + (Array.isArray(contextIds) ? contextIds.length : 0)
       );
+    },
+
+    /**
+     * 记录 Provider 返回的真实 usage。
+     * 与 recordSent 的 estimatedTokens 配对，才能回答「估算 vs 真实差多少」。
+     * providerKind='stub' 时 usageSource 记 'stub'，绝不冒充真实调用统计。
+     */
+    recordProviderUsage({ round = 1, usage = null, providerKind = null, tolerance = 0.35 } = {}) {
+      const promptTokens = Number.isFinite(usage && usage.prompt_tokens)
+        ? usage.prompt_tokens
+        : null;
+      const completionTokens = Number.isFinite(usage && usage.completion_tokens)
+        ? usage.completion_tokens
+        : null;
+      const totalTokens = Number.isFinite(usage && usage.total_tokens)
+        ? usage.total_tokens
+        : Number.isFinite(promptTokens) && Number.isFinite(completionTokens)
+          ? promptTokens + completionTokens
+          : null;
+
+      const usageSource =
+        providerKind === 'stub'
+          ? 'stub'
+          : promptTokens !== null || completionTokens !== null
+            ? 'provider'
+            : 'missing';
+
+      const sentRound = trace.sent.rounds.find(item => item.round === round);
+      const estimated =
+        sentRound && Number.isFinite(sentRound.estimatedTokens)
+          ? sentRound.estimatedTokens
+          : null;
+      const estimateRatio =
+        Number.isFinite(promptTokens) && Number.isFinite(estimated) && estimated > 0
+          ? +(promptTokens / estimated).toFixed(4)
+          : null;
+
+      trace.sent.usage.push({
+        round,
+        providerKind: providerKind || null,
+        usageSource,
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        estimatedInputTokens: estimated,
+        estimateRatio,
+        // 只有真实 Provider 的计数才有校准意义；stub 的数字不参与判定。
+        calibration: usageSource === 'provider',
+        withinTolerance:
+          usageSource === 'provider' && estimateRatio !== null
+            ? Math.abs(estimateRatio - 1) <= tolerance
+            : null,
+      });
+
+      return trace.sent.usage[trace.sent.usage.length - 1];
     },
 
     toJSON() {

@@ -16,7 +16,8 @@ const PERSONA_FILE = path.join(DATA_DIR, 'persona.json');
 const PERSONA_VERSION = 1;
 
 // 默认值对齐 Blue 当前表现：恢复默认 ≈ 行为不变。
-// messageMode: single 强制单条（与旧行为一致）/ auto 自然分条 / frequent 倾向多条。
+// messageMode: 仅表达风格提示（single / auto / frequent），不再决定消息拆分；
+// 一条回复默认落一条消息，只有超过单条硬上限才按语义边界分片。
 // customPrompt: 用户在控制面板自行撰写的人格提示词；空串 = 不注入自定义块。
 // systemPrompt: 用户在控制面板编辑的完整后端系统提示词；空串 = 使用内置默认。
 const DEFAULTS = Object.freeze({

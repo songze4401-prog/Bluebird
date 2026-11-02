@@ -118,6 +118,8 @@ const definition = Object.freeze({
     const sessionId = context
       ? context.memoryScopeSessionId || context.sessionId || null
       : null;
+    // 长期记忆是用户级：userId 来自服务端可信身份，用于匹配 visibility='user' 的 chunk。
+    const userId = context && context.userId ? context.userId : null;
     let sources = args.sources;
     if (!sessionId) {
       sources = (sources || SOURCES).filter(
@@ -128,6 +130,7 @@ const definition = Object.freeze({
     const found = await retrieval.search({
       query: args.query,
       sessionId,
+      userId,
       sources,
       purpose: 'agent_tool',
       limit: args.limit,

@@ -86,7 +86,7 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - 取消：`POST /agent-tasks/:taskId/cancel` 标记取消并中止模型/工具调用；终态任务不可回写。
 - 流式：`POST /agents/:botId/chat/stream` 使用真实 Token 级 delta（来自 Provider 流式响应），保留 `tool_start`/`tool_end` 状态事件；工具轮不把参数或内部推理下发。UI 通过 XHR SSE 逐字渲染，并保留工具摘要。
 - 工作台交互：流式期间提供停止按钮；切换会话/新建会话会 abort 当前流并丢弃迟到结果，不会把旧会话回复写进新会话。工作台直接创建的是独立 Bot 任务（无 `parentSessionId`），任务卡明确显示归属；主控委派任务才显示父会话归属。维护表单的 update 默认不下发 `type`（保持原类型），withdraw 的记忆 scope 只写入 `payload.sessionId`，不把 Bot 会话混作记忆 scope。
-- 主控派发：主 Agent 工具表新增 `delegate_to_bot`（仅主控可用，Bot 自身 allowlist 不包含它）；工具 schema 与成功返回形状保持不变，内部改为兼容适配器，把任务交给 Router 的统一决策链（能力匹配 → Policy 校验 → 创建任务 → 入队），任务带 `parentSessionId` / `parentMessageId`。`parentMessageId` 取本轮用户消息 id：id 在模型回合之前生成（`prepareChatRequest`），经 `ctx.userMessageId` 传入 `runAgentTurn` 再传给工具，落盘时复用同一个 id，所以任务里的引用与 `/history` 里的用户消息是同一条（续写模式没有新用户消息，`parentMessageId` 为 null）。主控任务页读取 `GET /agent-tasks?parentSessionId=...`，不是静态占位。用户明确点名 Memory Bot / 子 agent 时，`runAgentTurn` 会先由运行时直接调用 `delegate_to_bot`（`enforceExplicitDelegation`），不依赖模型是否自发发起工具调用；策略未允许该工具时不派发，并注入「当前无法派发」说明。识别是确定性纯函数 `server/delegation-intent.js`，否定句、元问题与回看旧任务不触发。
+- 主控派发：主 Agent 工具表新增 `delegate_to_bot`（仅主控可用，Bot 自身 allowlist 不包含它）；工具 schema 与成功返回形状保持不变，内部改为兼容适配器，把任务交给 Router 的统一决策链（能力匹配 → Policy 校验 → 创建任务 → 入队），任务带 `parentSessionId` / `parentMessageId`。`parentMessageId` 取本轮用户消息 id：id 在模型回合之前生成（`prepareChatRequest`），经 `ctx.userMessageId` 传入 `runAgentTurn` 再传给工具，落盘时复用同一个 id，所以任务里的引用与 `/history` 里的用户消息是同一条（续写模式没有新用户消息，`parentMessageId` 为 null）。主控任务页读取 `GET /agent-tasks?parentSessionId=...`，不是静态占位。
 - 控制面一期：`delegate_to_bot` 与 `POST /agent-tasks` 统一走 `server/agents/router.js`；任务新增 `contractVersion` / `agentId` / `workerSessionId` / `priority` / `contextRef` / `idempotencyKey` / `route` / `budget`（`botId` / `sessionId` 是同值兼容别名），Fast/Slow 预算在创建时快照、执行时不再读配置；路由决策写 `route.decided` / `route.rejected` 事件（不含正文）。详见 `docs/agent-runtime-stage1.md`。
 - Worker 执行协议：每次任务执行有独立 `runId`、心跳与 checkpoint 事件、会话 owner/作用域/生命周期和统一结果 schema（completed/failed/cancelled/timed_out 同形）；上下文只投影任务指令与授权数据，工具调用先过任务白名单网关。详见 `docs/agent-runtime-stage2.md`。
 - 状态持久化与恢复：任务迁移由 `state-machine.js` 校验，Store 接口 `task-store.js` 负责 schema v1→v2；租约/心跳/retryAt/lastErrorCode/checkpointVersion/runs 落库；重启时只读任务重排队、含写工具的任务标记 `uncertain` 需人工处理；结果投递按 taskId 幂等。详见 `docs/agent-runtime-stage3.md`。
@@ -183,12 +183,12 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - `node tests/memory-bot.test.js`：9 项，覆盖 Registry、AES-256-GCM 密文/重启解密、真实 `/models` 验证、Bot 会话、独立 Key 工具循环、工具预算截断后的无工具总结、任务裁剪只删已投递终态、任务/审批 API、token SSE/工具事件、并发队列/恢复/失败隔离。
 - `node tests/delete-semantics.test.js`：43 项，覆盖会话删除后的附件回收/共享保留与派生索引清理、历史清理、记忆删除/按会话清理后的派生索引同步。
 - `node tests/memory-maintenance.test.js`：5 项，覆盖 update/merge/supersede/archive/withdraw/delete、维护门面白名单、审批闭环、事件不含正文、权限拒绝。
-- `node tests/agent-dispatch.test.js`：13 项，覆盖主控工具派发、显式委派意图识别与运行时强制派发（含策略拒绝场景）、主控记忆→委派 Bot 的父会话读/写 scope、审批 waiting/完成/拒绝投递、结果 SSE/snapshot、失败回传、重复投递防护、主 Agent 工具循环与事件 outbox 恢复。
+- `node tests/agent-dispatch.test.js`：13 项，覆盖主控工具派发、主控记忆→委派 Bot 的父会话读/写 scope、审批 waiting/完成/拒绝投递、结果 SSE/snapshot、失败回传、重复投递防护、主 Agent 工具循环与事件 outbox 恢复。
 - `npx jest tests/unit/memory-bot-screen.test.tsx`：5 项，覆盖团队页、工作台/流式回退、流式停止与切会话丢弃旧结果、Prompt/工具白名单、任务表单、维护 scope/类型、审批操作。
 - `npx jest tests/unit/agent-results-stream.test.ts`：1 项，覆盖结果 SSE 的 401 永久失败、5xx/200 干净关闭可重试、主动 abort 为 `closed` 的连接分类。
 - `npx jest tests/unit/use-bot-result-stream.test.tsx`：2 项，覆盖 Hook 对永久错误只提示不重连、可重试错误按 1s 退避重连、snapshot 打开后重置延迟。
 - `npx jest tests/unit/app-smoke.test.tsx`：1 项，覆盖 App 组合根聊天首屏与设置抽屉的 Agent 团队入口。
-- 全量：`npm test` 60 个后端文件 / 1839 项；Jest 22 套 / 183 项；覆盖率校验 backend 1839/1839、runner 1618/1618、frontend 183/183；tsc/lint 通过（以最终交付命令输出为准）。
+- 全量：`npm test` 67 个后端文件 / 1952 项；Jest 22 套 / 183 项；覆盖率校验 backend 1952/1952、runner 1730/1730、frontend 183/183；tsc/lint 通过（以最终交付命令输出为准）。
 - Expo Web export 成功；浏览器 DOM 核对：Agent 团队入口、真实 Memory Bot 状态、工作台三页签、配置页真实服务商/脱敏 Key、维护申请表单与审批列表可渲染；浏览器实际提交一条 update 维护申请后，服务端返回 pending 并在审批列表显示。
 
 ### 8.1 Stub 与真实模型测试区分
@@ -220,9 +220,9 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 
 | 阶段 | 实际实现 | 验收证据 |
 |---|---|---|
-| P0 主控派发 + 结果回传 + 事件 outbox | 主 Agent `delegate_to_bot` 工具、显式委派意图的运行时强制派发、`parentSessionId`、父会话记忆读/写 scope、审批结果投递、Result Delivery SSE、任务页真实读取、事件 outbox | `tests/agent-dispatch.test.js` 13 项 |
+| P0 主控派发 + 结果回传 + 事件 outbox | 主 Agent `delegate_to_bot` 工具、`parentSessionId`、父会话记忆读/写 scope、审批结果投递、Result Delivery SSE、任务页真实读取、事件 outbox | `tests/agent-dispatch.test.js` 10 项 |
 | P0 记忆维护 + 人工审批 | `memory.updateMemory/mergeMemories/supersedeMemory/withdrawMemory` + `archive/delete` 复用；`memory-service` 白名单；`approvals` 状态机与 API | `tests/memory-maintenance.test.js` 5 项；审批 API 前后状态测试 |
 | P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；工具预算截断后无工具总结；任务裁剪只删已投递终态；Provider token delta；停止/切会话 abort；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 9 项；SSE/tool event 测试；Jest 5 项工作台测试 + 1 项 App 冒烟 |
 | P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；维护申请表单；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验、真实模型 HTTP SSE E2E |
 
-“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1839/1839、nodeSuite 221/221、runner 1618/1618、frontend 183/183、CI 60/60。
+“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1952/1952、nodeSuite 222/222、runner 1730/1730、frontend 183/183、CI 67/67。

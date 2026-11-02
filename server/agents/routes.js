@@ -16,6 +16,7 @@ const resultDelivery = require('./result-delivery');
 const mainSessions = require('../sessions');
 const approvals = require('./approvals');
 const permissions = require('./permissions');
+const { resolveUserId } = require('../user-scope');
 const { describeAgentError } = require('./errors');
 
 function sendError(res, error) {
@@ -290,6 +291,8 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
         const result = await runtime.chat(botId, {
           sessionId: body.sessionId,
           message: body.message,
+          // 直接对话也是用户级记忆读：身份只来自服务端，不读 body.userId。
+          userId: resolveUserId(req),
           signal: controller.signal,
           stream: true,
           onDelta: delta => {
@@ -322,6 +325,8 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
       const result = await runtime.chat(req.params.botId, {
         sessionId: body.sessionId,
         message: body.message,
+        // 与流式入口一致：Bot 直接对话按服务端可信用户身份读长期记忆。
+        userId: resolveUserId(req),
       });
       res.json(result);
     })

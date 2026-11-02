@@ -19,6 +19,12 @@
 | 外部通知（短信/邮件/Webhook） | 未实现 | 未配置，不假设已连接 |
 | 成本金额 | 未配置 | 无费率/账单来源，API 返回 `not_configured`，不编造金额 |
 | 模型实际消费（consumed） | 未采集 | Trace 固定 `null`；HTTP 成功不等于模型使用了每条内容 |
+| 记忆检索漏斗（候选/命中/注入） | 已实现、已验证 | `diagnostics.funnel` + `trace.retrieval.funnel`；`tests/memory-observability.test.js` |
+| 记忆过滤原因分解 | 已实现、已验证 | `visibilityReasons`（过期/被替代/归档/待确认/未生效）+ `memory_retrieval_excluded_total` |
+| 注入 Token 归属 | 已实现、已验证（估算器口径） | `measureRequest.blocks[]` / `memoryTokens`，标 `token_source=estimate` |
+| 发送内容指纹 | 已实现、已验证 | `trace.sent.rounds[].contentHash`，端到端用 `tests/context-trace-verify.test.js` 复算核对 |
+| Token 估算 vs 供应商对账 | 已实现、已验证（桩） | `trace.sent.usage[]` + `context.tokens.reconciled`；真实 Provider 收敛待部署验证 |
+| 桩 / 真实 Provider 区分 | 已实现、已验证 | `providerKind()` + `usage_source` 三态；`BLUEBIRD_PROVIDER_KIND` 显式声明优先 |
 
 ## 2. 当前真实调用链映射（阶段 0）
 

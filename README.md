@@ -29,7 +29,7 @@ npx expo start             # Metro :8081
 ## Quality gates
 
 ```bash
-npm test                    # backend: auto-discovers tests/*.test.js (60 files / 1839 checks)
+npm test                    # backend: auto-discovers tests/*.test.js (67 files / 1952 checks)
 npm run test:unit -- --ci   # frontend: 22 suites / 183 cases
 npx tsc --noEmit            # TypeScript
 npm run lint                # Expo ESLint

@@ -486,6 +486,7 @@ async function executeToolCall(name, rawArgs, context) {
       def.handler(validated.args, {
         sessionId: context.sessionId,
         memoryScopeSessionId: context.memoryScopeSessionId || context.sessionId,
+        userId: context.userId || null,
         userText: context.userText,
         userMessageId: context.userMessageId,
         signal: controller.signal,
@@ -606,6 +607,7 @@ async function runAgentTurn({
   modelId,
   messages,
   sessionId,
+  userId = null,
   userText = '',
   userMessageId = null,
   // 记忆作用域与对话作用域分开：委派任务用父主控会话作为记忆 scope，
@@ -693,6 +695,7 @@ async function runAgentTurn({
     const toolContext = {
       sessionId,
       memoryScopeSessionId: memoryScopeSessionId || sessionId,
+      userId,
       userText,
       userMessageId,
       cache,

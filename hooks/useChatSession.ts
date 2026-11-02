@@ -420,9 +420,10 @@ export function useChatSession({
         // 流式回复的临时气泡前缀：流式期按分段规则切成 tempId#0..#n
         const streamTempId = `stream-${makeLocalId()}`;
         const streamCreatedAt = new Date().toISOString();
-        // 累计正文与分段模式：模式由服务端 meta 事件下发（默认 auto）
+        // 累计正文与分段参数：模式/单条上限由服务端 meta 事件下发
         let streamedText = '';
         let streamMode: StreamMode = 'auto';
+        let streamMaxChars: number | undefined;
 
         const outcome = await streamChatRequest(payload, {
           signal: controller.signal,
@@ -433,6 +434,13 @@ export function useChatSession({
               meta.messageMode === 'frequent'
             ) {
               streamMode = meta.messageMode;
+            }
+            if (
+              typeof meta.replyMaxChars === 'number' &&
+              Number.isInteger(meta.replyMaxChars) &&
+              meta.replyMaxChars > 0
+            ) {
+              streamMaxChars = meta.replyMaxChars;
             }
           },
           onToolEvent: event => {
@@ -457,7 +465,8 @@ export function useChatSession({
                 streamTempId,
                 streamedText,
                 streamMode,
-                streamCreatedAt
+                streamCreatedAt,
+                streamMaxChars
               )
             );
           },

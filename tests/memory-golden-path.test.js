@@ -291,8 +291,8 @@ function check(name, cond, extra = '') {
   const roundThreeCall = mainAfterIsolation[mainAfterIsolation.length - 1];
   const roundThreeSystem = roundThreeCall ? String(roundThreeCall.system || '') : '';
   check(
-    '第3轮（新 Session）最终请求不含上一会话记忆',
-    !roundThreeSystem.includes('用户喜欢喝美式咖啡'),
+    '第3轮（新 Session）最终请求能召回上一会话的长期记忆（P1 用户级作用域）',
+    roundThreeSystem.includes('用户喜欢喝美式咖啡'),
     roundThreeSystem.slice(0, 300)
   );
 

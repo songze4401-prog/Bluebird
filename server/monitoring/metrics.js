@@ -46,8 +46,8 @@ const METRIC_DEFINITIONS = Object.freeze({
   model_requests_total: {
     type: 'counter',
     unit: 'requests',
-    description: '真实发往模型服务商的请求数（按服务商/模型/结果）',
-    labels: ['provider_id', 'model_id', 'status', 'kind'],
+    description: '真实发往模型服务商的请求数（按服务商/模型/结果/端点性质）',
+    labels: ['provider_id', 'model_id', 'status', 'kind', 'provider_kind'],
   },
   model_request_duration_ms: {
     type: 'histogram',
@@ -59,8 +59,9 @@ const METRIC_DEFINITIONS = Object.freeze({
   model_tokens_total: {
     type: 'counter',
     unit: 'tokens',
-    description: '模型 Token 用量；usage_source=provider 为供应商真实用量，missing 为未提供',
-    labels: ['provider_id', 'model_id', 'token_kind', 'usage_source'],
+    description:
+      '模型 Token 用量；usage_source=provider 为供应商真实用量，stub 为本地桩返回，missing 为未提供',
+    labels: ['provider_id', 'model_id', 'token_kind', 'usage_source', 'provider_kind'],
   },
   model_cached_tokens_total: {
     type: 'counter',
@@ -106,6 +107,19 @@ const METRIC_DEFINITIONS = Object.freeze({
     description: '记忆检索调用数（成功/空结果/检索错误/会话隔离跳过）',
     labels: ['status'],
   },
+  memory_retrieval_excluded_total: {
+    type: 'counter',
+    unit: 'items',
+    description:
+      '记忆未进入候选池/未返回的条数（按原因：expired/superseded/archived/pending/not_yet_valid/scope/low_relevance/...）',
+    labels: ['reason'],
+  },
+  memory_injected_tokens_total: {
+    type: 'counter',
+    unit: 'tokens',
+    description: '记忆块注入 Token（估算器口径，非供应商计数）',
+    labels: ['source'],
+  },
   memory_injected_items_total: {
     type: 'counter',
     unit: 'items',
@@ -129,6 +143,14 @@ const METRIC_DEFINITIONS = Object.freeze({
     unit: 'tokens',
     description: '上下文 Token 计量：输入估算、模型窗口、输出预留',
     labels: ['kind', 'source'],
+  },
+  context_token_estimate_ratio: {
+    type: 'histogram',
+    unit: 'ratio',
+    description:
+      '供应商 prompt_tokens ÷ 本地估算输入 Token；仅真实 Provider 计入校准，stub 单独标记',
+    labels: ['provider_kind', 'calibration'],
+    buckets: [0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 2, 3],
   },
   sse_connections_total: {
     type: 'counter',

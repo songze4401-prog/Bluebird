@@ -351,8 +351,38 @@ function monitoringMiddleware() {
 
 // ---- 领域埋点 ----
 
-function beginModelCall({ providerId, modelId, kind = 'chat', round = 1, toolsCount = 0, stream = false }) {
+/**
+ * Provider 端点性质：区分「本地桩」与「已配置的真实服务商」。
+ *
+ * 判定优先级（高 → 低）：
+ * 1. `BLUEBIRD_PROVIDER_KIND` 显式声明：'stub' | 'configured'。测试进程与
+ *    任何模块级桩都必须靠它显式声明——这是唯一不会猜错的口径。
+ * 2. `BLUEBIRD_ALLOW_PRIVATE_BASE_URL=1`：model-adapter 里专供本地 mock 服务商
+ *    的测试旁路，生产禁止开启，开着即判 stub。
+ * 3. 其余 → 'configured'（已配置的服务商端点）。
+ *
+ * 不按域名/端口猜：本地也可能跑真实模型服务（见 AGENTS.md 的 ONNX 验证），
+ * 靠猜测标注反而会造假。宁可要求显式声明，也不默认把桩当真实。
+ */
+function providerKind() {
+  const declared = process.env.BLUEBIRD_PROVIDER_KIND;
+  if (declared === 'stub') return 'stub';
+  if (declared === 'configured' || declared === 'real') return 'configured';
+  return process.env.BLUEBIRD_ALLOW_PRIVATE_BASE_URL === '1' ? 'stub' : 'configured';
+}
+
+function beginModelCall({
+  providerId,
+  modelId,
+  kind = 'chat',
+  round = 1,
+  toolsCount = 0,
+  stream = false,
+  providerKind: kindOverride = null,
+}) {
   if (!ACTIVE) return { active: false, complete() {}, fail() {} };
+
+  const endpointKind = kindOverride || providerKind();
 
   const span = startSpan('model.request', {
     provider_id: providerId,
@@ -361,6 +391,7 @@ function beginModelCall({ providerId, modelId, kind = 'chat', round = 1, toolsCo
     round,
     tools_count: toolsCount,
     stream,
+    provider_kind: endpointKind,
   });
 
   recordEvent({
@@ -383,13 +414,19 @@ function beginModelCall({ providerId, modelId, kind = 'chat', round = 1, toolsCo
     if (settled) return;
     settled = true;
 
-    const usageSource =
+    const hasUsage = Boolean(
       usage &&
-      (Number.isFinite(usage.prompt_tokens) ||
-        Number.isFinite(usage.completion_tokens) ||
-        Number.isFinite(usage.total_tokens))
-        ? 'provider'
-        : 'missing';
+        (Number.isFinite(usage.prompt_tokens) ||
+          Number.isFinite(usage.completion_tokens) ||
+          Number.isFinite(usage.total_tokens))
+    );
+
+    // 桩返回的 usage 一律标 stub：既不是缺失，也绝不能算成供应商真实用量。
+    const usageSource = hasUsage
+      ? endpointKind === 'stub'
+        ? 'stub'
+        : 'provider'
+      : 'missing';
 
     const promptTokens = Number.isFinite(usage && usage.prompt_tokens)
       ? usage.prompt_tokens
@@ -418,6 +455,7 @@ function beginModelCall({ providerId, modelId, kind = 'chat', round = 1, toolsCo
         model_id: modelId,
         status,
         kind,
+        provider_kind: endpointKind,
       });
       metrics.observe(
         'model_request_duration_ms',
@@ -432,6 +470,7 @@ function beginModelCall({ providerId, modelId, kind = 'chat', round = 1, toolsCo
             model_id: modelId,
             token_kind: 'input',
             usage_source: usageSource,
+            provider_kind: endpointKind,
           },
           promptTokens
         );
@@ -444,6 +483,7 @@ function beginModelCall({ providerId, modelId, kind = 'chat', round = 1, toolsCo
             model_id: modelId,
             token_kind: 'output',
             usage_source: usageSource,
+            provider_kind: endpointKind,
           },
           completionTokens
         );
@@ -456,6 +496,7 @@ function beginModelCall({ providerId, modelId, kind = 'chat', round = 1, toolsCo
             model_id: modelId,
             token_kind: 'unknown',
             usage_source: usageSource,
+            provider_kind: endpointKind,
           },
           1
         );
@@ -478,12 +519,13 @@ function beginModelCall({ providerId, modelId, kind = 'chat', round = 1, toolsCo
           if (!trace.model.model_ids.includes(modelId)) {
             trace.model.model_ids.push(modelId);
           }
+          trace.model.provider_kind = endpointKind;
           if (totalTokens !== null) {
             trace.model.input_tokens = (trace.model.input_tokens || 0) + (promptTokens || 0);
             trace.model.output_tokens =
               (trace.model.output_tokens || 0) + (completionTokens || 0);
             trace.model.total_tokens = (trace.model.total_tokens || 0) + totalTokens;
-            trace.model.usage_source = 'provider';
+            trace.model.usage_source = usageSource;
           }
           if (cachedTokens !== null) {
             trace.model.cached_tokens =
@@ -509,6 +551,7 @@ function beginModelCall({ providerId, modelId, kind = 'chat', round = 1, toolsCo
           total_tokens: totalTokens,
           cached_tokens: cachedTokens,
           usage_source: usageSource,
+          provider_kind: endpointKind,
         },
       });
 
@@ -897,7 +940,18 @@ function recordContextBuild({ runtime, durationMs = 0 } = {}) {
           recalled: traceData.history ? traceData.history.recalled : null,
           summarized: traceData.history ? traceData.history.summarized : null,
           memory_candidates: traceData.retrieval ? traceData.retrieval.candidates : null,
+          memory_returned: traceData.retrieval ? traceData.retrieval.returned : null,
           memory_accepted: runtime.memory ? runtime.memory.accepted.length : null,
+          memory_funnel: traceData.retrieval ? traceData.retrieval.funnel || null : null,
+          memory_excluded: traceData.retrieval
+            ? traceData.retrieval.excluded || null
+            : null,
+          memory_visibility_reasons: traceData.retrieval
+            ? traceData.retrieval.visibilityReasons || null
+            : null,
+          memory_scope_mode: traceData.retrieval
+            ? traceData.retrieval.scopeMode || null
+            : null,
           summary_count: runtime.summary ? runtime.summary.count : null,
           dropped_count: Array.isArray(runtime.dropped) ? runtime.dropped.length : 0,
           dropped: Array.isArray(runtime.dropped)
@@ -918,6 +972,16 @@ function recordContextBuild({ runtime, durationMs = 0 } = {}) {
               : [],
           window: measurement.window || null,
           estimated_input_tokens: measurement.estimatedInputTokens ?? null,
+          token_source: measurement.tokenSource || null,
+          block_tokens: Array.isArray(measurement.blocks)
+            ? measurement.blocks.slice(0, 20).map(block => ({
+                id: block.id || null,
+                kind: block.kind || null,
+                tokens: block.tokens,
+              }))
+            : null,
+          memory_tokens: measurement.memoryTokens ?? null,
+          knowledge_tokens: measurement.knowledgeTokens ?? null,
           system_tokens: measurement.systemTokens ?? null,
           history_tokens: measurement.historyTokens ?? null,
           current_tokens: measurement.currentTokens ?? null,
@@ -976,6 +1040,38 @@ function recordContextBuild({ runtime, durationMs = 0 } = {}) {
       }
     }
 
+    // 记忆被排除的原因分布：让「为什么没注入」可聚合，而不是只能翻单条 trace。
+    const retrieval = traceData.retrieval || {};
+    const excluded = retrieval.excluded || {};
+    const visibilityReasons = retrieval.visibilityReasons || {};
+    const reasonCounts = {
+      expired: visibilityReasons.expired,
+      superseded: visibilityReasons.superseded,
+      archived: visibilityReasons.archived,
+      pending: visibilityReasons.pending,
+      not_yet_valid: visibilityReasons.not_yet_valid,
+      unknown_status: visibilityReasons.unknown_status,
+      scope: excluded.session_scope,
+      status_filter: excluded.status,
+      source_filter: excluded.source,
+      time_filter: excluded.time,
+      low_relevance: excluded.irrelevant,
+      invalid: excluded.invalid,
+    };
+    for (const [reason, value] of Object.entries(reasonCounts)) {
+      if (Number.isFinite(value) && value > 0) {
+        metrics.increment('memory_retrieval_excluded_total', { reason }, value);
+      }
+    }
+
+    if (Number.isFinite(measurement.memoryTokens) && measurement.memoryTokens > 0) {
+      metrics.increment(
+        'memory_injected_tokens_total',
+        { source: measurement.tokenSource || 'estimate' },
+        measurement.memoryTokens
+      );
+    }
+
     const eventName = runtime.ok
       ? EVENTS.CONTEXT_BUILD_COMPLETED
       : EVENTS.CONTEXT_BUILD_REJECTED;
@@ -1023,6 +1119,102 @@ function recordContextBuild({ runtime, durationMs = 0 } = {}) {
     });
   } catch (_) {
     INTERNAL_ERRORS += 1;
+  }
+}
+
+/**
+ * Token 对账：把「本地估算的输入 Token」与「供应商返回的 prompt_tokens」配对。
+ *
+ * 这是唯一能把估算值和真实值区分开的地方：
+ * - usage_source='provider' → 真实供应商计数，参与校准判定；
+ * - usage_source='stub'     → 本地桩返回，只记录不校准（绝不冒充真实统计）；
+ * - usage_source='missing'  → 供应商没给 usage，ratio 为 null，不猜。
+ */
+function recordTokenReconciliation({
+  estimatedInputTokens = null,
+  promptTokens = null,
+  providerKind: kindOverride = null,
+  tolerance = 0.35,
+} = {}) {
+  if (!ACTIVE) return null;
+
+  const endpointKind = kindOverride || providerKind();
+  const hasPrompt = Number.isFinite(promptTokens) && promptTokens > 0;
+  const usageSource = hasPrompt
+    ? endpointKind === 'stub'
+      ? 'stub'
+      : 'provider'
+    : 'missing';
+  const ratio =
+    hasPrompt && Number.isFinite(estimatedInputTokens) && estimatedInputTokens > 0
+      ? +(promptTokens / estimatedInputTokens).toFixed(4)
+      : null;
+  const calibration = usageSource === 'provider';
+  const withinTolerance =
+    calibration && ratio !== null ? Math.abs(ratio - 1) <= tolerance : null;
+
+  try {
+    const traceId = context.currentTraceId();
+    if (traceId) {
+      store.updateTrace(traceId, trace => {
+        trace.tokens = {
+          estimated_input_tokens: estimatedInputTokens,
+          prompt_tokens: hasPrompt ? promptTokens : null,
+          estimate_ratio: ratio,
+          tolerance,
+          within_tolerance: withinTolerance,
+          usage_source: usageSource,
+          provider_kind: endpointKind,
+          calibration_applicable: calibration,
+        };
+      });
+    }
+
+    if (ratio !== null) {
+      metrics.observe(
+        'context_token_estimate_ratio',
+        {
+          provider_kind: endpointKind,
+          calibration: calibration ? 'true' : 'false',
+        },
+        ratio
+      );
+    }
+
+    if (hasPrompt) {
+      metrics.increment(
+        'context_tokens_total',
+        { kind: 'input_provider', source: endpointKind },
+        promptTokens
+      );
+    }
+
+    recordEvent({
+      event_name: EVENTS.CONTEXT_TOKENS_RECONCILED,
+      component: 'context',
+      status: withinTolerance === false ? 'degraded' : 'success',
+      attributes: {
+        estimated_input_tokens: estimatedInputTokens,
+        prompt_tokens: hasPrompt ? promptTokens : null,
+        estimate_ratio: ratio,
+        tolerance_ratio: tolerance,
+        within_tolerance: withinTolerance,
+        usage_source: usageSource,
+        provider_kind: endpointKind,
+        calibration_applicable: calibration,
+      },
+    });
+
+    return {
+      ratio,
+      withinTolerance,
+      usageSource,
+      providerKind: endpointKind,
+      calibration,
+    };
+  } catch (_) {
+    INTERNAL_ERRORS += 1;
+    return null;
   }
 }
 
@@ -1368,6 +1560,9 @@ function buildOverview({ from, to, now = Date.now() }) {
       .reduce((sum, row) => sum + row.count, 0);
   const providerInput = tokensBy('input', 'provider');
   const providerOutput = tokensBy('output', 'provider');
+  // 桩用量单独统计：既不能被算成供应商真实用量，也不能直接丢掉（否则像"没调用"）。
+  const stubInput = tokensBy('input', 'stub');
+  const stubOutput = tokensBy('output', 'stub');
   const missingUsage = tokenRows
     .filter(row => row.labels.usage_source === 'missing' && row.labels.token_kind === 'unknown')
     .reduce((sum, row) => sum + row.count, 0);
@@ -1459,6 +1654,12 @@ function buildOverview({ from, to, now = Date.now() }) {
         { label: '失败/超时', value: modelFailed, unit: 'requests' },
         { label: '输入 Token（供应商）', value: providerInput || null, unit: 'tokens' },
         { label: '输出 Token（供应商）', value: providerOutput || null, unit: 'tokens' },
+        {
+          label: '输入 Token（桩，不计入真实）',
+          value: stubInput || null,
+          unit: 'tokens',
+        },
+        { label: '输出 Token（桩，不计入真实）', value: stubOutput || null, unit: 'tokens' },
         { label: '用量缺失请求', value: missingUsage, unit: 'requests' },
         { label: 'P95 耗时', value: modelDurations.p95 ? modelDurations.p95.value : null, unit: 'ms', approximate: true },
         {
@@ -1932,6 +2133,8 @@ module.exports = {
   recordModelRoute,
   beginMemorySearch,
   recordContextBuild,
+  recordTokenReconciliation,
+  providerKind,
   recordSent,
   recordPersistence,
   recordSessionLoaded,

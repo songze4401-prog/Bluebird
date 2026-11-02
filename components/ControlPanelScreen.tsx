@@ -48,15 +48,15 @@ const SLIDERS: SliderDef[] = [
 ];
 
 const MODE_OPTIONS: { id: PersonaConfig['messageMode']; label: string }[] = [
-  { id: 'single', label: '单条回复' },
-  { id: 'auto', label: '自动判断分几条' },
-  { id: 'frequent', label: '更频繁地连续发送' },
+  { id: 'single', label: '单段表达' },
+  { id: 'auto', label: '自然分段' },
+  { id: 'frequent', label: '多短段' },
 ];
 
 const MODE_LABEL: Record<PersonaConfig['messageMode'], string> = {
-  single: '单条回复',
-  auto: '自动判断',
-  frequent: '频繁连续',
+  single: '单段表达',
+  auto: '自然分段',
+  frequent: '多短段',
 };
 
 const AGENT_MODES: {
@@ -742,7 +742,7 @@ export function ControlPanelScreen({
               ))}
 
               <View style={styles.modeBlock}>
-                <Text style={styles.sliderTitle}>连续消息模式</Text>
+                <Text style={styles.sliderTitle}>分段风格（始终一条消息）</Text>
 
                 {MODE_OPTIONS.map(option => {
                   const active = config.messageMode === option.id;

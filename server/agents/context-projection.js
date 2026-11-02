@@ -7,6 +7,8 @@
  * 会话，也不返回任何会话存储句柄——这是 Session 隔离的接口保证。
  */
 
+const { getInstanceUserId } = require('../user-scope');
+
 const INSTRUCTION_MAX = 9000;
 
 function buildTaskInstruction(task) {
@@ -42,6 +44,9 @@ function projectWorkerContext({ task, systemPrompt }) {
       { role: 'user', content: buildTaskInstruction({ ...task, allowedTools }) },
     ],
     memoryScopeSessionId: task.parentSessionId || task.workerSessionId || null,
+    // 长期记忆是用户级：委派任务沿用父请求的可信用户身份；
+    // 旧任务没有该字段时回落到实例用户（服务端身份，不读客户端传参）。
+    userId: task.parentUserId || getInstanceUserId(),
     userText: task.parentUserText || task.goal,
     contextRef: task.contextRef || null,
     authorization: {

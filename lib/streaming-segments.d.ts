@@ -18,7 +18,7 @@ export type StreamingBubble = {
 export declare function buildStreamingBubbles(
   text: string,
   mode: ReplyMode,
-  options?: { idPrefix?: string; createdAt?: string }
+  options?: { idPrefix?: string; createdAt?: string; maxChars?: number }
 ): StreamingBubble[];
 
 // 用新气泡整体替换旧的流式气泡块（保持原位置）；块不存在则追加到末尾。

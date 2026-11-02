@@ -130,6 +130,7 @@ function memoryTimeoutOutcome(timeoutMs, { partialItems = [], elapsedMs = null }
 async function fetchMemory({
   task,
   sessionId,
+  userId,
   config,
   injected,
   attempt = 1,
@@ -181,6 +182,7 @@ async function fetchMemory({
     const found = searchMemories({
       query: task,
       sessionId,
+      userId,
       limits: {
         maxItems: config.retrieval.memoryMaxItems,
         perItemMax: config.retrieval.memoryPerItemMax,
@@ -190,11 +192,24 @@ async function fetchMemory({
 
     if (found.reason === 'memory_disabled') {
       monitor.complete({ status: 'disabled', count: 0, errorCode: 'memory_disabled' });
-      return { status: 'source_unavailable', count: 0, items: [], error: '长期记忆未启用', reason: 'memory_disabled' };
+      return {
+        status: 'source_unavailable',
+        count: 0,
+        items: [],
+        error: '长期记忆未启用',
+        reason: 'memory_disabled',
+        diagnostics: found.diagnostics || null,
+      };
     }
     if (found.reason === 'empty_query' || found.reason === 'empty_store') {
       monitor.complete({ status: 'no_result', count: 0 });
-      return { status: 'no_result', count: 0, items: [], reason: found.reason };
+      return {
+        status: 'no_result',
+        count: 0,
+        items: [],
+        reason: found.reason,
+        diagnostics: found.diagnostics || null,
+      };
     }
 
     const items = found.results.map(result => mapMemoryResult(result, config));
@@ -219,6 +234,7 @@ async function fetchMemory({
       status: items.length ? 'ok' : 'no_result',
       count: items.length,
       items,
+      diagnostics: found.diagnostics || null,
     };
   } catch (error) {
     monitor.complete({
@@ -233,6 +249,7 @@ async function fetchMemory({
 async function retrieveMemory({
   task,
   sessionId = null,
+  userId = null,
   injected = {},
   config = defaultConfig,
   now = Date.now(),
@@ -264,6 +281,7 @@ async function retrieveMemory({
       const outcome = await fetchMemory({
         task,
         sessionId,
+        userId,
         config,
         injected,
         attempt: attempt + 1,

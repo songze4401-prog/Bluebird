@@ -234,27 +234,28 @@ async function main() {
 
   const paragraphs = splitReplyIntoSegments('第一段。\n\n第二段。\n\n第三段。', 'auto');
   check(
-    '多段落分 3 条',
-    paragraphs.length === 3 && paragraphs[0] === '第一段。'
+    '多段落短文仍为单条（换行保留在消息内部）',
+    paragraphs.length === 1 && paragraphs[0].includes('\n\n')
   );
   check(
-    'single 模式强制单条（保留换行原文）',
+    'single 模式单条（保留换行原文）',
     splitReplyIntoSegments('第一段。\n\n第二段。', 'single').length === 1
   );
 
-  const longText =
+  const longBase =
     '今天天气真的特别好，我一早就出门了。路上看到一只猫，趴在墙头晒太阳，尾巴一甩一甩的。它懒洋洋地看了我一眼，又闭上眼睛继续睡。我站在那儿看了好久，突然觉得你肯定也会喜欢这一幕。就掏出手机拍下来想给你看。你猜后来怎么着？它突然跳下来蹭我的裤脚，绕着我转了两圈。我蹲下来摸了摸它的头，它就干脆趴在我鞋上不走了。最后我迟到了十分钟，但是一点都不后悔。';
+  const longText = `${longBase}${longBase}${longBase}`;
   const longAuto = splitReplyIntoSegments(longText, 'auto');
   const longFreq = splitReplyIntoSegments(longText, 'frequent');
 
   check(
-    '长文 auto 分 2-4 条',
+    '超过单条上限才分片',
     longAuto.length >= 2 && longAuto.length <= 4,
     `actual=${longAuto.length}`
   );
   check(
-    'frequent 比 auto 更积极',
-    longFreq.length >= longAuto.length,
+    'auto / frequent 使用同一套上限规则',
+    longFreq.length === longAuto.length,
     `auto=${longAuto.length} freq=${longFreq.length}`
   );
   check(
@@ -262,23 +263,23 @@ async function main() {
     longFreq.join('').replace(/\s+/g, '') === longText.replace(/\s+/g, '')
   );
   check(
-    '超过 4 段封顶为 4 条',
-    splitReplyIntoSegments('一\n\n二\n\n三\n\n四\n\n五\n\n六', 'auto').length === 4
+    '短段落不因条数拆分（6 段短文仍为 1 条）',
+    splitReplyIntoSegments('一\n\n二\n\n三\n\n四\n\n五\n\n六', 'auto').length === 1
   );
   check(
-    '过短尾巴并入前一条',
+    '过短尾巴不单独成条',
     splitReplyIntoSegments('这是一段足够长的话，用来占住第一条的位置。\n\n嗯', 'auto')
       .length === 1
   );
   check(
-    '显式换行的短段不被吞并（"1\\n2" -> 两条）',
+    '显式换行的短段保留在一条消息内（"1\\n2" -> 1 条）',
     JSON.stringify(splitReplyIntoSegments('1\n2', 'auto')) ===
-      JSON.stringify(['1', '2'])
+      JSON.stringify(['1\n2'])
   );
   check(
-    '带标点的短段同样不被吞并',
+    '带标点的短段同样保留在一条消息内',
     JSON.stringify(splitReplyIntoSegments('1。\n2。', 'auto')) ===
-      JSON.stringify(['1。', '2。'])
+      JSON.stringify(['1。\n2。'])
   );
   check('空文本返回空数组', splitReplyIntoSegments('  ', 'auto').length === 0);
 
@@ -665,7 +666,7 @@ async function main() {
     chatBody1.reply === '第一段。\n\n第二段。'
   );
 
-  // auto：多段文本分条，逐段落盘
+  // auto：短文多段不再拆成多条气泡
   await fetch(BASE + '/persona', {
     method: 'PUT',
     headers: JSON_AUTH,
@@ -682,17 +683,17 @@ async function main() {
   const chatBody2 = await chatRes2.json();
 
   check(
-    'auto 模式分 3 条且内容对应',
-    chatBody2.replies.length === 3 &&
-      chatBody2.replies[1].content === '第二条内容。'
+    'auto 模式短文仍为单条且保留换行',
+    chatBody2.replies.length === 1 &&
+      chatBody2.replies[0].content === '第一条内容。\n\n第二条内容。\n\n第三条内容。'
   );
   check(
-    '每条分条有独立 id 与 createdAt',
+    '单条回复有 id 与 createdAt',
     chatBody2.replies.every(r => typeof r.id === 'string' && r.id && r.createdAt) &&
-      new Set(chatBody2.replies.map(r => r.id)).size === 3
+      new Set(chatBody2.replies.map(r => r.id)).size === 1
   );
 
-  // 历史恢复：本会话应含 user+1段 + user+3段 = 6 条
+  // 历史恢复：本会话应含 2 个用户消息 + 2 条助手回复 = 4 条
   const history1 = await (
     await fetch(BASE + `/history?sessionId=${sChat}`, { headers: AUTH })
   ).json();
@@ -700,12 +701,12 @@ async function main() {
   const assistantCount = msgs.filter(m => m.role === 'assistant').length;
 
   check(
-    '分条逐条落盘，历史恢复后完整显示',
-    msgs.length === 6 && assistantCount === 4,
+    '单条回复逐条落盘，历史恢复后完整显示',
+    msgs.length === 4 && assistantCount === 2,
     `actual=${msgs.length}/${assistantCount}`
   );
 
-  // 撤回：撤掉第二轮用户消息，整轮 3 段一起删除
+  // 撤回：撤掉第二轮用户消息，该轮单条回复一起删除
   const secondUser = msgs.filter(m => m.role === 'user')[1];
   const recallRes = await fetch(BASE + '/history/recall', {
     method: 'POST',
@@ -718,20 +719,21 @@ async function main() {
   ).json();
 
   check(
-    '撤回整轮：用户消息与全部 3 段回复一起删除',
+    '撤回整轮：用户消息与回复一起删除',
     recallRes.status === 200 && (history2.history || []).length === 2,
     `remaining=${(history2.history || []).length}`
   );
 
-  // frequent：阈值更低，且 systemPrompt 给分条倾向
+  // frequent：长回复超过单条上限才分片
   await fetch(BASE + '/persona', {
     method: 'PUT',
     headers: JSON_AUTH,
     body: JSON.stringify({ config: { messageMode: 'frequent' } }),
   });
 
-  stubReply =
-    '[mood:calm] 今天天气真的特别好，我一早就出门了。路上看到一只猫，趴在墙头晒太阳，尾巴一甩一甩的。它懒洋洋地看了我一眼，又闭上眼睛继续睡。我站在那儿看了好久，突然觉得你肯定也会喜欢这一幕。就掏出手机拍下来想给你看。你猜后来怎么着？';
+  const frequentBase =
+    '今天天气真的特别好，我一早就出门了。路上看到一只猫，趴在墙头晒太阳，尾巴一甩一甩的。它懒洋洋地看了我一眼，又闭上眼睛继续睡。我站在那儿看了好久，突然觉得你肯定也会喜欢这一幕。就掏出手机拍下来想给你看。你猜后来怎么着？';
+  stubReply = `[mood:calm] ${frequentBase}${frequentBase}${frequentBase}${frequentBase}`;
   capturedPrompts.length = 0;
 
   const chatRes3 = await fetch(BASE + '/chat', {
@@ -742,16 +744,16 @@ async function main() {
   const chatBody3 = await chatRes3.json();
 
   check(
-    'frequent 模式长回复分多条',
+    'frequent 模式长回复超过上限才分条',
     chatBody3.replies.length >= 2,
     `actual=${chatBody3.replies.length}`
   );
   check(
-    'frequent 模式 prompt 鼓励分条',
-    (capturedPrompts[0] || '').includes('拆成好几条短消息')
+    'frequent 模式 prompt 说明单条消息内分段',
+    (capturedPrompts[0] || '').includes('同一条消息')
   );
 
-  // 续写：只落 assistant，且也是分条数组
+  // 续写：只落 assistant，短回复不拆分
   const beforeContinue = (
     await (
       await fetch(BASE + `/history?sessionId=${sChat}`, { headers: AUTH })
@@ -773,12 +775,12 @@ async function main() {
   ).history;
 
   check(
-    '续写返回分条且只落 assistant 消息',
+    '续写返回单条且只落 assistant 消息',
     contRes.status === 200 &&
-      contBody.replies.length === 2 &&
+      contBody.replies.length === 1 &&
       contBody.userMessageId === null &&
-      afterContinue.length === beforeContinue + 2 &&
-      afterContinue.slice(-2).every(m => m.role === 'assistant')
+      afterContinue.length === beforeContinue + 1 &&
+      afterContinue.slice(-1).every(m => m.role === 'assistant')
   );
 
   // 短段回归：mergeTinyTail 曾把显式换行的短段压回一条（"1\n2" -> "12"），
@@ -804,11 +806,10 @@ async function main() {
   const shortBody = await shortRes.json();
 
   check(
-    '模型输出短段换行时返回两条独立消息',
+    '模型输出短段换行时仍为一条消息',
     shortRes.status === 200 &&
-      shortBody.replies.length === 2 &&
-      shortBody.replies[0].content === '1' &&
-      shortBody.replies[1].content === '2',
+      shortBody.replies.length === 1 &&
+      shortBody.replies[0].content === '1\n2',
     `actual=${JSON.stringify((shortBody.replies || []).map(r => r.content))}`
   );
 
@@ -819,16 +820,16 @@ async function main() {
   ).history;
 
   check(
-    '两条短段逐条落盘，历史恢复为两条',
+    '一条消息落盘，历史恢复保留换行',
     shortHistory
       .filter(m => m.role === 'assistant')
       .map(m => m.content)
-      .join(',') === '1,2'
+      .join(',') === '1\n2'
   );
 
   check(
-    'auto 模式 prompt 含分条协议（换行 = 独立消息）',
-    (capturedPrompts[0] || '').includes('每换一行就是一条新消息')
+    'auto 模式 prompt 说明单条消息内分段',
+    (capturedPrompts[0] || '').includes('完整消息')
   );
 
   ORIG_LOG('\nC2. 自定义人格提示词进入最终 system prompt');
@@ -920,13 +921,13 @@ async function main() {
     !emptyCustomPrompt.includes('用户自定义人格设定') &&
       !emptyCustomPrompt.includes('【用户自定义人格设定】') &&
       emptyCustomPrompt.includes('【说话风格调整】') &&
-      emptyCustomPrompt.includes('连续消息模式：')
+      emptyCustomPrompt.includes('分段风格：')
   );
 
   const emptyLines = emptyCustomPrompt.split('\n');
   const styleStart = emptyLines.indexOf('【说话风格调整】');
   const modeLineIndex = emptyLines.findIndex(line =>
-    line.startsWith('连续消息模式：')
+    line.startsWith('分段风格：')
   );
 
   check(
@@ -1066,8 +1067,7 @@ async function main() {
 
   check(
     '连续发送两轮：顺序正确且 id 全部唯一',
-    rolesA ===
-      'user,assistant,assistant,user,assistant,assistant' &&
+    rolesA === 'user,assistant,user,assistant' &&
       idsA.size === msgsA.length,
     rolesA
   );

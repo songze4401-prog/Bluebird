@@ -39,7 +39,7 @@ const NOTES = {
   sessions:
     'sessions: legacy migration, CRUD/isolation, 1000-message retention, /history cursor pagination, trim metadata',
   persona:
-    'persona panel: split-reply rules (incl. short-segment regression), /persona API, customPrompt (defaults, old-file migration, strict type/length/body-size validation with the stored file left byte-identical, reset clears it), editable systemPrompt (built-in default vs effective, 8000-char limit, saved prompt replaces the core block in /chat and /chat/stream, blank falls back to built-in), custom block in the final /chat and /chat/stream model request, empty value = legacy prompt, malicious text neutralized and tool gating unchanged, prompt injection, per-mode splitting, corruption protection',
+    'persona panel: split-reply rules (single-message default, 400-char hard limit, short-segment regression), /persona API, customPrompt (defaults, old-file migration, strict type/length/body-size validation with the stored file left byte-identical, reset clears it), editable systemPrompt (built-in default vs effective, 8000-char limit, saved prompt replaces the core block in /chat and /chat/stream, blank falls back to built-in), custom block in the final /chat and /chat/stream model request, empty value = legacy prompt, malicious text neutralized and tool gating unchanged, prompt injection, corruption protection',
   'chat-stream':
     'SSE streaming: stream-strip rules, /chat/stream framing/deltas/done fields, persistence timing, continue mode, mid-stream error, pure-image memory extraction, /chat coexistence',
   multimodal:
@@ -77,7 +77,7 @@ const NOTES = {
   'memory-golden-path':
     'golden path: real /chat + stubbed provider, write→recall→inject into final request, session isolation, response memoryState empty→ok, requestId format',
   'memory-lifecycle-golden':
-    'lifecycle golden path: supersede/delete/withdraw visibility in final request and unified search, session isolation',
+    'lifecycle golden path: supersede/delete/withdraw visibility in final request and unified search, session isolation, cross-session contradicting agent write parked as pending until confirmed',
   'memory-state-units':
     'normalizeMemoryState mapping, breaker/exception/timeout degradation without blocking, requestId in engine/trace, time budget',
   'memory-degradation-golden':
@@ -85,7 +85,7 @@ const NOTES = {
   'memory-budget-golden':
     'budget trimming: 10 memories → memoryMaxItems=8 → final request injects ≤8, token budget enforced',
   'agent-dispatch':
-    'main tool → Bot task, explicit delegation intent detection, runtime-enforced delegate_to_bot dispatch even when the model does not call tools (policy-denied case documented), parent-memory read/write scope, approval delivery, result SSE/snapshot, failure delivery, dedupe, outbox recovery',
+    'main tool → Bot task, explicit delegation intent detection, runtime-enforced delegate_to_bot dispatch even when the model does not call tools (policy-denied case documented), parent-memory read/write scope (agent rewrite of an existing memory parks a pending candidate until confirmed), parentUserId on the task, approval delivery, result SSE/snapshot, failure delivery, dedupe, outbox recovery',
   'agent-router':
     'router decision chain, task contract v1, fast/slow budgets, idempotency/priority queue, route events privacy, delegate_to_bot compatibility',
   'agent-worker':
@@ -94,12 +94,26 @@ const NOTES = {
     'state machine transitions, task-store schema migration, leases/retry backoff/checkpoint version/run history, restart recovery (queued/uncertain/live lease), SIGKILL fault injection, delivery idempotency and crash redelivery',
   'agent-watchdog':
     'watchdog health classification, action planning with whitelist/cooldown/breaker, intake pause and resume, offline recovery, escalation, audit fields, dry-run, external supervisor restart drill',
+  'reply-segmentation':
+    'single-message default with a 400-char configurable hard limit, semantic split order (paragraph/newline/sentence), code-block and Markdown-link protection, English word boundaries',
   'monitoring-api':
     'monitoring API + real HTTP/context/agent/SSE/persistence instrumentation (model SDK stubbed)',
   'agent-runtime-guards':
     'agent runtime guards: cross-session MERGE dedupe scope, task deadlineMs, policy maxRounds, abort-listener cleanup',
   'agent-storage-limits':
     'agent event outbox hard cap, overflow accounting (drop_oldest) and outbox recovery',
+  'memory-observability':
+    'memory retrieval funnel (candidates/returned/injected), filter reason breakdown (expired/superseded/archived/pending/low-relevance), injected token attribution vs char count, sent-content hash, provider-vs-stub usage labeling and token reconciliation',
+  'context-trace-verify':
+    'end-to-end context trace: sent content hash recomputed from what the stub provider actually received, and stub usage labeled usage_source=stub (never counted as real provider usage)',
+  'memory-user-scope':
+    'user-level memory scope (P1): cross-session recall for the same user, strict cross-user denial, fail-closed without trusted identity, index scope visibility=user, write side on the same scope (cross-session correction/merge allowed, cross-user and no-identity writes rejected, withdrawal stays contribution-scoped)',
+  'p3-acceptance':
+    'P3 acceptance matrix (10 rows): cross-session recall, irrelevant-injection control, message-history isolation, cross-user denial, project scope (skipped: no Project entity), agent task isolation, withdrawn/expired/superseded exclusion, distinguishable failure states, large-store budget cap, trace content hash',
+  'memory-ownership':
+    'memory API ownership (multi-user P0 blocker): GET /memory + /memory/pending filtered by trusted userId, foreign ids return 403 with data unchanged, clear/clear-session never touch other users, approval executor refuses foreign targets including merge sourceIds, own operations still work',
+  'session-ownership':
+    'session ownership (multi-user P0 blocker): /sessions list filtered by userId, foreign session ids return 404 on /sessions/:id, /history, /presence, /chat, /chat/stream, /retrieval/search, /history/clear, /history/recall and DELETE with data unchanged, legacy sessions migrated to instance user, own operations still work',
 };
 
 function readBaseline(file = BASELINE_FILE) {

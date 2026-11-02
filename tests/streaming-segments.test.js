@@ -11,8 +11,19 @@ const {
   isStreamingBubble,
 } = require('../lib/streaming-segments');
 
-test('auto：多段文本切成多气泡，id 连续带前缀', () => {
-  const text = '第一段内容足够长，超过六十个字符才会触发分段，这里再多写一点凑足长度。\n\n第二段也足够长，用来确保它会被独立切成一条气泡，不至于被并回第一段里面。';
+test('auto：短文多段仍为单气泡（换行保留在消息内）', () => {
+  const text =
+    '第一段内容足够长，超过六十个字符才会触发分段，这里再多写一点凑足长度。\n\n第二段也足够长，用来确保它会被独立切成一条气泡，不至于被并回第一段里面。';
+  const bubbles = buildStreamingBubbles(text, 'auto', { idPrefix: 'p' });
+
+  assert.equal(bubbles.length, 1);
+  assert.equal(bubbles[0].content, text);
+});
+
+test('超过单条上限才切分为多气泡，id 连续带前缀', () => {
+  const base =
+    '这是一段用于测试分段的长文本，包含足够多的内容和标点。'.repeat(8);
+  const text = `${base}\n\n${base}\n\n${base}`;
   const bubbles = buildStreamingBubbles(text, 'auto', { idPrefix: 'p' });
 
   assert.ok(bubbles.length >= 2, `应切成多条，实际 ${bubbles.length}`);
@@ -22,6 +33,7 @@ test('auto：多段文本切成多气泡，id 连续带前缀', () => {
   );
   assert.ok(bubbles.every(b => b.role === 'assistant'));
   assert.ok(bubbles.every(b => Array.isArray(b.segments)));
+  assert.ok(bubbles.every(b => [...b.content].length <= 400));
 });
 
 test('single：强制单气泡', () => {
@@ -31,12 +43,16 @@ test('single：强制单气泡', () => {
   assert.equal(bubbles[0].id, 'p#0');
 });
 
-test('封装上限：段落再多也不超过 4 条', () => {
+test('超过上限按语义边界切分，不设 4 条硬上限', () => {
   const text = [1, 2, 3, 4, 5, 6]
-    .map(i => `这是第${i}段，长度需要超过六十个字符才会被自然分条处理，所以这里多写一些字。`)
+    .map(i => `这是第${i}段，${'用于验证语义边界的填充内容。'.repeat(8)}`)
     .join('\n\n');
   const bubbles = buildStreamingBubbles(text, 'auto', { idPrefix: 'p' });
-  assert.equal(bubbles.length, 4);
+  assert.ok(bubbles.length >= 2, `actual=${bubbles.length}`);
+  assert.ok(
+    bubbles.every(b => [...b.content].length <= 400),
+    JSON.stringify(bubbles.map(b => [...b.content].length))
+  );
 });
 
 test('done 一致性：流式切分内容与最终 splitReplyIntoSegments 逐字相同', () => {
@@ -113,9 +129,9 @@ test('isStreamingBubble：前缀判定', () => {
   assert.equal(isStreamingBubble(null, 'p'), false);
 });
 
-test('frequent 比 auto 更积极（同等长文切得更多）', () => {
-  const text = '一二三四五六七八九十。一二三四五六七八九十。一二三四五六七八九十。一二三四五六七八九十。一二三四五六七八九十。';
+test('auto / frequent 使用同一套上限规则（切分条数相同）', () => {
+  const text = '一二三四五六七八九十。'.repeat(80);
   const auto = buildStreamingBubbles(text, 'auto', { idPrefix: 'p' }).length;
   const freq = buildStreamingBubbles(text, 'frequent', { idPrefix: 'p' }).length;
-  assert.ok(freq >= auto, `frequent=${freq} auto=${auto}`);
+  assert.equal(freq, auto, `frequent=${freq} auto=${auto}`);
 });
