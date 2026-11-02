@@ -182,6 +182,7 @@ const REGISTERED_TOOL_NAMES = agentRuntime
   .map(tool => tool.name)
   .sort();
 const CUSTOM_MAX = personaModule.CUSTOM_PROMPT_MAX_CHARS;
+const SYSTEM_MAX = personaModule.SYSTEM_PROMPT_MAX_CHARS;
 const PERSONA_FILE = path.join(DATA_DIR, 'persona.json');
 
 process.on('exit', () => {
@@ -394,10 +395,15 @@ async function main() {
     await fetch(BASE + '/persona', { headers: AUTH })
   ).json();
   check(
-    'GET 下发 customPrompt 空默认 + 服务端上限',
+    'GET 下发 customPrompt / systemPrompt 默认与上限',
     metaBody.config.customPrompt === '' &&
+      metaBody.config.systemPrompt === '' &&
       metaBody.defaults.customPrompt === '' &&
-      metaBody.limits.customPromptMaxChars === CUSTOM_MAX
+      metaBody.limits.customPromptMaxChars === CUSTOM_MAX &&
+      metaBody.limits.systemPromptMaxChars === SYSTEM_MAX &&
+      typeof metaBody.systemPrompt.default === 'string' &&
+      metaBody.systemPrompt.effective === metaBody.systemPrompt.default &&
+      metaBody.systemPrompt.customized === false
   );
 
   const customOk = await fetch(BASE + '/persona', {
@@ -549,6 +555,7 @@ async function main() {
   check(
     '旧配置缺字段自动迁移为空提示词，其余值保留',
     legacyConfig.customPrompt === '' &&
+      legacyConfig.systemPrompt === '' &&
       legacyConfig.colloquial === 33 &&
       legacyConfig.warmth === 12 &&
       legacyConfig.messageMode === 'single'
@@ -564,6 +571,15 @@ async function main() {
     '读盘对超长内容按上限截断（防手改文件撑爆上下文）',
     [...personaModule.normalizeConfig({ customPrompt: tooLong }).customPrompt].length ===
       CUSTOM_MAX
+  );
+
+  const tooLongSystem = '字'.repeat(SYSTEM_MAX + 1);
+  check(
+    'systemPrompt 读盘：异常类型/空白回退空串，超长按上限截断',
+    personaModule.normalizeConfig({ systemPrompt: 123 }).systemPrompt === '' &&
+      personaModule.normalizeConfig({ systemPrompt: '  \n\t' }).systemPrompt === '' &&
+      [...personaModule.normalizeConfig({ systemPrompt: tooLongSystem }).systemPrompt]
+        .length === SYSTEM_MAX
   );
 
   ORIG_LOG('\nB3. 落盘失败（500 路径）');
@@ -1062,6 +1078,118 @@ async function main() {
     ).json()
   ).history;
   check('A 会话的多段回复不串进 B 会话', msgsB.length === 0);
+
+  ORIG_LOG('\nD2. 可编辑的后端系统提示词');
+
+  // 复用 B2 的 GET 响应，避免额外请求撞上全局限流（60 次/分钟）。
+  const BUILTIN_SYSTEM_PROMPT = metaBody.systemPrompt?.default || '';
+
+  check(
+    'GET 下发内置后端提示词、生效值与上限',
+    BUILTIN_SYSTEM_PROMPT.includes('【情绪标签】') &&
+      metaBody.systemPrompt.effective === BUILTIN_SYSTEM_PROMPT &&
+      metaBody.systemPrompt.customized === false &&
+      metaBody.limits.systemPromptMaxChars === SYSTEM_MAX
+  );
+
+  const customSystemPrompt = '[mood:calm] 你是测试版 Blue。\r\n只回答 OK。';
+  const normalizedSystemPrompt = '[mood:calm] 你是测试版 Blue。\n只回答 OK。';
+
+  const sysPutRes = await fetch(BASE + '/persona', {
+    method: 'PUT',
+    headers: JSON_AUTH,
+    body: JSON.stringify({ config: { systemPrompt: customSystemPrompt } }),
+  });
+  const sysPutBody = await sysPutRes.json();
+
+  check(
+    '保存后端提示词并统一换行',
+    sysPutRes.status === 200 &&
+      sysPutBody.config.systemPrompt === normalizedSystemPrompt
+  );
+
+  const sysReread = await (
+    await fetch(BASE + '/persona', { headers: AUTH })
+  ).json();
+  check(
+    'GET 的 effective 为用户版本',
+    sysReread.systemPrompt.effective === normalizedSystemPrompt &&
+      sysReread.systemPrompt.customized === true
+  );
+
+  stubReply = '[mood:calm] OK';
+  capturedPrompts.length = 0;
+  const sSys = sessions.createSession('后端提示词测试').id;
+  const sysChatRes = await fetch(BASE + '/chat', {
+    method: 'POST',
+    headers: JSON_AUTH,
+    body: JSON.stringify({ message: '测试后端提示词', sessionId: sSys }),
+  });
+  const sysPrompt = capturedPrompts[0] || '';
+
+  check(
+    '/chat 实际下发用户编辑的后端提示词',
+    sysChatRes.status === 200 &&
+      sysPrompt.includes('你是测试版 Blue') &&
+      !sysPrompt.includes('你的名字是 Bluebird')
+  );
+
+  capturedPrompts.length = 0;
+  const sysStreamRes = await fetch(BASE + '/chat/stream', {
+    method: 'POST',
+    headers: JSON_AUTH,
+    body: JSON.stringify({ message: '流式提示词', sessionId: sSys }),
+  });
+  await readSSE(sysStreamRes);
+  const sysStreamPrompt = capturedPrompts[0] || '';
+
+  check(
+    '/chat/stream 使用同一份用户编辑提示词',
+    sysStreamRes.status === 200 &&
+      sysStreamPrompt.includes('你是测试版 Blue') &&
+      !sysStreamPrompt.includes('你的名字是 Bluebird')
+  );
+
+  const badSysType = await fetch(BASE + '/persona', {
+    method: 'PUT',
+    headers: JSON_AUTH,
+    body: JSON.stringify({ config: { systemPrompt: 123 } }),
+  });
+  const badSysTypeBody = await badSysType.json();
+  check(
+    'systemPrompt 非字符串被 400 拒绝，旧提示词不变',
+    badSysType.status === 400 &&
+      badSysTypeBody.error.includes('systemPrompt') &&
+      personaModule.getConfig().systemPrompt === normalizedSystemPrompt
+  );
+
+  const overSystem = personaModule.validateConfig({
+    systemPrompt: '字'.repeat(SYSTEM_MAX + 1),
+  });
+  const blankSystem = personaModule.normalizeConfig({ systemPrompt: '  \n\t' });
+
+  check(
+    '超长 systemPrompt 被校验拒绝，空白归一为空串',
+    overSystem.ok === false &&
+      overSystem.errors.join('').includes(String(SYSTEM_MAX)) &&
+      blankSystem.systemPrompt === ''
+  );
+
+  const resetRes2 = await fetch(BASE + '/persona', {
+    method: 'PUT',
+    headers: JSON_AUTH,
+    body: JSON.stringify({ reset: true }),
+  });
+  const afterFullReset = await (
+    await fetch(BASE + '/persona', { headers: AUTH })
+  ).json();
+
+  check(
+    '恢复默认一并清空自定义后端提示词',
+    resetRes2.status === 200 &&
+      afterFullReset.config.systemPrompt === '' &&
+      afterFullReset.systemPrompt.effective === BUILTIN_SYSTEM_PROMPT
+  );
 
   ORIG_LOG('\nE. 配置损坏：原地只读保护（子进程）');
 

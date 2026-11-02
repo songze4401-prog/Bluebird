@@ -54,7 +54,7 @@ user    模式（新增）  primary = 归属用户一致；excluded = 不同用�
 | 文件 | 作用 |
 |---|---|
 | `server/user-scope.js` | 可信用户身份：`getInstanceUserId` / `resolveUserId`，`DEFAULT_USER_ID='local-owner'` |
-| `tests/memory-user-scope.test.js` | 10 项作用域契约测试 |
+| `tests/memory-user-scope.test.js` | 13 项作用域契约测试 |
 
 ### 记忆核心
 

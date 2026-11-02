@@ -38,7 +38,10 @@ const BASE_CONFIG: PersonaConfig = {
   length: 50,
   messageMode: 'auto',
   customPrompt: '别叫我主人，说话直接一点。',
+  systemPrompt: '',
 };
+
+const DEFAULT_SYSTEM_PROMPT = '你是 Bluebird，一个安静敏锐的聊天对象。';
 
 function jsonResponse(body: object, status = 200) {
   return {
@@ -58,7 +61,12 @@ function mockResponses(save: SaveHandler) {
         return jsonResponse({
           config: BASE_CONFIG,
           defaults: { ...BASE_CONFIG, customPrompt: '' },
-          limits: { customPromptMaxChars: 4000 },
+          limits: { customPromptMaxChars: 4000, systemPromptMaxChars: 8000 },
+          systemPrompt: {
+            default: DEFAULT_SYSTEM_PROMPT,
+            effective: DEFAULT_SYSTEM_PROMPT,
+            customized: false,
+          },
         });
       }
 
@@ -194,4 +202,102 @@ it('恢复默认提交 reset，并以服务端返回值清空编辑框', async (
   expect(screen.getByText('已恢复默认')).toBeTruthy();
   // 摘要卡片是多段子节点拼成一个 Text，用正则做子串匹配
   expect(screen.getByText(/自定义提示词：未填写/)).toBeTruthy();
+});
+
+it('显示服务端生效的后端提示词，编辑后随整份 config 保存', async () => {
+  const effective = '服务端当前提示词';
+
+  mockApiFetch.mockImplementation(
+    async (path: string, init?: { method?: string; body?: string }) => {
+      if (path === '/persona' && (!init || init.body === undefined)) {
+        return jsonResponse({
+          config: { ...BASE_CONFIG, systemPrompt: effective },
+          defaults: { ...BASE_CONFIG },
+          limits: { customPromptMaxChars: 4000, systemPromptMaxChars: 8000 },
+          systemPrompt: {
+            default: DEFAULT_SYSTEM_PROMPT,
+            effective,
+            customized: true,
+          },
+        });
+      }
+
+      return jsonResponse({
+        config: { ...BASE_CONFIG, systemPrompt: '新的后端提示词' },
+      });
+    }
+  );
+
+  await render(
+    <ControlPanelScreen
+      theme={theme}
+      visible
+      onClose={() => {}}
+      streamingEnabled={false}
+      onToggleStreaming={() => {}}
+    />
+  );
+
+  const input = await screen.findByTestId('system-prompt-input');
+
+  expect(input.props.value).toBe(effective);
+  expect(screen.getByText(`${Array.from(effective).length} / 8000 字`)).toBeTruthy();
+
+  await fireEvent.changeText(input, '新的后端提示词');
+  await fireEvent.press(screen.getByText('保存'));
+
+  const putCall = mockApiFetch.mock.calls.find(
+    ([path, init]) => path === '/persona' && init?.method === 'PUT'
+  );
+  const body = JSON.parse(putCall![1].body as string);
+
+  expect(body.config.systemPrompt).toBe('新的后端提示词');
+  expect(body.config.customPrompt).toBe(BASE_CONFIG.customPrompt);
+});
+
+it('恢复内置提示词后保存空串，继续跟随服务端默认值', async () => {
+  mockApiFetch.mockImplementation(
+    async (path: string, init?: { method?: string; body?: string }) => {
+      if (path === '/persona' && (!init || init.body === undefined)) {
+        return jsonResponse({
+          config: { ...BASE_CONFIG, systemPrompt: '旧的自定义提示词' },
+          defaults: { ...BASE_CONFIG },
+          limits: { customPromptMaxChars: 4000, systemPromptMaxChars: 8000 },
+          systemPrompt: {
+            default: DEFAULT_SYSTEM_PROMPT,
+            effective: '旧的自定义提示词',
+            customized: true,
+          },
+        });
+      }
+
+      return jsonResponse({ config: { ...BASE_CONFIG, systemPrompt: '' } });
+    }
+  );
+
+  await render(
+    <ControlPanelScreen
+      theme={theme}
+      visible
+      onClose={() => {}}
+      streamingEnabled={false}
+      onToggleStreaming={() => {}}
+    />
+  );
+
+  await screen.findByTestId('system-prompt-input');
+  await fireEvent.press(screen.getByText('恢复内置提示词'));
+
+  expect(screen.getByTestId('system-prompt-input').props.value).toBe(
+    DEFAULT_SYSTEM_PROMPT
+  );
+
+  await fireEvent.press(screen.getByText('保存'));
+
+  const putCall = mockApiFetch.mock.calls.find(
+    ([path, init]) => path === '/persona' && init?.method === 'PUT'
+  );
+  const body = JSON.parse(putCall![1].body as string);
+
+  expect(body.config.systemPrompt).toBe('');
 });

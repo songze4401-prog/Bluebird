@@ -460,6 +460,41 @@ async function main() {
   );
   check('model 回执保持原语义', plain.json.model === 'deepseek-chat');
 
+  // ================= A2. 显式子 agent 请求强制派发 =================
+  ORIG_LOG('\nA2. 显式子 agent 请求：模型不调用工具也真实派发');
+  resetScript();
+  // 模型只回文本、不发起任何 tool_calls：模拟此前"嘴上说派了"的情况。
+  scripted.push({ content: '[calm] 这条任务我没法自己完成。' });
+
+  const forcedDelegate = await req('/chat', {
+    method: 'POST',
+    body: { message: '让记忆机器人查一下我的咖啡偏好' },
+  });
+
+  check('显式委派请求仍正常返回', forcedDelegate.status === 200);
+  check(
+    '模型未发起工具调用时仍执行 delegate_to_bot',
+    Array.isArray(forcedDelegate.json.toolSteps) &&
+      forcedDelegate.json.toolSteps[0]?.name === 'delegate_to_bot'
+  );
+  check(
+    '派发结果如实标记失败（测试环境未配置 Memory Bot）',
+    forcedDelegate.json.toolSteps[0]?.ok === false
+  );
+  check(
+    '强制派发后模型请求不再暴露 delegate_to_bot',
+    Array.isArray(stubCalls[0].tools) &&
+      !stubCalls[0].tools.some(tool => tool.function.name === 'delegate_to_bot')
+  );
+  check(
+    '强制派发说明已注入 system',
+    stubCalls[0].messages.some(
+      message =>
+        message.role === 'system' &&
+        String(message.content).includes('系统已经在本次请求中实际调用 delegate_to_bot')
+    )
+  );
+
   // ================= B. 紧急开关 =================
   ORIG_LOG('\nB. 紧急关闭开关');
 

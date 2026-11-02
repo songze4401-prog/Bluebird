@@ -114,6 +114,8 @@ export type PersonaConfig = {
   // 用户自填的人格提示词：只调表达方式，不授予工具权限（上限见服务端
   // CUSTOM_PROMPT_MAX_CHARS）。旧配置缺该字段时服务端迁移为 ''。
   customPrompt: string;
+  // 用户在控制面板编辑的完整后端系统提示词；空串 = 使用服务端内置默认。
+  systemPrompt: string;
 };
 
 // Agent 工作策略（GET/PUT /agent-policy 的结构；服务端 agent-policy.js 为准）
