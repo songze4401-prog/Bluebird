@@ -27,8 +27,9 @@ export type StreamOutcome =
 export type StreamEvent =
   | {
       type: 'meta';
-      // 服务端在 delta 之前下发本轮分段模式，供前端流式期分段
+      // 服务端在 delta 之前下发本轮分段模式（兼容字段）与单条长度上限
       messageMode: 'single' | 'auto' | 'frequent';
+      replyMaxChars?: number;
       sessionId?: string;
     }
   | { type: 'delta'; content: string }
@@ -87,8 +88,11 @@ export function streamChatRequest(
   payload: Record<string, unknown>,
   handlers: {
     onDelta: (content: string) => void;
-    // 服务端在首个 delta 前下发的元信息（当前用于分段模式）
-    onMeta?: (meta: { messageMode?: 'single' | 'auto' | 'frequent' }) => void;
+    // 服务端在首个 delta 前下发的元信息（分段模式兼容字段 + 单条上限）
+    onMeta?: (meta: {
+      messageMode?: 'single' | 'auto' | 'frequent';
+      replyMaxChars?: number;
+    }) => void;
     // Agent 工具调用的进度事件：tool_start 在跑工具前发，tool_end 带结果。
     // 早于所有 delta 到达，所以客户端能先亮 pill 再逐字出正文。
     onToolEvent?: (event: ToolStreamEvent) => void;

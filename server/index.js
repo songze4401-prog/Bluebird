@@ -315,8 +315,14 @@ const {
   resetConfig: resetPersonaConfig,
 } = require('./persona');
 
-// 回复分条：按 messageMode 把完整回复拆成 1-4 条气泡（纯函数）。
-const { splitReplyIntoSegments } = require('./split-reply');
+// 回复分段：默认一条消息；只有超过单条硬上限才按语义边界分片（纯函数）。
+const { splitReplyIntoSegments, DEFAULT_MAX_CHARS } = require('./split-reply');
+
+// 单条回复长度上限的唯一配置读取点：未配置时使用 lib 的默认 400。
+const REPLY_MAX_CHARS = (() => {
+  const raw = Number(process.env.BLUEBIRD_REPLY_MAX_CHARS);
+  return Number.isInteger(raw) && raw > 0 ? raw : DEFAULT_MAX_CHARS;
+})();
 
 // 情绪标签剥离：全量（/chat）与增量（/chat/stream）共用同一套规则。
 const { stripMoodTags, createMoodTagStripper } = require('./stream-strip');
@@ -872,15 +878,14 @@ function buildPersonaPrompt(config) {
     high: '可以详细：该展开时充分展开，允许把细节说透。',
   }[personaBand(config.length)];
 
-  // 连续消息模式与分条器联动：single 强制单条；auto / frequent 允许换行分段。
-  // 必须明确告知模型「换行 = 一条独立消息」——否则它不知道自己能分条，
-  // 用户点名要两条消息时会输出无换行的拼接文本（如 "12"），无边界可分。
+  // 一条回复默认作为一条消息发送；换行只用于消息内分段。
+  // messageMode 仅保留为表达风格提示，不再表示「换行=独立消息」。
   const modeRule =
     config.messageMode === 'single'
-      ? '你的回复会作为一条完整消息发送，不要写成多条短消息的拼接。'
+      ? '你的回复会作为一条完整消息发送；需要分段时用换行，不要写成多条消息的拼接。'
       : config.messageMode === 'frequent'
-        ? '你的回复会按换行拆成多条独立消息依次发送，每换一行就是一条新消息。你可以像真人聊天一样把回复拆成好几条短消息：多用换行分成自然的短段，每段说一个意思。用户明确要求“分几条发”时，把每条内容各自单独写成一行。'
-        : '你的回复会按换行拆成多条独立消息依次发送，每换一行就是一条新消息。回复较长或情绪有层次时，用换行分成自然的几段；短回答保持一段。用户明确要求“分几条发”时，把每条内容各自单独写成一行。';
+        ? '你的回复会作为一条完整消息发送；可以多用短段落换行，但所有段落仍在同一条消息内。'
+        : '你的回复会作为一条完整消息发送；较长时用自然段换行分段，不要写成多条消息的拼接。';
 
   const blocks = [
     '【说话风格调整】',
@@ -889,7 +894,7 @@ function buildPersonaPrompt(config) {
     `温暖程度 ${config.warmth}/100：${warmth}`,
     `主动表达 ${config.initiative}/100：${initiative}`,
     `表达长度 ${config.length}/100：${length}`,
-    `连续消息模式：${modeRule}`,
+    `分段风格：${modeRule}`,
   ];
 
   // 自定义人格提示词：用户在控制面板自填，属于「不可信的偏好数据」——
@@ -2890,9 +2895,11 @@ function completeChatTurn({
   const reply = buildAssistantReplyText(parsedReply.body, parsedReply.attachments);
   const replyAttachments = parsedReply.attachments;
 
-  // 连续消息模式：single 强制单条（与旧行为一致）；auto / frequent 按自然
-  // 边界拆成多条气泡。每条分条是独立的 assistant 消息，撤回会整轮删除。
-  const segments = splitReplyIntoSegments(reply, personaConfig.messageMode);
+  // 一条回复默认只落一条 assistant 消息；只有超过单条硬上限才按语义边界分片。
+  // 旧 messageMode 仍随 persona 配置传入，但不再改变切分规则。
+  const segments = splitReplyIntoSegments(reply, personaConfig.messageMode, {
+    maxChars: REPLY_MAX_CHARS,
+  });
 
   // 同步生成稳定 id 并立即返回给前端（撤回需要）；appendMessagesDetailed 会沿用已有 id。
   const now = new Date().toISOString();
@@ -3608,6 +3615,8 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
     type: 'meta',
     messageMode:
       (ctx.personaConfig && ctx.personaConfig.messageMode) || 'auto',
+    // 流式期与服务端 done 使用同一上限；旧客户端缺省时用 lib 默认 400。
+    replyMaxChars: REPLY_MAX_CHARS,
     sessionId: ctx.sessionId,
   });
 

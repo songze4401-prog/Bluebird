@@ -11,7 +11,7 @@ Agent Policy 与 Persona 是两套独立概念：
 
 | 概念 | 负责 | 存储/入口 |
 |---|---|---|
-| Persona | 怎么表达、说话风格、连续消息模式 | `persona.json` / 现有控制面板 |
+| Persona | 怎么表达、说话风格、分段偏好 | `persona.json` / 现有控制面板 |
 | Agent Policy | 怎么规划、检索、使用工具、处理失败、何时停止/确认 | `agent-policy.json` / 控制面板“Agent 工作方式” |
 | Enforcement | 权限、预算、工具白名单、高风险确认门 | 后端 `agent-runtime.js` 强制执行 |
 

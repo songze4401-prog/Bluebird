@@ -169,7 +169,8 @@ export function applyStreamingText(
   tempId: string,
   text: string,
   mode: StreamMode,
-  createdAt: string
+  createdAt: string,
+  maxChars?: number
 ): Message[] {
   return replaceStreamingBlock(
     prev,
@@ -177,6 +178,7 @@ export function applyStreamingText(
     buildStreamingBubbles(text, mode, {
       idPrefix: tempId,
       createdAt,
+      maxChars,
     })
   );
 }
