@@ -1146,6 +1146,15 @@ async function applyCandidate(raw, options = {}) {
   }
 
   const sessionId = cleanText(options.sessionId);
+  // 写侧与读侧共用同一作用域判定：拿到可信 userId 就是用户级 —— 同一用户的
+  // 任意会话都能更正 / 合并 / 替代自己的记忆（否则新会话里说「我改名叫X」
+  // 会被拒，旧名字与新名字作为两条记忆同时被注入）。
+  // 没有可信 userId 时回落到会话级隔离，跨用户仍然拒绝。
+  const writeScope = resolveReadScope({
+    scope: options.scope,
+    userId: options.userId,
+    sessionId,
+  });
   const abortedResult = () => ({
     ...base,
     reason: 'aborted',
@@ -1181,8 +1190,9 @@ async function applyCandidate(raw, options = {}) {
         };
       }
 
-      // 写入门禁仍按会话作用域：P1 只放开「读」，不改更正/合并/撤回的既有语义。
-      if (scopeOf(target, sessionId) === 'excluded') {
+      // 更正/合并/替代的目标按当前作用域判定可见性：用户级下同一用户的
+      // 任意会话都可以改自己的记忆；跨用户仍然拒绝。
+      if (scopeOf(target, writeScope) === 'excluded') {
         return {
           ...base,
           reason: 'unauthorized_target',
@@ -1196,7 +1206,7 @@ async function applyCandidate(raw, options = {}) {
       similarity: similarity(item.content, candidate.content),
       sameType: item.type === candidate.type,
       sharedKeyword: shareKeyword(item.keywords, candidate.keywords),
-      visible: scopeOf(item, sessionId) !== 'excluded',
+      visible: scopeOf(item, writeScope) !== 'excluded',
       contextConflict:
         (() => {
           const currentEvent = Date.parse(candidate.eventAt || '');

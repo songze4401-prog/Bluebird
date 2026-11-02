@@ -1178,8 +1178,11 @@ function publicCapabilities() {
     scope: {
       mode: 'single_user',
       globalSources: ['document', 'web', 'code'],
-      sessionScoped: ['memory', 'conversation'],
-      note: '单用户部署下外部知识全局可检索；多用户部署必须新增真实 ACL',
+      // 长期记忆是用户级（P1）：同一用户的任意会话都可检索，按服务端可信 userId 过滤。
+      userScoped: ['memory'],
+      // 原始对话消息仍按会话隔离，不随用户级读放开。
+      sessionScoped: ['conversation'],
+      note: '记忆按可信 userId 跨会话共享，对话消息仍按会话隔离；多用户部署必须新增真实 ACL',
     },
     formats: {
       document: ['.md', '.markdown', '.txt', '.text'],

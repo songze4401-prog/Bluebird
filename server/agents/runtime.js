@@ -418,6 +418,8 @@ function emptyReplyError(stopReason) {
 async function chat(botId, {
   sessionId = null,
   message,
+  // 可信用户身份：直接对话没有父主控会话，但仍要按用户级读长期记忆。
+  userId = null,
   signal = null,
   onToolEvent = null,
   stream = false,
@@ -446,6 +448,7 @@ async function chat(botId, {
     botId,
     messages,
     sessionId: session.id,
+    userId,
     userText: text,
     mode: 'direct_chat',
     signal,

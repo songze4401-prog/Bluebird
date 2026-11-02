@@ -140,6 +140,8 @@ const definition = Object.freeze({
           parentSessionId: mainSessionId,
           parentMessageId: context.userMessageId || null,
           parentUserText: context.userText || '',
+          // 记忆归属用户由运行时注入的可信身份决定（Worker 按用户级读记忆）。
+          parentUserId: context.userId || null,
         },
         { source: 'delegate_to_bot' }
       );

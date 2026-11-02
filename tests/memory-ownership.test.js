@@ -404,6 +404,42 @@ async function main() {
       '审批执行被拒后他人记忆仍在',
       normalized().some(item => item.id === foreignActive.id)
     );
+
+    // merge 会把 sourceIds 吞并进目标条目：源也必须属于本人，
+    // 否则可以借"合并我的记忆"消费掉别人的条目。
+    const ownSeed = diskMemory();
+    ownSeed.push(
+      entry({
+        content: '用户本人的合并目标记忆',
+        keywords: ['合并'],
+        sessionId: SESSION_MINE,
+      })
+    );
+    fs.writeFileSync(MEMORY_FILE, JSON.stringify(ownSeed, null, 2), 'utf8');
+    memory.loadMemories();
+    const ownTarget = normalized().find(
+      item => item.content === '用户本人的合并目标记忆'
+    );
+
+    const mergeResult = await memoryService.execute(
+      'merge',
+      {
+        targetId: ownTarget.id,
+        sourceIds: [foreignActive.id],
+        content: '合并后的本人记忆',
+      },
+      { userId: INSTANCE }
+    );
+
+    check(
+      'memoryService.execute merge 的 sourceIds 含他人条目 → 整体拒绝',
+      mergeResult && mergeResult.ok === false && mergeResult.reason === 'forbidden',
+      JSON.stringify(mergeResult)
+    );
+    check(
+      'merge 被拒后他人记忆未被吞并',
+      normalized().some(item => item.id === foreignActive.id)
+    );
   }
 
   origLog('\nE) 本人操作仍然正常（没有把功能锁死）');
@@ -450,6 +486,11 @@ async function main() {
     for (const item of failures) origLog(`  - ${item}`);
   }
 
+  // 收尾：先断开 keep-alive 连接再等事件循环排空。强退（process.exit）会在
+  // Windows 上触发 libuv 断言（src/win/async.c），断言全绿也以非零码退出。
+  if (typeof server.closeAllConnections === 'function') {
+    server.closeAllConnections();
+  }
   await new Promise(resolve => server.close(resolve));
 
   try {
@@ -458,7 +499,7 @@ async function main() {
     /* ignore */
   }
 
-  process.exit(failed ? 1 : 0);
+  process.exitCode = failed ? 1 : 0;
 }
 
 main().catch(error => {
@@ -468,5 +509,5 @@ main().catch(error => {
   } catch (_) {
     /* ignore */
   }
-  process.exit(1);
+  process.exitCode = 1;
 });

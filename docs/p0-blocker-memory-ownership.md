@@ -82,6 +82,8 @@ getPendingMemoriesForUser(userId)     // 同上
 
 `memory-service.execute(operation, payload, { userId })` 在执行前做归属预检；`agents/approvals.js` 调用时传 `getInstanceUserId()`。越权目标返回 `{ ok:false, reason:'forbidden' }`，审批记录落 `errorCode`。
 
+预检覆盖载荷里**全部**被引用的记忆 id，不只是 `id`：`update/supersede/archive/withdraw/delete` 看 `id`，`merge` 额外逐个看 `targetId` 与 `sourceIds[]`。只校验 `id` 的话，一条合法目标配上他人的 `sourceIds` 就能把他人记忆吞并掉——所以 merge 是**整体拒绝**，不做「跳过他人那条、只合本人那几条」的部分执行；部分执行会让审批记录显示完成、库里却少了一条本不该动的记忆，比拒绝更难排查。
+
 ---
 
 ## 3. 为什么越权返回 403 而不是 404
@@ -97,7 +99,7 @@ getPendingMemoriesForUser(userId)     // 同上
 
 ## 4. 验证
 
-`node tests/memory-ownership.test.js`（新增，27 项）
+`node tests/memory-ownership.test.js`（新增，29 项）
 
 做法：**不需要多用户认证**。单实例下 `resolveUserId(req)` 恒为 `local-owner`，只要在 `memory.json` 里种一条 `userId='user-other-ownership'` 的条目，就构造出了「他人记忆」。
 
@@ -124,7 +126,7 @@ C) 清空类接口：不越界删他人数据
   ✔ 清空后他人记忆完好保留
   ✔ 清空后本人记忆一条不剩
 
-D) 模块级契约
+D) 模块级契约（供非 HTTP 调用方使用）
   ✔ getMemoriesForUser(空身份) 返回空数组（fail-closed）
   ✔ getMemoriesForUser(本人) 不再包含他人记忆
   ✔ getPendingMemoriesForUser(空身份) 返回空数组
@@ -133,21 +135,23 @@ D) 模块级契约
   ✔ checkMemoryOwnership 本人条目 → ok
   ✔ memoryService.execute 他人 id → 拒绝且原因明确
   ✔ 审批执行被拒后他人记忆仍在
+  ✔ memoryService.execute merge 的 sourceIds 含他人条目 → 整体拒绝
+  ✔ merge 被拒后他人记忆未被吞并
 
 E) 本人操作仍然正常（没有把功能锁死）
   ✔ 本人删除自己的记忆 → 200 且真的删掉
   ✔ clear 已清掉原有本人记忆
   ✔ 他人记忆始终未被误删
 
-通过 27 项，失败 0 项
+通过 29 项，失败 0 项
 ```
 
-全量回归：
+全量回归（写侧与 merge 归属补齐后复跑）：
 
 ```
 node scripts/verify-test-coverage.js
-→ CI runner 覆盖：65/65 个测试文件
-→ backend=1888/1888 nodeSuite=221/221 runner=1667/1667
+→ CI runner 覆盖：66/66 个测试文件
+→ backend=1924/1924 nodeSuite=221/221 runner=1703/1703
 → frontend=181/181 suites=22/22 failed=0
 → ✔ 测试覆盖验证通过
 ```
@@ -184,8 +188,8 @@ node scripts/verify-test-coverage.js
 |---|---|
 | `server/memory.js` | 新增 `ownerAllows` / `getMemoriesForUser` / `getPendingMemoriesForUser` / `checkMemoryOwnership`；`deleteMemory` / `archiveMemory` / `confirmPending` / `rejectPending` / `clearMemories` / `clearSessionMemories` 增加可选 `userId` |
 | `server/index.js` | 7 个记忆接口接入 `resolveUserId(req)`；`forbidden` → 403；导入改为 `*ForUser` 版本 |
-| `server/memory-service.js` | `execute(operation, payload, { userId })` 增加归属预检 |
+| `server/memory-service.js` | `execute(operation, payload, { userId })` 增加归属预检，逐个校验 `id` / `targetId` / `sourceIds[]`；merge 命中他人条目时整体拒绝，不做部分执行 |
 | `server/agents/approvals.js` | 审批执行时传 `getInstanceUserId()` |
-| `tests/memory-ownership.test.js` | 新增（27 项） |
+| `tests/memory-ownership.test.js` | 新增（29 项） |
 | `scripts/test-coverage-baseline.json` / `scripts/sync-doc-counts.js` | 登记新测试与说明 |
 | `ARCHITECTURE.md` / `docs/p2-memory-observability.md` | 阻断项状态更新为「已处理」并指向本文 |

@@ -3080,6 +3080,9 @@ function scheduleMemoryExtraction(
     // 具体原因短码由 memory.js 的 reportSkip 与 writeOutcomes 记录。
     processMemory(memoryClient, memoryText, sessionId, {
       messageId: options.messageId || null,
+      // 可信用户身份要一路带到 applyCandidate：否则写侧仍按会话级判定，
+      // 新会话里的"改口"会被拒成 unauthorized_target。
+      userId: options.userId || null,
     })
       .then(outcome => {
         if (!outcome) return;
@@ -3418,6 +3421,8 @@ app.post('/chat', requireAuth, async (req, res) => {
     scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments, {
       messageId: result.userMessageId || null,
       requestId: ctx.requestId,
+      // 自动抽取的更正同样按用户级作用域判定可见性：新会话里改口要能覆盖旧记忆。
+      userId: ctx.userId,
     });
   } catch (error) {
     emitContextTrace(ctxForTrace);
@@ -3909,6 +3914,8 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments, {
     messageId: result && result.userMessageId ? result.userMessageId : null,
     requestId: ctx.requestId,
+    // 与 /chat 一致：更正按用户级作用域判定，新会话改口能覆盖旧记忆。
+    userId: ctx.userId,
   });
 });
 

@@ -60,7 +60,7 @@ flowchart LR
 | 编排 | `server/context/*` | 历史选择、摘要、记忆/知识检索、上下文构建、输入保护 | 已验证 |
 | Agent | `server/agent-runtime.js`, `agent-policy.js`, `tool-*.js` | 工具注册、策略、预算、执行、结果归一化 | 已验证 |
 | 子 Agent | `server/agents/*` | Bot registry/config/vault/sessions/tasks/approvals/result delivery | 部分实现；P0-01 |
-| 记忆 | `server/memory*.js` | 搜索、候选、生命周期、贡献、落盘 | 已验证；作用域/merge 口径需明确 |
+| 记忆 | `server/memory*.js` | 搜索、候选、生命周期、贡献、落盘 | 已验证；作用域见 §6 第 4 条，merge 口径见 `docs/p0-blocker-memory-ownership.md` §2.5 |
 | 检索 | `server/retrieval/*` | 五类来源、BM25/精确/可选向量、RRF、门控、索引 | backend 已验证；无 UI |
 | 域服务 | `server/emotion.js`, `persona.js`, `presence.js`, `uploads.js`, `sticker-repo.js` | 情绪、人格、在线、上传、贴纸 | 已验证 |
 | 持久化 | `server/atomic-write.js`, `sessions.js`, `agents/tasks.js` | 原子写、会话、任务、事件 | 有恢复测试；保留策略缺口 |
@@ -68,10 +68,10 @@ flowchart LR
 
 ## 4. 核心数据流
 
-- **记忆注入**：`prepareChatRequest` → `runContextRuntime` → `retrieveMemory` → `memory.searchMemories`（session scope）→ `buildContext` → 模型。
+- **记忆注入**：`prepareChatRequest` → `runContextRuntime` → `retrieveMemory` → `memory.searchMemories`（带服务端可信 `userId`，即用户级作用域；无身份时 fail-closed 退回会话级）→ `buildContext` → 模型。
 - **外部知识**：`retrieveKnowledge` → `retrieval.searchForContext` → 只注入 document/web/code；memory/conversation 走独立记忆通道。
 - **主控工具**：`runAgentTurn` → `executeToolCall` → `memory_search`/`memory_remember`/`knowledge_search`/`delegate_to_bot`。
-- **委派**：`delegate_to_bot` → Bot 会话 + task → queue → Bot Runtime → tools → result delivery → 父会话。
+- **委派**：`delegate_to_bot` → Router（`parentUserId` = 调用方上下文身份，缺省落回实例用户）→ Bot 会话 + task → queue → Bot Runtime → tools（记忆读写归属父主控会话 + `parentUserId`）→ result delivery → 父会话。
 - **审批**：approval API → `memory-service` → `memory.js` → atomic write；结果投递未闭合（P1-04）。
 - **落盘**：sessions/memory/emotion/presence/agents/tasks/events 各有独立 JSON 文件；没有跨文件事务。
 
@@ -92,7 +92,7 @@ flowchart LR
    主会话已补 `userId` 维度并强制：`/sessions` 只列本人；他人会话 id 在 `/sessions/:id`、`/history`、`/history/clear|recall`、`/presence`、`/chat`、`/chat/stream`、`/retrieval/search` 一律 404 且数据不变。见 `docs/p0-blocker-session-ownership.md`。
    **多用户上线仍需**：(a) `resolveUserId` 返回真实用户；(b) Bot 会话（`agents/sessions.js`）补 `userId`、默认会话改为每用户一个；(c) 审批记录携带请求者 userId。
 3. **Agent 边界**：主控与 Bot 工具 allowlist、policy budget、高风险 deny-only；Bot Key 独立加密。
-4. **记忆边界**：长期记忆按**用户级**作用域（`visibility: user` + 服务端可信 `userId`，当前单用户即 `local-owner`）跨会话共享；原始消息历史、短期上下文、任务执行状态仍按会话/任务隔离；无可信身份时 fail-closed 退回会话级，绝不放开全库。跨会话 merge 是全局设计。
+4. **记忆边界**：长期记忆的**读与写**都按用户级作用域（`visibility: user` + 服务端可信 `userId`，当前单用户即 `local-owner`）跨会话共享——同一用户在任意会话都能召回、更正、合并自己的记忆；原始消息历史、短期上下文、任务执行状态仍按会话/任务隔离；无可信身份时 fail-closed 退回会话级，绝不放开全库。跨会话 merge 是全局设计；Agent 的 `memory_remember` 改写已有记忆时不静默覆盖，候选停在 `pending` 等用户确认（自动抽取路径仍按既有策略直接替代）。见 `docs/p1-user-scoped-memory.md` §5.1。
 5. **模型边界**：Provider 返回是外部不可信数据；Context 对知识做 neutralization，工具路径尚未完全对齐（P2-07）。
 6. **存储边界**：JSON at-rest；API Key 明文/前端 token 内嵌；Bot Vault 加密但备份包含主密钥（P1-05）。
 

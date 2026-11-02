@@ -6,6 +6,8 @@
  *   2. 不同用户之间严格拒绝，泄漏数为 0（跨用户隔离）
  *   3. 没有可信 userId 时退回会话级隔离，绝不放开成全库可见（fail-closed）
  *   4. 三条读路径（注入渲染 / 工具检索 / 派生索引）作用域结论一致
+ *   5. 写侧与读侧同一作用域：同一用户可跨会话更正，跨用户与无身份仍被拒绝，
+ *      且更正后不会同时留下两条矛盾记忆
  *
  * 隔离保证：BLUEBIRD_DATA_DIR 指向系统临时目录，不读写 server/data 的真实记忆文件。
  *
@@ -180,6 +182,101 @@ test('会话级 chunk 仍按会话隔离（消息历史边界不变）', () => {
     false,
     '用户身份不得放大会话边界'
   );
+});
+
+test('写侧用户级：新会话里的改口能覆盖同一用户的旧记忆，不留矛盾条目', async () => {
+  seed([entry({ content: '用户喝咖啡只喝美式', keywords: ['咖啡', '美式'], sessionId: SESSION_A })]);
+  const original = memory.getMemories()[0];
+
+  const result = await memory.applyCandidate(
+    {
+      content: '用户改喝拿铁',
+      type: 'preference',
+      keywords: ['咖啡', '拿铁'],
+      confidence: 0.95,
+      sourceQuote: '我改喝拿铁了',
+      targetId: original.id,
+    },
+    {
+      sessionId: SESSION_B,
+      userId: INSTANCE_USER,
+      userText: '我改喝拿铁了',
+      requireUserGrounding: true,
+    }
+  );
+
+  assert.equal(result.written, true, `更正应落盘：${result.reason}`);
+  assert.ok(
+    ['updated', 'merged', 'superseded'].includes(result.action),
+    `应是更正类动作，实际 ${result.action}`
+  );
+
+  const found = memory.searchMemories({
+    query: QUERY,
+    sessionId: SESSION_B,
+    userId: INSTANCE_USER,
+    limits: { maxItems: 10 },
+  });
+
+  assert.equal(
+    found.results.some(item => item.content.includes('只喝美式')),
+    false,
+    '旧口径不得再被注入（否则同时注入两条矛盾事实）'
+  );
+  assert.ok(
+    found.results.some(item => item.content.includes('拿铁')),
+    '新口径应可被召回'
+  );
+});
+
+test('写侧跨用户拒绝：另一用户不能更正他人记忆', async () => {
+  seed([entry({ content: '用户喝咖啡只喝美式', keywords: ['咖啡', '美式'], sessionId: SESSION_A })]);
+  const original = memory.getMemories()[0];
+
+  const result = await memory.applyCandidate(
+    {
+      content: '用户改喝拿铁',
+      type: 'preference',
+      keywords: ['咖啡'],
+      confidence: 0.95,
+      sourceQuote: '我改喝拿铁了',
+      targetId: original.id,
+    },
+    {
+      sessionId: SESSION_B,
+      userId: OTHER_USER,
+      userText: '我改喝拿铁了',
+      requireUserGrounding: true,
+    }
+  );
+
+  assert.equal(result.written, false);
+  assert.equal(result.reason, 'unauthorized_target');
+  assert.equal(memory.getMemories()[0].content, '用户喝咖啡只喝美式', '拒绝时数据不变');
+});
+
+test('写侧无身份时保持会话级拒绝（旧行为回归）', async () => {
+  seed([entry({ content: '用户喝咖啡只喝美式', keywords: ['咖啡', '美式'], sessionId: SESSION_A })]);
+  const original = memory.getMemories()[0];
+
+  const result = await memory.applyCandidate(
+    {
+      content: '用户改喝拿铁',
+      type: 'preference',
+      keywords: ['咖啡'],
+      confidence: 0.95,
+      sourceQuote: '我改喝拿铁了',
+      targetId: original.id,
+    },
+    {
+      sessionId: SESSION_B,
+      userText: '我改喝拿铁了',
+      requireUserGrounding: true,
+    }
+  );
+
+  assert.equal(result.written, false);
+  assert.equal(result.reason, 'unauthorized_target', '没有可信身份时不得跨会话改写');
 });
 
 test('写入路径仍按会话登记贡献（更正/撤回语义未改）', () => {

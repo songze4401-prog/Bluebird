@@ -249,6 +249,11 @@ async function main() {
     );
   });
 
+  // 收尾：先断开 keep-alive 连接再等事件循环排空。强退（process.exit）会在
+  // Windows 上触发 libuv 断言（src/win/async.c），断言全绿也以非零码退出。
+  if (typeof server.closeAllConnections === 'function') {
+    server.closeAllConnections();
+  }
   await new Promise(resolve => server.close(resolve));
 }
 
@@ -259,9 +264,9 @@ main()
     originalError(`\n通过 ${passed} 项，失败 ${failed} 项`);
     if (failed > 0) {
       for (const item of failures) originalError(`  失败明细：${item}`);
-      process.exit(1);
     }
-    process.exit(0);
+    // 不调用 process.exit：等句柄自然排空，避免 Windows 上 libuv 断言
+    process.exitCode = failed > 0 ? 1 : 0;
   })
   .catch(error => {
     console.error = originalError;
@@ -274,5 +279,5 @@ main()
     } catch (_) {
       /* ignore */
     }
-    process.exit(1);
+    process.exitCode = 1;
   });

@@ -251,11 +251,21 @@ async function execute(operation, payload, { userId = null } = {}) {
 
   // 归属校验（多用户上线前的 P0 阻断项）：审批执行器不得操作他人记忆。
   // userId 为空时保持既有行为（单用户内部调用）；HTTP/审批链路必须传入。
-  const targetId = value && (value.id || value.targetId);
-  if (userId && targetId) {
-    const ownership = memory.checkMemoryOwnership(targetId, userId);
-    if (!ownership.ok) {
-      return { ok: false, reason: ownership.reason };
+  // 一次操作可能引用多个条目（merge 的 sourceIds 会被吞并进目标），
+  // 因此要逐个校验，不能只查 targetId —— 否则可以借 merge 消费他人记忆。
+  const referencedIds = [
+    value && value.id,
+    value && value.targetId,
+    ...(Array.isArray(value && value.sourceIds) ? value.sourceIds : []),
+  ];
+
+  if (userId) {
+    for (const id of referencedIds) {
+      if (typeof id !== 'string' || !id.trim()) continue;
+      const ownership = memory.checkMemoryOwnership(id, userId);
+      if (!ownership.ok) {
+        return { ok: false, reason: ownership.reason };
+      }
     }
   }
 

@@ -13,6 +13,7 @@
 const crypto = require('crypto');
 const { AgentError } = require('./errors');
 const intakeControl = require('./intake-control');
+const { getInstanceUserId } = require('../user-scope');
 
 const CONTRACT_VERSION = 1;
 const PRIORITY_VALUES = Object.freeze(['high', 'normal', 'low']);
@@ -500,6 +501,8 @@ function createRouter(overrides = {}) {
       parentSessionId: normalizeString(input.parentSessionId) || null,
       parentMessageId: normalizeString(input.parentMessageId) || null,
       parentUserText: typeof input.parentUserText === 'string' ? input.parentUserText : '',
+      // 记忆归属用户：调用方给可信身份就用它，否则落回实例用户（服务端身份）。
+      parentUserId: normalizeString(input.parentUserId) || getInstanceUserId(),
     });
 
     if (task.idempotent === true) {

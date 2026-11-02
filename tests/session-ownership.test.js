@@ -377,6 +377,11 @@ async function main() {
     for (const item of failures) origLog(`  - ${item}`);
   }
 
+  // 收尾：先断开 keep-alive 连接再等事件循环排空。强退（process.exit）会在
+  // Windows 上触发 libuv 断言（src/win/async.c），断言全绿也以非零码退出。
+  if (typeof server.closeAllConnections === 'function') {
+    server.closeAllConnections();
+  }
   await new Promise(resolve => server.close(resolve));
 
   try {
@@ -385,7 +390,7 @@ async function main() {
     /* ignore */
   }
 
-  process.exit(failed ? 1 : 0);
+  process.exitCode = failed ? 1 : 0;
 }
 
 main().catch(error => {
@@ -395,5 +400,5 @@ main().catch(error => {
   } catch (_) {
     /* ignore */
   }
-  process.exit(1);
+  process.exitCode = 1;
 });
