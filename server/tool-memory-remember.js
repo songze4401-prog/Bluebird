@@ -207,6 +207,9 @@ const definition = Object.freeze({
       },
       {
         sessionId: memorySessionId,
+        // 可信用户身份由运行时注入：写侧与读侧共用同一作用域，
+        // 同一用户的任意会话都能更正自己的记忆；跨用户仍被拒绝。
+        userId: context.userId || null,
         messageId: context.userMessageId || null,
         sourceType: 'agent',
         intent: args.targetId ? 'correction' : 'explicit',

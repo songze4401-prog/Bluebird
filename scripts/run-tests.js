@@ -38,6 +38,9 @@ const env = {
   BLUEBIRD_AGENT_TOOLS: '',
   // 监控默认开启；普通测试关闭，监控专项测试在文件内显式打开并使用临时目录。
   BLUEBIRD_MONITORING: '0',
+  // 测试进程里的模型调用一律是桩（模块级 mock 或本地 HTTP 桩）。
+  // 显式声明，避免监控把桩 usage 记成供应商真实统计。
+  BLUEBIRD_PROVIDER_KIND: 'stub',
 };
 
 const failed = [];

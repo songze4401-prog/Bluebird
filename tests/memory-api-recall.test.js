@@ -230,6 +230,11 @@ async function waitReady() {
   const memory = require(path.join(__dirname, '..', 'server', 'memory.js'));
   const sessions = require(path.join(__dirname, '..', 'server', 'sessions.js'));
   const retrieval = require(path.join(__dirname, '..', 'server', 'retrieval'));
+  const { getInstanceUserId } = require(
+    path.join(__dirname, '..', 'server', 'user-scope')
+  );
+  // 长期记忆 chunk 是用户级作用域（P1），检索必须带服务端可信用户身份。
+  const instanceUserId = getInstanceUserId();
 
   origLog('\n鉴权与参数校验');
   {
@@ -351,6 +356,7 @@ async function waitReady() {
     await retrieval.search({
       query: '拿铁',
       sessionId,
+      userId: instanceUserId,
       sources: ['memory'],
     });
     check(

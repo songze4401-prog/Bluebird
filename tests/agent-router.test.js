@@ -26,6 +26,7 @@ const botSessions = require('../server/agents/sessions');
 const mainSessions = require('../server/sessions');
 const dispatchTool = require('../server/tool-dispatch-bot');
 const { AgentError } = require('../server/agents/errors');
+const { getInstanceUserId } = require('../server/user-scope');
 
 function routing(overrides = {}) {
   const base = JSON.parse(JSON.stringify(routingModule.DEFAULT_ROUTING));
@@ -507,6 +508,11 @@ test('dispatch：创建 Worker 会话 → 任务 → 事件 → 入队', () => {
   assert.equal(env.created.length, 1);
   assert.equal(env.created[0].workerSessionId, 'bs_fake_1');
   assert.equal(env.created[0].parentSessionId, 's_main');
+  assert.equal(
+    env.created[0].parentUserId,
+    getInstanceUserId(),
+    '调用方没给身份时，记忆归属落回服务端实例用户'
+  );
   assert.equal(env.started.length, 1);
   assert.equal(result.idempotent, false);
   const decided = env.events.filter(event => event.eventType === 'route.decided');
@@ -516,6 +522,22 @@ test('dispatch：创建 Worker 会话 → 任务 → 事件 → 入队', () => {
   assert.equal(decided[0].payload.pathReason, 'within_fast_limits');
   assert.equal(decided[0].payload.candidates, 'memory');
   assert.match(decided[0].payload.routeId, /^route_/);
+});
+
+test('dispatch：调用方传入的 parentUserId 原样落库（Worker 按它读用户级记忆）', () => {
+  const env = fakeDispatchEnv();
+  env.router.dispatch(
+    {
+      agentId: 'memory',
+      taskType: 'memory.search',
+      goal: '查咖啡偏好',
+      parentSessionId: 's_main',
+      parentUserId: 'trusted-user-42',
+    },
+    { source: 'delegate_to_bot' }
+  );
+  assert.equal(env.created.length, 1);
+  assert.equal(env.created[0].parentUserId, 'trusted-user-42');
 });
 
 test('dispatch：被拒绝时不建会话、不建任务，并写 route.rejected', () => {

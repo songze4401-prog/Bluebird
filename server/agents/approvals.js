@@ -18,6 +18,7 @@ const resultDelivery = require('./result-delivery');
 const { normalizeWorkerResult } = require('./worker-result');
 const { isKnownBot } = require('./manifest');
 const { AgentError } = require('./errors');
+const { getInstanceUserId } = require('../user-scope');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -384,7 +385,10 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
   let result;
   let errorCode = null;
   try {
-    result = await memoryService.execute(record.operation, record.payload);
+    // 归属校验：审批执行器按服务端可信用户身份操作，不能越界改他人记忆。
+    result = await memoryService.execute(record.operation, record.payload, {
+      userId: getInstanceUserId(),
+    });
     if (!result || result.reason !== 'ok') {
       errorCode = (result && result.reason) || 'memory_operation_failed';
     }

@@ -32,6 +32,7 @@ let tool;
 let runtime;
 let agentRuntime;
 let approvals;
+let userScope;
 let apiServer;
 let apiBase;
 let providerId;
@@ -247,6 +248,7 @@ test.before(async () => {
   runtime = require('../server/agents/runtime');
   approvals = require('../server/agents/approvals');
   agentRuntime = require('../server/agent-runtime');
+  userScope = require('../server/user-scope');
 
   const added = apiConfigs.addModelProvider({
     name: 'Dispatch Test Provider',
@@ -396,6 +398,7 @@ test('主 Agent 工具循环：模型可调用 delegate_to_bot 并把任务交�
     providerId,
     modelId: 'dispatch-test-model',
     sessionId: main.id,
+    userId: 'trusted-user-dispatch',
     userText: 'DELEGATE 请整理一条记忆',
     messages: [
       { role: 'system', content: '你可以调用 delegate_to_bot。' },
@@ -415,6 +418,11 @@ test('主 Agent 工具循环：模型可调用 delegate_to_bot 并把任务交�
   assert.equal(outcome.toolSteps[0].name, 'delegate_to_bot');
   const task = tasks.listTasks('memory', { parentSessionId: main.id })[0];
   assert.ok(task);
+  assert.equal(
+    task.parentUserId,
+    'trusted-user-dispatch',
+    '运行时注入的可信用户身份要随任务落库，Worker 才能按用户级读记忆'
+  );
   const finished = await waitForTask(task.taskId);
   assert.equal(finished.status, 'completed');
   assert.ok(mainSessions.getMessages(main.id).some(message =>
@@ -483,7 +491,8 @@ test('主控记忆 → 委派 Bot：memory_search 使用父主控会话 scope', 
   );
 });
 
-test('主控记忆 → 委派 Bot：memory_remember 写入父主控会话 scope', async () => {
+test('主控记忆 → 委派 Bot：memory_remember 归属父主控会话，跨会话冲突改写转待确认', async () => {
+  const instanceUser = userScope.getInstanceUserId();
   const main = mainSessions.createSession({ title: '委派写入 scope 回归' });
   const outcome = await agentRuntime.runAgentTurn({
     providerId,
@@ -509,6 +518,30 @@ test('主控记忆 → 委派 Bot：memory_remember 写入父主控会话 scope'
   const finished = await waitForTask(task.taskId);
   assert.equal(finished.status, 'completed');
   assert.equal(finished.parentSessionId, main.id);
+  // 委派任务带服务端可信身份执行，记忆作用域才是用户级。
+  assert.equal(finished.parentUserId, instanceUser);
+
+  // 上一条测试里的「深烘咖啡」属于同一用户，用户级作用域下它现在可见，
+  // 于是这条新的「浅烘咖啡」被判定为改写。Agent 写入不允许静默覆盖已有
+  // 记忆：候选停在待确认，旧偏好保持生效，数据一条都没被改。
+  const darkBefore = memory
+    .getMemoriesForUser(instanceUser)
+    .find(item => item.content.includes('深烘咖啡'));
+  assert.equal(darkBefore.status, 'active');
+
+  const pendingList = memory.getPendingMemoriesForUser(instanceUser);
+  const pending = pendingList.find(item => item.content.includes('浅烘咖啡'));
+  assert.ok(pending, JSON.stringify(pendingList.map(item => item.content)));
+  assert.equal(pending.pendingReason, 'mutation_requires_confirmation');
+  assert.equal(pending.pendingTargetId, darkBefore.id);
+  assert.ok(
+    pending.contributions.some(item => item.sessionId === main.id),
+    '候选要归属父主控会话，而不是 Bot 自己的 bs_ 会话'
+  );
+
+  // 确认后才生效：新偏好落定、旧偏好被取代，不会同时注入两条互相矛盾的咖啡偏好。
+  const confirmed = await memory.confirmPending(pending.id, instanceUser);
+  assert.equal(confirmed.updated, 1);
 
   const mainFound = memory.searchMemories({
     query: '浅烘咖啡',
@@ -521,6 +554,11 @@ test('主控记忆 → 委派 Bot：memory_remember 写入父主控会话 scope'
     limits: { maxItems: 10, perItemMax: 300, totalMax: 2000, maxTokens: 1200 },
   });
   assert.ok(mainFound.results.some(item => item.content.includes('浅烘咖啡')));
+  const darkAfter = memory
+    .getMemoriesForUser(instanceUser, { includeSuperseded: true })
+    .find(item => item.id === darkBefore.id);
+  assert.equal(darkAfter.status, 'superseded');
+  // Bot 的 bs_ 会话只承载执行轨迹：不带可信身份时仍按会话隔离，读不到用户记忆。
   assert.equal(botFound.results.length, 0);
 });
 

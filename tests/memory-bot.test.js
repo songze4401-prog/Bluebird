@@ -27,6 +27,14 @@ process.env.BLUEBIRD_AGENT_TOOLS = '';
 process.env.BLUEBIRD_MONITORING = '0';
 process.env.BLUEBIRD_ALLOW_PRIVATE_BASE_URL = '1';
 
+// 可信用户身份：与运行期同一来源，避免把 'local-owner' 写死进断言。
+const { getInstanceUserId } = require(path.join(
+  __dirname,
+  '..',
+  'server',
+  'user-scope.js'
+));
+
 const seenAuth = [];
 const budgetRequests = [];
 let providerMode = 'text';
@@ -457,6 +465,9 @@ test('Bot 会话：创建、读取、追加与跨 Bot/不存在会话拒绝', ()
 test('直接对话：使用 Bot 独立 Key，真实工具循环与事件可追溯', async () => {
   const session = sessions.createSession('memory', { title: '工具检索' });
   const now = new Date().toISOString();
+  // 记忆归属"主控的另一会话"：Bot 直接对话要按用户级读到它，
+  // 没有可信 userId 时必须读不到（fail-closed）。
+  const ownerSession = 'main-app-session-owner';
   fs.writeFileSync(
     path.join(TMP, 'memory.json'),
     JSON.stringify(
@@ -474,7 +485,7 @@ test('直接对话：使用 Bot 独立 Key，真实工具循环与事件可追�
           updatedAt: now,
           contributions: [
             {
-              sessionId: session.id,
+              sessionId: ownerSession,
               sourceQuote: '我喜欢拿铁咖啡',
               createdAt: now,
               sourceType: 'user',
@@ -493,16 +504,33 @@ test('直接对话：使用 Bot 独立 Key，真实工具循环与事件可追�
   const result = await runtime.chat('memory', {
     sessionId: session.id,
     message: '请检索我关于咖啡的长期记忆。',
+    userId: getInstanceUserId(),
   });
 
   assert.equal(result.ok, true);
   assert.equal(result.sessionId, session.id);
   assert.equal(result.message.role, 'assistant');
   assert.ok(result.toolSteps.some(step => step.name === 'memory_search'));
-  assert.ok(result.evidence.some(item => item.id === 'm-memory-bot-test'));
+  assert.ok(
+    result.evidence.some(item => item.id === 'm-memory-bot-test'),
+    '可信用户身份下，Bot 直接对话应能跨会话读到用户的长期记忆'
+  );
   assert.ok(seenAuth.length >= 2);
   assert.ok(seenAuth.every(auth => auth === `Bearer ${BOT_KEY}`));
   assert.ok(!JSON.stringify(result).includes(BOT_KEY));
+
+  // 无可信身份：同一份记忆不得被 Bot 会话读到（Bot 会话本身没有贡献）。
+  const anonymousSession = sessions.createSession('memory', { title: '无身份检索' });
+  providerMode = 'tool-first';
+  const anonymous = await runtime.chat('memory', {
+    sessionId: anonymousSession.id,
+    message: '请检索我关于咖啡的长期记忆。',
+  });
+  assert.equal(
+    anonymous.evidence.some(item => item.id === 'm-memory-bot-test'),
+    false,
+    '没有 userId 时不得放开跨会话记忆'
+  );
 
   const history = sessions.getMessages('memory', session.id);
   assert.equal(history.length, 2);

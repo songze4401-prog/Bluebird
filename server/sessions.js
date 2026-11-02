@@ -6,6 +6,7 @@ const { logDataEvent } = require('./data-events');
 const { registerCorruptionHandler, handleCorruption } = require('./corruption');
 const { writeFileAtomicSync } = require('./atomic-write');
 const { truncateText } = require('./text-utils');
+const { getInstanceUserId } = require('./user-scope');
 
 // 数据目录可通过 BLUEBIRD_DATA_DIR 覆盖：测试用临时目录，避免碰到真实数据。
 // 未设置时与 memory.js / emotion.js 保持一致，落在 server/data/。
@@ -105,6 +106,12 @@ function sanitizeStore(parsed) {
           typeof item.title === 'string' && item.title.trim()
             ? item.title.trim()
             : DEFAULT_SESSION_TITLE,
+        // 会话归属（多用户上线前的 P0 阻断项）：旧数据没有这个字段，
+        // 读盘时归到实例用户。单用户部署下等价于"全部属于本人"。
+        userId:
+          typeof item.userId === 'string' && item.userId.trim()
+            ? item.userId.trim().slice(0, 120)
+            : getInstanceUserId(),
         createdAt,
         updatedAt:
           typeof item.updatedAt === 'string' && item.updatedAt
@@ -327,6 +334,7 @@ function importLegacyHistory() {
   store.sessions.push({
     id: DEFAULT_SESSION_ID,
     title: DEFAULT_SESSION_TITLE,
+    userId: getInstanceUserId(),
     createdAt: (messages[0] && messages[0].createdAt) || fallbackCreatedAt,
     updatedAt:
       (messages[messages.length - 1] && messages[messages.length - 1].createdAt) ||
@@ -349,6 +357,7 @@ function ensureDefaultSession() {
   store.sessions.push({
     id: DEFAULT_SESSION_ID,
     title: DEFAULT_SESSION_TITLE,
+    userId: getInstanceUserId(),
     createdAt: t,
     updatedAt: t,
   });
@@ -452,10 +461,15 @@ function findMeta(sessionId) {
 
 // ---- 对外 API ----
 
-function listSessions() {
+// userId 非空时只列出该用户名的会话（HTTP 层必须传）。
+// 不传保持旧行为：返回全部（内部索引/兼容调用）。
+function listSessions(userId = null) {
   const current = loadStore();
+  const owner =
+    typeof userId === 'string' && userId.trim() ? userId.trim() : null;
 
   return current.sessions
+    .filter(meta => !owner || meta.userId === owner)
     .map(meta => ({
       id: meta.id,
       title: meta.title,
@@ -481,6 +495,43 @@ function getSession(sessionId) {
   };
 }
 
+// ---- 会话归属校验（多用户上线前的 P0 阻断项） ----
+// 会话本身没有归属维度时，`GET /history?sessionId=X` 等于「知道 id 就能读」。
+// 这里补上归属判断，读/写两侧共用：
+//   userId 为空  → 不做限制（内部调用，保持既有行为）
+//   userId 非空  → 必须与会话 userId 一致
+function sessionOwnerAllows(meta, userId) {
+  const owner =
+    typeof userId === 'string' && userId.trim() ? userId.trim() : null;
+  if (!owner) return true;
+  return Boolean(meta && meta.userId === owner);
+}
+
+// 返回 { ok, reason }：'not-found' / 'forbidden'。
+// 调用方通常把两者都映射成 404——会话 id 是 UUID，不泄露"存在但无权"。
+function checkSessionOwnership(sessionId, userId) {
+  if (typeof sessionId !== 'string' || !sessionId.trim()) {
+    return { ok: false, reason: 'invalid' };
+  }
+
+  // findMeta 只读内存，必须先确保 store 已加载（与 getSession 同一前置）。
+  loadStore();
+
+  const meta = findMeta(sessionId.trim());
+
+  if (!meta) return { ok: false, reason: 'not-found' };
+  if (!sessionOwnerAllows(meta, userId)) return { ok: false, reason: 'forbidden' };
+
+  return { ok: true, reason: null };
+}
+
+// 归属感知的会话读取：无权时返回 null（与不存在同形）。
+function getSessionForUser(sessionId, userId) {
+  const access = checkSessionOwnership(sessionId, userId);
+  if (!access.ok) return null;
+  return getSession(sessionId);
+}
+
 // 回收最老的空会话：只回收没有消息、且不是默认会话的空壳。
 // 有对话的会话一律不删——容量压力不能变成"删掉用户的聊天记录"。
 function pruneEmptySessions(current) {
@@ -499,7 +550,7 @@ function pruneEmptySessions(current) {
   return removed;
 }
 
-function createSession({ title } = {}) {
+function createSession({ title, userId = null } = {}) {
   const current = loadStore();
   const t = nowIso();
 
@@ -520,6 +571,11 @@ function createSession({ title } = {}) {
       typeof title === 'string' && title.trim()
         ? title.trim().slice(0, 60)
         : NEW_SESSION_TITLE,
+    // 归属用户由服务端身份决定；不传时归到实例用户（内部调用/旧调用点）。
+    userId:
+      typeof userId === 'string' && userId.trim()
+        ? userId.trim().slice(0, 120)
+        : getInstanceUserId(),
     createdAt: t,
     updatedAt: t,
   };
@@ -817,6 +873,8 @@ module.exports = {
   LEGACY_HISTORY_FILE,
   listSessions,
   getSession,
+  getSessionForUser,
+  checkSessionOwnership,
   createSession,
   getMessages,
   appendMessages,

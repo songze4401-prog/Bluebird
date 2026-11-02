@@ -104,6 +104,7 @@ function normalizeSources(raw, { sessionId = null, allowed = null } = {}) {
 function createPlan({
   query,
   sessionId = null,
+  userId = null,
   sources,
   limit,
   tokenBudget,
@@ -141,6 +142,8 @@ function createPlan({
     queryChars: text.length,
     sessionId:
       typeof sessionId === 'string' && sessionId.trim() ? sessionId.trim() : null,
+    userId:
+      typeof userId === 'string' && userId.trim() ? userId.trim() : null,
     sources,
     sourceSet: new Set(sources),
     purpose,
@@ -168,6 +171,11 @@ function scopeAllows(chunk, plan) {
         Array.isArray(scope.sessions) &&
         scope.sessions.includes(plan.sessionId)
     );
+  }
+  // 用户级：长期记忆的读边界（P1）。没有可信 userId 时一律拒绝，
+  // 绝不退回 global。
+  if (scope.visibility === 'user') {
+    return Boolean(plan.userId && scope.userId && scope.userId === plan.userId);
   }
   return false;
 }
