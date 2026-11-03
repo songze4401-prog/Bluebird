@@ -4,7 +4,8 @@
  * 云岫 Bluebird — Context Runtime v3 真实模型能力评测
  *
  * 用途：在真实 DeepSeek 凭据可用时，验证"20 条以外仍能找回""当前事实优先"
- * "Agent 工具结果回传"三条能力。未配置凭据时明确输出 BLOCKED，不伪造结果。
+ * "Agent 工具结果回传"三条能力。未配置凭据时明确输出 BLOCKED 并以退出码 2
+ * 表示"未验证"（与 p4-real-e2e.js 的 NOT VERIFIED 语义一致），不伪造结果。
  *
  * 运行：node scripts/context-capability-eval.js
  * 说明：会真实调用模型（少量请求）；数据全部落在临时目录，不碰 server/data。
@@ -308,7 +309,8 @@ function record(name, ok, evidence) {
 async function main() {
   if (!hasKey()) {
     console.log('BLOCKED：未配置 DEEPSEEK_API_KEY，真实模型验收无法执行。');
-    process.exit(0);
+    console.log('这不算通过：设置 DEEPSEEK_API_KEY 后重跑 npm run eval:context。');
+    process.exit(2);
   }
 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-cap-eval-'));
