@@ -8,6 +8,10 @@ const { DECISION } = require('./memory-decision');
 
 const POLICY_VERSION = 'p1.0';
 const DECISION_VERSION = 'p1.0';
+// S9：反馈纠正路径（user_correction 重写记忆）使用的版本。它与首次写入的
+// POLICY_VERSION / DECISION_VERSION 分开治理；值固定为 'p5.0' 以兼容已存数据。
+const FEEDBACK_POLICY_VERSION = 'p5.0';
+const FEEDBACK_DECISION_VERSION = 'p5.0';
 
 const PROVENANCE = Object.freeze({
   USER_ASSERTED: 'user_asserted',
@@ -278,6 +282,8 @@ function applyEvidencePolicy({
 module.exports = {
   POLICY_VERSION,
   DECISION_VERSION,
+  FEEDBACK_POLICY_VERSION,
+  FEEDBACK_DECISION_VERSION,
   PROVENANCE,
   VALID_PROVENANCE,
   CATEGORY,

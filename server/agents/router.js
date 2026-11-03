@@ -14,8 +14,7 @@ const crypto = require('crypto');
 const { AgentError } = require('./errors');
 const intakeControl = require('./intake-control');
 const { getInstanceUserId } = require('../user-scope');
-
-const CONTRACT_VERSION = 1;
+const { CONTRACT_VERSION } = require('./contract');
 const PRIORITY_VALUES = Object.freeze(['high', 'normal', 'low']);
 const STATUS_BY_CODE = Object.freeze({
   invalid_task: 400,

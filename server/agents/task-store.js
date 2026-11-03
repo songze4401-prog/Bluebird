@@ -18,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const { writeFileAtomicSync } = require('../atomic-write');
 const { AgentError } = require('./errors');
+const { CONTRACT_VERSION } = require('./contract');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -53,7 +54,7 @@ function normalizeTask(task) {
   };
   add('agentId', task.botId || null);
   add('workerSessionId', task.sessionId || null);
-  add('contractVersion', 1);
+  add('contractVersion', CONTRACT_VERSION);
   add('priority', 'normal');
   add('contextRef', null);
   // S8：计划版本指针的只读默认视图。故意不参与 migrated 判定——仅因新增

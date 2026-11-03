@@ -42,6 +42,8 @@ const {
 const {
   POLICY_VERSION,
   DECISION_VERSION,
+  FEEDBACK_POLICY_VERSION,
+  FEEDBACK_DECISION_VERSION,
   PROVENANCE,
   CATEGORY,
   VALID_PROVENANCE,
@@ -4995,8 +4997,8 @@ async function correctMemoryFeedback({
       ),
       observedAt: now,
       persistentIntent: true,
-      policyVersion: 'p5.0',
-      decisionVersion: 'p5.0',
+      policyVersion: FEEDBACK_POLICY_VERSION,
+      decisionVersion: FEEDBACK_DECISION_VERSION,
       evidence:
         item.evidence && typeof item.evidence === 'object' ? item.evidence : null,
       lastDecision: feedbackDecision('correct', 'user_correction', fbId, now),

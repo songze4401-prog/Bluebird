@@ -43,7 +43,8 @@ const PARENT_USER_TEXT_MAX = 4000;
 const RESULT_SUMMARY_MAX = 8000;
 // Task Contract v1：这些字段是 Router/Worker 之间的冻结契约。
 // 旧字段 botId / sessionId 保留为同一值的别名，避免破坏既有 API 与前端。
-const CONTRACT_VERSION = 1;
+// S9：契约版本唯一定义在 contract.js，避免多处常量漂移。
+const { CONTRACT_VERSION } = require('./contract');
 const CONTEXT_REF_MAX = 200;
 const IDEMPOTENCY_KEY_MAX = 120;
 const PRIORITIES = Object.freeze(['high', 'normal', 'low']);
@@ -655,6 +656,8 @@ function createTask({
     lease: null,
     retryAt: null,
     lastErrorCode: null,
+    // checkpointVersion 是 checkpoint 序号（recordCheckpoint 每次 +1），
+    // 不是 CAS/并发版本；CAS 版本（stateVersion）属 ② 范围，本步不实现。
     checkpointVersion: 0,
     runs: [],
     requiresReview: false,
@@ -738,6 +741,15 @@ function updateTask(taskId, patch = {}) {
       400
     );
   }
+  // S9：checkpointVersion 是 checkpoint 序号，只能由 recordCheckpoint 递增写入。
+  // 它不是 CAS 版本；CAS 版本（stateVersion）属 ② 范围，本步不实现。
+  if (patch.checkpointVersion !== undefined) {
+    throw new AgentError(
+      'task_checkpoint_version_read_only',
+      'checkpointVersion 只能由 recordCheckpoint 写入',
+      400
+    );
+  }
   if (patch.cancelRequested !== undefined) {
     task.cancelRequested = patch.cancelRequested === true;
   }
@@ -802,9 +814,6 @@ function updateTask(taskId, patch = {}) {
           typeof patch.lease.heartbeatAt === 'string' ? patch.lease.heartbeatAt : null,
       };
     }
-  }
-  if (Number.isInteger(patch.checkpointVersion) && patch.checkpointVersion >= 0) {
-    task.checkpointVersion = patch.checkpointVersion;
   }
   if (patch.deliveredToParentAt !== undefined) {
     task.deliveredToParentAt = patch.deliveredToParentAt;
