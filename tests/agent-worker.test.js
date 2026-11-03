@@ -32,6 +32,8 @@ let providerServer;
 let providerBase;
 let providerId;
 let pendingTimers = [];
+// S7：同一 goal 首次请求返回 429，用于验证 retrying 退避与重试上限。
+const rateLimitedGoals = new Set();
 
 function json(res, status, payload) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -98,6 +100,14 @@ test.before(async () => {
       const messages = parsed.messages || [];
       const text = lastUserText(messages);
       const hasToolResult = messages.some(message => message.role === 'tool');
+      if (text.includes('RATE_LIMIT_TASK')) {
+        const goal = taskGoal(messages);
+        if (!rateLimitedGoals.has(goal)) {
+          rateLimitedGoals.add(goal);
+          json(res, 429, { error: 'rate_limited' });
+          return;
+        }
+      }
       if (text.includes('FAIL_TASK')) {
         json(res, 500, { error: 'provider_failed' });
         return;
@@ -217,6 +227,28 @@ function makeTask(overrides = {}) {
     deadlineMs: 20000,
     ...overrides,
   });
+}
+
+async function waitForStatus(taskId, status, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const task = tasks.getTask(taskId);
+    if (task && (task.status === status || tasks.isTerminalStatus(task.status))) return task;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  return tasks.getTask(taskId);
+}
+
+// maxAttempts 在 createTask 时从环境变量读取；这里按需临时覆盖。
+function makeRetryTask(goal, maxAttempts) {
+  const previous = process.env.BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS;
+  process.env.BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS = String(maxAttempts);
+  try {
+    return makeTask({ goal });
+  } finally {
+    if (previous === undefined) delete process.env.BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS;
+    else process.env.BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS = previous;
+  }
 }
 
 // ---- A. 上下文按需投影 ----
@@ -526,6 +558,48 @@ test('执行：模型失败收敛为 failed，并落地失败结果', async () =
   assert.equal(finished.result.errorCode, finished.errorCode);
   const session = sessions.getSession('memory', finished.sessionId);
   assert.equal(session.lifecycle.status, 'failed');
+});
+
+test('执行：可重试错误进入 retrying，退避到期后直接 running 完成', async () => {
+  const task = makeRetryTask('RATE_LIMIT_TASK 限流一次', 2);
+  runtime.startTask(task.taskId);
+
+  const retrying = await waitForStatus(task.taskId, 'retrying');
+  assert.equal(retrying.status, 'retrying');
+  assert.equal(retrying.attempts, 1);
+  assert.ok(retrying.retryAt);
+  // 退避未到期：调度器不会取走该任务。
+  assert.equal(tasks.nextQueuedTask(), null);
+
+  const waitMs = Math.max(0, Date.parse(retrying.retryAt) - Date.now()) + 20;
+  await new Promise(resolve => setTimeout(resolve, waitMs));
+  assert.equal(tasks.getTask(task.taskId).status, 'retrying');
+
+  // 到期后由队列 tick 直接启动下一次 attempt（retrying → running，不经 queued）。
+  runtime.startTask(task.taskId);
+  const finished = await waitForTask(task.taskId);
+  assert.equal(finished.status, 'completed');
+  assert.equal(finished.attempts, 2);
+
+  const events = tasks
+    .listEvents('memory', { limit: 200 })
+    .filter(event => event.taskId === task.taskId);
+  assert.equal(events.filter(event => event.eventType === 'task.accepted').length, 1);
+  assert.equal(events.filter(event => event.eventType === 'task.started').length, 2);
+});
+
+test('执行：重试次数达到 maxAttempts 后收敛为 failed，不再重试', async () => {
+  const task = makeRetryTask('RATE_LIMIT_TASK 重试上限', 1);
+  runtime.startTask(task.taskId);
+  const finished = await waitForTask(task.taskId);
+  assert.equal(finished.status, 'failed');
+  assert.equal(finished.errorCode, 'model_rate_limit');
+  assert.equal(finished.attempts, 1);
+  const events = tasks
+    .listEvents('memory', { limit: 200 })
+    .filter(event => event.taskId === task.taskId);
+  assert.ok(!events.some(event => event.eventType === 'task.recovered' && event.payload.mode === 'retry'));
+  assert.equal(tasks.getTask(task.taskId).status, 'failed');
 });
 
 test('执行：取消传播到运行中的 Worker，收敛为 cancelled', async () => {

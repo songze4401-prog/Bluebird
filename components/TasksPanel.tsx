@@ -18,6 +18,7 @@ const STATUS_LABEL: Record<string, string> = {
   accepted: '已接收',
   running: '执行中',
   waiting_approval: '等待审批',
+  retrying: '重试中',
   recovery: '待核对',
   completed: '已完成',
   failed: '失败',
@@ -165,7 +166,9 @@ export function TasksPanel({
             <Text style={styles.running}>
               {task.status === 'queued' || task.status === 'accepted'
                 ? '任务已排队，等待 Memory Bot 执行。'
-                : '任务执行中，结果来自服务端任务存储。'}
+                : task.status === 'retrying'
+                  ? '任务执行失败，正在退避后重试。'
+                  : '任务执行中，结果来自服务端任务存储。'}
             </Text>
           )}
         </View>

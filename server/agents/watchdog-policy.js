@@ -49,7 +49,8 @@ function evaluate(snapshot = {}, policy = DEFAULT_POLICY) {
   let queued = 0;
   let oldestQueuedAt = null;
   for (const task of tasks) {
-    if (task.status === 'queued') {
+    // S7：retrying 仍是等待调度的队列成员，积压与最老排队时间都要计入。
+    if (task.status === 'queued' || task.status === 'retrying') {
       queued += 1;
       if (!oldestQueuedAt || String(task.createdAt) < oldestQueuedAt) {
         oldestQueuedAt = task.createdAt || null;

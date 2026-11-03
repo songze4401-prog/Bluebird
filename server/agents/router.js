@@ -345,9 +345,10 @@ function computeLoad(taskStore) {
   try {
     const load = emptyLoad();
     for (const task of taskStore.allTasks()) {
-      if (!['queued', 'accepted', 'running'].includes(task.status)) continue;
+      // S7：retrying 计入队列深度（不是运行中占用）。
+      if (!['queued', 'retrying', 'accepted', 'running'].includes(task.status)) continue;
       load.queuedTotal += 1;
-      if (task.status === 'queued') continue;
+      if (task.status === 'queued' || task.status === 'retrying') continue;
       const agentId = task.agentId || task.botId;
       load.runningByAgent[agentId] = (Number(load.runningByAgent[agentId]) || 0) + 1;
     }

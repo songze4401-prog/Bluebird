@@ -10,7 +10,7 @@
 const { AgentError } = require('./errors');
 const vocabulary = require('./status-vocabulary');
 
-// S5：状态集合取 §24.1 十态；`retrying` 仅入词表，暂无写入者（S7 再补边）。
+// S5：状态集合取 §24.1 十态；S7 起 `retrying` 是正式重试态，不再借道 queued。
 const STATUSES = Object.freeze([...vocabulary.STATUSES]);
 
 const TERMINAL = new Set([...vocabulary.TERMINAL_STATUSES]);
@@ -26,9 +26,10 @@ const TRANSITIONS = Object.freeze({
     'timed_out',
     'recovery',
   ]),
+  // S7：运行失败退避进入 retrying；running → queued 的回退边已删除。
   running: Object.freeze([
     'waiting_approval',
-    'queued',
+    'retrying',
     'completed',
     'failed',
     'cancelled',
@@ -37,7 +38,8 @@ const TRANSITIONS = Object.freeze({
   ]),
   // 审批出口：批准后先回 running 再执行；timed_out/recovery 只由资源期限耗尽写入。
   waiting_approval: Object.freeze(['running', 'timed_out', 'cancelled', 'recovery']),
-  retrying: Object.freeze([]),
+  // 重试出口：退避到期直接启动下一次 attempt（不经 queued）；等待期可取消/超时。
+  retrying: Object.freeze(['running', 'cancelled', 'timed_out']),
   completed: Object.freeze([]),
   failed: Object.freeze([]),
   cancelled: Object.freeze([]),

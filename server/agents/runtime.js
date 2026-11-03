@@ -65,7 +65,7 @@ function scheduleTaskQueue() {
         try {
           const task = tasks.getRawTask(next.taskId);
           if (task && !tasks.isTerminalStatus(task.status)) {
-            if (task.status === 'queued') {
+            if (task.status === 'queued' || task.status === 'retrying') {
               // 未能进入 accepted 的失败：延后重试而不是原地热循环。
               tasks.updateTask(next.taskId, {
                 retryAt: new Date(Date.now() + 2000).toISOString(),
@@ -356,7 +356,10 @@ async function execute({
       throw new AgentError('cancelled', '运行已取消', 409);
     }
     const info = classifyError(error);
-    const code = info.kind === 'timeout' ? 'model_timeout' : `model_${info.kind || 'failed'}`;
+    // classifyError 返回 { code, status, error }；S7 修复：此前误读 info.kind，
+    // 导致所有模型错误都退化成 model_failed，重试白名单永不命中。
+    const code =
+      info.code === 'timeout' ? 'model_timeout' : `model_${info.code || 'failed'}`;
     safeEvent(
       botId,
       'model.failed',
@@ -565,6 +568,10 @@ async function runTask(taskId) {
     );
   };
 
+  // S7：retrying 任务退避到期后直接启动 attempt（retrying → running），
+  // 不再经 queued/accepted 中转。
+  const retryAttempt = task.status === 'retrying';
+
   try {
     // ---- accept ----
     // 先拿租约：已有其他存活 Worker 持有时不执行；租约在手才进入 accepted。
@@ -577,28 +584,41 @@ async function runTask(taskId) {
       attempt: (Number.isInteger(task.attempts) ? task.attempts : 0) + 1,
       startedAt: nowIso(),
     });
-    tasks.transitionTask(task.taskId, {
-      to: 'accepted',
-      runId,
-      runStartedAt: nowIso(),
-      heartbeatAt: nowIso(),
-      checkpoint: null,
-    });
-    safeEvent(
-      task.botId,
-      'task.accepted',
-      { status: 'accepted', taskType: task.taskType },
-      { taskId: task.taskId, runId, sessionId: task.sessionId }
-    );
+    if (retryAttempt) {
+      // 重试启动前最后一次确认：期间被取消/已离开 retrying 则不再执行。
+      const due = tasks.getRawTask(task.taskId);
+      if (
+        !due ||
+        tasks.isTerminalStatus(due.status) ||
+        due.status !== 'retrying' ||
+        due.cancelRequested
+      ) {
+        return;
+      }
+    } else {
+      tasks.transitionTask(task.taskId, {
+        to: 'accepted',
+        runId,
+        runStartedAt: nowIso(),
+        heartbeatAt: nowIso(),
+        checkpoint: null,
+      });
+      safeEvent(
+        task.botId,
+        'task.accepted',
+        { status: 'accepted', taskType: task.taskType },
+        { taskId: task.taskId, runId, sessionId: task.sessionId }
+      );
 
-    const afterAccept = tasks.getRawTask(task.taskId);
-    if (
-      !afterAccept ||
-      tasks.isTerminalStatus(afterAccept.status) ||
-      afterAccept.status === 'waiting_approval' ||
-      afterAccept.cancelRequested
-    ) {
-      return;
+      const afterAccept = tasks.getRawTask(task.taskId);
+      if (
+        !afterAccept ||
+        tasks.isTerminalStatus(afterAccept.status) ||
+        afterAccept.status === 'waiting_approval' ||
+        afterAccept.cancelRequested
+      ) {
+        return;
+      }
     }
 
     // ---- Worker 会话：缺失时补建，归属检查 + 生命周期 ----
@@ -647,6 +667,7 @@ async function runTask(taskId) {
     tasks.transitionTask(task.taskId, {
       to: 'running',
       startedAt: new Date(runningSince).toISOString(),
+      retryAt: null,
     });
     safeEvent(
       task.botId,
@@ -810,7 +831,7 @@ async function runTask(taskId) {
       safeEvent(
         task.botId,
         'task.recovered',
-        { status: 'queued', errorCode: 'task_lease_held', mode: 'retry' },
+        { status: latest.status, errorCode: 'task_lease_held', mode: 'retry' },
         { taskId: task.taskId, sessionId: task.sessionId }
       );
       return;
@@ -880,7 +901,7 @@ async function runTask(taskId) {
         task.botId,
         'task.recovered',
         {
-          status: 'queued',
+          status: retried.status,
           errorCode,
           mode: 'retry',
           attempts: retried.attempts,
@@ -979,7 +1000,7 @@ function initializeTaskQueue() {
     safeEvent(
       task.botId,
       'task.recovered',
-      { status: 'queued', mode: 'queue_recovery' },
+      { status: task.status, mode: 'queue_recovery' },
       { taskId }
     );
   }

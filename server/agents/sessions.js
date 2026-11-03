@@ -51,6 +51,8 @@ const PENDING_TASK_STATUSES = Object.freeze([
   'queued',
   'accepted',
   'waiting_approval',
+  // S7：retrying 是等待下一次 attempt 的非终态，投影为 running 而不是 closed。
+  'retrying',
 ]);
 // recovery 不呈现给会话层：结果未知且需人工核对，投影为 failed（不是仍在运行）。
 const RECOVERY_LIFECYCLE_STATUS = 'failed';

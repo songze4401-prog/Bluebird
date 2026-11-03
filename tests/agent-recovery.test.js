@@ -234,18 +234,20 @@ test('checkpoint：每次写入递增 checkpointVersion', () => {
   assert.equal(second.checkpoint.toolCalls, 1);
 });
 
-test('重试：写 retryAt/lastErrorCode，队列在到期前跳过', () => {
+test('重试：retrying 为正式状态，退避到期后由队列直接取走', () => {
   resetStore();
   const task = toRunning(makeTask());
   const retried = tasks.setRetry(task.taskId, { errorCode: 'model_timeout' });
-  assert.equal(retried.status, 'queued');
+  assert.equal(retried.status, 'retrying');
   assert.equal(retried.lastErrorCode, 'model_timeout');
   assert.ok(retried.retryAt);
+  // running → queued 的回退边已删除；退避到期仍以 retrying 出队，不经 queued。
+  assert.equal(stateMachine.canTransition('running', 'queued'), false);
+  assert.equal(stateMachine.canTransition('retrying', 'running'), true);
   assert.equal(tasks.nextQueuedTask(), null);
-  assert.equal(
-    tasks.nextQueuedTask(Date.parse(retried.retryAt) + 1).taskId,
-    task.taskId
-  );
+  const due = tasks.nextQueuedTask(Date.parse(retried.retryAt) + 1);
+  assert.equal(due.taskId, task.taskId);
+  assert.equal(due.status, 'retrying');
 });
 
 test('运行历史：记录 run 起止，且只保留最近 5 条', () => {
@@ -275,7 +277,7 @@ test('运行历史：记录 run 起止，且只保留最近 5 条', () => {
 
 // ---- E. 启动恢复 ----
 
-test('恢复：只读任务重排队，绝不直接报告成功', () => {
+test('恢复：只读任务回到 retrying 且可立即被重新调度，绝不直接报告成功', () => {
   resetStore();
   const task = toRunning(makeTask());
   tasks.reloadForTests();
@@ -283,7 +285,9 @@ test('恢复：只读任务重排队，绝不直接报告成功', () => {
   assert.equal(result.recovered, 1);
   assert.equal(result.recovery, 0);
   const recovered = tasks.getTask(task.taskId);
-  assert.equal(recovered.status, 'queued');
+  assert.equal(recovered.status, 'retrying');
+  assert.ok(recovered.retryAt);
+  assert.equal(tasks.nextQueuedTask().taskId, task.taskId);
   assert.equal(recovered.lastErrorCode, 'recovered_after_restart');
   assert.ok(recovered.recoveredAt);
   assert.notEqual(recovered.status, 'completed');
@@ -399,7 +403,8 @@ process.kill(process.pid, 'SIGKILL');
   assert.equal(result.recovery, 1);
   const all = tasks.allTasks();
   assert.equal(all.filter(task => task.status === 'completed').length, 0);
-  assert.equal(all.filter(task => task.status === 'queued').length, 1);
+  assert.equal(all.filter(task => task.status === 'queued').length, 0);
+  assert.equal(all.filter(task => task.status === 'retrying').length, 1);
   assert.equal(all.filter(task => task.status === 'recovery').length, 1);
 });
 

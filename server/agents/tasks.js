@@ -1070,13 +1070,14 @@ function recordCheckpoint(taskId, checkpoint = {}, now = Date.now()) {
   return publicTask(task);
 }
 
+// S7：运行失败进入正式重试态 retrying；退避到期由调度器直接启动 attempt。
+// 不再写 queued，也不再把 retryAt 藏在排队态里。
 function setRetry(taskId, { errorCode, retryAt, now = Date.now() } = {}) {
   const state = loadTasks();
   const task = state.tasks[String(taskId || '')];
   if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
-  stateMachine.assertTransition(task.status, 'queued');
+  applyTransition(task, 'retrying');
   const at = new Date(now).toISOString();
-  task.status = 'queued';
   task.retryAt =
     typeof retryAt === 'string'
       ? retryAt
@@ -1212,6 +1213,17 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
       });
       recovery += 1;
       recoveryTaskIds.push(task.taskId);
+    } else if (task.status === 'running') {
+      // S7：running → queued 的回退边已删除；重启时未完成的运行态按重试收口，
+      // retryAt 设为当前时刻，调度器下一次遍历即可直接启动 attempt。
+      applyTransition(task, 'retrying');
+      task.retryAt = at;
+      task.recoveredAt = at;
+      task.lastErrorCode = 'recovered_after_restart';
+      task.errorCode = null;
+      task.requiresReview = false;
+      recovered += 1;
+      taskIds.push(task.taskId);
     } else {
       applyTransition(task, 'queued');
       task.recoveredAt = at;
@@ -1231,7 +1243,10 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
     taskIds,
     recoveryTaskIds,
     expiredWaitingApproval,
-    queued: Object.values(state.tasks).filter(task => task.status === 'queued').length,
+    // S7：retrying 也是“等待下一次调度”的队列成员。
+    queued: Object.values(state.tasks).filter(
+      task => task.status === 'queued' || task.status === 'retrying'
+    ).length,
   };
 }
 
@@ -1253,7 +1268,8 @@ function healthSnapshot(now = Date.now()) {
     if (task.status === 'waiting_approval') counts.waitingApproval += 1;
     else if (task.status === 'recovery') counts.recovery += 1;
     else if (stateMachine.isTerminal(task.status)) counts.terminal += 1;
-    else if (task.status === 'queued') {
+    else if (task.status === 'queued' || task.status === 'retrying') {
+      // S7：retrying 归入队列计数，保持 healthSnapshot 的字段集合不变。
       counts.queued += 1;
       if (!oldestQueuedAt || String(task.createdAt) < oldestQueuedAt) {
         oldestQueuedAt = task.createdAt || null;
@@ -1280,12 +1296,17 @@ function healthSnapshot(now = Date.now()) {
 }
 
 // 队列顺序：优先级（high → normal → low）优先，同级按创建时间，最后用 taskId
-// 兜底。尚未到 retryAt 的任务暂不出队，避免失败后立即重试形成风暴。
+// 兜底。S7 起队列成员含正式重试态 retrying；尚未到 retryAt 的任务暂不出队，
+// 避免失败后立即重试形成风暴。
 function nextQueuedTask(now = Date.now()) {
   const current = loadTasks();
   return (
     Object.values(current.tasks)
-      .filter(task => task.status === 'queued' && task.cancelRequested !== true)
+      .filter(
+        task =>
+          (task.status === 'queued' || task.status === 'retrying') &&
+          task.cancelRequested !== true
+      )
       .filter(task => !task.retryAt || Date.parse(task.retryAt) <= now)
       .sort((a, b) => {
         const byPriority = priorityRank(a.priority) - priorityRank(b.priority);
@@ -1299,7 +1320,9 @@ function nextQueuedTask(now = Date.now()) {
 
 function queuedCount() {
   return Object.values(loadTasks().tasks).filter(
-    task => task.status === 'queued' && task.cancelRequested !== true
+    task =>
+      (task.status === 'queued' || task.status === 'retrying') &&
+      task.cancelRequested !== true
   ).length;
 }
 

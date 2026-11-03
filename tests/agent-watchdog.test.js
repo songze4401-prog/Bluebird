@@ -271,7 +271,7 @@ test('Watchdog：服务停机 + 租约过期 → 受控恢复只读任务并写�
   const result = watchdog.runOnce({ now: Date.now() });
   assert.ok(result.executed.some(item => item.action === 'recover_interrupted'));
   const recovered = tasks.getTask(task.taskId);
-  assert.equal(recovered.status, 'queued');
+  assert.equal(recovered.status, 'retrying');
   assert.notEqual(recovered.status, 'completed');
   const lines = auditLines(watchdog.AUDIT_FILE);
   const recovery = lines.find(item => item.action === 'recover_interrupted');
@@ -410,7 +410,7 @@ test('Watchdog：重复运行不会重复恢复同一任务', () => {
   reset();
   const task = staleTask();
   watchdog.runOnce({ now: Date.now() });
-  assert.equal(tasks.getTask(task.taskId).status, 'queued');
+  assert.equal(tasks.getTask(task.taskId).status, 'retrying');
   watchdog.runOnce({ now: Date.now() + 30000 });
   const lines = auditLines(watchdog.AUDIT_FILE).filter(
     item => item.action === 'recover_interrupted'
