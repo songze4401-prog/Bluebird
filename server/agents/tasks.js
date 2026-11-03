@@ -19,6 +19,7 @@ const taskStore = require('./task-store');
 const stateMachine = require('./state-machine');
 const { normalizeWorkerResult } = require('./worker-result');
 const { LEGACY_ALIASES } = require('./status-vocabulary');
+const approvalDeadline = require('./approval-deadline');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -884,7 +885,16 @@ function updateTask(taskId, patch = {}) {
 // 对外只能经 transitionTask。
 function applyTransition(task, to) {
   stateMachine.assertTransition(task.status, to);
+  // S6b：审批等待期同样受 Task deadline 约束。进入 waiting_approval 时统一挂计时，
+  // 离开时统一清除，避免任何一条入口路径留下永久等待的资源占用。
+  if (task.status === 'waiting_approval' && to !== 'waiting_approval') {
+    approvalDeadline.disarm(task.taskId);
+  }
   task.status = to;
+  if (to === 'waiting_approval') {
+    const dueAt = getTaskDeadlineAt(task);
+    if (dueAt !== null) approvalDeadline.arm(task.taskId, dueAt - Date.now());
+  }
 }
 
 /**
@@ -1090,6 +1100,60 @@ function hasSideEffectTools(task) {
   );
 }
 
+// S6b：deadline 沿用既有语义——本次执行起点 + deadlineMs（与 runtime.js 的
+// runningSince + deadlineMs 一致）。审批等待的墙钟时间计入，不重新计时。
+// 旧数据缺少 startedAt 时退回 updatedAt / createdAt，绝不新造第二个期限来源。
+function getTaskDeadlineAt(task) {
+  if (!task) return null;
+  const budget =
+    Number.isInteger(task.deadlineMs) && task.deadlineMs > 0 ? task.deadlineMs : null;
+  if (!budget) return null;
+  const anchor = Date.parse(task.startedAt || task.updatedAt || task.createdAt || '');
+  return Number.isFinite(anchor) ? anchor + budget : null;
+}
+
+// S6b 收敛：与 S6 的 convergeExpiredWaitingApproval 同一规则。
+// 副作用未知 → recovery；否则 → timed_out。审批记录不在本函数内改动。
+function expireWaitingApproval(task, now = Date.now()) {
+  const finishedAt = new Date(now).toISOString();
+  const status = hasSideEffectTools(task) ? 'recovery' : 'timed_out';
+  const errorCode =
+    status === 'recovery' ? 'recovery_uncertain_side_effects' : 'deadline_exceeded';
+  applyTransition(task, status);
+  task.completedAt = finishedAt;
+  task.errorCode = errorCode;
+  task.lastErrorCode = errorCode;
+  if (status === 'recovery') task.requiresReview = true;
+  task.result = normalizeWorkerResult({
+    status,
+    summary: '',
+    errorCode,
+    runId: task.runId || null,
+    finishedAt,
+  });
+  task.lease = null;
+  task.retryAt = null;
+  task.heartbeatAt = null;
+  task.updatedAt = finishedAt;
+  return { status, errorCode, result: task.result, finishedAt, runId: task.runId || null };
+}
+
+/**
+ * S6b：把已过期的 waiting_approval 任务按 §32.1 收敛。
+ * 只处理“仍在等待且期限已到”的任务；未到期或已离开等待态返回 null（不早触发）。
+ * 返回收敛结果供 runtime 补 run history / 投递 / 事件；审批记录保持 pending。
+ */
+function convergeWaitingApprovalDeadline(taskId, { now = Date.now() } = {}) {
+  const state = loadTasks();
+  const task = state.tasks[String(taskId || '')];
+  if (!task || task.status !== 'waiting_approval') return null;
+  const dueAt = getTaskDeadlineAt(task);
+  if (dueAt === null || dueAt > now) return null;
+  const outcome = expireWaitingApproval(task, now);
+  saveTasks();
+  return outcome;
+}
+
 // 启动恢复：租约仍由未过期且不同的 owner 持有时保持 running；
 // 只读任务重新排队；可能产生副作用的任务标记 recovery 等待人工核对，
 // 绝不凭空报告成功。
@@ -1101,9 +1165,23 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
   let leftRunning = 0;
   const taskIds = [];
   const recoveryTaskIds = [];
+  const expiredWaitingApproval = [];
   let changed = false;
 
   for (const task of Object.values(state.tasks)) {
+    // S6b：重启后 waiting_approval 也必须按 deadline 收敛——不能只依赖“活着的计时器”。
+    if (task.status === 'waiting_approval') {
+      const dueAt = getTaskDeadlineAt(task);
+      if (dueAt === null) continue;
+      if (dueAt > now) {
+        approvalDeadline.arm(task.taskId, dueAt - now);
+        continue;
+      }
+      changed = true;
+      expireWaitingApproval(task, now);
+      expiredWaitingApproval.push(task.taskId);
+      continue;
+    }
     if (!stateMachine.isRecoverable(task.status)) continue;
     if (
       task.lease &&
@@ -1152,6 +1230,7 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
     leftRunning,
     taskIds,
     recoveryTaskIds,
+    expiredWaitingApproval,
     queued: Object.values(state.tasks).filter(task => task.status === 'queued').length,
   };
 }
@@ -1255,6 +1334,8 @@ module.exports = {
   nextQueuedTask,
   queuedCount,
   recoverInterrupted,
+  getTaskDeadlineAt,
+  convergeWaitingApprovalDeadline,
   findByIdempotencyKey,
   priorityRank,
   acquireLease,

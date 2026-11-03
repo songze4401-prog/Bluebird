@@ -175,10 +175,17 @@ function pendingCount() {
 
 // S6：审批入口只能从 running 进入。既有调用方（HTTP 与测试）可能对 queued/accepted
 // 任务发起审批，这里按主链路补齐执行前迁移，最后停在 waiting_approval。
+// S6b：执行前审批也必须受 Task deadline 约束——accepted→running 时补写本次执行
+// 起点 startedAt，供 waiting_approval 计时按既有 deadline 语义（起点 + deadlineMs）起算。
 function moveTaskToApproval(task) {
   try {
     if (task.status === 'queued') tasks.transitionTask(task.taskId, { to: 'accepted' });
-    if (task.status === 'accepted') tasks.transitionTask(task.taskId, { to: 'running' });
+    if (task.status === 'accepted') {
+      tasks.transitionTask(task.taskId, {
+        to: 'running',
+        ...(task.startedAt ? {} : { startedAt: nowIso() }),
+      });
+    }
     if (task.status === 'running') {
       tasks.transitionTask(task.taskId, { to: 'waiting_approval' });
     }

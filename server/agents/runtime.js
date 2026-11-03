@@ -18,6 +18,7 @@ const { projectWorkerContext } = require('./context-projection');
 const { normalizeWorkerResult } = require('./worker-result');
 const { createToolAuthorizer } = require('./tool-gateway');
 const { AgentError } = require('./errors');
+const approvalDeadline = require('./approval-deadline');
 
 const MAX_USER_MESSAGE = 4000;
 const HISTORY_MESSAGES = 24;
@@ -490,29 +491,10 @@ async function chat(botId, {
 // S6 / v1.3 §32.1：审批等待期间只有“资源期限耗尽”能收敛 Task，
 // 审批记录保持 pending；deadlineExceeded 是唯一触发源。
 // 有副作用工具时结果未知 → recovery；否则 → timed_out。
-function convergeExpiredWaitingApproval(task, runId) {
-  const finishedAt = nowIso();
-  const hasSideEffects = task.allowedTools.some(tool =>
-    tasks.SIDE_EFFECT_TOOLS.includes(tool)
-  );
-  const status = hasSideEffects ? 'recovery' : 'timed_out';
-  const errorCode = hasSideEffects
-    ? 'recovery_uncertain_side_effects'
-    : 'deadline_exceeded';
-  const result = normalizeWorkerResult({
-    status,
-    summary: '',
-    errorCode,
-    runId,
-    finishedAt,
-  });
-  tasks.transitionTask(task.taskId, {
-    to: status,
-    completedAt: finishedAt,
-    errorCode,
-    result,
-    ...(status === 'recovery' ? { requiresReview: true } : {}),
-  });
+// S6b：状态收敛统一由 tasks.convergeWaitingApprovalDeadline 完成（与重启恢复同一实现），
+// 这里只补 run history、租约、结果投递与事件。
+function finalizeWaitingApprovalExpiry(task, outcome) {
+  const { status, errorCode, result, finishedAt, runId } = outcome;
   tasks.recordRunFinish(task.taskId, {
     runId,
     status,
@@ -528,6 +510,21 @@ function convergeExpiredWaitingApproval(task, runId) {
     { taskId: task.taskId, runId, sessionId: task.sessionId }
   );
 }
+
+function convergeExpiredWaitingApproval(task, runId) {
+  const outcome = tasks.convergeWaitingApprovalDeadline(task.taskId);
+  if (!outcome) return;
+  finalizeWaitingApprovalExpiry(task, { ...outcome, runId: runId || outcome.runId });
+}
+
+// S6b：计时器到期回调。任务已离开 waiting_approval 时直接跳过，避免误收敛。
+function handleWaitingApprovalExpiry(taskId) {
+  const task = tasks.getRawTask(taskId);
+  if (!task || task.status !== 'waiting_approval') return;
+  convergeExpiredWaitingApproval(task, task.runId || null);
+}
+
+approvalDeadline.setExpireHandler(handleWaitingApprovalExpiry);
 
 async function runTask(taskId) {
   const task = tasks.getRawTask(taskId);
@@ -996,6 +993,21 @@ function initializeTaskQueue() {
       'task.uncertain',
       { status: 'recovery', errorCode: 'recovery_uncertain_side_effects' },
       { taskId }
+    );
+  }
+  for (const taskId of recovered.expiredWaitingApproval || []) {
+    const task = tasks.getRawTask(taskId);
+    if (!task) continue;
+    // S6b：重启时已过期的审批等待任务，按与活计时器同一规则收敛后补事件。
+    safeEvent(
+      task.botId,
+      task.status === 'recovery' ? 'task.uncertain' : 'task.timed_out',
+      {
+        status: task.status,
+        errorCode: task.errorCode,
+        phase: 'waiting_approval',
+      },
+      { taskId, runId: task.runId || null, sessionId: task.sessionId }
     );
   }
   try {
