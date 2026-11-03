@@ -6,6 +6,8 @@
  *   绝不记录 Prompt、Key、记忆正文或模型推理。
  * - 任务状态的唯一事实来源是 task-store 的持久化记录（见 task-store.js）；
  *   事件只是通知/审计通道，不拥有状态权威，客户端不得自行编造进度。
+ * - 状态只有一个写入入口：transitionTask（迁移校验 + 与其余字段同一次落盘）。
+ *   updateTask 只写非状态字段，收到 status 会显式拒绝，避免出现第二条写入路径。
  */
 const fs = require('fs');
 const path = require('path');
@@ -698,9 +700,14 @@ function updateTask(taskId, patch = {}) {
   const task = tasks.tasks[String(taskId || '')];
   if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
 
+  // 状态只允许经 transitionTask 写入；这里显式拒绝而不是静默丢弃，
+  // 否则会留下一条看不见的第二写入路径。
   if (patch.status !== undefined) {
-    stateMachine.assertTransition(task.status, patch.status);
-    task.status = patch.status;
+    throw new AgentError(
+      'task_status_requires_transition',
+      '任务状态只能经 transitionTask 写入',
+      400
+    );
   }
   if (patch.cancelRequested !== undefined) {
     task.cancelRequested = patch.cancelRequested === true;
@@ -854,6 +861,32 @@ function updateTask(taskId, patch = {}) {
   task.updatedAt = nowIso();
   saveTasks();
   return publicTask(task);
+}
+
+// 状态写入的唯一实现：先校验迁移合法性，再改内存。
+// recoverInterrupted 需要批量改状态后只落盘一次，因此复用这个内部函数；
+// 对外只能经 transitionTask。
+function applyTransition(task, to) {
+  stateMachine.assertTransition(task.status, to);
+  task.status = to;
+}
+
+/**
+ * 任务状态唯一对外写入入口。
+ * options.to             目标状态（必经 assertTransition 校验）
+ * options.expectedVersion 本步只作签名占位，不校验（属 Phase 1 ② CAS 范围）
+ * options.writer         审计/日志标识，不改变行为，也不写入任务记录
+ * 其余字段（result/completedAt/errorCode/...）与状态在同一次落盘内写入，
+ * 保持“状态与结果同一次写”的既有语义。
+ */
+function transitionTask(taskId, options = {}) {
+  const tasks = loadTasks();
+  const task = tasks.tasks[String(taskId || '')];
+  if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+  applyTransition(task, options.to);
+  const patch = { ...options };
+  delete patch.to;
+  return updateTask(taskId, patch);
 }
 
 function isTerminalStatus(status) {
@@ -1071,7 +1104,7 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
     task.retryAt = null;
     task.heartbeatAt = null;
     if (hasSideEffectTools(task)) {
-      task.status = 'uncertain';
+      applyTransition(task, 'uncertain');
       task.completedAt = at;
       task.errorCode = 'recovery_uncertain_side_effects';
       task.lastErrorCode = 'recovery_uncertain_side_effects';
@@ -1086,7 +1119,7 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
       uncertain += 1;
       uncertainTaskIds.push(task.taskId);
     } else {
-      task.status = 'queued';
+      applyTransition(task, 'queued');
       task.recoveredAt = at;
       task.lastErrorCode = 'recovered_after_restart';
       task.errorCode = null;
@@ -1195,6 +1228,7 @@ module.exports = {
   getRawTask,
   listTasks,
   updateTask,
+  transitionTask,
   appendEvent,
   listEvents,
   flushEventOutbox,

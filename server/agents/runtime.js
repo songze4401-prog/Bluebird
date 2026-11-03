@@ -70,8 +70,8 @@ function scheduleTaskQueue() {
                 retryAt: new Date(Date.now() + 2000).toISOString(),
               });
             } else {
-              tasks.updateTask(next.taskId, {
-                status: 'failed',
+              tasks.transitionTask(next.taskId, {
+                to: 'failed',
                 completedAt: new Date().toISOString(),
                 errorCode: (error && error.code) || 'agent_task_failed',
               });
@@ -538,8 +538,8 @@ async function runTask(taskId) {
       attempt: (Number.isInteger(task.attempts) ? task.attempts : 0) + 1,
       startedAt: nowIso(),
     });
-    tasks.updateTask(task.taskId, {
-      status: 'accepted',
+    tasks.transitionTask(task.taskId, {
+      to: 'accepted',
       runId,
       runStartedAt: nowIso(),
       heartbeatAt: nowIso(),
@@ -605,8 +605,8 @@ async function runTask(taskId) {
 
     // ---- start ----
     const runningSince = Date.now();
-    tasks.updateTask(task.taskId, {
-      status: 'running',
+    tasks.transitionTask(task.taskId, {
+      to: 'running',
       startedAt: new Date(runningSince).toISOString(),
     });
     safeEvent(
@@ -722,8 +722,8 @@ async function runTask(taskId) {
       finishedAt: nowIso(),
     });
 
-    tasks.updateTask(task.taskId, {
-      status: 'completed',
+    tasks.transitionTask(task.taskId, {
+      to: 'completed',
       completedAt: finalResult.finishedAt,
       result: finalResult,
     });
@@ -780,8 +780,8 @@ async function runTask(taskId) {
         runId,
         finishedAt: nowIso(),
       });
-      tasks.updateTask(task.taskId, {
-        status: 'failed',
+      tasks.transitionTask(task.taskId, {
+        to: 'failed',
         completedAt: lostResult.finishedAt,
         errorCode: 'task_lease_lost',
         result: lostResult,
@@ -855,8 +855,8 @@ async function runTask(taskId) {
       runId,
       finishedAt: nowIso(),
     });
-    tasks.updateTask(task.taskId, {
-      status,
+    tasks.transitionTask(task.taskId, {
+      to: status,
       completedAt: failureResult.finishedAt,
       errorCode,
       result: failureResult,
@@ -989,9 +989,9 @@ function cancelTask(taskId) {
     runId: task.runId || null,
     finishedAt,
   });
-  tasks.updateTask(taskId, {
+  tasks.transitionTask(taskId, {
+    to: 'cancelled',
     cancelRequested: true,
-    status: 'cancelled',
     completedAt: finishedAt,
     errorCode: 'cancelled',
     result,

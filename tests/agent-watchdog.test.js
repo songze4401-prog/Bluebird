@@ -54,8 +54,8 @@ function staleTask(overrides = {}) {
     deadlineMs: 20000,
     ...overrides,
   });
-  tasks.updateTask(task.taskId, { status: 'accepted' });
-  tasks.updateTask(task.taskId, { status: 'running' });
+  tasks.transitionTask(task.taskId, { to: 'accepted' });
+  tasks.transitionTask(task.taskId, { to: 'running' });
   tasks.updateTask(task.taskId, { heartbeatAt: '2026-10-01T00:00:00.000Z' });
   tasks.acquireLease(task.taskId, { ownerId: 'dead-worker', now: Date.now() - 120000, ttlMs: 1000 });
   return tasks.getTask(task.taskId);
@@ -387,8 +387,8 @@ test('Watchdog：投递失败产生告警审计', () => {
     deadlineMs: 20000,
     parentSessionId: parent.id,
   });
-  tasks.updateTask(task.taskId, { status: 'accepted' });
-  tasks.updateTask(task.taskId, { status: 'failed' });
+  tasks.transitionTask(task.taskId, { to: 'accepted' });
+  tasks.transitionTask(task.taskId, { to: 'failed' });
   tasks.updateTask(task.taskId, { deliveryStatus: 'failed', deliveryErrorCode: 'parent_session_missing' });
   watchdog.runOnce({ now: Date.now() });
   const alert = auditLines(watchdog.AUDIT_FILE).find(item => item.action === 'alert');

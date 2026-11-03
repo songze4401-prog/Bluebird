@@ -47,8 +47,8 @@ function makeTask(overrides = {}) {
 }
 
 function toRunning(task, ownerId = 'dead-owner') {
-  tasks.updateTask(task.taskId, { status: 'accepted' });
-  tasks.updateTask(task.taskId, { status: 'running' });
+  tasks.transitionTask(task.taskId, { to: 'accepted' });
+  tasks.transitionTask(task.taskId, { to: 'running' });
   tasks.acquireLease(task.taskId, { ownerId });
   return tasks.getTask(task.taskId);
 }
@@ -207,8 +207,8 @@ test('租约：释放后清空，终态任务不能再获取', () => {
   tasks.acquireLease(task.taskId, { ownerId: 'worker-a' });
   assert.equal(tasks.releaseLease(task.taskId).lease, null);
   const done = makeTask();
-  tasks.updateTask(done.taskId, { status: 'accepted' });
-  tasks.updateTask(done.taskId, { status: 'failed' });
+  tasks.transitionTask(done.taskId, { to: 'accepted' });
+  tasks.transitionTask(done.taskId, { to: 'failed' });
   assert.throws(
     () => tasks.acquireLease(done.taskId, { ownerId: 'worker-a' }),
     error => error && error.code === 'task_lease_terminal'
@@ -299,7 +299,7 @@ test('恢复：可能产生副作用的任务标记 uncertain 等待人工处理
 test('恢复：waiting_approval 保持暂停，不被自动执行', () => {
   resetStore();
   const task = makeTask();
-  tasks.updateTask(task.taskId, { status: 'waiting_approval' });
+  tasks.transitionTask(task.taskId, { to: 'waiting_approval' });
   tasks.reloadForTests();
   const result = tasks.recoverInterrupted({ ownerId: null });
   assert.equal(result.recovered, 0);
@@ -343,9 +343,9 @@ test('健康快照：只含计数与时间点', () => {
   makeTask({ goal: '排队' });
   const running = toRunning(makeTask({ goal: '运行中' }));
   const done = makeTask({ goal: '完成' });
-  tasks.updateTask(done.taskId, { status: 'accepted' });
-  tasks.updateTask(done.taskId, { status: 'running' });
-  tasks.updateTask(done.taskId, { status: 'completed' });
+  tasks.transitionTask(done.taskId, { to: 'accepted' });
+  tasks.transitionTask(done.taskId, { to: 'running' });
+  tasks.transitionTask(done.taskId, { to: 'completed' });
   const health = tasks.healthSnapshot(Date.now() + 120000);
   assert.equal(health.schemaVersion, 2);
   assert.equal(health.counts.queued, 1);
@@ -366,12 +366,12 @@ test('崩溃注入：子进程 SIGKILL 后恢复只读任务并标记写任务 u
 process.env.BLUEBIRD_DATA_DIR = ${JSON.stringify(TMP)};
 const tasks = require('./server/agents/tasks');
 const readOnly = tasks.createTask({ botId: 'memory', taskType: 'memory.search', goal: '崩溃只读', allowedTools: ['memory_search'], deadlineMs: 20000 });
-tasks.updateTask(readOnly.taskId, { status: 'accepted' });
-tasks.updateTask(readOnly.taskId, { status: 'running' });
+tasks.transitionTask(readOnly.taskId, { to: 'accepted' });
+tasks.transitionTask(readOnly.taskId, { to: 'running' });
 tasks.acquireLease(readOnly.taskId, { ownerId: 'dead-child' });
 const writeTask = tasks.createTask({ botId: 'memory', taskType: 'memory.search', goal: '崩溃写入', allowedTools: ['memory_remember'], deadlineMs: 20000 });
-tasks.updateTask(writeTask.taskId, { status: 'accepted' });
-tasks.updateTask(writeTask.taskId, { status: 'running' });
+tasks.transitionTask(writeTask.taskId, { to: 'accepted' });
+tasks.transitionTask(writeTask.taskId, { to: 'running' });
 tasks.acquireLease(writeTask.taskId, { ownerId: 'dead-child' });
 console.log('CHILD_READY');
 process.kill(process.pid, 'SIGKILL');
@@ -400,9 +400,9 @@ test('投递：重复调用只生成一条父会话消息', () => {
   resetStore();
   const parent = mainSessions.createSession({ title: '投递幂等' });
   const task = makeTask({ parentSessionId: parent.id });
-  tasks.updateTask(task.taskId, { status: 'accepted' });
-  tasks.updateTask(task.taskId, {
-    status: 'completed',
+  tasks.transitionTask(task.taskId, { to: 'accepted' });
+  tasks.transitionTask(task.taskId, {
+    to: 'completed',
     result: { status: 'completed', summary: '完成' },
   });
   const finished = tasks.getTask(task.taskId);
@@ -424,9 +424,9 @@ test('投递：终态但未投递的任务在恢复时补投一次', () => {
   resetStore();
   const parent = mainSessions.createSession({ title: '崩溃补投' });
   const task = makeTask({ parentSessionId: parent.id });
-  tasks.updateTask(task.taskId, { status: 'accepted' });
-  tasks.updateTask(task.taskId, {
-    status: 'completed',
+  tasks.transitionTask(task.taskId, { to: 'accepted' });
+  tasks.transitionTask(task.taskId, {
+    to: 'completed',
     result: { status: 'completed', summary: '完成' },
   });
   assert.equal(tasks.getTask(task.taskId).deliveryStatus, 'pending');
@@ -452,7 +452,7 @@ test('存储：写入失败向调用方抛出受控错误，不伪装成功', ()
   };
   try {
     assert.throws(
-      () => tasks.updateTask(task.taskId, { status: 'accepted' }),
+      () => tasks.transitionTask(task.taskId, { to: 'accepted' }),
       error => error && error.code === 'EACCES'
     );
   } finally {

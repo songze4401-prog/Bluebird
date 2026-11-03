@@ -246,7 +246,7 @@ function createApproval({
     const task = tasks.getRawTask(requestTaskId);
     if (task && !tasks.isTerminalStatus(task.status) && task.status !== 'waiting_approval') {
       try {
-        tasks.updateTask(requestTaskId, { status: 'waiting_approval' });
+        tasks.transitionTask(requestTaskId, { to: 'waiting_approval' });
       } catch (_) {
         // 任务状态竞争不影响审批记录本身。
       }
@@ -299,8 +299,8 @@ function decide(approvalId, decision, { actor = permissions.SINGLE_USER_ACTOR, r
         finishedAt: now,
       });
       try {
-        tasks.updateTask(record.taskId, {
-          status: 'cancelled',
+        tasks.transitionTask(record.taskId, {
+          to: 'cancelled',
           completedAt: now,
           errorCode: 'approval_rejected',
           result: rejectResult,
@@ -434,8 +434,8 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
             runId: task.runId || null,
             finishedAt: now,
           });
-          tasks.updateTask(record.taskId, {
-            status: 'completed',
+          tasks.transitionTask(record.taskId, {
+            to: 'completed',
             completedAt: now,
             result: taskResult,
           });
@@ -455,8 +455,8 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
             runId: task.runId || null,
             finishedAt: now,
           });
-          tasks.updateTask(record.taskId, {
-            status: 'failed',
+          tasks.transitionTask(record.taskId, {
+            to: 'failed',
             completedAt: now,
             errorCode: record.errorCode,
             result: failureResult,
@@ -513,8 +513,8 @@ function recoverInterrupted() {
         if (task && !tasks.isTerminalStatus(task.status)) {
           let updated = false;
           try {
-            tasks.updateTask(record.taskId, {
-              status: 'failed',
+            tasks.transitionTask(record.taskId, {
+              to: 'failed',
               completedAt: nowIso(),
               errorCode: 'approval_interrupted',
             });
