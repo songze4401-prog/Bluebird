@@ -173,6 +173,33 @@ function pendingCount() {
   return Object.values(load().approvals).filter(item => item.status === 'pending').length;
 }
 
+// S6：审批入口只能从 running 进入。既有调用方（HTTP 与测试）可能对 queued/accepted
+// 任务发起审批，这里按主链路补齐执行前迁移，最后停在 waiting_approval。
+function moveTaskToApproval(task) {
+  try {
+    if (task.status === 'queued') tasks.transitionTask(task.taskId, { to: 'accepted' });
+    if (task.status === 'accepted') tasks.transitionTask(task.taskId, { to: 'running' });
+    if (task.status === 'running') {
+      tasks.transitionTask(task.taskId, { to: 'waiting_approval' });
+    }
+    if (task.status !== 'waiting_approval') {
+      throw new AgentError(
+        'invalid_transition',
+        `任务状态不能进入 waiting_approval：${task.status}`,
+        409
+      );
+    }
+  } catch (error) {
+    // 入口迁移失败是结构性错误，不再静默吞掉；调用方收到原始错误码。
+    console.warn(
+      `[agent-approval] task approval entry failed task=${task.taskId} code=${
+        (error && error.code) || 'approval_entry_failed'
+      }`
+    );
+    throw error;
+  }
+}
+
 function createApproval({
   botId,
   operation,
@@ -218,6 +245,15 @@ function createApproval({
     for (const item of prune) delete current.approvals[item.approvalId];
   }
 
+  // S6 入口前置：审批只能从 running 进入；queued/accepted 先补齐执行前迁移，
+  // 再把任务暂停在 waiting_approval。迁移失败时记录并向上抛出，不再静默吞掉。
+  if (requestTaskId) {
+    const task = tasks.getRawTask(requestTaskId);
+    if (task && !tasks.isTerminalStatus(task.status) && task.status !== 'waiting_approval') {
+      moveTaskToApproval(task);
+    }
+  }
+
   const now = nowIso();
   const record = {
     approvalId: `appr_${crypto.randomUUID()}`,
@@ -241,17 +277,6 @@ function createApproval({
   };
   current.approvals[record.approvalId] = record;
   save();
-
-  if (requestTaskId) {
-    const task = tasks.getRawTask(requestTaskId);
-    if (task && !tasks.isTerminalStatus(task.status) && task.status !== 'waiting_approval') {
-      try {
-        tasks.transitionTask(requestTaskId, { to: 'waiting_approval' });
-      } catch (_) {
-        // 任务状态竞争不影响审批记录本身。
-      }
-    }
-  }
 
   recordEvent(
     botId,
@@ -375,6 +400,8 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
         409
       );
     }
+    // S6 出口：批准后必须先回 running，再由执行结果写 completed/failed。
+    tasks.transitionTask(record.taskId, { to: 'running' });
   }
 
   record.status = 'executing';
@@ -412,7 +439,7 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
 
   if (record.taskId) {
     const task = tasks.getRawTask(record.taskId);
-    if (task && task.status === 'waiting_approval') {
+    if (task && task.status === 'running') {
       try {
         if (record.status === 'completed') {
           const taskResult = normalizeWorkerResult({

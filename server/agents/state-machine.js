@@ -16,12 +16,11 @@ const STATUSES = Object.freeze([...vocabulary.STATUSES]);
 const TERMINAL = new Set([...vocabulary.TERMINAL_STATUSES]);
 
 const TRANSITIONS = Object.freeze({
-  queued: Object.freeze(['accepted', 'cancelled', 'waiting_approval']),
+  // S6：审批只能从 running 进入；queued/accepted 由 approvals 入口链式补齐。
+  queued: Object.freeze(['accepted', 'cancelled', 'timed_out']),
   accepted: Object.freeze([
     'running',
     'queued',
-    'waiting_approval',
-    'completed',
     'cancelled',
     'failed',
     'timed_out',
@@ -36,7 +35,8 @@ const TRANSITIONS = Object.freeze({
     'timed_out',
     'recovery',
   ]),
-  waiting_approval: Object.freeze(['completed', 'failed', 'cancelled', 'recovery']),
+  // 审批出口：批准后先回 running 再执行；timed_out/recovery 只由资源期限耗尽写入。
+  waiting_approval: Object.freeze(['running', 'timed_out', 'cancelled', 'recovery']),
   retrying: Object.freeze([]),
   completed: Object.freeze([]),
   failed: Object.freeze([]),

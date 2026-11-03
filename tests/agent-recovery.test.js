@@ -56,7 +56,14 @@ function toRunning(task, ownerId = 'dead-owner') {
 // ---- A. 状态机 ----
 
 test('状态机：主链路合法迁移', () => {
-  const chain = ['queued', 'accepted', 'running', 'waiting_approval', 'completed'];
+  const chain = [
+    'queued',
+    'accepted',
+    'running',
+    'waiting_approval',
+    'running',
+    'completed',
+  ];
   for (let i = 0; i < chain.length - 1; i += 1) {
     assert.equal(stateMachine.canTransition(chain[i], chain[i + 1]), true);
     stateMachine.assertTransition(chain[i], chain[i + 1]);
@@ -299,6 +306,8 @@ test('恢复：可能产生副作用的任务标记 recovery 等待人工处理'
 test('恢复：waiting_approval 保持暂停，不被自动执行', () => {
   resetStore();
   const task = makeTask();
+  tasks.transitionTask(task.taskId, { to: 'accepted' });
+  tasks.transitionTask(task.taskId, { to: 'running' });
   tasks.transitionTask(task.taskId, { to: 'waiting_approval' });
   tasks.reloadForTests();
   const result = tasks.recoverInterrupted({ ownerId: null });
@@ -401,6 +410,7 @@ test('投递：重复调用只生成一条父会话消息', () => {
   const parent = mainSessions.createSession({ title: '投递幂等' });
   const task = makeTask({ parentSessionId: parent.id });
   tasks.transitionTask(task.taskId, { to: 'accepted' });
+  tasks.transitionTask(task.taskId, { to: 'running' });
   tasks.transitionTask(task.taskId, {
     to: 'completed',
     result: { status: 'completed', summary: '完成' },
@@ -425,6 +435,7 @@ test('投递：终态但未投递的任务在恢复时补投一次', () => {
   const parent = mainSessions.createSession({ title: '崩溃补投' });
   const task = makeTask({ parentSessionId: parent.id });
   tasks.transitionTask(task.taskId, { to: 'accepted' });
+  tasks.transitionTask(task.taskId, { to: 'running' });
   tasks.transitionTask(task.taskId, {
     to: 'completed',
     result: { status: 'completed', summary: '完成' },

@@ -487,6 +487,48 @@ async function chat(botId, {
   };
 }
 
+// S6 / v1.3 §32.1：审批等待期间只有“资源期限耗尽”能收敛 Task，
+// 审批记录保持 pending；deadlineExceeded 是唯一触发源。
+// 有副作用工具时结果未知 → recovery；否则 → timed_out。
+function convergeExpiredWaitingApproval(task, runId) {
+  const finishedAt = nowIso();
+  const hasSideEffects = task.allowedTools.some(tool =>
+    tasks.SIDE_EFFECT_TOOLS.includes(tool)
+  );
+  const status = hasSideEffects ? 'recovery' : 'timed_out';
+  const errorCode = hasSideEffects
+    ? 'recovery_uncertain_side_effects'
+    : 'deadline_exceeded';
+  const result = normalizeWorkerResult({
+    status,
+    summary: '',
+    errorCode,
+    runId,
+    finishedAt,
+  });
+  tasks.transitionTask(task.taskId, {
+    to: status,
+    completedAt: finishedAt,
+    errorCode,
+    result,
+    ...(status === 'recovery' ? { requiresReview: true } : {}),
+  });
+  tasks.recordRunFinish(task.taskId, {
+    runId,
+    status,
+    errorCode,
+    finishedAt,
+  });
+  tasks.releaseLease(task.taskId);
+  resultDelivery.deliverTaskOutcome(task.taskId, { status, result, errorCode });
+  safeEvent(
+    task.botId,
+    status === 'recovery' ? 'task.uncertain' : 'task.timed_out',
+    { status, errorCode, phase: 'waiting_approval' },
+    { taskId: task.taskId, runId, sessionId: task.sessionId }
+  );
+}
+
 async function runTask(taskId) {
   const task = tasks.getRawTask(taskId);
   if (!task) return;
@@ -699,6 +741,8 @@ async function runTask(taskId) {
     }
     if (latest.status === 'waiting_approval') {
       // 审批在模型执行期间创建：保留等待态，不覆盖为 completed。
+      // 但若资源期限已耗尽，按不变量只收敛 Task，审批记录保持 pending。
+      if (deadlineExceeded) convergeExpiredWaitingApproval(latest, runId);
       return;
     }
 
@@ -751,7 +795,11 @@ async function runTask(taskId) {
   } catch (error) {
     const latest = tasks.getRawTask(task.taskId);
     if (!latest || tasks.isTerminalStatus(latest.status)) return;
-    if (latest.status === 'waiting_approval') return;
+    if (latest.status === 'waiting_approval') {
+      // 同上：只有 deadline 触发的收敛，审批 SLA/取消都不改写 Task 终态。
+      if (deadlineExceeded) convergeExpiredWaitingApproval(latest, runId);
+      return;
+    }
 
     // 租约已被其他 Worker 持有：本实例不执行，稍后再试，不改变任务状态。
     if (error && error.code === 'task_lease_held') {
