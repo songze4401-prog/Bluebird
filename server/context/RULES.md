@@ -9,6 +9,8 @@
 - 一条真实调用链：会话历史 → 近期原文 → 长程召回 → 抽取式摘要 → 记忆检索与裁决
   → 安全渲染 → 输入保护 → 真实模型请求 → 工具循环 → 回答 → 写入 trace。
 - 能力优先于架构形式：没有真实消费者的检索源、开关、预算字段一律不保留。
+- 调度优先于全量：每轮先判断意图与所需层，再决定检索量、预算与无答案阈值；
+  无法判断时退回 general 全量计划。
 - 证据优先于声称：trace 必须区分候选、选中、接受、注入、发送；未验证项显式标注。
 - 数据安全与可靠性优先：不静默截断当前任务、工具结构、消息角色或多模态数据。
 
@@ -22,6 +24,21 @@
 Agent 工具循环在上下文组装之后运行：工具调用与工具结果由
 `server/agent-runtime.js` 在**本次请求内**追加到真实消息数组，下一轮模型调用可见；
 它们不伪装成检索条目，也不写入 sessions.json。
+
+### 2.1 P3 调度计划
+
+`server/context/orchestrator.js` 在历史/记忆/知识检索前生成只读计划：
+
+- 意图：`chitchat` / `memory_query` / `fact_query` / `project_work` /
+  `planning` / `execution` / `review` / `general`；
+- 层开关：`history` / `summary` / `memory` / `knowledge`；
+- 记忆类型过滤、知识来源、每层预算与 `noAnswerThreshold`；
+- 计划写入 `trace.orchestration`，只含意图、层、预算与短码，不含任务正文。
+
+`BLUEBIRD_CONTEXT_ORCHESTRATOR=0` 时退回 general 全量计划（回滚开关），
+不是第二套上下文链路。chitchat 关闭记忆/知识与摘要；memory_query 关闭知识；
+project/execution 选择 fact/goal/identity/preference 与 document/code；
+review 使用 episodic only；fact_query 使用 document/web 且无答案阈值 0.08。
 
 ## 3. 消息与数据契约（projection v3）
 
@@ -87,6 +104,11 @@ Agent 工具循环在上下文组装之后运行：工具调用与工具结果�
 （会话隔离、预算由配置传入）。旧 `user/doc/web/tool` 检索源已删除：
 user 历史走第 4 节；doc/web 没有真实读取器；工具结果由 Agent 循环直接回传。
 
+P3 计划可进一步传入 `filters.types` / `filters.categories` / `episodicOnly`
+与 `noAnswerThreshold`。记忆层关闭时返回 `skipped`（`memoryState=empty`）；
+记忆源本身被禁用时优先返回 `source_unavailable`，不把“禁用”伪装成“意图不需要”。
+低于阈值的候选保留在检索 trace 的 `returned`，但不进入 `accepted`/注入。
+
 `server/context/coverage.js` + `builder.js`：
 
 - 检索条目与近期原文、召回原文、摘要做词面覆盖比较。
@@ -116,8 +138,10 @@ user 历史走第 4 节；doc/web 没有真实读取器；工具结果由 Agent 
 
 ## 8. 输入保护（唯一的“预算”层）
 
-`server/context/input-guard.js` 只保证最终请求适配模型输入能力，
-不按来源类别配额决定信息价值。
+`server/context/input-guard.js` 是最终请求预算的唯一裁决层，只保证请求适配
+模型输入能力，不按来源类别配额决定信息价值。P3 调度器在此之前设置每层
+**上限**（记忆条数/总量、知识条数/token、历史/summary 预算），
+最终仍由 input-guard 统一裁剪。
 
 - 窗口来源：模型声明 `contextWindow` 时用声明值（`windowSource=declared`，
   `verified=true`）；未声明时使用 `inputGuard.unknownWindowGuardTokens`
@@ -140,12 +164,18 @@ user 历史走第 4 节；doc/web 没有真实读取器；工具结果由 Agent 
 
 - 阶段：`candidate → selected → accepted → injected → sent`；
   `consumed` 固定为 `null` 并注明“HTTP 成功不等于模型已消费”，不伪造消费证据。
+- `trace.orchestration` 记录 P3 意图、层开关、类型/来源过滤、预算、无答案阈值
+  与短码；不记录任务正文。层关闭时 retrieval 状态为 `skipped`；
+  低于阈值的候选计入 `returned` 但不计入 `accepted`。
 - 历史决策记录 `messageId / index / stage / reason / score`；
   摘要只记录 `ref / messageId / role / section / createdAt`；
   记忆只记录 `id / source / stage / reason / against / score`。
 - `recordSent()` 必须在真正调用提供方之前，用**同一条消息数组**调用；
   记录 `round / roles / messageIds / contextIds / systemLength / 模型标识`。
   Agent 每一轮都记录；工具消息用 `tool:<callId>` 标识。
+- `recordProviderUsage()` 只记录 Provider 返回的真实 usage；`usageSource`
+  区分 `provider` / `stub` / `missing`，`calibration` 仅对真实 Provider 为 true。
+  流式 usage 依赖供应商末帧，缺失时记 `missing`，不猜数字。
 - 隐私红线：不记录用户任务原文、历史正文、记忆正文、摘要正文、
   工具参数或工具结果正文；策略理由也会做敏感词兜底打码。
 - 验证检查（`verifyContext`）：无过期实时数据进入、近期/召回不重复、
@@ -158,6 +188,7 @@ user 历史走第 4 节；doc/web 没有真实读取器；工具结果由 Agent 
 | `no_result` | 检索成功但无内容 | 正常空，不视为错误 |
 | `retrieval_error` | 检索本身失败 | 记录错误，聊天继续（仅缺记忆） |
 | `source_unavailable` | 记忆源未启用 | 记录状态，不伪装成无结果 |
+| `skipped` | 当前意图不需要该层 | `memoryState=empty`，不伪造检索失败 |
 | `context_too_large` | 当前任务/核心规则本身超限 | 显式 413，不静默截断 |
 
 - 自动重试仅限只读/幂等源，最多一次（`retry.maxRetries=1`）。
@@ -180,6 +211,10 @@ user 历史走第 4 节；doc/web 没有真实读取器；工具结果由 Agent 
 | `retry` | `maxRetries` ≤ 1 |
 | `circuitBreaker` | 失败阈值与窗口 |
 
+P3 调度器的层预算由 `server/context/orchestrator.js` 生成，配置值仍是上限；
+`BLUEBIRD_CONTEXT_ORCHESTRATOR=1` 默认开启，`0` 回滚到 general 全量计划。
+修改 `.env` 后需重启后端。
+
 删除的旧字段：`budget.softTarget / hardCap / guaranteedSystem / guaranteedTask /
 perTypeMax`、`routing`、`metrics`、`verificationOrder`、`sourceOrder`。
 它们没有真实消费者，保留只会制造“看起来有策略”的假象。
@@ -195,6 +230,7 @@ perTypeMax`、`routing`、`metrics`、`verificationOrder`、`sourceOrder`。
 - `input-guard.js` — 最终请求计量、窗口来源、确定性降级。
 - `trace.js` — 阶段化结构化 trace 与隐私过滤。
 - `engine.js` — 单一编排入口 `runContextRuntime()`。
+- `orchestrator.js` — P3 意图分类、层/预算/阈值计划与配置覆盖（纯函数）。
 - `config.js` / `config.json` — 唯一配置加载器与策略值。
 
 ## 13. 已知限制 / 待验证项（不得淡化）
@@ -220,3 +256,20 @@ perTypeMax`、`routing`、`metrics`、`verificationOrder`、`sourceOrder`。
    仅在服务端默认会话为空时生效，此时无法做 20 条以外的长程召回。
 8. **真实模型窗口未声明时，输入保护是保守上界**：不会因超限静默截断，
    但可能比模型实际能力更早触发降级/413。
+9. **P3 意图分类是规则匹配，不是学习模型**：`chitchat`/`memory_query` 等
+   由关键词与问题形态判定；计划预算是静态上限，不随流量自适应。
+   `tests/context-orchestrator-p3.test.js` 的 Recall/Precision 对比是固定小样本，
+   不是生产流量或统计显著性的证明。
+10. **P4 真实端到端已用真实 DeepSeek 验证（2026-11-03）**：
+    `scripts/p4-real-e2e.js` 经真实 HTTP 入口 `/chat` 与 `/chat/stream`、
+    真实 Context Runtime、真实内置 DeepSeek 完成调用，不使用 openai 桩或本地假
+    Provider。真实模型发起 `memory_search`，工具结果按 `tool_call_id` 回传下一轮；
+    trace 每轮 `contentHash` 与实际交给适配层的 messages 一致（2/2），
+    真实 usage 写入 `sent.usage`（`prompt_tokens=3310`；同日 4 次运行均 30/30）。
+    该脚本不在 CI；缺 `BLUEBIRD_P4_REAL=1` 或真实 key 时退出 2 并输出
+    `NOT VERIFIED`。不证明模型在语义上消费了记忆，也不保证流式末帧 usage。
+11. **真实 usage 与本地估算不是同一口径**：工具轮
+    `prompt_tokens=3310` 对 trace `estimatedTokens≈2169`（比值 1.526），
+    但该轮请求包含工具 schema，输入保护用 `toolsReserveTokens` 单独预留，
+    不能把比值直接当成 tokenizer 误差；非工具轮的 P3 实测比值为 0.5152。
+    Tokenizer 仍未按目标模型校准，单样本不足以修改全局估算系数。

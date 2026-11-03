@@ -26,6 +26,11 @@ import type {
   MemoryListResponse,
   MemoryWriteAttempt,
   MemoryWriteAttemptsResponse,
+  Profile,
+  ProfileFeedbackAction,
+  ProfileFeedbackResponse,
+  ProfileItem,
+  ProfileResponse,
 } from '../lib/api/types';
 import {
   buildGrowthSeries,
@@ -39,6 +44,7 @@ import {
   type MemoryRelation,
 } from '../lib/memory-center';
 import { buildMemoryGraph } from '../lib/memory-graph';
+import { createFeedbackId, findMemoryForProfile } from '../lib/profile';
 import { readJsonResponse } from '../lib/utils';
 
 import { createMemoryCenterStyles } from './memory-center-styles';
@@ -53,17 +59,21 @@ import {
   type MemoryAction,
 } from './MemoryDetailModal';
 import { MemoryInspectionModal } from './MemoryInspectionModal';
+import { MemoryProfileTab } from './MemoryProfileTab';
 
-type MemoryTab = 'overview' | 'manage' | 'graph' | 'lifecycle';
+type MemoryTab = 'overview' | 'manage' | 'graph' | 'profile' | 'lifecycle';
 
 const TABS: { id: MemoryTab; label: string }[] = [
   { id: 'overview', label: '概览' },
   { id: 'manage', label: '管理' },
   { id: 'graph', label: '图谱' },
+  { id: 'profile', label: '画像' },
   { id: 'lifecycle', label: '生命周期' },
 ];
 
-const ACTION_PATHS: Record<MemoryAction, string> = {
+type LegacyMemoryAction = Exclude<MemoryAction, 'deny' | 'correct'>;
+
+const ACTION_PATHS: Record<LegacyMemoryAction, string> = {
   confirm: API_PATHS.memoryConfirm,
   reject: API_PATHS.memoryReject,
   archive: API_PATHS.memoryArchive,
@@ -98,7 +108,15 @@ export function MemoryCenterScreen({
   const [inspectionOpen, setInspectionOpen] = useState(false);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [localActions, setLocalActions] = useState<LocalMemoryAction[]>([]);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileError, setProfileError] = useState('');
+  const [includeInactive, setIncludeInactive] = useState(false);
+  const [detailInitialAction, setDetailInitialAction] = useState<
+    'correct' | null
+  >(null);
   const requestRef = useRef(0);
+  const profileRequestRef = useRef(0);
 
   const loadData = useCallback(async () => {
     const ticket = requestRef.current + 1;
@@ -168,19 +186,58 @@ export function MemoryCenterScreen({
     }
   }, []);
 
+  const loadProfile = useCallback(async (withInactive: boolean) => {
+    const ticket = profileRequestRef.current + 1;
+    profileRequestRef.current = ticket;
+
+    setProfileLoading(true);
+    setProfileError('');
+
+    try {
+      const response = await apiFetch(
+        withInactive ? API_PATHS.profileWithInactive : API_PATHS.profile
+      );
+      const data = (await readJsonResponse(response)) as ProfileResponse & {
+        error?: string;
+      };
+
+      if (ticket !== profileRequestRef.current) return;
+
+      if (!response.ok) {
+        throw apiErrorFromPayload(data, response.status, '读取画像失败');
+      }
+
+      setProfile(data.profile || null);
+    } catch (loadError) {
+      if (ticket !== profileRequestRef.current) return;
+
+      console.error('Load profile error:', loadError);
+      setProfileError(
+        loadError instanceof Error && loadError.message
+          ? loadError.message
+          : '读取画像失败，请稍后再试。'
+      );
+    } finally {
+      if (ticket === profileRequestRef.current) setProfileLoading(false);
+    }
+  }, []);
+
   useLayoutEffect(() => {
     if (!visible) return;
 
     let cancelled = false;
 
     void Promise.resolve().then(() => {
-      if (!cancelled) void loadData();
+      if (!cancelled) {
+        void loadData();
+        void loadProfile(includeInactive);
+      }
     });
 
     return () => {
       cancelled = true;
     };
-  }, [visible, loadData]);
+  }, [visible, loadData, loadProfile, includeInactive]);
 
   const overview = useMemo(() => buildMemoryOverview(items), [items]);
   const growth = useMemo(() => buildGrowthSeries(items), [items]);
@@ -243,10 +300,12 @@ export function MemoryCenterScreen({
 
   const openMemory = (
     item: MemoryItem,
-    relations?: MemoryRelation[]
+    relations?: MemoryRelation[],
+    initialAction: 'correct' | null = null
   ) => {
     setInspectionOpen(false);
     setSelectedRelations(relations ?? relationsFor(item));
+    setDetailInitialAction(initialAction);
     setSelected(item);
   };
 
@@ -256,14 +315,16 @@ export function MemoryCenterScreen({
 
   const closeCenter = () => {
     requestRef.current += 1;
+    profileRequestRef.current += 1;
     setSelected(null);
     setSelectedRelations([]);
+    setDetailInitialAction(null);
     setInspectionOpen(false);
     setLocalActions([]);
     onClose();
   };
 
-  const runAction = async (action: MemoryAction, item: MemoryItem) => {
+  const runAction = async (action: LegacyMemoryAction, item: MemoryItem) => {
     if (busyAction) return;
 
     if (!item.id && action !== 'delete') {
@@ -313,10 +374,11 @@ export function MemoryCenterScreen({
       ]);
       setSelected(null);
       setSelectedRelations([]);
+      setDetailInitialAction(null);
 
-      await loadData();
+      await Promise.all([loadData(), loadProfile(includeInactive)]);
 
-      const messages: Record<MemoryAction, string> = {
+      const messages: Record<LegacyMemoryAction, string> = {
         confirm:
           targetId && targetId !== item.id
             ? '已确认，并合并到原记忆。'
@@ -340,7 +402,116 @@ export function MemoryCenterScreen({
     }
   };
 
-  const requestAction = (action: MemoryAction) => {
+  const runProfileFeedback = async (
+    action: ProfileFeedbackAction,
+    item: MemoryItem,
+    payload?: { content?: string }
+  ) => {
+    if (busyAction) return;
+
+    if (!item.id) {
+      Alert.alert('无法操作', '这条记忆缺少稳定 ID，不能提交画像反馈。');
+      return;
+    }
+
+    const corrected = payload?.content?.trim() || '';
+
+    if (action === 'correct' && !corrected) {
+      Alert.alert('无法纠正', '纠正内容不能为空。');
+      return;
+    }
+
+    setBusyAction(action);
+
+    try {
+      const body: Record<string, string> = {
+        action,
+        id: item.id,
+        feedbackId: createFeedbackId(action),
+      };
+      if (action === 'correct') body.content = corrected;
+
+      const response = await apiFetch(API_PATHS.profileFeedback, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      const data = (await readJsonResponse(response)) as ProfileFeedbackResponse & {
+        error?: string;
+      };
+
+      if (!response.ok) {
+        throw apiErrorFromPayload(data, response.status, '反馈失败');
+      }
+
+      setLocalActions(current => [
+        ...current,
+        {
+          at: new Date().toISOString(),
+          type: action,
+          memoryId: item.id,
+          content: item.content,
+          targetId: data.result?.id || null,
+        },
+      ]);
+      setSelected(null);
+      setSelectedRelations([]);
+      setDetailInitialAction(null);
+
+      await Promise.all([loadData(), loadProfile(includeInactive)]);
+
+      const messages: Record<ProfileFeedbackAction, string> = {
+        confirm: '已确认，画像与生命周期已更新。',
+        deny: '已否认，条目归档并保留审计。',
+        correct: '已纠正，新版本生效，旧版本保留为历史。',
+      };
+      Alert.alert('完成', messages[action]);
+    } catch (feedbackError) {
+      console.error(`Profile ${action} error:`, feedbackError);
+      Alert.alert(
+        '失败',
+        feedbackError instanceof Error && feedbackError.message
+          ? feedbackError.message
+          : '反馈失败，请稍后再试。'
+      );
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const requestProfileFeedback = (
+    action: ProfileFeedbackAction,
+    profileItem: ProfileItem
+  ) => {
+    const memory = findMemoryForProfile(profileItem, items);
+
+    if (action === 'correct') {
+      openMemory(memory, undefined, 'correct');
+      return;
+    }
+
+    if (action === 'confirm') {
+      void runProfileFeedback('confirm', memory);
+      return;
+    }
+
+    Alert.alert(
+      '否认这条记忆？',
+      `${memory.content}\n\n条目会归档并保留审计；同源异步抽取不能再复活它。`,
+      [
+        { text: '取消', style: 'cancel' },
+        {
+          text: '否认',
+          style: 'destructive',
+          onPress: () => void runProfileFeedback('deny', memory),
+        },
+      ]
+    );
+  };
+
+  const requestAction = (
+    action: MemoryAction,
+    payload?: { content?: string }
+  ) => {
     if (!selected) return;
 
     if (action === 'confirm') {
@@ -348,25 +519,56 @@ export function MemoryCenterScreen({
       return;
     }
 
-    const titles: Record<Exclude<MemoryAction, 'confirm'>, string> = {
+    if (action === 'deny') {
+      Alert.alert(
+        '否认这条记忆？',
+        `${selected.content}\n\n条目会归档并保留审计；同源异步抽取不能再复活它。`,
+        [
+          { text: '取消', style: 'cancel' },
+          {
+            text: '否认',
+            style: 'destructive',
+            onPress: () => void runProfileFeedback('deny', selected),
+          },
+        ]
+      );
+      return;
+    }
+
+    if (action === 'correct') {
+      void runProfileFeedback('correct', selected, payload);
+      return;
+    }
+
+    const titles: Record<'reject' | 'archive' | 'delete', string> = {
       reject: '拒绝这条候选？',
       archive: '归档这条记忆？',
       delete: '删除这条记忆？',
     };
-    const bodies: Record<Exclude<MemoryAction, 'confirm'>, string> = {
+    const bodies: Record<'reject' | 'archive' | 'delete', string> = {
       reject: '拒绝后这条候选不会进入记忆中心。',
       archive: '归档后不参与检索，可在“已归档”中查看。',
       delete: '删除不可恢复；服务端也不会保留这条记忆的完整删除事件。',
     };
+    const legacyAction = action as 'reject' | 'archive' | 'delete';
 
-    Alert.alert(titles[action], `${bodies[action]}\n\n${selected.content}`, [
-      { text: '取消', style: 'cancel' },
-      {
-        text: action === 'reject' ? '拒绝' : action === 'archive' ? '归档' : '删除',
-        style: 'destructive',
-        onPress: () => void runAction(action, selected),
-      },
-    ]);
+    Alert.alert(
+      titles[legacyAction],
+      `${bodies[legacyAction]}\n\n${selected.content}`,
+      [
+        { text: '取消', style: 'cancel' },
+        {
+          text:
+            action === 'reject'
+              ? '拒绝'
+              : action === 'archive'
+                ? '归档'
+                : '删除',
+          style: 'destructive',
+          onPress: () => void runAction(legacyAction, selected),
+        },
+      ]
+    );
   };
 
   const requestQuickAction = (
@@ -806,6 +1008,26 @@ export function MemoryCenterScreen({
                   }
                 />
               </ScrollView>
+            ) : tab === 'profile' ? (
+              <MemoryProfileTab
+                theme={theme}
+                styles={styles}
+                profile={profile}
+                loading={profileLoading}
+                error={profileError}
+                includeInactive={includeInactive}
+                busyAction={busyAction}
+                onRefresh={() => void loadProfile(includeInactive)}
+                onToggleInactive={() => setIncludeInactive(value => !value)}
+                onOpenProfileItem={item =>
+                  openMemory(findMemoryForProfile(item, items))
+                }
+                onOpenMemoryById={memoryId => {
+                  const memory = items.find(item => item.id === memoryId);
+                  if (memory) openMemory(memory);
+                }}
+                onFeedback={requestProfileFeedback}
+              />
             ) : (
               <MemoryLifecycleTab
                 theme={theme}
@@ -821,16 +1043,20 @@ export function MemoryCenterScreen({
         </SafeAreaView>
 
         <MemoryDetailModal
-          key={selected?.id || selected?.content || 'no-memory'}
+          key={`${selected?.id || selected?.content || 'no-memory'}:${
+            detailInitialAction || 'view'
+          }`}
           visible={!!selected}
           theme={theme}
           styles={styles}
           item={selected}
           relations={selectedRelations}
           busyAction={busyAction}
+          initialAction={detailInitialAction}
           onClose={() => {
             setSelected(null);
             setSelectedRelations([]);
+            setDetailInitialAction(null);
           }}
           onAction={requestAction}
           onOpenRelated={openRelated}

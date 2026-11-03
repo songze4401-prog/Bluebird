@@ -20,6 +20,7 @@ const { retrieveKnowledge } = require('./knowledge');
 const { buildContext } = require('./builder');
 const { fitRequest } = require('./input-guard');
 const { createTrace } = require('./trace');
+const { planContext, applyPlanToConfig } = require('./orchestrator');
 
 // 记忆状态标准化：把内部检索状态映射为对外契约状态。
 // - ok → ok（检索成功且有结果）
@@ -31,7 +32,13 @@ const { createTrace } = require('./trace');
 function normalizeMemoryState(status, extra = {}) {
   if (extra && extra.timeout === true) return 'degraded';
   if (status === 'ok') return 'ok';
-  if (status === 'no_result' || status === 'source_unavailable') return 'empty';
+  if (
+    status === 'no_result' ||
+    status === 'source_unavailable' ||
+    status === 'skipped'
+  ) {
+    return 'empty';
+  }
   if (status === 'retrieval_error') return extra && extra.breaker ? 'degraded' : 'failed';
   return 'failed';
 }
@@ -107,16 +114,23 @@ async function runContextRuntime({
   toolsReserveTokens = 0,
   injected = {},
   config = defaultConfig,
+  plan: planOverride = null,
   now = Date.now(),
 } = {}) {
+  const plan = planOverride || planContext({ task });
+  const planLayers = plan.layers || {};
+  const planBudgets = plan.budgets || {};
+  const effectiveConfig = applyPlanToConfig(config, plan);
   const trace = createTrace({ task, sessionId, requestId });
-  const guard = config.inputGuard;
+  const guard = effectiveConfig.inputGuard;
+
+  trace.recordOrchestration(plan);
 
   const selection = selectHistory({
     messages: projectedMessages,
     query: task,
     render: renderMessage,
-    config,
+    config: effectiveConfig,
     perImageTokens: guard.perImageTokens,
     overheadTokens: guard.perMessageOverheadTokens,
   });
@@ -135,23 +149,38 @@ async function runContextRuntime({
   }
 
   let summary;
-  try {
-    summary = buildHistorySummary(selection.summaryInput, { config });
-  } catch (error) {
-    summary = {
-      ok: false,
-      rendered: '',
-      sources: [],
-      conflicts: [],
-      count: 0,
-      error: error && error.message ? error.message : '摘要生成失败',
-    };
+
+  if (planLayers.summary === false) {
+    summary = { ok: true, rendered: '', sources: [], conflicts: [], count: 0 };
+  } else {
+    try {
+      summary = buildHistorySummary(selection.summaryInput, {
+        config: effectiveConfig,
+      });
+    } catch (error) {
+      summary = {
+        ok: false,
+        rendered: '',
+        sources: [],
+        conflicts: [],
+        count: 0,
+        error: error && error.message ? error.message : '摘要生成失败',
+      };
+    }
   }
   trace.recordHistory(selection, summary);
 
   let retrieval;
   try {
-    retrieval = await retrieveMemory({ task, sessionId, userId, injected, config, now });
+    retrieval = await retrieveMemory({
+      task,
+      sessionId,
+      userId,
+      injected,
+      config: effectiveConfig,
+      plan,
+      now,
+    });
   } catch (error) {
     retrieval = {
       status: 'retrieval_error',
@@ -162,22 +191,49 @@ async function runContextRuntime({
   }
 
   let knowledge;
-  try {
-    knowledge = await retrieveKnowledge({
-      task,
-      sessionId,
-      userId,
-      now,
-    });
-  } catch (error) {
+
+  if (planLayers.knowledge === false) {
     knowledge = {
-      status: 'error',
+      status: 'skipped',
       count: 0,
       items: [],
       trace: null,
-      errorCode: (error && error.code) || 'knowledge_retrieval_failed',
-      error: '外部知识检索失败',
+      reason: 'intent_no_knowledge',
     };
+  } else {
+    try {
+      knowledge = await retrieveKnowledge({
+        task,
+        sessionId,
+        userId,
+        now,
+        ...(Array.isArray(planLayers.knowledgeSources)
+          ? { sources: planLayers.knowledgeSources }
+          : {}),
+        ...(Number.isFinite(planBudgets.knowledge && planBudgets.knowledge.limit)
+          ? { limit: planBudgets.knowledge.limit }
+          : {}),
+        ...(Number.isFinite(
+          planBudgets.knowledge && planBudgets.knowledge.tokenBudget
+        )
+          ? { tokenBudget: planBudgets.knowledge.tokenBudget }
+          : {}),
+        ...(Number.isFinite(
+          planBudgets.knowledge && planBudgets.knowledge.timeoutMs
+        )
+          ? { timeoutMs: planBudgets.knowledge.timeoutMs }
+          : {}),
+      });
+    } catch (error) {
+      knowledge = {
+        status: 'error',
+        count: 0,
+        items: [],
+        trace: null,
+        errorCode: (error && error.code) || 'knowledge_retrieval_failed',
+        error: '外部知识检索失败',
+      };
+    }
   }
 
   const build = buildContext({
@@ -186,7 +242,7 @@ async function runContextRuntime({
     summary,
     memoryItems: retrieval.items || [],
     knowledgeItems: knowledge.items || [],
-    config,
+    config: effectiveConfig,
   });
 
   trace.recordRetrieval(retrieval, build.memory, retrieval.diagnostics || null);
@@ -199,7 +255,7 @@ async function runContextRuntime({
     currentMessage,
     toolsReserveTokens,
     model,
-    config,
+    config: effectiveConfig,
   });
 
   trace.recordStages({

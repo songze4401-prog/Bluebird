@@ -144,6 +144,32 @@ function metricText(metric: MonitoringMetricValue): string {
   return `${value} ${unit === 'counts' ? '' : unit}`.trim();
 }
 
+const AUDIT_ACTION_LABELS: Record<string, string> = {
+  'memory.delete': '删除记忆',
+  'memory.clear': '清空记忆',
+  'memory.archive': '归档记忆',
+  'memory.confirm': '确认记忆',
+  'memory.reject': '拒绝记忆',
+  'profile.feedback': '画像反馈',
+  'provider.update': '服务商变更',
+  'config.update': '配置变更',
+};
+
+function auditActionLabel(action?: string | null): string {
+  if (!action) return '未知操作';
+  return AUDIT_ACTION_LABELS[action] || action;
+}
+
+function auditReasonLabel(action: string, reason?: string | null): string {
+  if (!reason) return '';
+  if (action === 'profile.feedback') {
+    if (reason === 'confirm') return '确认';
+    if (reason === 'deny') return '否认';
+    if (reason === 'correct') return '纠正';
+  }
+  return reason;
+}
+
 function healthLabel(status?: string): string {
   const labels: Record<string, string> = {
     ok: '正常',
@@ -206,6 +232,7 @@ export function MonitoringScreen({
   const [models, setModels] = useState<MonitoringModelsResponse | null>(null);
   const [errorEvents, setErrorEvents] = useState<MonitoringEvent[]>([]);
   const [audit, setAudit] = useState<MonitoringAuditResponse | null>(null);
+  const [auditGovernanceOnly, setAuditGovernanceOnly] = useState(false);
   const [health, setHealth] = useState<MonitoringHealthResponse | null>(null);
   const [alerts, setAlerts] = useState<MonitoringAlertsResponse | null>(null);
 
@@ -781,14 +808,40 @@ export function MonitoringScreen({
     </View>
   );
 
-  const renderSecurity = () => (
+  const renderSecurity = () => {
+    const auditItems = (audit?.items || []).filter(
+      record => !auditGovernanceOnly || record.action === 'profile.feedback'
+    );
+    const governanceCount = (audit?.items || []).filter(
+      record => record.action === 'profile.feedback'
+    ).length;
+
+    return (
     <View style={styles.section}>
-      <Text style={styles.sectionTitle}>敏感操作审计</Text>
-      {(audit?.items || []).length ? (
-        audit?.items?.map(record => (
+      <View style={styles.rowBetween}>
+        <Text style={styles.sectionTitle}>敏感操作审计</Text>
+        <TouchableOpacity
+          onPress={() => setAuditGovernanceOnly(value => !value)}
+          accessibilityLabel={
+            auditGovernanceOnly ? '显示全部审计' : '仅显示画像反馈审计'
+          }
+        >
+          <Text style={styles.sectionTitle}>
+            {auditGovernanceOnly ? '显示全部' : `仅画像反馈（${governanceCount}）`}
+          </Text>
+        </TouchableOpacity>
+      </View>
+      <Text style={styles.mutedText}>
+        画像确认/否认/纠正记录在 profile.feedback；审计只含动作、结果、原因短码与引用，
+        不含记忆正文或用户更正内容。
+      </Text>
+      {auditItems.length ? (
+        auditItems.map(record => (
           <View key={record.audit_id} style={styles.eventRow}>
             <View style={styles.rowBetween}>
-              <Text style={styles.eventName}>{record.action}</Text>
+              <Text style={styles.eventName}>
+                {auditActionLabel(record.action)}
+              </Text>
               <Badge theme={theme} label={record.result} />
             </View>
             <Text style={styles.mutedText}>
@@ -796,12 +849,20 @@ export function MonitoringScreen({
               {record.actor_ref || '未记录'} · 会话 {record.session_ref || '未记录'}
             </Text>
             {record.reason ? (
-              <Text style={styles.attrText}>原因 {record.reason}</Text>
+              <Text style={styles.attrText}>
+                原因 {auditReasonLabel(record.action, record.reason)}
+              </Text>
             ) : null}
           </View>
         ))
       ) : (
-        <EmptyState text="暂无审计记录（清空/删除/配置变更会留下审计）" />
+        <EmptyState
+          text={
+            auditGovernanceOnly
+              ? '暂无画像反馈审计；在 Memory Center 的画像页执行确认/否认/纠正后会出现在这里。'
+              : '暂无审计记录（清空/删除/配置变更会留下审计）'
+          }
+        />
       )}
 
       <Text style={styles.sectionTitle}>数据持久化与备份</Text>
@@ -833,7 +894,8 @@ export function MonitoringScreen({
         </Text>
       </View>
     </View>
-  );
+    );
+  };
 
   const renderHealth = () => {
     if (!health) return null;

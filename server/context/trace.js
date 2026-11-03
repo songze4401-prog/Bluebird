@@ -123,6 +123,14 @@ function createTrace({ task, sessionId, ts, requestId } = {}) {
       dropped: [],
       measurement: null,
     },
+    orchestration: {
+      enabled: null,
+      intent: null,
+      layers: null,
+      budgets: null,
+      noAnswerThreshold: null,
+      reasons: [],
+    },
     tools: [],
     verification: { ok: null, reason: null, checks: [] },
     stages: {
@@ -141,6 +149,46 @@ function createTrace({ task, sessionId, ts, requestId } = {}) {
   };
 
   return {
+    recordOrchestration(plan) {
+      if (!plan) return;
+
+      trace.orchestration = {
+        enabled: plan.enabled !== false,
+        intent: plan.intent ? sanitizeId(plan.intent) : null,
+        layers: plan.layers
+          ? {
+              history: plan.layers.history === true,
+              summary: plan.layers.summary === true,
+              memory: plan.layers.memory === true,
+              knowledge: plan.layers.knowledge === true,
+              memoryTypes: Array.isArray(plan.layers.memoryTypes)
+                ? plan.layers.memoryTypes.map(sanitizeId)
+                : null,
+              memoryCategories: Array.isArray(plan.layers.memoryCategories)
+                ? plan.layers.memoryCategories.map(sanitizeId)
+                : null,
+              episodicOnly: plan.layers.episodicOnly === true,
+              knowledgeSources: Array.isArray(plan.layers.knowledgeSources)
+                ? plan.layers.knowledgeSources.map(sanitizeId)
+                : null,
+            }
+          : null,
+        budgets: plan.budgets
+          ? {
+              history: plan.budgets.history || {},
+              retrieval: plan.budgets.retrieval || {},
+              knowledge: plan.budgets.knowledge || {},
+            }
+          : null,
+        noAnswerThreshold: Number.isFinite(plan.noAnswerThreshold)
+          ? plan.noAnswerThreshold
+          : null,
+        reasons: Array.isArray(plan.reasons)
+          ? plan.reasons.slice(0, 20).map(sanitizeId)
+          : [],
+      };
+    },
+
     recordHistory(selection, summary) {
       const decisions = Array.isArray(selection.decisions) ? selection.decisions : [];
       const count = stage => decisions.filter(item => item.stage === stage).length;

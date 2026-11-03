@@ -1,6 +1,7 @@
 /* 记忆生命周期状态与时间窗口规则（纯函数，不含 IO） */
 const STATUS_ACTIVE = 'active';
 const STATUS_PENDING = 'pending';
+const STATUS_CONTESTED = 'contested';
 const STATUS_SUPERSEDED = 'superseded';
 const STATUS_ARCHIVED = 'archived';
 
@@ -10,13 +11,15 @@ const STATUS_ARCHIVED = 'archived';
 const STATUSES = Object.freeze([
   STATUS_ACTIVE,
   STATUS_PENDING,
+  STATUS_CONTESTED,
   STATUS_SUPERSEDED,
   STATUS_ARCHIVED,
 ]);
 
 const TRANSITIONS = Object.freeze({
-  [STATUS_PENDING]: [STATUS_ACTIVE, 'deleted'],
-  [STATUS_ACTIVE]: [STATUS_SUPERSEDED, STATUS_ARCHIVED, 'deleted'],
+  [STATUS_PENDING]: [STATUS_ACTIVE, STATUS_CONTESTED, STATUS_ARCHIVED, 'deleted'],
+  [STATUS_ACTIVE]: [STATUS_SUPERSEDED, STATUS_CONTESTED, STATUS_ARCHIVED, 'deleted'],
+  [STATUS_CONTESTED]: [STATUS_ACTIVE, STATUS_SUPERSEDED, STATUS_ARCHIVED, 'deleted'],
   [STATUS_SUPERSEDED]: [STATUS_ARCHIVED, 'deleted'],
   [STATUS_ARCHIVED]: ['deleted'],
 });
@@ -57,8 +60,10 @@ function isEffectiveAt(item, at = Date.now()) {
 // 检索层看不到它们，因此这里不存在 'withdrawn' 分支。
 const INEFFECTIVE_REASONS = Object.freeze({
   PENDING: 'pending',
+  CONTESTED: 'contested',
   SUPERSEDED: 'superseded',
   ARCHIVED: 'archived',
+  WITHDRAWN: 'withdrawn',
   NOT_YET_VALID: 'not_yet_valid',
   EXPIRED: 'expired',
   UNKNOWN_STATUS: 'unknown_status',
@@ -70,8 +75,13 @@ function classifyIneffective(item, at = Date.now()) {
   const status = item.status;
 
   if (status === STATUS_PENDING) return INEFFECTIVE_REASONS.PENDING;
+  if (status === STATUS_CONTESTED) return INEFFECTIVE_REASONS.CONTESTED;
   if (status === STATUS_SUPERSEDED) return INEFFECTIVE_REASONS.SUPERSEDED;
-  if (status === STATUS_ARCHIVED) return INEFFECTIVE_REASONS.ARCHIVED;
+  if (status === STATUS_ARCHIVED) {
+    return item.withdrawnAt
+      ? INEFFECTIVE_REASONS.WITHDRAWN
+      : INEFFECTIVE_REASONS.ARCHIVED;
+  }
 
   if (!isActiveStatus(item)) return INEFFECTIVE_REASONS.UNKNOWN_STATUS;
 
@@ -92,6 +102,7 @@ function isHistoricalAt(item, at = Date.now()) {
     status !== undefined &&
     status !== null &&
     status !== STATUS_ACTIVE &&
+    status !== STATUS_CONTESTED &&
     status !== STATUS_SUPERSEDED &&
     status !== STATUS_ARCHIVED
   ) {
@@ -116,6 +127,7 @@ function canTransition(from, to) {
 module.exports = {
   STATUS_ACTIVE,
   STATUS_PENDING,
+  STATUS_CONTESTED,
   STATUS_SUPERSEDED,
   STATUS_ARCHIVED,
   STATUSES,

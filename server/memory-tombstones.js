@@ -30,6 +30,55 @@ function hashText(value) {
   return crypto.createHash('sha256').update(text).digest('hex');
 }
 
+function buildIdempotencyKey(entry, sources) {
+  const sourceKey = sources
+    .map(source =>
+      [
+        source.sessionId || '',
+        source.messageId || '',
+        source.sourceQuoteHash || '',
+      ].join(':')
+    )
+    .sort()
+    .join('|');
+
+  return `del-${crypto
+    .createHash('sha256')
+    .update(
+      [entry.id || '', entry.userId || '', sourceKey].join('|')
+    )
+    .digest('hex')}`;
+}
+
+function normalizeTombstone(tombstone) {
+  if (!tombstone || typeof tombstone !== 'object') return tombstone;
+
+  const sources = Array.isArray(tombstone.sources) ? tombstone.sources : [];
+  const userId = cleanId(tombstone.userId);
+  const scope =
+    tombstone.scope && typeof tombstone.scope === 'object'
+      ? tombstone.scope
+      : {
+          userId,
+          sessionIds: [
+            ...new Set(
+              sources.map(source => source && source.sessionId).filter(Boolean)
+            ),
+          ],
+        };
+
+  return {
+    ...tombstone,
+    tombstoneVersion: tombstone.tombstoneVersion || TOMBSTONE_VERSION,
+    userId,
+    scope,
+    idempotencyKey:
+      typeof tombstone.idempotencyKey === 'string'
+        ? tombstone.idempotencyKey
+        : null,
+  };
+}
+
 function normalizeSources(contributions) {
   const sources = [];
   const seen = new Set();
@@ -74,11 +123,23 @@ function createTombstone(entry, { reason = 'delete', now = new Date().toISOStrin
     if (source.sourceQuoteHash) sources.push(source);
   }
 
+  const userId = cleanId(entry.userId);
+
   return {
     version: TOMBSTONE_VERSION,
+    tombstoneVersion: TOMBSTONE_VERSION,
     id: `tomb-${crypto.randomUUID()}`,
+    idempotencyKey: buildIdempotencyKey(entry, sources),
     entryId: cleanId(entry.id),
-    userId: cleanId(entry.userId),
+    userId,
+    scope: {
+      userId,
+      sessionIds: [
+        ...new Set(
+          sources.map(source => source && source.sessionId).filter(Boolean)
+        ),
+      ],
+    },
     contentHash: hashText(entry.content),
     deletedAt: now,
     reason,
@@ -92,6 +153,25 @@ function isValidTombstone(value) {
   if (typeof value.id !== 'string' || !value.id) return false;
   if (!Number.isFinite(Date.parse(value.deletedAt))) return false;
   if (!Array.isArray(value.sources)) return false;
+
+  if (
+    value.tombstoneVersion !== undefined &&
+    value.tombstoneVersion !== TOMBSTONE_VERSION
+  ) {
+    return false;
+  }
+  if (
+    value.idempotencyKey !== undefined &&
+    typeof value.idempotencyKey !== 'string'
+  ) {
+    return false;
+  }
+  if (
+    value.scope !== undefined &&
+    (!value.scope || typeof value.scope !== 'object')
+  ) {
+    return false;
+  }
 
   return value.sources.every(
     source =>
@@ -134,7 +214,9 @@ function loadTombstones(file) {
       };
     }
 
-    const tombstones = parsed.filter(isValidTombstone);
+    const tombstones = parsed
+      .map(normalizeTombstone)
+      .filter(isValidTombstone);
 
     return {
       tombstones: pruneTombstones(tombstones),
@@ -259,6 +341,7 @@ module.exports = {
   RETENTION_MS,
   MAX_TOMBSTONES,
   hashText,
+  buildIdempotencyKey,
   createTombstone,
   loadTombstones,
   saveTombstones,

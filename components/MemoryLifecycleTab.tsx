@@ -27,6 +27,10 @@ type LifecycleFilter =
   | 'update'
   | 'merge'
   | 'supersede'
+  | 'confirm'
+  | 'deny'
+  | 'correct'
+  | 'contest'
   | 'archive'
   | 'other';
 
@@ -36,6 +40,10 @@ const FILTERS: { id: LifecycleFilter; label: string }[] = [
   { id: 'update', label: '更新' },
   { id: 'merge', label: '合并' },
   { id: 'supersede', label: '取代' },
+  { id: 'confirm', label: '确认事件' },
+  { id: 'deny', label: '否认事件' },
+  { id: 'correct', label: '纠正事件' },
+  { id: 'contest', label: '冲突事件' },
   { id: 'archive', label: '归档' },
   { id: 'other', label: '其他' },
 ];
@@ -46,9 +54,17 @@ function matchesFilter(
 ): boolean {
   if (filter === 'all') return true;
   if (filter === 'other') {
-    return !['create', 'update', 'merge', 'supersede', 'archive'].includes(
-      event.type
-    );
+    return ![
+      'create',
+      'update',
+      'merge',
+      'supersede',
+      'confirm',
+      'deny',
+      'correct',
+      'contest',
+      'archive',
+    ].includes(event.type);
   }
   return event.type === filter;
 }
@@ -57,8 +73,13 @@ function dotStyle(
   type: LifecycleEventType,
   styles: MemoryCenterStyles
 ) {
-  if (type === 'pending') return styles.eventDotPending;
-  if (type === 'reject' || type === 'delete' || type === 'recall') {
+  if (type === 'pending' || type === 'contest') return styles.eventDotPending;
+  if (
+    type === 'reject' ||
+    type === 'delete' ||
+    type === 'recall' ||
+    type === 'deny'
+  ) {
     return styles.eventDotDanger;
   }
   if (type === 'archive' || type === 'supersede') {
@@ -130,9 +151,10 @@ export function MemoryLifecycleTab({
     >
       <View style={styles.lifecycleNotice}>
         <Text style={styles.lifecycleNoticeText}>
-          事件来自条目字段（创建、最近决策、待确认、归档、取代）和本次
-          Memory Center 操作。服务端只保留最近 20 次写入尝试，没有完整的
-          拒绝/撤回/删除审计流；已删除的记忆及其事件不可回溯。
+          事件来自条目字段（创建、最近决策、待确认、冲突、归档、取代）以及
+          P5 反馈历史（确认/否认/纠正，每条最多 20 条）和本次 Memory Center
+          操作。服务端写入尝试只保留最近 20 次；物理删除的条目及其事件不可回溯，
+          否认/纠正则保留归档与历史版本。
         </Text>
       </View>
 

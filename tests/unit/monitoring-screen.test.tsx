@@ -245,7 +245,40 @@ const alertsData = {
 
 type OverviewFixture = typeof overviewData | { ok: false; reason: string };
 
-function installRoutes({ overview = overviewData }: { overview?: OverviewFixture } = {}) {
+const governanceAudit = {
+  ok: true,
+  total: 2,
+  items: [
+    {
+      audit_id: 'audit-profile',
+      occurred_at: new Date().toISOString(),
+      action: 'profile.feedback',
+      target: 'memory',
+      result: 'success',
+      actor_ref: 'actor_1',
+      session_ref: null,
+      reason: 'correct',
+    },
+    {
+      audit_id: 'audit-delete',
+      occurred_at: new Date().toISOString(),
+      action: 'memory.delete',
+      target: 'memory',
+      result: 'success',
+      actor_ref: 'actor_1',
+      session_ref: null,
+      reason: null,
+    },
+  ],
+};
+
+function installRoutes({
+  overview = overviewData,
+  audit = { ok: true, items: [], total: 0 },
+}: {
+  overview?: OverviewFixture;
+  audit?: typeof governanceAudit | { ok: true; items: []; total: 0 };
+} = {}) {
   mockedFetch.mockImplementation(async (url: string) => {
     if (url.includes('/monitoring/overview')) return jsonResponse(overview);
     if (url.includes('/monitoring/traces/')) return jsonResponse(traceDetailData);
@@ -253,7 +286,7 @@ function installRoutes({ overview = overviewData }: { overview?: OverviewFixture
     if (url.includes('/monitoring/health')) return jsonResponse(healthData);
     if (url.includes('/monitoring/alerts')) return jsonResponse(alertsData);
     if (url.includes('/monitoring/events')) return jsonResponse({ ok: true, items: [], total: 0 });
-    if (url.includes('/monitoring/audit')) return jsonResponse({ ok: true, items: [], total: 0 });
+    if (url.includes('/monitoring/audit')) return jsonResponse(audit);
     if (url.includes('/monitoring/tools')) return jsonResponse({ ok: true, tools: [] });
     if (url.includes('/monitoring/models')) return jsonResponse({ ok: true, models: [] });
     return jsonResponse({ ok: true });
@@ -329,6 +362,26 @@ test('安全·可靠性页展示审计与备份只读状态', async () => {
   expect(screen.getByText('数据持久化与备份')).toBeTruthy();
   expect(screen.getByText(/控制台只读/)).toBeTruthy();
   expect(screen.getByText(/暂无审计记录/)).toBeTruthy();
+});
+
+test('审计页区分画像反馈并可只看治理审计', async () => {
+  installRoutes({ audit: governanceAudit });
+  await render(<MonitoringScreen visible onClose={noop} theme={theme} />);
+
+  await waitFor(() => expect(screen.getByText('Agent 任务')).toBeTruthy());
+  await fireEvent.press(screen.getByText('安全·可靠性'));
+
+  await waitFor(() => expect(screen.getByText('敏感操作审计')).toBeTruthy());
+  expect(screen.getByText('画像反馈')).toBeTruthy();
+  expect(screen.getByText('原因 纠正')).toBeTruthy();
+  expect(screen.getByText('删除记忆')).toBeTruthy();
+
+  await fireEvent.press(screen.getByLabelText('仅显示画像反馈审计'));
+  await waitFor(() => expect(screen.queryByText('删除记忆')).toBeNull());
+  expect(screen.getByText('画像反馈')).toBeTruthy();
+
+  await fireEvent.press(screen.getByLabelText('显示全部审计'));
+  await waitFor(() => expect(screen.getByText('删除记忆')).toBeTruthy());
 });
 
 test('设置抽屉提供系统监控入口', async () => {

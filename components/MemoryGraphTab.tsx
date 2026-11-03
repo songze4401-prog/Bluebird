@@ -24,6 +24,7 @@ const SUPERSEDED = '#6f7681';
 function nodeColors(status: string) {
   switch (status) {
     case 'pending':
+    case 'contested':
       return { border: PENDING, fill: 'rgba(226,196,137,0.16)' };
     case 'archived':
       return { border: ARCHIVED, fill: 'rgba(154,160,170,0.12)' };
@@ -264,13 +265,13 @@ export function MemoryGraphTab({
           <View
             style={[graphStyles.legendDot, { backgroundColor: PENDING }]}
           />
-          <Text style={graphStyles.legendText}>待确认</Text>
+          <Text style={graphStyles.legendText}>待确认 / 冲突</Text>
         </View>
         <View style={graphStyles.legendItem}>
           <View
             style={[graphStyles.legendDot, { backgroundColor: ARCHIVED }]}
           />
-          <Text style={graphStyles.legendText}>已归档</Text>
+          <Text style={graphStyles.legendText}>已归档 / 已否认</Text>
         </View>
         <View style={graphStyles.legendItem}>
           <View
@@ -282,6 +283,7 @@ export function MemoryGraphTab({
 
       <Text style={styles.trendNote}>
         节点由真实记忆生成；边来自关键词共现和 supersededBy（版本取代）。
+        P5 纠正会生成新的活跃节点与取代边；否认会保留归档节点用于审计。
         布局在本地确定性计算，拖动平移，+/− 缩放。神经嵌入与向量模型尚未接入，
         因此这里不声称存在机器学习关联。
       </Text>

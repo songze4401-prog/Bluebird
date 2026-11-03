@@ -20,6 +20,8 @@ import { API_PATHS } from '../../lib/api/endpoints';
 import type {
   MemoryItem,
   MemoryWriteAttempt,
+  Profile,
+  ProfileItem,
 } from '../../lib/api/types';
 import { getTheme } from '../../theme';
 
@@ -252,9 +254,110 @@ function makeAttempts(): MemoryWriteAttempt[] {
 }
 
 let memories: MemoryItem[];
+let profile: Profile;
+
+function profileItem(item: MemoryItem, type: string): ProfileItem {
+  const sources = (item.contributions || []).map(contribution => ({
+    sessionId: contribution.sessionId ?? null,
+    messageId: contribution.messageId ?? null,
+    sourceQuote: contribution.sourceQuote,
+    createdAt: contribution.createdAt ?? null,
+    sourceType: contribution.sourceType ?? null,
+  }));
+
+  return {
+    memoryId: item.id || item.content,
+    content: item.content,
+    type,
+    category: item.type || null,
+    status: item.status || 'active',
+    effective: item.status !== 'pending' && item.status !== 'archived' && item.status !== 'superseded',
+    confidence: item.confidence ?? null,
+    sourceQuote: sources[0]?.sourceQuote || '',
+    sourceCount: sources.length,
+    independentSessions: new Set(
+      sources.map(source => source.sessionId).filter(Boolean)
+    ).size,
+    sources,
+    feedback: {
+      confirmationCount: item.confirmationCount || 0,
+      lastConfirmedAt: item.lastConfirmedAt || null,
+      lastDecision: item.lastDecision || null,
+      history: item.feedbackHistory || [],
+    },
+    ...(item.status === 'pending'
+      ? {
+          pendingReason: item.pendingReason || null,
+          pendingAt: item.pendingAt || null,
+        }
+      : {}),
+  };
+}
+
+function makeProfile(items: MemoryItem[]): Profile {
+  const active = items.filter(item => item.status === 'active' || !item.status);
+  const pending = items.filter(item => item.status === 'pending');
+  const archived = items.filter(item => item.status === 'archived');
+  const superseded = items.filter(item => item.status === 'superseded');
+
+  return {
+    profileVersion: 'p5.0',
+    generatedAt: new Date().toISOString(),
+    userId: 'local-owner',
+    sourceOfTruth: 'memory',
+    rebuildable: true,
+    digestAlgorithm: 'sha256-profile-v1',
+    digest: 'a'.repeat(64),
+    includeInactive: false,
+    counts: {
+      active: active.length,
+      pending: pending.length,
+      contested: 0,
+      superseded: superseded.length,
+      archived: archived.length,
+      denied: archived.filter(item => item.withdrawnAt).length,
+      expired: 0,
+      total: items.length,
+    },
+    sectionLabels: {
+      identity: '身份',
+      preferences: '偏好',
+      goals: '目标',
+      relationships: '关系',
+      facts: '事实',
+      other: '其他',
+    },
+    sections: {
+      identity: active
+        .filter(item => item.type === 'identity')
+        .map(item => profileItem(item, 'identity')),
+      preferences: active
+        .filter(item => item.type === 'preference')
+        .map(item => profileItem(item, 'preference')),
+      goals: active
+        .filter(item => item.type === 'goal')
+        .map(item => profileItem(item, 'goal')),
+      relationships: active
+        .filter(item => item.type === 'relationship')
+        .map(item => profileItem(item, 'relationship')),
+      facts: active
+        .filter(item => item.type === 'fact')
+        .map(item => profileItem(item, 'fact')),
+      other: [],
+    },
+    pending: pending.map(item => profileItem(item, item.type || 'fact')),
+    contested: [],
+    inactive: [],
+    feedback: {
+      counts: { confirm: 0, deny: 0, correct: 0 },
+      recent: [],
+    },
+  };
+}
 
 function installApi() {
   memories = makeMemories();
+  profile = makeProfile(memories);
   const attempts = makeAttempts();
 
   mockedFetch.mockImplementation(async (path: string, init?: RequestInit) => {
@@ -262,8 +365,124 @@ function installApi() {
       return jsonResponse({ memories, scope: 'all' });
     }
 
+    if (path === API_PATHS.profile || path === API_PATHS.profileWithInactive) {
+      return jsonResponse({ profile: { ...profile, includeInactive: path === API_PATHS.profileWithInactive } });
+    }
+
     if (path === API_PATHS.memoryWriteAttempts) {
       return jsonResponse({ attempts });
+    }
+
+    if (path === API_PATHS.profileFeedback) {
+      const body = JSON.parse(String(init?.body || '{}'));
+      const action = body.action;
+      const target = memories.find(item => item.id === body.id);
+      const nowIso = new Date().toISOString();
+      let resultId = body.id;
+
+      if (!target) {
+        return jsonResponse({ error: '记忆不存在', code: 'not_found' }, 404);
+      }
+
+      if (action === 'confirm') {
+        memories = memories.map(item =>
+          item.id === body.id
+            ? {
+                ...item,
+                status: 'active',
+                confirmationCount: (item.confirmationCount || 0) + 1,
+                lastDecision: {
+                  action: 'confirm',
+                  reason: 'user_confirmed',
+                  at: nowIso,
+                  actor: 'user',
+                  feedbackId: body.feedbackId,
+                },
+                feedbackHistory: [
+                  ...(item.feedbackHistory || []),
+                  {
+                    action: 'confirm',
+                    reason: 'user_confirmed',
+                    at: nowIso,
+                    actor: 'user',
+                    feedbackId: body.feedbackId,
+                  },
+                ],
+              }
+            : item
+        );
+      } else if (action === 'deny') {
+        memories = memories.map(item =>
+          item.id === body.id
+            ? {
+                ...item,
+                status: 'archived',
+                withdrawnAt: nowIso,
+                withdrawnReason: 'user_denied',
+                lastDecision: {
+                  action: 'deny',
+                  reason: 'user_denied',
+                  at: nowIso,
+                  actor: 'user',
+                  feedbackId: body.feedbackId,
+                },
+                feedbackHistory: [
+                  ...(item.feedbackHistory || []),
+                  {
+                    action: 'deny',
+                    reason: 'user_denied',
+                    at: nowIso,
+                    actor: 'user',
+                    feedbackId: body.feedbackId,
+                  },
+                ],
+              }
+            : item
+        );
+      } else if (action === 'correct') {
+        resultId = `${body.id}-corrected`;
+        memories = memories
+          .map(item =>
+            item.id === body.id
+              ? {
+                  ...item,
+                  status: 'superseded' as const,
+                  supersededBy: resultId,
+                }
+              : item
+          )
+          .concat({
+            id: resultId,
+            content: body.content,
+            type: target.type,
+            confidence: target.confidence,
+            status: 'active' as const,
+            validFrom: nowIso,
+            validTo: null,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+            supersedes: body.id,
+            contributions: target.contributions,
+            feedbackHistory: [
+              {
+                action: 'correct',
+                reason: 'user_correction',
+                at: nowIso,
+                actor: 'user',
+                feedbackId: body.feedbackId,
+              },
+            ],
+          });
+      }
+
+      profile = makeProfile(memories);
+      return jsonResponse({
+        ok: true,
+        action,
+        feedbackId: body.feedbackId,
+        result: { id: resultId, status: action === 'confirm' ? 'active' : 'archived' },
+        profile,
+      });
     }
 
     if (path === API_PATHS.memoryConfirm) {
@@ -351,7 +570,7 @@ describe('Memory Center 屏幕', () => {
     expect(screen.getByText('记忆检查')).toBeTruthy();
   });
 
-  it('管理页支持搜索、类型筛选，并在详情展示真实来源与未接入操作', async () => {
+  it('管理页支持搜索、类型筛选，并在详情展示真实来源与治理入口', async () => {
     await render(<MemoryCenterScreen visible onClose={noop} theme={theme} />);
     await openManage();
 
@@ -381,10 +600,10 @@ describe('Memory Center 屏幕', () => {
 
     expect(screen.getAllByText('身份').length).toBeGreaterThan(0);
     expect(screen.getByText(/我叫宋泽/)).toBeTruthy();
-    expect(screen.getByText('未接入操作')).toBeTruthy();
-    expect(screen.getByText('编辑')).toBeTruthy();
-    expect(screen.getByText('撤回')).toBeTruthy();
-    expect(screen.getByText(/单条撤回/)).toBeTruthy();
+    expect(screen.getByText('画像治理')).toBeTruthy();
+    expect(screen.getByText('纠正')).toBeTruthy();
+    expect(screen.getByText('否认')).toBeTruthy();
+    expect(screen.getByText(/保留旧版本/)).toBeTruthy();
 
     await fireEvent.press(screen.getByLabelText('返回记忆列表'));
     await waitFor(() => {
@@ -555,6 +774,98 @@ describe('Memory Center 屏幕', () => {
 
     await waitFor(() => {
       expect(screen.getAllByText('置信度不足').length).toBeGreaterThan(0);
+    });
+  });
+
+  it('画像页展示分节、来源、digest，并可确认待确认条目', async () => {
+    await render(<MemoryCenterScreen visible onClose={noop} theme={theme} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Memory Center')).toBeTruthy();
+    });
+
+    await fireEvent.press(screen.getByLabelText('记忆中心 画像'));
+    await waitFor(() => {
+      expect(screen.getByText('可追溯画像')).toBeTruthy();
+    });
+
+    expect(screen.getByText('身份')).toBeTruthy();
+    expect(screen.getByText('偏好')).toBeTruthy();
+    expect(screen.getByText('事实')).toBeTruthy();
+    expect(screen.getByText('用户叫宋泽')).toBeTruthy();
+    expect(screen.getByText('用户住在杭州')).toBeTruthy();
+    expect(screen.getByText(/digest aaaaaaaaaaaa/)).toBeTruthy();
+    expect(screen.getByText('用户计划下个月去杭州')).toBeTruthy();
+
+    await fireEvent.press(
+      screen.getByLabelText('确认画像条目 用户计划下个月去杭州')
+    );
+
+    await waitFor(() => {
+      const call = mockedFetch.mock.calls.find(
+        ([path]) => path === API_PATHS.profileFeedback
+      );
+      expect(call).toBeTruthy();
+      const body = JSON.parse(String(call?.[1]?.body || '{}'));
+      expect(body.action).toBe('confirm');
+      expect(body.id).toBe('p1');
+      expect(body.feedbackId).toMatch(/^ui-confirm-/);
+    });
+  });
+
+  it('画像页可否认条目，详情纠正会提交 P5 反馈', async () => {
+    alertSpy.mockImplementation((title, _message, buttons) => {
+      if (title === '否认这条记忆？') {
+        const confirm = (buttons || []).find(
+          (item: AlertButtonLike) => item.text === '否认'
+        );
+        confirm?.onPress?.();
+      }
+    });
+
+    await render(<MemoryCenterScreen visible onClose={noop} theme={theme} />);
+    await waitFor(() => {
+      expect(screen.getByText('Memory Center')).toBeTruthy();
+    });
+    await fireEvent.press(screen.getByLabelText('记忆中心 画像'));
+    await waitFor(() => {
+      expect(screen.getByText('可追溯画像')).toBeTruthy();
+    });
+
+    await fireEvent.press(screen.getByLabelText('否认画像条目 用户住在杭州'));
+    await waitFor(() => {
+      const call = mockedFetch.mock.calls.find(
+        ([path]) => path === API_PATHS.profileFeedback
+      );
+      const body = JSON.parse(String(call?.[1]?.body || '{}'));
+      expect(body.action).toBe('deny');
+      expect(body.id).toBe('a4');
+      expect(body.feedbackId).toMatch(/^ui-deny-/);
+    });
+
+    await fireEvent.press(
+      screen.getAllByLabelText('纠正画像条目 用户喜欢喝美式咖啡')[0]
+    );
+    await waitFor(() => {
+      expect(screen.getByText('记忆详情')).toBeTruthy();
+      expect(screen.getByLabelText('纠正后的记忆内容')).toBeTruthy();
+    });
+
+    await fireEvent.changeText(
+      screen.getByLabelText('纠正后的记忆内容'),
+      '用户喜欢拿铁咖啡'
+    );
+    await fireEvent.press(screen.getByLabelText('保存纠正'));
+
+    await waitFor(() => {
+      const calls = mockedFetch.mock.calls.filter(
+        ([path]) => path === API_PATHS.profileFeedback
+      );
+      const body = JSON.parse(String(calls[calls.length - 1]?.[1]?.body || '{}'));
+      expect(body.action).toBe('correct');
+      expect(body.id).toBe('a2');
+      expect(body.content).toBe('用户喜欢拿铁咖啡');
+      expect(body.feedbackId).toMatch(/^ui-correct-/);
     });
   });
 
