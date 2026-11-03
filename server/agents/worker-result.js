@@ -9,12 +9,16 @@
  * 这里只做规范化与截断，不判断业务含义。
  */
 
+const {
+  TERMINAL_STATUSES: ENABLED_TERMINAL_STATUSES,
+  LEGACY_STATUSES,
+} = require('./status-vocabulary');
+
+// S2 过渡：已启用终态 + 旧值别名，取值与 state-machine.js 的 TERMINAL 一致；
+// S5 改名后只剩已启用终态（recovery 取代 uncertain）。
 const TERMINAL_STATUSES = Object.freeze([
-  'completed',
-  'failed',
-  'cancelled',
-  'timed_out',
-  'uncertain',
+  ...ENABLED_TERMINAL_STATUSES,
+  ...LEGACY_STATUSES,
 ]);
 const SUMMARY_MAX = 8000;
 

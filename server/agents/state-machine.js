@@ -8,25 +8,19 @@
  * 已发生的任务进入该状态等待人工处理，永不自动当作成功。
  */
 const { AgentError } = require('./errors');
+const vocabulary = require('./status-vocabulary');
 
+// S2 过渡：写入值不变——retrying / recovery 尚未接入写入路径，旧值 uncertain 仍被写入。
+// S5 完成改名后删除过渡集，STATUSES 直接取 vocabulary.STATUSES。
+const PENDING_STATUSES = Object.freeze(['retrying', 'recovery']);
 const STATUSES = Object.freeze([
-  'queued',
-  'accepted',
-  'running',
-  'waiting_approval',
-  'completed',
-  'failed',
-  'cancelled',
-  'timed_out',
-  'uncertain',
+  ...vocabulary.STATUSES.filter(status => !PENDING_STATUSES.includes(status)),
+  ...vocabulary.LEGACY_STATUSES,
 ]);
 
 const TERMINAL = new Set([
-  'completed',
-  'failed',
-  'cancelled',
-  'timed_out',
-  'uncertain',
+  ...vocabulary.TERMINAL_STATUSES,
+  ...vocabulary.LEGACY_STATUSES,
 ]);
 
 const TRANSITIONS = Object.freeze({
