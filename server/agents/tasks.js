@@ -389,6 +389,13 @@ function publicTask(task, { includeResult = true } = {}) {
     idempotencyKey: task.idempotencyKey || null,
     route: task.route ? clone(task.route) : null,
     budget: task.budget ? clone(task.budget) : null,
+    // S8：计划版本指针。仅在 Workflow Engine 创建/重规划计划时由引擎写入；
+    // 未接入 Workflow Store 时保持 null，绝不返回占位版本（0 也视为未写入）。
+    planId: task.planId || null,
+    planVersion:
+      Number.isInteger(task.planVersion) && task.planVersion > 0
+        ? task.planVersion
+        : null,
     // Worker 运行期元数据（不属于 Task Contract 字段，随执行更新）。
     runId: task.runId || null,
     runStartedAt: task.runStartedAt || null,
@@ -636,6 +643,11 @@ function createTask({
     idempotencyKey: cleanIdempotencyKey,
     route: cleanRoute,
     budget: cleanBudget,
+    // S8：计划版本指针（Task Contract 新增可空字段）。只在 Workflow Engine
+    // 创建/重规划计划时写入；Workflow Store 落地前恒为 null，严禁写
+    // 'v1' / 0 / '' 等占位值，否则会制造无法追溯的假版本。
+    planId: null,
+    planVersion: null,
     runId: null,
     runStartedAt: null,
     heartbeatAt: null,

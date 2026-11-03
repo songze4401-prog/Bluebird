@@ -999,6 +999,10 @@ export type AgentTask = {
   deliveryStatus?: 'pending' | 'delivered' | 'failed' | 'not_applicable';
   deliveryErrorCode?: string | null;
   allowedTools: string[];
+  // S8：计划版本指针。仅由 Workflow Engine 写入；未接入 Workflow Store 时为 null，
+  // 不会是 'v1' 之类的占位字符串。版本号是整数（每次重规划单调 +1）。
+  planId?: string | null;
+  planVersion?: number | null;
   deadlineMs: number;
   status:
     | 'queued'

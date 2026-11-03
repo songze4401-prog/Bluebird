@@ -56,6 +56,11 @@ function normalizeTask(task) {
   add('contractVersion', 1);
   add('priority', 'normal');
   add('contextRef', null);
+  // S8：计划版本指针的只读默认视图。故意不参与 migrated 判定——仅因新增
+  // 两个可空键就改写旧文件会破坏“旧数据原文件字节不变”的读边界；
+  // 首次真实写入（任何业务变更落盘）时再自然带出。
+  if (task.planId === undefined) task.planId = null;
+  if (task.planVersion === undefined) task.planVersion = null;
   add('idempotencyKey', null);
   add('route', null);
   add('budget', null);
