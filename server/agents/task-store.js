@@ -2,11 +2,15 @@
 /**
  * Task Store 接口（阶段 3）。
  *
- * 业务层只依赖这里声明的读写接口，不直接碰文件名或 JSON 结构：
+ * 本文件是 `agent-tasks.json` 这张任务表的唯一事实源，范围只覆盖这一个文件：
  *   read()  → { store, migrated, fromVersion }
  *   write(store)
  *   migrate(raw)
  *
+ * 业务层只依赖这里声明的读写接口，不直接碰文件名或 JSON 结构；但这只是约定
+ * 边界——read() 返回可变对象，业务层仍会直接改字段，落盘必须走 saveTasks → write()。
+ * 事件/outbox（agent-events.json、agent-event-outbox.json）与 Session、Approval
+ * 各自有独立 store，不归本文件管辖；事件仅通知/审计，不拥有事实权威。
  * 当前实现是单机原子文件（writeFileAtomicSync），并由进程启动时的单实例锁
  * 保证只有一个写者。未来替换 SQLite/PostgreSQL 时保持同一接口即可。
  */
