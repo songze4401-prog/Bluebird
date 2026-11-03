@@ -770,7 +770,7 @@ function updateTask(taskId, patch = {}) {
     );
   }
   // S9：checkpointVersion 是 checkpoint 序号，只能由 recordCheckpoint 递增写入。
-  // 它不是 CAS 版本；CAS 版本（stateVersion）属 ② 范围，本步不实现。
+  // 它不是 CAS 版本；并发版本是 stateVersion（② 实现，见下方 assertExpectedVersion）。
   if (patch.checkpointVersion !== undefined) {
     throw new AgentError(
       'task_checkpoint_version_read_only',
