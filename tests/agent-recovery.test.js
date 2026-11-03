@@ -486,3 +486,95 @@ test('存储：损坏的任务文件在读取时明确报错', () => {
     error => error && error.code === 'agent_tasks_corrupted'
   );
 });
+
+// ---- G. ② CAS：任务记录乐观并发 ----
+
+test('CAS：同一 expectedVersion 的两个写者，后者 conflict 且前者数据保留', async () => {
+  resetStore();
+  const task = makeTask();
+  const snapshot = tasks.getTask(task.taskId);
+  assert.equal(snapshot.stateVersion, 0);
+  // Node 是单线程且本 Store 是同步写，无法在进程内做到指令级并行；这里让两个
+  // 写者都从同一快照出发、在同一批微任务里发起写入——这正是“丢更新”的时序。
+  // 能证明：先执行者的写入保留、后执行者得到 conflict；不能证明：多进程同时读文件。
+  const results = await Promise.allSettled([
+    Promise.resolve().then(() =>
+      tasks.transitionTask(task.taskId, {
+        to: 'accepted',
+        expectedVersion: snapshot.stateVersion,
+      })
+    ),
+    Promise.resolve().then(() =>
+      tasks.updateTask(task.taskId, {
+        lastErrorCode: 'writer_b',
+        expectedVersion: snapshot.stateVersion,
+      })
+    ),
+  ]);
+
+  assert.equal(results[0].status, 'fulfilled');
+  assert.equal(results[0].value.status, 'accepted');
+  assert.equal(results[0].value.stateVersion, 1);
+
+  assert.equal(results[1].status, 'rejected');
+  const conflict = results[1].reason;
+  assert.equal(conflict.code, 'conflict');
+  assert.equal(conflict.status, 409);
+  const details = conflict.details || {};
+  assert.equal(details.retryable, true);
+  assert.match(details.errorFingerprint, /^[0-9a-f]{64}$/);
+  assert.equal(typeof details.failedAt, 'string');
+  assert.equal(details.taskId, task.taskId);
+  assert.equal(details.runId, null);
+  assert.equal(details.causeRef, `task:${task.taskId}`);
+
+  // 内存：先写者的结果保留，后写者什么都没改。
+  const current = tasks.getTask(task.taskId);
+  assert.equal(current.status, 'accepted');
+  assert.equal(current.stateVersion, 1);
+  assert.equal(current.lastErrorCode, null);
+
+  // 磁盘：与内存一致，未被第二个写者覆盖。
+  const raw = JSON.parse(
+    fs.readFileSync(path.join(AGENTS_DIR, 'agent-tasks.json'), 'utf8')
+  );
+  assert.equal(raw.tasks[task.taskId].status, 'accepted');
+  assert.equal(raw.tasks[task.taskId].stateVersion, 1);
+  assert.equal(raw.tasks[task.taskId].lastErrorCode, null);
+});
+
+test('CAS：冲突后重读并用最新版本重试成功，版本单调递增', () => {
+  resetStore();
+  const task = makeTask();
+  const first = tasks.transitionTask(task.taskId, { to: 'accepted' });
+  assert.equal(first.stateVersion, 1);
+
+  assert.throws(
+    () => tasks.transitionTask(task.taskId, { to: 'running', expectedVersion: 0 }),
+    error => error && error.code === 'conflict'
+  );
+  const afterConflict = tasks.getTask(task.taskId);
+  assert.equal(afterConflict.status, 'accepted');
+  assert.equal(afterConflict.stateVersion, 1);
+
+  const retried = tasks.transitionTask(task.taskId, {
+    to: 'running',
+    expectedVersion: afterConflict.stateVersion,
+  });
+  assert.equal(retried.status, 'running');
+  assert.equal(retried.stateVersion, 2);
+});
+
+test('CAS：不传 expectedVersion 的既有调用保持可写', () => {
+  resetStore();
+  const task = makeTask();
+  const accepted = tasks.transitionTask(task.taskId, { to: 'accepted' });
+  assert.equal(accepted.stateVersion, 1);
+  // 旧调用方（runtime / 测试）不带版本，行为与 ② 之前一致。
+  const heartbeat = tasks.updateTask(task.taskId, {
+    heartbeatAt: '2026-11-04T00:00:00.000Z',
+  });
+  assert.equal(heartbeat.status, 'accepted');
+  assert.equal(heartbeat.heartbeatAt, '2026-11-04T00:00:00.000Z');
+  assert.equal(heartbeat.stateVersion, 2);
+});

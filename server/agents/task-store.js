@@ -62,6 +62,10 @@ function normalizeTask(task) {
   // 首次真实写入（任何业务变更落盘）时再自然带出。
   if (task.planId === undefined) task.planId = null;
   if (task.planVersion === undefined) task.planVersion = null;
+  // ② CAS：任务记录的单调递增版本，由存储层在每次真实写入时分配。
+  // 与 S8 同一读边界策略——默认值不参与 migrated 判定，旧文件不被重写；
+  // 首次业务写入时自然带出。它不是 checkpointVersion（后者是检查点序号）。
+  if (task.stateVersion === undefined) task.stateVersion = 0;
   add('idempotencyKey', null);
   add('route', null);
   add('budget', null);

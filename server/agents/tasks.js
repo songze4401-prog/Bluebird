@@ -14,7 +14,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { writeFileAtomicSync } = require('../atomic-write');
 const { getManifest, isKnownBot } = require('./manifest');
-const { AgentError } = require('./errors');
+const { AgentError, conflictError } = require('./errors');
 const taskStore = require('./task-store');
 const stateMachine = require('./state-machine');
 const { normalizeWorkerResult } = require('./worker-result');
@@ -409,6 +409,8 @@ function publicTask(task, { includeResult = true } = {}) {
     checkpointVersion: Number.isInteger(task.checkpointVersion)
       ? task.checkpointVersion
       : 0,
+    // ② CAS：对外只读的当前版本，调用方写入时据此传 expectedVersion。
+    stateVersion: Number.isInteger(task.stateVersion) ? task.stateVersion : 0,
     runs: Array.isArray(task.runs) ? clone(task.runs) : [],
     requiresReview: task.requiresReview === true,
     deliveredToParentAt: task.deliveredToParentAt || null,
@@ -657,8 +659,11 @@ function createTask({
     retryAt: null,
     lastErrorCode: null,
     // checkpointVersion 是 checkpoint 序号（recordCheckpoint 每次 +1），
-    // 不是 CAS/并发版本；CAS 版本（stateVersion）属 ② 范围，本步不实现。
+    // 不是 CAS/并发版本；CAS 版本是 stateVersion（创建时为 0，首次写入 +1）。
     checkpointVersion: 0,
+    // ② CAS：任务记录的单调递增版本。只有存储层（本文件的写入路径）能分配，
+    // 调用方只能通过 expectedVersion 声明“基于哪一版修改”。
+    stateVersion: 0,
     runs: [],
     requiresReview: false,
     parentSessionId: cleanParentSession,
@@ -727,6 +732,29 @@ function listTasks(botId, { limit = 20, parentSessionId = null } = {}) {
     .map(task => publicTask(task));
 }
 
+// ② CAS：版本由存储层分配，调用方只读。每次真实落盘 +1，绝不信任写入方自报。
+function bumpStateVersion(task) {
+  task.stateVersion = (Number.isInteger(task.stateVersion) ? task.stateVersion : 0) + 1;
+  return task.stateVersion;
+}
+
+// ② CAS：先校验后写。expectedVersion 为空（undefined/null）表示“旧调用方不带版本”，
+// 保持既有可写行为；携带时必须与当前 stateVersion 严格相等，否则抛 conflict。
+// 冲突发生在任何内存改动之前，因此内存与磁盘都不会被改动。
+function assertExpectedVersion(task, expectedVersion) {
+  if (expectedVersion === undefined || expectedVersion === null) return;
+  const current = Number.isInteger(task.stateVersion) ? task.stateVersion : 0;
+  if (expectedVersion !== current) {
+    throw conflictError({
+      taskId: task.taskId,
+      expectedVersion,
+      currentVersion: current,
+      runId: task.runId || null,
+      causeRef: task.taskId ? `task:${task.taskId}` : null,
+    });
+  }
+}
+
 function updateTask(taskId, patch = {}) {
   const tasks = loadTasks();
   const task = tasks.tasks[String(taskId || '')];
@@ -750,6 +778,9 @@ function updateTask(taskId, patch = {}) {
       400
     );
   }
+  // ② CAS：在任何字段被修改之前校验版本，冲突时内存与磁盘都保持原样。
+  // 与 checkpointVersion 无关（后者是检查点序号，不是并发版本）。
+  assertExpectedVersion(task, patch.expectedVersion);
   if (patch.cancelRequested !== undefined) {
     task.cancelRequested = patch.cancelRequested === true;
   }
@@ -897,6 +928,7 @@ function updateTask(taskId, patch = {}) {
     };
   }
   task.updatedAt = nowIso();
+  bumpStateVersion(task);
   saveTasks();
   return publicTask(task);
 }
@@ -921,7 +953,7 @@ function applyTransition(task, to) {
 /**
  * 任务状态唯一对外写入入口。
  * options.to             目标状态（必经 assertTransition 校验）
- * options.expectedVersion 本步只作签名占位，不校验（属 Phase 1 ② CAS 范围）
+ * options.expectedVersion ② CAS：可选，基于哪一版修改；不匹配抛 conflict 且不改动
  * options.writer         审计/日志标识，不改变行为，也不写入任务记录
  * 其余字段（result/completedAt/errorCode/...）与状态在同一次落盘内写入，
  * 保持“状态与结果同一次写”的既有语义。
@@ -930,6 +962,8 @@ function transitionTask(taskId, options = {}) {
   const tasks = loadTasks();
   const task = tasks.tasks[String(taskId || '')];
   if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+  // ② CAS：必须在 applyTransition 之前校验，否则冲突会留下已改的内存状态。
+  assertExpectedVersion(task, options.expectedVersion);
   applyTransition(task, options.to);
   const patch = { ...options };
   delete patch.to;
@@ -982,6 +1016,7 @@ function acquireLease(
     heartbeatAt: iso,
   };
   task.updatedAt = iso;
+  bumpStateVersion(task);
   saveTasks();
   return publicTask(task);
 }
@@ -1005,6 +1040,7 @@ function renewLease(
   task.lease.expiresAt = new Date(now + Math.max(1000, ttlMs)).toISOString();
   task.heartbeatAt = iso;
   task.updatedAt = iso;
+  bumpStateVersion(task);
   saveTasks();
   return publicTask(task);
 }
@@ -1015,6 +1051,7 @@ function releaseLease(taskId) {
   if (!task) return null;
   task.lease = null;
   task.updatedAt = nowIso();
+  bumpStateVersion(task);
   saveTasks();
   return publicTask(task);
 }
@@ -1038,6 +1075,7 @@ function recordRunStart(taskId, { runId, attempt, startedAt } = {}) {
   });
   task.runs = runs.slice(-RUN_HISTORY_MAX);
   task.updatedAt = at;
+  bumpStateVersion(task);
   saveTasks();
   return publicTask(task);
 }
@@ -1068,6 +1106,7 @@ function recordRunFinish(taskId, { runId, status, errorCode = null, finishedAt }
   }
   task.runs = runs.slice(-RUN_HISTORY_MAX);
   task.updatedAt = at;
+  bumpStateVersion(task);
   saveTasks();
   return publicTask(task);
 }
@@ -1087,6 +1126,7 @@ function recordCheckpoint(taskId, checkpoint = {}, now = Date.now()) {
     (Number.isInteger(task.checkpointVersion) ? task.checkpointVersion : 0) + 1;
   task.heartbeatAt = at;
   task.updatedAt = at;
+  bumpStateVersion(task);
   saveTasks();
   return publicTask(task);
 }
@@ -1111,6 +1151,7 @@ function setRetry(taskId, { errorCode, retryAt, now = Date.now() } = {}) {
   task.heartbeatAt = null;
   task.lease = null;
   task.updatedAt = at;
+  bumpStateVersion(task);
   saveTasks();
   return publicTask(task);
 }
@@ -1172,6 +1213,7 @@ function convergeWaitingApprovalDeadline(taskId, { now = Date.now() } = {}) {
   const dueAt = getTaskDeadlineAt(task);
   if (dueAt === null || dueAt > now) return null;
   const outcome = expireWaitingApproval(task, now);
+  bumpStateVersion(task);
   saveTasks();
   return outcome;
 }
@@ -1215,6 +1257,7 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
       continue;
     }
     changed = true;
+    bumpStateVersion(task);
     task.updatedAt = at;
     task.lease = null;
     task.retryAt = null;
