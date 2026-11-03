@@ -151,10 +151,10 @@ function recoverInterrupted() {
   }
   return {
     recovered: recovered.recovered,
-    uncertain: recovered.uncertain,
+    recovery: recovered.recovery,
     leftRunning: recovered.leftRunning,
     taskIds: recovered.taskIds,
-    uncertainTaskIds: recovered.uncertainTaskIds,
+    recoveryTaskIds: recovered.recoveryTaskIds,
     delivery,
   };
 }

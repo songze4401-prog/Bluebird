@@ -282,16 +282,16 @@ test('Watchdog：服务停机 + 租约过期 → 受控恢复只读任务并写�
   assert.ok(recovery.result.recovered >= 1);
 });
 
-test('Watchdog：服务停机 + 写任务 → uncertain，不伪装成功', () => {
+test('Watchdog：服务停机 + 写任务 → recovery，不伪装成功', () => {
   reset();
   const task = staleTask({ allowedTools: ['memory_remember'] });
   watchdog.runOnce({ now: Date.now() });
   const recovered = tasks.getTask(task.taskId);
-  assert.equal(recovered.status, 'uncertain');
+  assert.equal(recovered.status, 'recovery');
   assert.equal(recovered.requiresReview, true);
   const lines = auditLines(watchdog.AUDIT_FILE);
   const recovery = lines.filter(item => item.action === 'recover_interrupted').at(-1);
-  assert.ok(recovery.result.uncertain >= 1);
+  assert.ok(recovery.result.recovery >= 1);
 });
 
 test('Watchdog：服务存活时只告警与暂停接单，不写任务状态', () => {

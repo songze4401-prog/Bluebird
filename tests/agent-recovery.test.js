@@ -3,7 +3,7 @@
  * 阶段 3 恢复与故障注入回归。
  *
  * 覆盖：状态机合法迁移、Store schema v1→v2 迁移、租约获取/续约/过期、
- * 重试退避、checkpoint 版本、运行历史、启动恢复（重排队/uncertain/保持运行）、
+ * 重试退避、checkpoint 版本、运行历史、启动恢复（重排队/recovery/保持运行）、
  * 强制终止进程后的恢复、结果投递幂等与崩溃补投、存储损坏/写入失败的显式路径。
  */
 const fs = require('fs');
@@ -75,10 +75,10 @@ test('状态机：跳步与回退被拒绝', () => {
   );
 });
 
-test('状态机：uncertain 是终态，只能由中间态进入', () => {
-  assert.equal(stateMachine.isTerminal('uncertain'), true);
-  assert.equal(stateMachine.canTransition('running', 'uncertain'), true);
-  assert.equal(stateMachine.canTransition('uncertain', 'queued'), false);
+test('状态机：recovery 是终态，只能由中间态进入', () => {
+  assert.equal(stateMachine.isTerminal('recovery'), true);
+  assert.equal(stateMachine.canTransition('running', 'recovery'), true);
+  assert.equal(stateMachine.canTransition('recovery', 'queued'), false);
 });
 
 test('状态机：只有 accepted/running 需要恢复', () => {
@@ -274,7 +274,7 @@ test('恢复：只读任务重排队，绝不直接报告成功', () => {
   tasks.reloadForTests();
   const result = tasks.recoverInterrupted({ ownerId: null });
   assert.equal(result.recovered, 1);
-  assert.equal(result.uncertain, 0);
+  assert.equal(result.recovery, 0);
   const recovered = tasks.getTask(task.taskId);
   assert.equal(recovered.status, 'queued');
   assert.equal(recovered.lastErrorCode, 'recovered_after_restart');
@@ -282,17 +282,17 @@ test('恢复：只读任务重排队，绝不直接报告成功', () => {
   assert.notEqual(recovered.status, 'completed');
 });
 
-test('恢复：可能产生副作用的任务标记 uncertain 等待人工处理', () => {
+test('恢复：可能产生副作用的任务标记 recovery 等待人工处理', () => {
   resetStore();
   const task = toRunning(makeTask({ allowedTools: ['memory_remember'] }));
   tasks.reloadForTests();
   const result = tasks.recoverInterrupted({ ownerId: null });
-  assert.equal(result.uncertain, 1);
+  assert.equal(result.recovery, 1);
   const recovered = tasks.getTask(task.taskId);
-  assert.equal(recovered.status, 'uncertain');
+  assert.equal(recovered.status, 'recovery');
   assert.equal(recovered.requiresReview, true);
   assert.equal(recovered.errorCode, 'recovery_uncertain_side_effects');
-  assert.equal(recovered.result.status, 'uncertain');
+  assert.equal(recovered.result.status, 'recovery');
   assert.notEqual(recovered.status, 'completed');
 });
 
@@ -303,7 +303,7 @@ test('恢复：waiting_approval 保持暂停，不被自动执行', () => {
   tasks.reloadForTests();
   const result = tasks.recoverInterrupted({ ownerId: null });
   assert.equal(result.recovered, 0);
-  assert.equal(result.uncertain, 0);
+  assert.equal(result.recovery, 0);
   assert.equal(tasks.getTask(task.taskId).status, 'waiting_approval');
 });
 
@@ -320,7 +320,7 @@ test('恢复：租约由其他存活 owner 持有时保持 running', () => {
   assert.equal(tasks.getTask(task.taskId).status, 'running');
 });
 
-test('恢复：uncertain 结果按 taskId 幂等投递到父会话', () => {
+test('恢复：recovery 结果按 taskId 幂等投递到父会话', () => {
   resetStore();
   const parent = mainSessions.createSession({ title: '恢复投递' });
   const task = toRunning(
@@ -333,7 +333,7 @@ test('恢复：uncertain 结果按 taskId 幂等投递到父会话', () => {
   const after = mainSessions.getMessages(parent.id);
   assert.equal(after.length, before + 1);
   assert.ok(after.at(-1).content.includes('【Memory Bot 任务未完成】'));
-  assert.ok(after.at(-1).content.includes('uncertain'));
+  assert.ok(after.at(-1).content.includes('recovery'));
   resultDelivery.recoverPending();
   assert.equal(mainSessions.getMessages(parent.id).length, before + 1);
 });
@@ -351,7 +351,7 @@ test('健康快照：只含计数与时间点', () => {
   assert.equal(health.counts.queued, 1);
   assert.equal(health.counts.running, 1);
   assert.equal(health.counts.terminal, 1);
-  assert.equal(health.counts.uncertain, 0);
+  assert.equal(health.counts.recovery, 0);
   assert.equal(health.expiredLeases, 1);
   assert.equal(health.checkedAt.includes('T'), true);
   assert.ok(!JSON.stringify(health).includes('运行中'));
@@ -360,7 +360,7 @@ test('健康快照：只含计数与时间点', () => {
 
 // ---- F. 强制终止进程后的恢复 ----
 
-test('崩溃注入：子进程 SIGKILL 后恢复只读任务并标记写任务 uncertain', () => {
+test('崩溃注入：子进程 SIGKILL 后恢复只读任务并标记写任务 recovery', () => {
   resetStore();
   const script = `
 process.env.BLUEBIRD_DATA_DIR = ${JSON.stringify(TMP)};
@@ -387,11 +387,11 @@ process.kill(process.pid, 'SIGKILL');
   tasks.reloadForTests();
   const result = tasks.recoverInterrupted({ ownerId: null });
   assert.equal(result.recovered, 1);
-  assert.equal(result.uncertain, 1);
+  assert.equal(result.recovery, 1);
   const all = tasks.allTasks();
   assert.equal(all.filter(task => task.status === 'completed').length, 0);
   assert.equal(all.filter(task => task.status === 'queued').length, 1);
-  assert.equal(all.filter(task => task.status === 'uncertain').length, 1);
+  assert.equal(all.filter(task => task.status === 'recovery').length, 1);
 });
 
 // ---- G. 投递幂等与崩溃补投 ----

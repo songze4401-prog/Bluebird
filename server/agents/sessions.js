@@ -15,6 +15,7 @@ const crypto = require('crypto');
 const { writeFileAtomicSync } = require('../atomic-write');
 const { isKnownBot } = require('./manifest');
 const { AgentError } = require('./errors');
+const { LEGACY_ALIASES } = require('./status-vocabulary');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -51,9 +52,8 @@ const PENDING_TASK_STATUSES = Object.freeze([
   'accepted',
   'waiting_approval',
 ]);
-// 本步 Task 词表尚未引入 recovery（S5 才改名）。会话既不呈现 recovery，
-// 也不该显示为仍在运行，故 uncertain 投影为 failed；S5 会随词表一并改判。
-const UNCERTAIN_LIFECYCLE_STATUS = 'failed';
+// recovery 不呈现给会话层：结果未知且需人工核对，投影为 failed（不是仍在运行）。
+const RECOVERY_LIFECYCLE_STATUS = 'failed';
 const PROJECTED_LIFECYCLE_STATUSES = Object.freeze([
   'running',
   'completed',
@@ -64,11 +64,13 @@ const PROJECTED_LIFECYCLE_STATUSES = Object.freeze([
 ]);
 
 function deriveLifecycleStatus(taskStatus) {
-  if (Object.prototype.hasOwnProperty.call(TASK_STATUS_PROJECTION, taskStatus)) {
-    return TASK_STATUS_PROJECTION[taskStatus];
+  // 旧记录/旧客户端可能仍传 uncertain；读边界先归一为 recovery 再投影。
+  const normalized = LEGACY_ALIASES[taskStatus] || taskStatus;
+  if (Object.prototype.hasOwnProperty.call(TASK_STATUS_PROJECTION, normalized)) {
+    return TASK_STATUS_PROJECTION[normalized];
   }
-  if (PENDING_TASK_STATUSES.includes(taskStatus)) return 'running';
-  if (taskStatus === 'uncertain') return UNCERTAIN_LIFECYCLE_STATUS;
+  if (PENDING_TASK_STATUSES.includes(normalized)) return 'running';
+  if (normalized === 'recovery') return RECOVERY_LIFECYCLE_STATUS;
   console.warn(
     '[agents] deriveLifecycleStatus 收到未知 Task 状态，会话生命周期回退 closed:',
     JSON.stringify(taskStatus)

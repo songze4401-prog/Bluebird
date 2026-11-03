@@ -2,24 +2,14 @@
 /**
  * 统一 Worker 结果 schema（阶段 2）。
  *
- * completed / failed / cancelled / timed_out 都写成同一形状：
+ * completed / failed / cancelled / timed_out / recovery 都写成同一形状：
  * status、summary、artifacts、evidence、toolSteps、changes、
  * requiresConfirmation / requiresApproval、errorCode、rounds、
  * stopReason、model、runId、finishedAt。
  * 这里只做规范化与截断，不判断业务含义。
  */
 
-const {
-  TERMINAL_STATUSES: ENABLED_TERMINAL_STATUSES,
-  LEGACY_STATUSES,
-} = require('./status-vocabulary');
-
-// S2 过渡：已启用终态 + 旧值别名，取值与 state-machine.js 的 TERMINAL 一致；
-// S5 改名后只剩已启用终态（recovery 取代 uncertain）。
-const TERMINAL_STATUSES = Object.freeze([
-  ...ENABLED_TERMINAL_STATUSES,
-  ...LEGACY_STATUSES,
-]);
+const { TERMINAL_STATUSES } = require('./status-vocabulary');
 const SUMMARY_MAX = 8000;
 
 function refs(value, limit = 40) {

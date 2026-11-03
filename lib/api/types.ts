@@ -1005,6 +1005,7 @@ export type AgentTask = {
     | 'accepted'
     | 'running'
     | 'waiting_approval'
+    | 'recovery'
     | 'completed'
     | 'failed'
     | 'cancelled'

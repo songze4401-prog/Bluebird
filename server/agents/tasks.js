@@ -18,6 +18,7 @@ const { AgentError } = require('./errors');
 const taskStore = require('./task-store');
 const stateMachine = require('./state-machine');
 const { normalizeWorkerResult } = require('./worker-result');
+const { LEGACY_ALIASES } = require('./status-vocabulary');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -162,7 +163,22 @@ function loadTasks() {
       // 存储暂不可写时保留内存中的规范视图；下一次成功写入会一并落盘。
     }
   }
+  // S5 读边界：旧记录里的 uncertain 在内存中映射为 recovery，
+  // 不回写文件（migrate 不批量改写，原文件字节保持不变）。
+  applyLegacyStatusAliases(taskCache);
   return taskCache;
+}
+
+function applyLegacyStatusAliases(state) {
+  for (const task of Object.values(state.tasks || {})) {
+    if (!task) continue;
+    const aliasedStatus = LEGACY_ALIASES[task.status];
+    if (aliasedStatus) task.status = aliasedStatus;
+    if (task.result) {
+      const aliasedResultStatus = LEGACY_ALIASES[task.result.status];
+      if (aliasedResultStatus) task.result.status = aliasedResultStatus;
+    }
+  }
 }
 
 function loadEvents() {
@@ -1075,16 +1091,16 @@ function hasSideEffectTools(task) {
 }
 
 // 启动恢复：租约仍由未过期且不同的 owner 持有时保持 running；
-// 只读任务重新排队；可能产生副作用的任务标记 uncertain 等待人工处理，
+// 只读任务重新排队；可能产生副作用的任务标记 recovery 等待人工核对，
 // 绝不凭空报告成功。
 function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
   const state = loadTasks();
   const at = new Date(now).toISOString();
   let recovered = 0;
-  let uncertain = 0;
+  let recovery = 0;
   let leftRunning = 0;
   const taskIds = [];
-  const uncertainTaskIds = [];
+  const recoveryTaskIds = [];
   let changed = false;
 
   for (const task of Object.values(state.tasks)) {
@@ -1104,20 +1120,20 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
     task.retryAt = null;
     task.heartbeatAt = null;
     if (hasSideEffectTools(task)) {
-      applyTransition(task, 'uncertain');
+      applyTransition(task, 'recovery');
       task.completedAt = at;
       task.errorCode = 'recovery_uncertain_side_effects';
       task.lastErrorCode = 'recovery_uncertain_side_effects';
       task.requiresReview = true;
       task.result = normalizeWorkerResult({
-        status: 'uncertain',
+        status: 'recovery',
         summary: '',
         errorCode: 'recovery_uncertain_side_effects',
         runId: task.runId || null,
         finishedAt: at,
       });
-      uncertain += 1;
-      uncertainTaskIds.push(task.taskId);
+      recovery += 1;
+      recoveryTaskIds.push(task.taskId);
     } else {
       applyTransition(task, 'queued');
       task.recoveredAt = at;
@@ -1131,10 +1147,11 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
   if (changed) saveTasks();
   return {
     recovered,
-    uncertain,
+    // 自 S5 起该字段随正式状态改名；语义仍是“进入 recovery 的任务数”。
+    recovery,
     leftRunning,
     taskIds,
-    uncertainTaskIds,
+    recoveryTaskIds,
     queued: Object.values(state.tasks).filter(task => task.status === 'queued').length,
   };
 }
@@ -1148,14 +1165,14 @@ function healthSnapshot(now = Date.now()) {
     running: 0,
     waitingApproval: 0,
     terminal: 0,
-    uncertain: 0,
+    recovery: 0,
   };
   let expiredLeases = 0;
   let retryScheduled = 0;
   let oldestQueuedAt = null;
   for (const task of Object.values(state.tasks)) {
     if (task.status === 'waiting_approval') counts.waitingApproval += 1;
-    else if (task.status === 'uncertain') counts.uncertain += 1;
+    else if (task.status === 'recovery') counts.recovery += 1;
     else if (stateMachine.isTerminal(task.status)) counts.terminal += 1;
     else if (task.status === 'queued') {
       counts.queued += 1;

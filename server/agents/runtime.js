@@ -938,18 +938,20 @@ function initializeTaskQueue() {
       { taskId }
     );
   }
-  for (const taskId of recovered.uncertainTaskIds || []) {
+  for (const taskId of recovered.recoveryTaskIds || []) {
     const task = tasks.getRawTask(taskId);
     if (!task) continue;
+    // 事件类型名与 errorCode 沿用历史拼写，保持事件/审计字段集合不变；
+    // payload.status 自 S5 起反映正式状态 recovery。
     safeEvent(
       task.botId,
       'task.uncertain',
-      { status: 'uncertain', errorCode: 'recovery_uncertain_side_effects' },
+      { status: 'recovery', errorCode: 'recovery_uncertain_side_effects' },
       { taskId }
     );
   }
   try {
-    // 恢复后再补投递：终态（含 uncertain）且未投递的结果会在这里补发一次。
+    // 恢复后再补投递：终态（含 recovery）且未投递的结果会在这里补发一次。
     resultDelivery.recoverPending();
   } catch (_) {
     // 结果投递恢复失败不阻塞任务队列；下次 SSE/snapshot 或启动再试。
@@ -957,7 +959,7 @@ function initializeTaskQueue() {
   scheduleTaskQueue();
   return {
     recovered: recovered.recovered,
-    uncertain: recovered.uncertain,
+    recovery: recovered.recovery,
     leftRunning: recovered.leftRunning,
     queued: tasks.queuedCount(),
     concurrency: TASK_CONCURRENCY,

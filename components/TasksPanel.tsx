@@ -18,6 +18,7 @@ const STATUS_LABEL: Record<string, string> = {
   accepted: '已接收',
   running: '执行中',
   waiting_approval: '等待审批',
+  recovery: '待核对',
   completed: '已完成',
   failed: '失败',
   cancelled: '已取消',
@@ -117,7 +118,8 @@ export function TasksPanel({
                       ? theme.online
                       : task.status === 'failed' ||
                           task.status === 'timed_out' ||
-                          task.status === 'cancelled'
+                          task.status === 'cancelled' ||
+                          task.status === 'recovery'
                         ? theme.danger
                         : theme.warning,
                 },

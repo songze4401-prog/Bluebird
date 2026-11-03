@@ -4,24 +4,16 @@
  *
  * 迁移合法性定义（不是状态事实源）：任务状态只能沿这里声明的边变化。
  * 状态事实源是 task-store 的持久化记录；事件（appendEvent）仅通知/审计，
- * 不拥有事实权威。`uncertain` 是恢复中间态：进程中断时无法判断副作用是否
- * 已发生的任务进入该状态等待人工处理，永不自动当作成功。
+ * 不拥有事实权威。`recovery` 是正式终态：进程中断时无法判断副作用是否
+ * 已发生的任务进入该状态等待人工核对，永不自动当作成功。
  */
 const { AgentError } = require('./errors');
 const vocabulary = require('./status-vocabulary');
 
-// S2 过渡：写入值不变——retrying / recovery 尚未接入写入路径，旧值 uncertain 仍被写入。
-// S5 完成改名后删除过渡集，STATUSES 直接取 vocabulary.STATUSES。
-const PENDING_STATUSES = Object.freeze(['retrying', 'recovery']);
-const STATUSES = Object.freeze([
-  ...vocabulary.STATUSES.filter(status => !PENDING_STATUSES.includes(status)),
-  ...vocabulary.LEGACY_STATUSES,
-]);
+// S5：状态集合取 §24.1 十态；`retrying` 仅入词表，暂无写入者（S7 再补边）。
+const STATUSES = Object.freeze([...vocabulary.STATUSES]);
 
-const TERMINAL = new Set([
-  ...vocabulary.TERMINAL_STATUSES,
-  ...vocabulary.LEGACY_STATUSES,
-]);
+const TERMINAL = new Set([...vocabulary.TERMINAL_STATUSES]);
 
 const TRANSITIONS = Object.freeze({
   queued: Object.freeze(['accepted', 'cancelled', 'waiting_approval']),
@@ -33,7 +25,7 @@ const TRANSITIONS = Object.freeze({
     'cancelled',
     'failed',
     'timed_out',
-    'uncertain',
+    'recovery',
   ]),
   running: Object.freeze([
     'waiting_approval',
@@ -42,14 +34,15 @@ const TRANSITIONS = Object.freeze({
     'failed',
     'cancelled',
     'timed_out',
-    'uncertain',
+    'recovery',
   ]),
-  waiting_approval: Object.freeze(['completed', 'failed', 'cancelled', 'uncertain']),
+  waiting_approval: Object.freeze(['completed', 'failed', 'cancelled', 'recovery']),
+  retrying: Object.freeze([]),
   completed: Object.freeze([]),
   failed: Object.freeze([]),
   cancelled: Object.freeze([]),
   timed_out: Object.freeze([]),
-  uncertain: Object.freeze([]),
+  recovery: Object.freeze([]),
 });
 
 function isTerminal(status) {
