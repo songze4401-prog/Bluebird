@@ -4,6 +4,10 @@
  *
  * 隔离键是 botId + sessionId；所有读写都要求两者同时匹配，
  * 主控 /history 与 Bot 工作台不会互相看到对方会话。
+ *
+ * lifecycle.status 不是第二套状态机：它是对所属 Task 状态的投影，
+ * 词表（active/running/completed/failed/cancelled/timed_out/closed）只为兼容
+ * 既有 API 而保留；会话收尾一律经 deriveLifecycleStatus 后再写。
  */
 const fs = require('fs');
 const path = require('path');
@@ -32,6 +36,45 @@ const LIFECYCLE_STATES = Object.freeze([
   'timed_out',
   'closed',
 ]);
+
+// Task 状态 → Session 生命周期投影：5 个同名值直接沿用，非终态任务投影为
+// running（会话存在但任务未完成）。closeSession 只接受这张表 + closed 的产物。
+const TASK_STATUS_PROJECTION = Object.freeze({
+  running: 'running',
+  completed: 'completed',
+  failed: 'failed',
+  cancelled: 'cancelled',
+  timed_out: 'timed_out',
+});
+const PENDING_TASK_STATUSES = Object.freeze([
+  'queued',
+  'accepted',
+  'waiting_approval',
+]);
+// 本步 Task 词表尚未引入 recovery（S5 才改名）。会话既不呈现 recovery，
+// 也不该显示为仍在运行，故 uncertain 投影为 failed；S5 会随词表一并改判。
+const UNCERTAIN_LIFECYCLE_STATUS = 'failed';
+const PROJECTED_LIFECYCLE_STATUSES = Object.freeze([
+  'running',
+  'completed',
+  'failed',
+  'cancelled',
+  'timed_out',
+  'closed',
+]);
+
+function deriveLifecycleStatus(taskStatus) {
+  if (Object.prototype.hasOwnProperty.call(TASK_STATUS_PROJECTION, taskStatus)) {
+    return TASK_STATUS_PROJECTION[taskStatus];
+  }
+  if (PENDING_TASK_STATUSES.includes(taskStatus)) return 'running';
+  if (taskStatus === 'uncertain') return UNCERTAIN_LIFECYCLE_STATUS;
+  console.warn(
+    '[agents] deriveLifecycleStatus 收到未知 Task 状态，会话生命周期回退 closed:',
+    JSON.stringify(taskStatus)
+  );
+  return 'closed';
+}
 
 let cache = null;
 
@@ -298,10 +341,16 @@ function closeSession(botId, sessionId, { status = 'closed', reason = null } = {
   const current = load();
   const meta = findMeta(botId, sessionId);
   if (!meta) return null;
-  const finalStatus = LIFECYCLE_STATES.includes(status) ? status : 'closed';
+  // 只接受投影产物，避免调用方绕过 Task 状态再写第二套生命周期。
+  if (!PROJECTED_LIFECYCLE_STATUSES.includes(status)) {
+    throw new AgentError(
+      'invalid_lifecycle_status',
+      '会话生命周期状态必须由 Task 状态投影产生'
+    );
+  }
   meta.lifecycle = {
     ...(meta.lifecycle || defaultLifecycle()),
-    status: finalStatus,
+    status,
     closedAt: nowIso(),
     closeReason: typeof reason === 'string' ? reason.slice(0, 120) : null,
   };
@@ -405,6 +454,7 @@ module.exports = {
   MESSAGE_MAX,
   SCOPES,
   LIFECYCLE_STATES,
+  deriveLifecycleStatus,
   listSessions,
   getSession,
   createSession,

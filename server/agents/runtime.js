@@ -896,15 +896,11 @@ async function runTask(taskId) {
     } catch (_) {
       // 忽略释放失败，避免影响任务终态。
     }
-    // Worker 会话生命周期收口：终态沿用任务状态，暂停/异常退出标记 closed。
+    // Worker 会话生命周期收口：状态由 Task 状态投影，未知值在投影函数内记日志后回退 closed。
     try {
       const finalTask = tasks.getRawTask(task.taskId);
-      const lifecycleStatus =
-        finalTask && tasks.isTerminalStatus(finalTask.status)
-          ? finalTask.status
-          : 'closed';
       sessions.closeSession(task.botId, task.sessionId, {
-        status: lifecycleStatus,
+        status: sessions.deriveLifecycleStatus(finalTask ? finalTask.status : null),
         reason: finalTask ? finalTask.errorCode : null,
       });
     } catch (_) {
@@ -1006,7 +1002,7 @@ function cancelTask(taskId) {
   safeEvent(task.botId, 'task.cancelled', { status: 'cancelled' }, { taskId });
   try {
     sessions.closeSession(task.botId, task.sessionId, {
-      status: 'cancelled',
+      status: sessions.deriveLifecycleStatus('cancelled'),
       reason: 'cancelled',
     });
   } catch (_) {

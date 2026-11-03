@@ -317,7 +317,7 @@ function decide(approvalId, decision, { actor = permissions.SINGLE_USER_ACTOR, r
         });
         try {
           sessions.closeSession(record.botId, task.sessionId, {
-            status: 'cancelled',
+            status: sessions.deriveLifecycleStatus('cancelled'),
             reason: 'approval_rejected',
           });
         } catch (_) {
@@ -444,7 +444,7 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
             result: taskResult,
           });
           sessions.closeSession(record.botId, task.sessionId, {
-            status: 'completed',
+            status: sessions.deriveLifecycleStatus('completed'),
             reason: null,
           });
         } else {
@@ -467,7 +467,7 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
             errorCode: record.errorCode,
           });
           sessions.closeSession(record.botId, task.sessionId, {
-            status: 'failed',
+            status: sessions.deriveLifecycleStatus('failed'),
             reason: record.errorCode,
           });
         }
