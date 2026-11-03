@@ -181,14 +181,14 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 ## 8. 测试
 
 - `node tests/memory-bot.test.js`：9 项，覆盖 Registry、AES-256-GCM 密文/重启解密、真实 `/models` 验证、Bot 会话、独立 Key 工具循环、工具预算截断后的无工具总结、任务裁剪只删已投递终态、任务/审批 API、token SSE/工具事件、并发队列/恢复/失败隔离。
-- `node tests/delete-semantics.test.js`：43 项，覆盖会话删除后的附件回收/共享保留与派生索引清理、历史清理、记忆删除/按会话清理后的派生索引同步。
+- `node tests/delete-semantics.test.js`：55 项，覆盖会话删除后的附件回收/共享保留与派生索引清理、历史清理、记忆删除/按会话清理后的派生索引同步、删除墓碑/重启复活防护与同源抽取幂等。
 - `node tests/memory-maintenance.test.js`：5 项，覆盖 update/merge/supersede/archive/withdraw/delete、维护门面白名单、审批闭环、事件不含正文、权限拒绝。
 - `node tests/agent-dispatch.test.js`：13 项，覆盖主控工具派发、主控记忆→委派 Bot 的父会话读/写 scope、审批 waiting/完成/拒绝投递、结果 SSE/snapshot、失败回传、重复投递防护、主 Agent 工具循环与事件 outbox 恢复。
 - `npx jest tests/unit/memory-bot-screen.test.tsx`：5 项，覆盖团队页、工作台/流式回退、流式停止与切会话丢弃旧结果、Prompt/工具白名单、任务表单、维护 scope/类型、审批操作。
 - `npx jest tests/unit/agent-results-stream.test.ts`：1 项，覆盖结果 SSE 的 401 永久失败、5xx/200 干净关闭可重试、主动 abort 为 `closed` 的连接分类。
 - `npx jest tests/unit/use-bot-result-stream.test.tsx`：2 项，覆盖 Hook 对永久错误只提示不重连、可重试错误按 1s 退避重连、snapshot 打开后重置延迟。
 - `npx jest tests/unit/app-smoke.test.tsx`：1 项，覆盖 App 组合根聊天首屏与设置抽屉的 Agent 团队入口。
-- 全量：`npm test` 67 个后端文件 / 1952 项；Jest 22 套 / 183 项；覆盖率校验 backend 1952/1952、runner 1730/1730、frontend 183/183；tsc/lint 通过（以最终交付命令输出为准）。
+- 全量：`npm test` 72 个后端文件 / 2056 项；Jest 22 套 / 188 项；覆盖率校验 backend 2056/2056、runner 1834/1834、frontend 188/188；tsc/lint 通过（以最终交付命令输出为准）。
 - Expo Web export 成功；浏览器 DOM 核对：Agent 团队入口、真实 Memory Bot 状态、工作台三页签、配置页真实服务商/脱敏 Key、维护申请表单与审批列表可渲染；浏览器实际提交一条 update 维护申请后，服务端返回 pending 并在审批列表显示。
 
 ### 8.1 Stub 与真实模型测试区分
@@ -225,4 +225,4 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 | P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；工具预算截断后无工具总结；任务裁剪只删已投递终态；Provider token delta；停止/切会话 abort；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 9 项；SSE/tool event 测试；Jest 5 项工作台测试 + 1 项 App 冒烟 |
 | P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；维护申请表单；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验、真实模型 HTTP SSE E2E |
 
-“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 1952/1952、nodeSuite 222/222、runner 1730/1730、frontend 183/183、CI 67/67。
+“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 2056/2056、nodeSuite 222/222、runner 1834/1834、frontend 188/188、CI 72/72。

@@ -141,6 +141,27 @@
       ]
     },
     {
+      "id": "profile",
+      "title": "画像与反馈",
+      "prefix": "/profile",
+      "capabilities": [
+        {
+          "name": "画像读取 GET /profile",
+          "probe": "API_PATHS.profile",
+          "ui": true,
+          "consumers": ["components/MemoryCenterScreen.tsx"],
+          "note": "P6 Memory Center 画像页；从 memory.json 派生，includeInactive 可查看历史。"
+        },
+        {
+          "name": "画像反馈 POST /profile/feedback",
+          "probe": "API_PATHS.profileFeedback",
+          "ui": true,
+          "consumers": ["components/MemoryCenterScreen.tsx"],
+          "note": "Memory Center 画像页的确认/否认/纠正；feedbackId 幂等，结果写审计。"
+        }
+      ]
+    },
+    {
       "id": "emotion",
       "title": "情绪状态",
       "prefix": "/emotion",

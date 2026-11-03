@@ -67,13 +67,13 @@ function MemoryRow({
   const status = memoryStatus(item);
   const expired = status === 'active' && !isEffectiveMemory(item);
   const statusStyle =
-    status === 'pending'
+    status === 'pending' || status === 'contested'
       ? styles.badgeWarning
       : status === 'active' && !expired
         ? styles.badgeAccent
         : styles.badgeMuted;
   const statusTextStyle =
-    status === 'pending'
+    status === 'pending' || status === 'contested'
       ? styles.badgeWarningText
       : status === 'active' && !expired
         ? styles.badgeAccentText
@@ -175,6 +175,7 @@ export function MemoryManageTab({
     { id: 'all', label: '全部' },
     { id: 'active', label: '活跃' },
     { id: 'pending', label: '待确认' },
+    { id: 'contested', label: '冲突' },
     { id: 'archived', label: '已归档' },
     { id: 'superseded', label: '历史版本' },
   ];

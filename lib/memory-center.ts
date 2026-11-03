@@ -6,7 +6,12 @@ import type {
 // Memory Center 的纯展示规则：状态判定、概览、趋势、重复/冲突检测、生命周期事件。
 // 这些函数不读写网络，也不改动服务端记忆；所有输入都来自真实 /memory 数据。
 
-export type MemoryStatus = 'active' | 'pending' | 'superseded' | 'archived';
+export type MemoryStatus =
+  | 'active'
+  | 'pending'
+  | 'contested'
+  | 'superseded'
+  | 'archived';
 
 export const MEMORY_TYPE_LABELS: Record<string, string> = {
   identity: '身份',
@@ -27,6 +32,7 @@ export const MEMORY_TYPE_ORDER = [
 export const MEMORY_STATUS_LABELS: Record<MemoryStatus, string> = {
   active: '活跃',
   pending: '待确认',
+  contested: '冲突待裁决',
   superseded: '历史版本',
   archived: '已归档',
 };
@@ -39,6 +45,7 @@ export function memoryStatus(item: MemoryItem): MemoryStatus {
   const status = item.status;
 
   return status === 'pending' ||
+    status === 'contested' ||
     status === 'superseded' ||
     status === 'archived'
     ? status
@@ -95,6 +102,7 @@ export type MemoryOverview = {
   total: number;
   active: number;
   pending: number;
+  contested: number;
   archived: number;
   history: number;
   expired: number;
@@ -106,6 +114,7 @@ export function buildMemoryOverview(
 ): MemoryOverview {
   let active = 0;
   let pending = 0;
+  let contested = 0;
   let archived = 0;
   let history = 0;
   let expired = 0;
@@ -114,6 +123,7 @@ export function buildMemoryOverview(
     const status = memoryStatus(item);
 
     if (status === 'pending') pending += 1;
+    else if (status === 'contested') contested += 1;
     else if (status === 'archived') archived += 1;
     else if (status === 'superseded') history += 1;
     else if (isEffectiveMemory(item, now)) active += 1;
@@ -124,6 +134,7 @@ export function buildMemoryOverview(
     total: items.length,
     active,
     pending,
+    contested,
     archived,
     history,
     expired,
@@ -343,6 +354,9 @@ export type LifecycleEventType =
   | 'merge'
   | 'supersede'
   | 'confirm'
+  | 'deny'
+  | 'correct'
+  | 'contest'
   | 'archive'
   | 'pending'
   | 'reject'
@@ -372,6 +386,9 @@ const LIFECYCLE_TITLES: Record<LifecycleEventType, string> = {
   merge: '合并',
   supersede: '取代',
   confirm: '确认',
+  deny: '否认',
+  correct: '纠正',
+  contest: '冲突待裁决',
   archive: '归档',
   pending: '待确认',
   reject: '拒绝',
@@ -387,6 +404,11 @@ export function lifecycleTitle(type: LifecycleEventType): string {
 const REASON_LABELS: Record<string, string> = {
   user_confirmed: '用户确认',
   user_confirmed_update: '用户确认并更新原记忆',
+  user_confirmed_supersede: '用户确认并取代旧版本',
+  user_resolved_contest: '用户裁决冲突',
+  user_denied: '用户否认',
+  user_denied_wrong_fact: '用户否认错误事实',
+  user_correction: '用户纠正内容',
   user_archived: '用户归档',
   supersedes_existing: '新事实取代旧事实',
   explicit_target_update: '指定目标更新',
@@ -419,6 +441,9 @@ const DECISION_ACTION_LABELS: Record<string, string> = {
   supersede: '取代',
   needs_confirmation: '待确认',
   confirm: '确认',
+  deny: '否认',
+  correct: '纠正',
+  contest: '冲突待裁决',
   archive: '归档',
   reject: '拒绝',
 };
@@ -455,6 +480,12 @@ function decisionType(action?: string): LifecycleEventType | null {
       return 'pending';
     case 'confirm':
       return 'confirm';
+    case 'deny':
+      return 'deny';
+    case 'correct':
+      return 'correct';
+    case 'contest':
+      return 'contest';
     case 'archive':
       return 'archive';
     case 'reject':
@@ -502,11 +533,53 @@ export function collectEntryLifecycleEvents(
       });
     }
 
+    const feedbackSeen = new Set<string>();
+    const history = Array.isArray(item.feedbackHistory)
+      ? item.feedbackHistory
+      : [];
+
+    for (const feedback of history) {
+      const type = decisionType(feedback.action);
+      const at = validTime(feedback.at);
+
+      if (!type || !at || !['confirm', 'deny', 'correct'].includes(type)) {
+        continue;
+      }
+
+      feedbackSeen.add(`${feedback.action}:${at}`);
+      const reason = reasonLabel(feedback.reason);
+      const detail = [
+        reason,
+        feedback.feedbackId ? `feedbackId ${feedback.feedbackId}` : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+
+      push({
+        key: `entry:${memoryId}:feedback:${feedback.feedbackId || at}:${type}`,
+        at,
+        type,
+        title: LIFECYCLE_TITLES[type],
+        detail,
+        memoryId,
+        content,
+        targetId:
+          type === 'correct'
+            ? item.supersedes || item.supersededBy || null
+            : null,
+        source: 'entry',
+      });
+    }
+
     const decision = item.lastDecision;
     const decisionAt = validTime(decision?.at);
     const decisionEventType = decisionType(decision?.action);
+    const decisionAlreadyInHistory =
+      decision && decisionAt
+        ? feedbackSeen.has(`${decision.action}:${decisionAt}`)
+        : false;
 
-    if (decisionEventType && decisionAt) {
+    if (decisionEventType && decisionAt && !decisionAlreadyInHistory) {
       const sameAsCreate =
         decisionEventType === 'create' &&
         created &&
@@ -517,7 +590,9 @@ export function collectEntryLifecycleEvents(
         const detail =
           decisionEventType === 'supersede' && item.supersededBy
             ? `${reason || '被新版本取代'} · 目标 ${item.supersededBy}`
-            : reason;
+            : decisionEventType === 'contest' && item.contestedBy
+              ? `${reason || '多冲突未裁决'} · 挑战候选 ${item.contestedBy}`
+              : reason;
 
         push({
           key: `entry:${memoryId}:decision:${decisionAt}:${decisionEventType}`,
@@ -528,7 +603,11 @@ export function collectEntryLifecycleEvents(
           memoryId,
           content,
           targetId:
-            decisionEventType === 'supersede' ? item.supersededBy : null,
+            decisionEventType === 'supersede'
+              ? item.supersededBy
+              : decisionEventType === 'contest'
+                ? item.contestedBy || null
+                : null,
           source: 'entry',
         });
       }
@@ -547,6 +626,24 @@ export function collectEntryLifecycleEvents(
           detail: reasonLabel(item.pendingReason),
           memoryId,
           content,
+          source: 'entry',
+        });
+      }
+    }
+
+    if (memoryStatus(item) === 'contested' && decisionEventType !== 'contest') {
+      const at = validTime(item.contestedAt || item.updatedAt) || created;
+
+      if (at) {
+        push({
+          key: `entry:${memoryId}:contested`,
+          at,
+          type: 'contest',
+          title: LIFECYCLE_TITLES.contest,
+          detail: reasonLabel(item.contestedReason),
+          memoryId,
+          content,
+          targetId: item.contestedBy || null,
           source: 'entry',
         });
       }
@@ -574,7 +671,10 @@ export function collectEntryLifecycleEvents(
       }
     }
 
-    if (memoryStatus(item) === 'archived' && decisionEventType !== 'archive') {
+    if (
+      memoryStatus(item) === 'archived' &&
+      !['archive', 'deny', 'correct'].includes(decisionEventType || '')
+    ) {
       const at =
         validTime(item.updatedAt || item.validTo || item.validFrom) || created;
 
@@ -653,7 +753,13 @@ export function collectWriteAttemptEvents(
 
 export type LocalMemoryAction = {
   at: string;
-  type: 'confirm' | 'reject' | 'archive' | 'delete';
+  type:
+    | 'confirm'
+    | 'reject'
+    | 'archive'
+    | 'delete'
+    | 'deny'
+    | 'correct';
   memoryId?: string;
   content?: string;
   targetId?: string | null;

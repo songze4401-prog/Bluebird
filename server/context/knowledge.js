@@ -24,7 +24,21 @@ async function retrieveKnowledge({
   sessionId = null,
   userId = null,
   now = Date.now(),
+  sources = null,
+  limit = null,
+  tokenBudget = null,
+  timeoutMs = null,
 } = {}) {
+  if (Array.isArray(sources) && !sources.length) {
+    return {
+      status: 'skipped',
+      count: 0,
+      items: [],
+      trace: null,
+      reason: 'intent_no_knowledge',
+    };
+  }
+
   if (!retrieval.config.enabled || !retrieval.config.contextEnabled) {
     return { status: 'disabled', count: 0, items: [], trace: null };
   }
@@ -40,6 +54,10 @@ async function retrieveKnowledge({
       sessionId,
       userId,
       now,
+      ...(Array.isArray(sources) ? { sources } : {}),
+      ...(Number.isFinite(limit) ? { limit } : {}),
+      ...(Number.isFinite(tokenBudget) ? { tokenBudget } : {}),
+      ...(Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
     });
 
     if (outcome.status === 'error') {

@@ -267,6 +267,7 @@ const {
 } = require('./memory');
 
 const { logDataEvent } = require('./data-events');
+const { buildProfile, applyProfileFeedback } = require('./profile');
 
 const {
   getEmotion,
@@ -1965,6 +1966,7 @@ app.get('/memory', requireAuth, (req, res) => {
               includeSuperseded: true,
               includeArchived: true,
               includePending: true,
+              includeContested: true,
             }
           : {}
       ),
@@ -2063,6 +2065,76 @@ app.get('/memory/write-attempts', requireAuth, (req, res) => {
   } catch (error) {
     console.error('Memory attempts error:', error);
     res.status(500).json({ error: '读取记忆写入记录失败' });
+  }
+});
+
+// ---- P5 可追溯画像与反馈 ----
+// 画像每次从 memory.json 派生，不落第二份画像文件；来源贡献随条目返回。
+app.get('/profile', requireAuth, (req, res) => {
+  try {
+    const raw = req.query.includeInactive;
+    if (raw !== undefined && !['1', '0', 'true', 'false'].includes(String(raw))) {
+      return res.status(400).json({
+        error: 'includeInactive 只支持 1/0/true/false',
+        code: 'invalid_include_inactive',
+      });
+    }
+
+    const profile = buildProfile({
+      userId: resolveUserId(req),
+      includeInactive: raw === '1' || raw === 'true',
+    });
+
+    res.set('Cache-Control', 'no-store');
+    res.json({ profile });
+  } catch (error) {
+    console.error('Profile API Error:', error);
+    res.status(500).json({ error: '读取画像失败', code: 'profile_read_failed' });
+  }
+});
+
+// 确认 / 否认 / 纠正。反馈写操作与自动抽取共用 memory.js 的写队列与原子落盘；
+// 审计只记录动作、结果与短码，不记录记忆正文或用户更正内容。
+app.post('/profile/feedback', requireAuth, async (req, res) => {
+  try {
+    const outcome = await applyProfileFeedback({
+      ...(req.body || {}),
+      userId: resolveUserId(req),
+    });
+
+    if (!outcome.ok) {
+      auditAction(req, 'profile.feedback', {
+        target: 'memory',
+        result: 'denied',
+        reason: outcome.reason,
+      });
+      return res.status(outcome.status || 400).json({
+        error: outcome.error || '画像反馈失败',
+        code: outcome.reason,
+        ...(outcome.feedbackId ? { feedbackId: outcome.feedbackId } : {}),
+      });
+    }
+
+    auditAction(req, 'profile.feedback', {
+      target: 'memory',
+      result: 'success',
+      reason: outcome.action,
+    });
+    return res.json({
+      ok: true,
+      action: outcome.action,
+      feedbackId: outcome.feedbackId,
+      result: outcome.result,
+      profile: outcome.profile,
+    });
+  } catch (error) {
+    auditAction(req, 'profile.feedback', {
+      target: 'memory',
+      result: 'failed',
+      reason: error && error.name ? error.name : 'feedback_failed',
+    });
+    console.error('Profile feedback error:', error);
+    return res.status(500).json({ error: '画像反馈失败', code: 'feedback_failed' });
   }
 });
 

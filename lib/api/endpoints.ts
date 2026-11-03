@@ -80,6 +80,11 @@ export const API_PATHS = {
   memoryArchive: '/memory/archive',
   memoryWriteAttempts: '/memory/write-attempts',
 
+  // P5 画像与反馈
+  profile: '/profile',
+  profileWithInactive: '/profile?includeInactive=1',
+  profileFeedback: '/profile/feedback',
+
   // 附件上传
   uploads: '/uploads/image',
   uploadImage: (id: string) => `/uploads/image/${encodeURIComponent(id)}`,

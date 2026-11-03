@@ -161,6 +161,15 @@ export type MemoryContribution = {
   sourceType?: string;
 };
 
+export type MemoryFeedbackDecision = {
+  action?: string;
+  reason?: string;
+  at?: string;
+  actor?: string;
+  sourceType?: string;
+  feedbackId?: string;
+};
+
 export type MemoryItem = {
   // 稳定 id：更正/删除优先用它定位（旧的 createdAt + content 定位仍受支持）
   id?: string;
@@ -168,7 +177,7 @@ export type MemoryItem = {
   type?: string;
   keywords?: string[];
   confidence?: number;
-  status?: 'active' | 'pending' | 'superseded' | 'archived';
+  status?: 'active' | 'pending' | 'contested' | 'superseded' | 'archived';
   validFrom?: string;
   validTo?: string | null;
   supersededBy?: string | null;
@@ -178,15 +187,27 @@ export type MemoryItem = {
   pendingReason?: string;
   pendingAt?: string | null;
   pendingTargetId?: string | null;
+  pendingMutation?: string | null;
+  contestedIds?: string[];
+  contestedAt?: string | null;
+  contestedReason?: string | null;
+  contestedBy?: string | null;
+  resolvedContestAt?: string | null;
+  withdrawnAt?: string | null;
+  withdrawnReason?: string | null;
+  archivedReason?: string | null;
+  provenance?: string;
+  category?: string;
+  evidence?: Record<string, unknown> | null;
+  observedAt?: string | null;
+  policyVersion?: string | null;
+  decisionVersion?: string | null;
+  confirmationCount?: number;
+  lastConfirmedAt?: string | null;
+  feedbackHistory?: MemoryFeedbackDecision[];
   eventAt?: string | null;
   condition?: string | null;
-  lastDecision?: {
-    action?: string;
-    reason?: string;
-    at?: string;
-    actor?: string;
-    sourceType?: string;
-  };
+  lastDecision?: MemoryFeedbackDecision;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -224,6 +245,133 @@ export type MemoryLifecycleResponse = {
 export type MemoryDeleteResponse = { ok: true; removed: boolean };
 
 export type MemoryClearResponse = { ok: true; message: string };
+
+// ---- P5 画像与反馈 ----
+export type ProfileFeedbackAction = 'confirm' | 'deny' | 'correct';
+
+export type ProfileSource = {
+  sessionId: string | null;
+  messageId: string | null;
+  sourceQuote: string;
+  createdAt: string | null;
+  sourceType: string | null;
+};
+
+export type ProfileFeedbackEvent = {
+  memoryId: string;
+  action: string;
+  reason: string | null;
+  at: string | null;
+  actor: string | null;
+  feedbackId: string | null;
+  supersededId: string | null;
+  status: string;
+};
+
+export type ProfileItem = {
+  memoryId: string;
+  content: string;
+  type?: string;
+  category?: string | null;
+  status: string;
+  effective: boolean;
+  inactiveReason?: string | null;
+  confidence?: number | null;
+  provenance?: string | null;
+  policyVersion?: string | null;
+  decisionVersion?: string | null;
+  validFrom?: string | null;
+  validTo?: string | null;
+  observedAt?: string | null;
+  updatedAt?: string | null;
+  supersedes?: string | null;
+  supersededBy?: string | null;
+  sourceQuote?: string;
+  sourceCount: number;
+  independentSessions: number;
+  sources: ProfileSource[];
+  evidence?: Record<string, unknown> | null;
+  feedback: {
+    confirmationCount: number;
+    lastConfirmedAt?: string | null;
+    lastDecision?: MemoryFeedbackDecision | null;
+    history?: MemoryFeedbackDecision[];
+    withdrawnAt?: string | null;
+    withdrawnReason?: string | null;
+    archivedReason?: string | null;
+  };
+  pendingReason?: string | null;
+  pendingAt?: string | null;
+  pendingTargetId?: string | null;
+  proposedAction?: string | null;
+  contestedIds?: string[];
+  contestedAt?: string | null;
+  contestedReason?: string | null;
+  contestedBy?: string | null;
+  resolvedContestAt?: string | null;
+};
+
+export type ProfileSections = {
+  identity: ProfileItem[];
+  preferences: ProfileItem[];
+  goals: ProfileItem[];
+  relationships: ProfileItem[];
+  facts: ProfileItem[];
+  other: ProfileItem[];
+};
+
+export type ProfileCounts = {
+  active: number;
+  pending: number;
+  contested: number;
+  superseded: number;
+  archived: number;
+  denied: number;
+  expired: number;
+  total: number;
+};
+
+export type Profile = {
+  profileVersion: string;
+  generatedAt: string;
+  userId: string | null;
+  sourceOfTruth: 'memory';
+  rebuildable: boolean;
+  digestAlgorithm: string;
+  digest: string;
+  includeInactive: boolean;
+  counts: ProfileCounts;
+  sectionLabels: Record<string, string>;
+  sections: ProfileSections;
+  pending: ProfileItem[];
+  contested: ProfileItem[];
+  inactive: ProfileItem[];
+  feedback: {
+    counts: { confirm: number; deny: number; correct: number };
+    recent: ProfileFeedbackEvent[];
+  };
+};
+
+export type ProfileResponse = { profile: Profile };
+
+export type ProfileFeedbackResponse = {
+  ok: true;
+  action: ProfileFeedbackAction;
+  feedbackId: string;
+  result: {
+    updated?: number;
+    denied?: number;
+    reason: string;
+    id?: string;
+    supersededId?: string | null;
+    status?: string;
+    duplicate?: boolean;
+    archived?: boolean;
+    archivedContested?: number;
+    replacedStatus?: string;
+  };
+  profile: Profile;
+};
 
 // ---- 上传 / 表情包 ----
 // 服务端 res.json({ ok: true, ...meta })，meta 即落库的附件元数据

@@ -228,7 +228,10 @@ export function buildMemoryGraph(
 
     const statusRank = (item: MemoryItem) => {
       const status = memoryStatus(item);
-      return status === 'active' ? 0 : status === 'pending' ? 1 : 2;
+      if (status === 'active') return 0;
+      if (status === 'pending') return 1;
+      if (status === 'contested') return 2;
+      return 3;
     };
     const statusDiff = statusRank(a.item) - statusRank(b.item);
     if (statusDiff !== 0) return statusDiff;

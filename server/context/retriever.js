@@ -9,7 +9,7 @@
  * 因此这些空壳源已删除；外部资料接入是明确的未实现项，不用假模块占位。
  */
 const { config: defaultConfig } = require('./config');
-const { searchMemories } = require('../memory');
+const { searchMemories, MEMORY_ENABLED } = require('../memory');
 const monitoring = require('../monitoring');
 
 const MEMORY_TYPE_MAP = {
@@ -133,6 +133,7 @@ async function fetchMemory({
   userId,
   config,
   injected,
+  plan = null,
   attempt = 1,
   deadline = null,
 }) {
@@ -179,6 +180,23 @@ async function fetchMemory({
 
   const startedAt = Date.now();
   try {
+    const filters = {};
+    if (plan && plan.layers) {
+      if (
+        Array.isArray(plan.layers.memoryTypes) &&
+        plan.layers.memoryTypes.length
+      ) {
+        filters.types = plan.layers.memoryTypes;
+      }
+      if (
+        Array.isArray(plan.layers.memoryCategories) &&
+        plan.layers.memoryCategories.length
+      ) {
+        filters.categories = plan.layers.memoryCategories;
+      }
+      if (plan.layers.episodicOnly === true) filters.episodicOnly = true;
+    }
+
     const found = searchMemories({
       query: task,
       sessionId,
@@ -188,6 +206,7 @@ async function fetchMemory({
         perItemMax: config.retrieval.memoryPerItemMax,
         totalMax: config.retrieval.memoryTotalMax,
       },
+      ...(Object.keys(filters).length ? { filters } : {}),
     });
 
     if (found.reason === 'memory_disabled') {
@@ -212,7 +231,28 @@ async function fetchMemory({
       };
     }
 
-    const items = found.results.map(result => mapMemoryResult(result, config));
+    const threshold =
+      plan && Number.isFinite(plan.noAnswerThreshold)
+        ? plan.noAnswerThreshold
+        : 0;
+    const keptResults =
+      threshold > 0
+        ? found.results.filter(result => {
+            if (result.type === 'identity') return true;
+            const relevance = Number.isFinite(result.relevance)
+              ? result.relevance
+              : result.score;
+            return Number.isFinite(relevance) && relevance >= threshold;
+          })
+        : found.results;
+    const belowThreshold = found.results.length - keptResults.length;
+    const items = keptResults.map(result => mapMemoryResult(result, config));
+    const diagnostics = {
+      ...(found.diagnostics || {}),
+      ...(threshold > 0
+        ? { noAnswerThreshold: threshold, belowThreshold }
+        : {}),
+    };
 
     // 同步扫描不可抢占：完成后按真实耗时判断是否已超预算。
     // 已拿到的结果照常注入，但必须显式标记超时，让 memoryState 降为 degraded，
@@ -234,7 +274,10 @@ async function fetchMemory({
       status: items.length ? 'ok' : 'no_result',
       count: items.length,
       items,
-      diagnostics: found.diagnostics || null,
+      ...(items.length ? {} : belowThreshold
+        ? { reason: 'below_no_answer_threshold' }
+        : {}),
+      diagnostics,
     };
   } catch (error) {
     monitor.complete({
@@ -252,8 +295,36 @@ async function retrieveMemory({
   userId = null,
   injected = {},
   config = defaultConfig,
+  plan = null,
   now = Date.now(),
 } = {}) {
+  if (plan && plan.layers && plan.layers.memory === false) {
+    if (!MEMORY_ENABLED) {
+      return {
+        status: 'source_unavailable',
+        count: 0,
+        items: [],
+        error: '长期记忆未启用',
+        reason: 'memory_disabled',
+        diagnostics: { skipped: 'intent_no_memory' },
+      };
+    }
+
+    const skipped = monitoring.beginMemorySearch({ source: 'memory' });
+    skipped.complete({
+      status: 'skipped',
+      count: 0,
+      errorCode: 'intent_no_memory',
+    });
+    return {
+      status: 'skipped',
+      count: 0,
+      items: [],
+      reason: 'intent_no_memory',
+      diagnostics: { skipped: 'intent_no_memory' },
+    };
+  }
+
   if (isTripped('memory', config, now)) {
     const skipped = monitoring.beginMemorySearch({ source: 'memory' });
     skipped.complete({ status: 'skipped', count: 0, errorCode: 'breaker_open' });
@@ -284,6 +355,7 @@ async function retrieveMemory({
         userId,
         config,
         injected,
+        plan,
         attempt: attempt + 1,
         deadline,
       });

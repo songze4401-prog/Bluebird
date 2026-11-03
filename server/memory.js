@@ -5,6 +5,13 @@ const path = require('path');
 const { logDataEvent } = require('./data-events');
 const monitoring = require('./monitoring');
 const { writeFileAtomic, writeFileExclusiveSync } = require('./atomic-write');
+const {
+  hashText,
+  loadTombstones,
+  saveTombstones,
+  appendTombstones,
+  tombstoneBlocksCandidate,
+} = require('./memory-tombstones');
 const { registerCorruptionHandler, handleCorruption } = require('./corruption');
 const {
   textLength,
@@ -16,6 +23,7 @@ const {
 const {
   STATUS_ACTIVE,
   STATUS_PENDING,
+  STATUS_CONTESTED,
   STATUS_SUPERSEDED,
   STATUS_ARCHIVED,
   isActiveStatus,
@@ -28,8 +36,22 @@ const {
 } = require('./memory-lifecycle');
 const {
   DECISION,
+  DEFAULT_RULES,
   decide,
 } = require('./memory-decision');
+const {
+  POLICY_VERSION,
+  DECISION_VERSION,
+  PROVENANCE,
+  CATEGORY,
+  VALID_PROVENANCE,
+  getPolicyMode,
+  detectPersistentIntent,
+  resolveProvenance,
+  classifyCategory,
+  buildEvidence,
+  applyEvidencePolicy,
+} = require('./memory-evidence');
 const {
   semanticSimilarity,
   semanticCapability,
@@ -43,17 +65,23 @@ const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   : path.join(__dirname, 'data');
 
 const MEMORY_FILE = path.join(DATA_DIR, 'memory.json');
+const MEMORY_TOMBSTONE_FILE = path.join(DATA_DIR, 'memory-tombstones.json');
 const MEMORY_LIMIT = 100;
+// strict 模式下，只有高相似度的再次表达才合并进同一个偏好候选，
+// 避免把“喜欢美式”和“喜欢拿铁”这类相近但不同的偏好并成一条。
+const PENDING_PREFERENCE_MATCH_MIN = 0.9;
 // 被更正的旧条目不立刻删除（审计与回滚要看得见的），但只留最近的这么多条。
 const SUPERSEDED_HISTORY = 20;
-// 待确认与已归档条目也属于历史留档，必须有显式上限，避免无限堆积。
+// 待确认、冲突与已归档条目也属于历史留档，必须有显式上限，避免无限堆积。
 const PENDING_LIMIT = 20;
+const CONTESTED_LIMIT = 20;
 const ARCHIVED_HISTORY = 20;
 // identity 类记忆的显式配额：超过就淘汰最旧的，不再假装「identity 永不淘汰」。
 const IDENTITY_QUOTA = 20;
 const MEMORY_ENABLED = process.env.MEMORY_ENABLED !== 'false';
 
 let memories = [];
+let memoryTombstones = [];
 let writeQueue = Promise.resolve();
 
 // 记忆触发词：覆盖「记住 / 记下」这类显式指令，以及口语化的
@@ -78,6 +106,10 @@ const ALLOWED_TYPES = new Set([
 ]);
 
 const SOURCE_TYPES = new Set(['user', 'agent', 'tool', 'model', 'import']);
+const SEARCHABLE_CATEGORIES = new Set([
+  ...Object.values(CATEGORY),
+  'legacy',
+]);
 
 // ---- 条目身份与时效 ----
 // 稳定 id 是更正 / 撤回 / 审计 / 回滚的地基：在这之前定位一条记忆只能靠
@@ -113,6 +145,7 @@ const STATUS_WEIGHTS = Object.freeze({
   [STATUS_SUPERSEDED]: 0.45,
   [STATUS_ARCHIVED]: 0.3,
   [STATUS_PENDING]: 0,
+  [STATUS_CONTESTED]: 0,
 });
 const STABLE_DECAY_TYPES = new Set(['identity', 'preference', 'relationship']);
 const TIME_FILTER_FIELDS = new Set(['valid', 'created', 'updated']);
@@ -120,6 +153,7 @@ const SEARCHABLE_STATUSES = new Set([
   STATUS_ACTIVE,
   STATUS_SUPERSEDED,
   STATUS_ARCHIVED,
+  STATUS_CONTESTED,
 ]);
 const SEARCH_TOKEN_BUDGET_DEFAULT = 1200;
 const INJECT_TOKEN_BUDGET = 2400;
@@ -168,6 +202,13 @@ function stampIdentity(item) {
     validFrom: cleanText(item.validFrom) || createdAt,
     validTo: cleanText(item.validTo),
     supersededBy: cleanText(item.supersededBy),
+    provenance: cleanText(item.provenance) || PROVENANCE.IMPORTED,
+    category: cleanText(item.category) || CATEGORY.LEGACY,
+    observedAt: cleanText(item.observedAt) || createdAt,
+    policyVersion: cleanText(item.policyVersion) || 'legacy',
+    decisionVersion: cleanText(item.decisionVersion) || null,
+    evidence:
+      item.evidence && typeof item.evidence === 'object' ? item.evidence : null,
   };
 }
 
@@ -517,6 +558,15 @@ function normalizeCandidate(raw, options = {}) {
   const sourceType = SOURCE_TYPES.has(sourceTypeCandidate)
     ? sourceTypeCandidate
     : 'user';
+  const provenance = resolveProvenance({ ...source, sourceType }, options);
+  const persistentIntent = detectPersistentIntent(
+    options.userText || source.userText || ''
+  );
+  const category = classifyCategory(
+    { content, type: source.type },
+    provenance
+  );
+  const observedAt = cleanText(source.observedAt) || now;
   const keywords = Array.isArray(source.keywords)
     ? source.keywords
         .filter(item => typeof item === 'string')
@@ -551,6 +601,13 @@ function normalizeCandidate(raw, options = {}) {
     createdAt: cleanText(source.createdAt) || now,
     updatedAt: now,
     sourceType,
+    provenance,
+    category,
+    persistentIntent,
+    observedAt,
+    evidence: null,
+    policyVersion: POLICY_VERSION,
+    decisionVersion: DECISION_VERSION,
     intent: cleanText(options.intent) || cleanText(source.intent) || 'auto',
     targetId: cleanText(options.targetId) || cleanText(source.targetId),
     eventAt: cleanText(source.eventAt),
@@ -590,9 +647,18 @@ function candidateValidationError(candidate, options = {}) {
   if (isSensitive(candidate.content) || isSensitive(quote)) {
     return 'sensitive_content';
   }
+  if (!VALID_PROVENANCE.has(candidate.provenance)) {
+    return 'invalid_provenance';
+  }
   if (
-    candidate.sourceType === 'model' ||
-    candidate.sourceType === 'tool'
+    candidate.sourceType === 'model' &&
+    candidate.provenance !== PROVENANCE.MODEL_INFERRED
+  ) {
+    return 'unsupported_source';
+  }
+  if (
+    candidate.sourceType === 'tool' &&
+    candidate.provenance !== PROVENANCE.TOOL_OBSERVED
   ) {
     return 'unsupported_source';
   }
@@ -626,7 +692,37 @@ function decisionRecord(action, reason, candidate, actor, at) {
     at,
     actor: actor || 'system',
     sourceType: candidate.sourceType || 'user',
+    provenance: candidate.provenance || null,
+    category: candidate.category || null,
+    policyVersion: candidate.policyVersion || POLICY_VERSION,
+    decisionVersion: candidate.decisionVersion || DECISION_VERSION,
+    evidence: candidate.evidence || null,
   };
+}
+
+// 生命周期审计只记录 ID、动作、状态与短码，不记录正文/原话。
+function logLifecycleEvent({ action, from, to, id, reason }) {
+  logDataEvent({
+    module: 'memory',
+    file: MEMORY_FILE,
+    event: 'memory_lifecycle_transition',
+    level: 'info',
+    reason: reason || null,
+    action: action || null,
+    extra: { id: id || null, from: from || null, to: to || null },
+  });
+}
+
+function logLifecycleRejection({ action, from, id, reason }) {
+  logDataEvent({
+    module: 'memory',
+    file: MEMORY_FILE,
+    event: 'memory_lifecycle_rejected',
+    level: 'warn',
+    reason: reason || 'invalid_transition',
+    action: action || null,
+    extra: { id: id || null, from: from || null },
+  });
 }
 
 function storedCandidate(candidate, extra = {}) {
@@ -636,11 +732,68 @@ function storedCandidate(candidate, extra = {}) {
     confirmationReason,
     intent,
     sourceType,
+    persistentIntent,
     ...stored
   } = candidate;
 
   // 归属用户由服务端身份决定，不信任候选里可能夹带的任何 userId。
   return { ...stored, userId: getInstanceUserId(), ...extra };
+}
+
+// 同一条消息的同一事实只处理一次：异步抽取重跑或 Agent 重复提交时
+// 不再产生第二条条目（同一消息里的不同事实内容哈希不同，仍会分别写入）。
+function findDuplicateSourceEntry(current, candidate) {
+  const messageId = cleanText(
+    candidate.contributions[0] && candidate.contributions[0].messageId
+  );
+
+  if (!messageId) return null;
+
+  const contentHash = hashText(candidate.content);
+  if (!contentHash) return null;
+
+  return (
+    current.find(
+      item =>
+        Array.isArray(item.contributions) &&
+        item.contributions.some(
+          contribution =>
+            contribution &&
+            cleanText(contribution.messageId) === messageId
+        ) &&
+        hashText(item.content) === contentHash
+    ) || null
+  );
+}
+
+function rulesForCandidate(candidate) {
+  if (
+    candidate.persistentIntent === true &&
+    candidate.provenance === PROVENANCE.USER_ASSERTED &&
+    candidate.sourceType !== 'agent'
+  ) {
+    return { ...DEFAULT_RULES, minConfidence: 0.6 };
+  }
+
+  return DEFAULT_RULES;
+}
+
+// strict 模式下，同一条单次偏好再次出现时合并到原候选；
+// 独立会话第二次表达或显式持久意图才晋升为 active。
+function findPendingCandidateForPromotion(current, candidate, writeScope) {
+  const matches = current.filter(
+    item =>
+      item &&
+      item.status === STATUS_PENDING &&
+      item.pendingReason === 'single_preference_candidate' &&
+      (writeScope.mode !== 'user' ||
+        scopeOf(item, writeScope) !== 'excluded') &&
+      item.type === candidate.type &&
+      similarity(item.content, candidate.content) >=
+        PENDING_PREFERENCE_MATCH_MIN
+  );
+
+  return matches.length === 1 ? matches[0] : null;
 }
 
 // 容量控制。旧实现只在"全部是 identity"时 next.shift()，等于把
@@ -687,6 +840,16 @@ function trimToCapacity(list) {
 
     if (pending.length > PENDING_LIMIT) {
       list.splice(pending[0].index, 1);
+
+      continue;
+    }
+
+    const contested = tagged
+      .filter(({ item }) => item.status === STATUS_CONTESTED)
+      .sort(byOldest);
+
+    if (contested.length > CONTESTED_LIMIT) {
+      list.splice(contested[0].index, 1);
 
       continue;
     }
@@ -802,7 +965,27 @@ function hydrateEntries(parsed) {
   );
 }
 
+function loadTombstoneState() {
+  const loaded = loadTombstones(MEMORY_TOMBSTONE_FILE);
+
+  memoryTombstones = loaded.tombstones;
+
+  if (loaded.corrupt) {
+    logDataEvent({
+      module: 'memory',
+      file: MEMORY_TOMBSTONE_FILE,
+      event: 'data_file_corruption',
+      level: 'error',
+      reason: loaded.reason || 'invalid_shape',
+      action: 'tombstones_unavailable',
+      error: loaded.error,
+    });
+  }
+}
+
 function loadMemories() {
+  loadTombstoneState();
+
   if (!fs.existsSync(MEMORY_FILE)) {
     let created = false;
 
@@ -860,6 +1043,49 @@ async function saveMemories(nextMemories) {
   // 原子写（临时文件 'wx' + fsync + rename + 尽力 fsync 父目录），
   // 崩溃时不会出现空文件 / 截断文件。
   await writeFileAtomic(MEMORY_FILE, JSON.stringify(nextMemories, null, 2));
+}
+
+// 删除类操作先写墓碑再落记忆库：宁可删除失败，也不让已删除内容
+// 在异步抽取的下一次写入里复活。记忆库写入失败时回滚墓碑。
+async function commitWithTombstones(nextMemories, tombstoneEntries, reason) {
+  const hasTombstones =
+    Array.isArray(tombstoneEntries) && tombstoneEntries.some(Boolean);
+  const previousTombstones = memoryTombstones;
+
+  if (hasTombstones) {
+    const nextTombstones = appendTombstones(
+      previousTombstones,
+      tombstoneEntries,
+      { reason, now: new Date().toISOString() }
+    );
+
+    await saveTombstones(MEMORY_TOMBSTONE_FILE, nextTombstones);
+    memoryTombstones = nextTombstones;
+  }
+
+  try {
+    await saveMemories(nextMemories);
+  } catch (error) {
+    if (hasTombstones) {
+      memoryTombstones = previousTombstones;
+
+      try {
+        await saveTombstones(MEMORY_TOMBSTONE_FILE, previousTombstones);
+      } catch (rollbackError) {
+        logDataEvent({
+          module: 'memory',
+          file: MEMORY_TOMBSTONE_FILE,
+          event: 'memory_tombstone_rollback_failed',
+          level: 'error',
+          reason: 'rollback_failed',
+          action: 'tombstone_rollback',
+          error: rollbackError,
+        });
+      }
+    }
+
+    throw error;
+  }
 }
 
 function enqueueWrite(task) {
@@ -957,6 +1183,7 @@ async function extractMemory(client, message, force = false, sessionId = null, o
   "type": "identity|preference|fact|goal|relationship",
   "keywords": ["关键词1", "关键词2", "关键词3"],
   "confidence": 0.0,
+  "inferred": false,
   "sourceQuote": "用户原话中的连续片段"
 }
 
@@ -964,6 +1191,7 @@ content 不要超过 100 个字符。
 keywords 提取 3-5 个与这条记忆直接相关的具体关键词或同义词。
 不要使用“什么”“应该”“这个”“那个”“以后”等低信息量词。
 sourceQuote 必须来自用户原话。
+inferred 只有当你从用户原话归纳出用户没有直接说出的结论时才为 true；直接复述用户原话时为 false。
 `.trim(),
             },
             {
@@ -1034,7 +1262,10 @@ sourceQuote 必须来自用户原话。
 
     if (!ALLOWED_TYPES.has(type)) return skip('type_not_allowed', { type });
 
-    if (!Number.isFinite(confidence) || confidence < 0.85) {
+    const explicitIntent = detectPersistentIntent(message);
+    const minConfidence = explicitIntent ? 0.6 : 0.85;
+
+    if (!Number.isFinite(confidence) || confidence < minConfidence) {
       return skip('low_confidence', { confidence });
     }
 
@@ -1074,6 +1305,7 @@ sourceQuote 必须来自用户原话。
 
     const now = new Date().toISOString();
     const messageId = cleanText(options.messageId);
+    const inferred = candidate.inferred === true;
 
     return {
       entry: {
@@ -1101,6 +1333,9 @@ sourceQuote 必须来自用户原话。
         createdAt: now,
         updatedAt: now,
         sourceType: 'user',
+        provenance: inferred
+          ? PROVENANCE.MODEL_INFERRED
+          : PROVENANCE.USER_ASSERTED,
         intent: options.intent || 'auto',
         targetId: cleanText(options.targetId),
         eventAt: cleanText(options.eventAt),
@@ -1177,6 +1412,33 @@ async function applyCandidate(raw, options = {}) {
     const nowMs = Date.now();
     const effective = next.filter(item => isEffectiveAt(item, nowMs));
 
+    const tombstoneReason = tombstoneBlocksCandidate(
+      memoryTombstones,
+      candidate,
+      {
+        mode: writeScope.mode,
+        userId: writeScope.userId,
+        sessionId,
+      },
+      nowMs
+    );
+
+    if (tombstoneReason) {
+      return {
+        ...base,
+        reason: tombstoneReason,
+        decision: DECISION.REJECT,
+      };
+    }
+
+    if (findDuplicateSourceEntry(current, candidate)) {
+      return {
+        ...base,
+        reason: 'duplicate_source',
+        decision: DECISION.REJECT,
+      };
+    }
+
     let target = null;
 
     if (candidate.targetId) {
@@ -1201,7 +1463,15 @@ async function applyCandidate(raw, options = {}) {
       }
     }
 
-    const matches = effective.map(item => ({
+    // 用户级作用域下，其他用户的条目连候选都不算：既不能 merge，
+    // 也不能参与冲突判断，更不能被本次写入复活。
+    const matches = effective
+      .filter(
+        item =>
+          writeScope.mode !== 'user' ||
+          scopeOf(item, writeScope) !== 'excluded'
+      )
+      .map(item => ({
       item,
       similarity: similarity(item.content, candidate.content),
       sameType: item.type === candidate.type,
@@ -1228,9 +1498,114 @@ async function applyCandidate(raw, options = {}) {
         })(),
     }));
 
-    const decision = decide({ candidate, matches, target });
+    const decision = decide({
+      candidate,
+      matches,
+      target,
+      rules: rulesForCandidate(candidate),
+    });
+    const policyMode = getPolicyMode();
+    const pendingCandidate =
+      policyMode === 'strict' &&
+      candidate.category === CATEGORY.LONG_TERM_PREFERENCE &&
+      decision.decision === DECISION.CREATE
+        ? findPendingCandidateForPromotion(next, candidate, writeScope)
+        : null;
+    const evidence = buildEvidence({
+      candidate,
+      decision,
+      existing: decision.target || pendingCandidate,
+      userText: options.userText || '',
+      policyMode,
+    });
+
+    candidate.evidence = evidence;
+    candidate.policyVersion = POLICY_VERSION;
+    candidate.decisionVersion = DECISION_VERSION;
+
     const record = (action, reason) =>
       decisionRecord(action, reason, candidate, options.actor, nowIso);
+
+    // strict：同一候选再次出现时合并；独立会话第二次表达或显式持久意图才晋升。
+    if (pendingCandidate && decision.decision === DECISION.CREATE) {
+      const index = next.findIndex(item => item.id === pendingCandidate.id);
+      const contributions = mergeContributions(
+        pendingCandidate.contributions,
+        candidate.contributions
+      );
+      const sessions = new Set(
+        contributions
+          .map(contribution => contribution && contribution.sessionId)
+          .filter(Boolean)
+      );
+      const promote =
+        candidate.provenance === PROVENANCE.USER_ASSERTED &&
+        (candidate.persistentIntent === true || sessions.size >= 2);
+      const promotedEvidence = {
+        ...evidence,
+        repetition: contributions.length,
+        independentSessions: sessions.size,
+      };
+
+      candidate.evidence = promotedEvidence;
+
+      const updated = {
+        ...pendingCandidate,
+        contributions,
+        category: candidate.category,
+        provenance: candidate.provenance,
+        evidence: promotedEvidence,
+        policyVersion: POLICY_VERSION,
+        decisionVersion: DECISION_VERSION,
+        observedAt: nowIso,
+        updatedAt: nowIso,
+        status: promote ? STATUS_ACTIVE : STATUS_PENDING,
+        lastDecision: record(
+          promote ? 'reinforce' : 'needs_confirmation',
+          promote
+            ? 'repeated_independent_evidence'
+            : 'single_preference_candidate'
+        ),
+      };
+
+      if (promote) {
+        delete updated.pendingReason;
+        delete updated.pendingAt;
+        delete updated.pendingTargetId;
+        delete updated.pendingMutation;
+      }
+
+      next[index] = updated;
+      trimToCapacity(next);
+      if (!(await persist())) return abortedResult();
+      memories = next;
+      refreshDerivedMemoryIndex(
+        promote ? 'candidate_promoted' : 'candidate_merged'
+      );
+
+      return {
+        written: promote,
+        action: promote ? 'reinforced' : 'pending',
+        reason: promote ? null : 'single_preference_candidate',
+        id: updated.id,
+        supersededId: null,
+        targetId: updated.id,
+        decision: promote ? 'reinforce' : DECISION.NEEDS_CONFIRMATION,
+        status: updated.status,
+        durable: true,
+      };
+    }
+
+    const policy = applyEvidencePolicy({
+      candidate,
+      decision,
+      evidence,
+      policyMode,
+    });
+    const finalDecision =
+      policy.decision === decision.decision
+        ? decision
+        : { ...decision, decision: policy.decision, reason: policy.reason };
 
     // Agent 工具路径：改写/合并/替代已有记忆必须由用户确认，不能自动落盘。
     // 自动记忆抽取仍保留既有策略，避免改变主控聊天既有行为。
@@ -1259,6 +1634,13 @@ async function applyCandidate(raw, options = {}) {
       trimToCapacity(next);
       if (!(await persist())) return abortedResult();
       memories = next;
+      logLifecycleEvent({
+        action: 'pending',
+        from: null,
+        to: STATUS_PENDING,
+        id: pending.id,
+        reason: 'mutation_requires_confirmation',
+      });
 
       return {
         written: false,
@@ -1273,63 +1655,156 @@ async function applyCandidate(raw, options = {}) {
       };
     }
 
-    if (decision.decision === DECISION.REJECT) {
+    if (finalDecision.decision === DECISION.REJECT) {
       return {
         ...base,
-        reason: decision.reason,
-        decision: decision.decision,
+        reason: finalDecision.reason,
+        decision: finalDecision.decision,
       };
     }
 
-    if (decision.decision === DECISION.NEEDS_CONFIRMATION) {
+    if (finalDecision.decision === DECISION.NEEDS_CONFIRMATION) {
+      const pendingTargetId = finalDecision.target
+        ? finalDecision.target.id
+        : candidate.targetId || null;
+      const contestedIds = [];
+
+      if (
+        finalDecision.reason === 'ambiguous_conflict' &&
+        Array.isArray(finalDecision.conflicts)
+      ) {
+        for (const conflict of finalDecision.conflicts) {
+          const conflictIndex = next.findIndex(
+            item => item && item.id === conflict.id
+          );
+
+          if (conflictIndex < 0) continue;
+
+          const current = next[conflictIndex];
+
+          if (current.status !== STATUS_ACTIVE) continue;
+
+          next[conflictIndex] = {
+            ...current,
+            status: STATUS_CONTESTED,
+            contestedAt: nowIso,
+            contestedReason: 'ambiguous_conflict',
+            contestedBy: candidate.id,
+            updatedAt: nowIso,
+            lastDecision: record('contest', 'ambiguous_conflict'),
+          };
+          contestedIds.push(current.id);
+          logLifecycleEvent({
+            action: 'contest',
+            from: current.status,
+            to: STATUS_CONTESTED,
+            id: current.id,
+            reason: 'ambiguous_conflict',
+          });
+        }
+      }
+
       const pending = storedCandidate(candidate, {
         status: STATUS_PENDING,
-        pendingReason: decision.reason,
+        pendingReason: finalDecision.reason,
         pendingAt: nowIso,
-        pendingTargetId: candidate.targetId || null,
-        lastDecision: record('needs_confirmation', decision.reason),
+        pendingTargetId,
+        pendingMutation: mutationDecisions.has(decision.decision)
+          ? decision.decision
+          : null,
+        ...(contestedIds.length ? { contestedIds } : {}),
+        lastDecision: record('needs_confirmation', finalDecision.reason),
       });
 
       next.push(pending);
       trimToCapacity(next);
       if (!(await persist())) return abortedResult();
       memories = next;
+      logLifecycleEvent({
+        action: 'pending',
+        from: null,
+        to: STATUS_PENDING,
+        id: pending.id,
+        reason: finalDecision.reason,
+      });
 
       return {
         written: false,
         action: 'pending',
-        reason: decision.reason,
+        reason: finalDecision.reason,
         id: pending.id,
         supersededId: null,
-        targetId: target ? target.id : null,
-        decision: decision.decision,
+        targetId: pendingTargetId,
+        decision: finalDecision.decision,
         status: STATUS_PENDING,
         durable: true,
       };
     }
 
     if (
-      decision.decision === DECISION.MERGE ||
-      decision.decision === DECISION.UPDATE
+      finalDecision.decision === DECISION.MERGE ||
+      finalDecision.decision === DECISION.UPDATE
     ) {
-      const index = next.findIndex(item => item.id === decision.target.id);
+      const index = next.findIndex(item => item.id === finalDecision.target.id);
       const existing = next[index];
+
+      if (
+        writeScope.mode === 'user' &&
+        scopeOf(existing, writeScope) === 'excluded'
+      ) {
+        return {
+          ...base,
+          reason: 'unauthorized_target',
+          decision: DECISION.REJECT,
+        };
+      }
+
       const contributions = mergeContributions(
         existing.contributions,
         candidate.contributions
       );
+      const existingSessions = new Set(
+        (Array.isArray(existing.contributions) ? existing.contributions : [])
+          .map(contribution => contribution && contribution.sessionId)
+          .filter(Boolean)
+      );
+      const candidateSessions = Array.isArray(candidate.contributions)
+        ? candidate.contributions
+            .map(contribution => contribution && contribution.sessionId)
+            .filter(Boolean)
+        : [];
+      const independentSupport =
+        finalDecision.decision === DECISION.MERGE &&
+        candidateSessions.some(session => !existingSessions.has(session));
+      const mergedEvidence = {
+        ...(evidence || {}),
+        repetition: contributions.length,
+        independentSessions: new Set(
+          contributions
+            .map(contribution => contribution && contribution.sessionId)
+            .filter(Boolean)
+        ).size,
+        ...(independentSupport ? { promotion: 'independent_support' } : {}),
+      };
+      const mergeAction = independentSupport
+        ? 'reinforce'
+        : finalDecision.decision;
+
+      candidate.evidence = mergedEvidence;
+
       // 合并到别的会话的条目时，只追加贡献：对方条目的正文、类型、关键词、
       // 置信度保持原样，否则一次写入会改写别的会话已经存下来的事实。
       const updated =
-        decision.reason === 'same_fact_other_session'
+        finalDecision.reason === 'same_fact_other_session'
           ? {
               ...existing,
               status: STATUS_ACTIVE,
               validTo: null,
               supersededBy: null,
               contributions,
+              evidence: mergedEvidence,
               updatedAt: nowIso,
-              lastDecision: record(decision.decision, decision.reason),
+              lastDecision: record(mergeAction, finalDecision.reason),
             }
           : storedCandidate(candidate, {
               id: existing.id,
@@ -1339,8 +1814,12 @@ async function applyCandidate(raw, options = {}) {
               validTo: null,
               supersededBy: null,
               contributions,
+              evidence: mergedEvidence,
               updatedAt: nowIso,
-              lastDecision: record(decision.decision, decision.reason),
+              lastDecision: record(mergeAction, finalDecision.reason),
+              confirmationCount: existing.confirmationCount,
+              lastConfirmedAt: existing.lastConfirmedAt,
+              feedbackHistory: existing.feedbackHistory,
             });
 
       next[index] = updated;
@@ -1348,23 +1827,42 @@ async function applyCandidate(raw, options = {}) {
       if (!(await persist())) return abortedResult();
       memories = next;
       refreshDerivedMemoryIndex('merge_update');
+      logLifecycleEvent({
+        action: mergeAction,
+        from: existing.status || STATUS_ACTIVE,
+        to: STATUS_ACTIVE,
+        id: updated.id,
+        reason: finalDecision.reason,
+      });
 
       return {
         written: true,
-        action: decision.decision === DECISION.MERGE ? 'merged' : 'updated',
+        action:
+          finalDecision.decision === DECISION.MERGE ? 'merged' : 'updated',
         reason: null,
         id: updated.id,
         supersededId: null,
         targetId: updated.id,
-        decision: decision.decision,
+        decision: finalDecision.decision,
         status: STATUS_ACTIVE,
         durable: true,
       };
     }
 
-    if (decision.decision === DECISION.SUPERSEDE) {
-      const index = next.findIndex(item => item.id === decision.target.id);
+    if (finalDecision.decision === DECISION.SUPERSEDE) {
+      const index = next.findIndex(item => item.id === finalDecision.target.id);
       const outdated = next[index];
+
+      if (
+        writeScope.mode === 'user' &&
+        scopeOf(outdated, writeScope) === 'excluded'
+      ) {
+        return {
+          ...base,
+          reason: 'unauthorized_target',
+          decision: DECISION.REJECT,
+        };
+      }
 
       next[index] = {
         ...outdated,
@@ -1372,7 +1870,7 @@ async function applyCandidate(raw, options = {}) {
         validTo: nowIso,
         supersededBy: candidate.id,
         updatedAt: nowIso,
-        lastDecision: record(DECISION.SUPERSEDE, decision.reason),
+        lastDecision: record(DECISION.SUPERSEDE, finalDecision.reason),
       };
 
       const replacement = storedCandidate(candidate, {
@@ -1386,6 +1884,20 @@ async function applyCandidate(raw, options = {}) {
       if (!(await persist())) return abortedResult();
       memories = next;
       refreshDerivedMemoryIndex('supersede');
+      logLifecycleEvent({
+        action: 'supersede',
+        from: outdated.status || STATUS_ACTIVE,
+        to: STATUS_SUPERSEDED,
+        id: outdated.id,
+        reason: finalDecision.reason,
+      });
+      logLifecycleEvent({
+        action: 'create',
+        from: null,
+        to: STATUS_ACTIVE,
+        id: replacement.id,
+        reason: 'supersedes_existing',
+      });
 
       return {
         written: true,
@@ -1394,7 +1906,7 @@ async function applyCandidate(raw, options = {}) {
         id: replacement.id,
         supersededId: outdated.id,
         targetId: outdated.id,
-        decision: decision.decision,
+        decision: finalDecision.decision,
         status: STATUS_ACTIVE,
         durable: true,
       };
@@ -1402,7 +1914,7 @@ async function applyCandidate(raw, options = {}) {
 
     const created = storedCandidate(candidate, {
       status: STATUS_ACTIVE,
-      lastDecision: record(DECISION.CREATE, decision.reason),
+      lastDecision: record(DECISION.CREATE, finalDecision.reason),
     });
 
     next.push(created);
@@ -1410,6 +1922,13 @@ async function applyCandidate(raw, options = {}) {
     if (!(await persist())) return abortedResult();
     memories = next;
     refreshDerivedMemoryIndex('create');
+    logLifecycleEvent({
+      action: 'create',
+      from: null,
+      to: STATUS_ACTIVE,
+      id: created.id,
+      reason: finalDecision.reason,
+    });
 
     return {
       written: true,
@@ -2135,7 +2654,14 @@ function normalizeSearchFilters(raw) {
   if (raw === undefined || raw === null) {
     return {
       ok: true,
-      filters: { sources: null, statuses: null, timeRange: null },
+      filters: {
+        sources: null,
+        statuses: null,
+        timeRange: null,
+        types: null,
+        categories: null,
+        episodicOnly: false,
+      },
     };
   }
 
@@ -2167,6 +2693,29 @@ function normalizeSearchFilters(raw) {
     );
     if (!normalized.ok) return normalized;
     statuses = normalized.value;
+  }
+
+  let types = null;
+  const rawTypes = raw.types !== undefined ? raw.types : raw.type;
+
+  if (rawTypes !== undefined) {
+    const normalized = normalizeFilterList(rawTypes, ALLOWED_TYPES, 'types');
+    if (!normalized.ok) return normalized;
+    types = normalized.value;
+  }
+
+  let categories = null;
+  const rawCategories =
+    raw.categories !== undefined ? raw.categories : raw.category;
+
+  if (rawCategories !== undefined) {
+    const normalized = normalizeFilterList(
+      rawCategories,
+      SEARCHABLE_CATEGORIES,
+      'categories'
+    );
+    if (!normalized.ok) return normalized;
+    categories = normalized.value;
   }
 
   const timeField = raw.timeField === undefined ? 'valid' : raw.timeField;
@@ -2202,7 +2751,17 @@ function normalizeSearchFilters(raw) {
     timeRange = { from, to, field: timeField };
   }
 
-  return { ok: true, filters: { sources, statuses, timeRange } };
+  return {
+    ok: true,
+    filters: {
+      sources,
+      statuses,
+      timeRange,
+      types,
+      categories,
+      episodicOnly: raw.episodicOnly === true || raw.episodic === true,
+    },
+  };
 }
 
 function matchesStatusFilter(item, statuses) {
@@ -2217,6 +2776,32 @@ function matchesSourceFilter(item, sources) {
   const types = contributionSourceTypes(item);
 
   return types.some(type => sources.includes(type));
+}
+
+function matchesTypeFilter(item, types) {
+  if (!types) return true;
+  return types.includes(item.type);
+}
+
+function matchesCategoryFilter(item, categories) {
+  if (!categories) return true;
+
+  const category = cleanText(item.category);
+
+  // 旧条目没有 P1 类别：保留在层内，避免升级后旧事实突然不可见。
+  return !category || category === CATEGORY.LEGACY || categories.includes(category);
+}
+
+function matchesEpisodicFilter(item, episodicOnly) {
+  if (!episodicOnly) return true;
+
+  return Boolean(
+    item.type === 'fact' &&
+      (cleanText(item.eventAt) ||
+        cleanText(item.condition) ||
+        cleanText(item.validTo) ||
+        item.category === CATEGORY.TEMPORARY_STATE)
+  );
 }
 
 function matchesTimeRange(item, range) {
@@ -2260,6 +2845,9 @@ function selectSearchCandidates({
     status: 0,
     source: 0,
     time: 0,
+    type: 0,
+    category: 0,
+    episodic: 0,
   };
   // 不可见原因分解（P2）：过期的、被替代的、归档的、待确认的分别计数，
   // 这样 Trace 能回答「这条记忆为什么没进候选池」，而不是只有一个总数。
@@ -2332,6 +2920,28 @@ function selectSearchCandidates({
       matchesTimeRange(item, filters.timeRange)
     );
     exclusions.time += before - filtered.length;
+  }
+
+  if (filters.types) {
+    const before = filtered.length;
+    filtered = filtered.filter(item => matchesTypeFilter(item, filters.types));
+    exclusions.type += before - filtered.length;
+  }
+
+  if (filters.categories) {
+    const before = filtered.length;
+    filtered = filtered.filter(item =>
+      matchesCategoryFilter(item, filters.categories)
+    );
+    exclusions.category += before - filtered.length;
+  }
+
+  if (filters.episodicOnly) {
+    const before = filtered.length;
+    filtered = filtered.filter(item =>
+      matchesEpisodicFilter(item, filters.episodicOnly)
+    );
+    exclusions.episodic += before - filtered.length;
   }
 
   return {
@@ -2702,9 +3312,14 @@ async function clearMemories(userId = null) {
     const remaining = owner
       ? current.filter(item => !ownerAllows(item, owner))
       : [];
-    const removedEntries = current.length - remaining.length;
+    const removed = current.filter(item => !remaining.includes(item));
+    const removedEntries = removed.length;
 
-    await saveMemories(remaining);
+    await commitWithTombstones(
+      remaining,
+      removed,
+      owner ? 'clear_user' : 'clear'
+    );
 
     memories = remaining;
 
@@ -2736,6 +3351,7 @@ async function clearSessionMemories(sessionId, userId = null) {
     const current = Array.isArray(memories) ? memories : [];
 
     const remaining = [];
+    const removedForTombstone = [];
     let removedEntries = 0;
     let removedContributions = 0;
 
@@ -2760,6 +3376,14 @@ async function clearSessionMemories(sessionId, userId = null) {
         continue;
       }
 
+      const removed = contributions.filter(
+        contribution => contribution && contribution.sessionId === target
+      );
+
+      if (removed.length) {
+        removedForTombstone.push({ ...item, contributions: removed });
+      }
+
       removedContributions += contributions.length - kept.length;
 
       if (kept.length) {
@@ -2778,7 +3402,11 @@ async function clearSessionMemories(sessionId, userId = null) {
       };
     }
 
-    await saveMemories(remaining);
+    await commitWithTombstones(
+      remaining,
+      removedForTombstone,
+      'clear_session'
+    );
 
     memories = remaining;
 
@@ -2882,6 +3510,7 @@ async function recallMemoryBySourceQuote(
         : contribution.sessionId === targetSessionId;
 
     const remaining = [];
+    const removedForTombstone = [];
     let removedContributions = 0;
 
     for (const item of current) {
@@ -2889,9 +3518,16 @@ async function recallMemoryBySourceQuote(
         ? item.contributions
         : [];
 
+      const removed = contributions.filter(
+        contribution => isTargeted(contribution) && isMatch(contribution)
+      );
       const kept = contributions.filter(
         contribution => !(isTargeted(contribution) && isMatch(contribution))
       );
+
+      if (removed.length) {
+        removedForTombstone.push({ ...item, contributions: removed });
+      }
 
       removedContributions += contributions.length - kept.length;
 
@@ -2909,7 +3545,7 @@ async function recallMemoryBySourceQuote(
 
     if (!removedContributions && !removedEntries) return empty;
 
-    await saveMemories(remaining);
+    await commitWithTombstones(remaining, removedForTombstone, 'recall');
 
     memories = remaining;
 
@@ -2933,7 +3569,8 @@ function getMemories(options = {}) {
   const includeHistory =
     options.includeSuperseded === true ||
     options.includeArchived === true ||
-    options.includePending === true;
+    options.includePending === true ||
+    options.includeContested === true;
   const current = Array.isArray(memories) ? memories : [];
 
   return current
@@ -2996,11 +3633,18 @@ async function deleteMemory({ id, createdAt, content, userId = null } = {}) {
 
     next.splice(index, 1);
 
-    await saveMemories(next);
+    await commitWithTombstones(next, [removedItem], 'delete');
 
     memories = next;
 
     refreshDerivedMemoryIndex('delete');
+    logLifecycleEvent({
+      action: 'delete',
+      from: removedItem ? removedItem.status || STATUS_ACTIVE : null,
+      to: 'deleted',
+      id: removedItem ? removedItem.id : null,
+      reason: 'user_deleted',
+    });
 
     console.log('Memory deleted');
 
@@ -3029,9 +3673,85 @@ function getPendingMemories() {
     }));
 }
 
-async function confirmPending(id, userId = null) {
+// 用户确认一个冲突候选后，把被它标记为 contested 的旧条目归档；
+// 保留审计，但不再作为当前事实参与注入。
+function archiveContestedForConfirmation(list, contestedIds, now) {
+  if (!Array.isArray(contestedIds) || !contestedIds.length) return list;
+
+  const idSet = new Set(contestedIds);
+
+  return list.map(entry => {
+    if (!entry || !idSet.has(entry.id) || entry.status !== STATUS_CONTESTED) {
+      return entry;
+    }
+
+    if (!canTransition(entry.status, STATUS_ARCHIVED)) return entry;
+
+    logLifecycleEvent({
+      action: 'archive',
+      from: entry.status,
+      to: STATUS_ARCHIVED,
+      id: entry.id,
+      reason: 'contested_replaced_by_confirmation',
+    });
+
+    return {
+      ...entry,
+      status: STATUS_ARCHIVED,
+      validTo: entry.validTo || now,
+      archivedReason: 'contested_replaced_by_confirmation',
+      updatedAt: now,
+      lastDecision: {
+        action: 'archive',
+        reason: 'contested_replaced_by_confirmation',
+        at: now,
+        actor: 'user',
+        sourceType: 'user',
+      },
+    };
+  });
+}
+
+const FEEDBACK_HISTORY_LIMIT = 20;
+
+function feedbackDecision(action, reason, feedbackId, at) {
+  return {
+    action,
+    reason,
+    at,
+    actor: 'user',
+    sourceType: 'user',
+    ...(feedbackId ? { feedbackId } : {}),
+  };
+}
+
+function appendFeedbackHistory(item, decision) {
+  const history = Array.isArray(item && item.feedbackHistory)
+    ? item.feedbackHistory.slice()
+    : [];
+
+  if (
+    decision &&
+    decision.feedbackId &&
+    history.some(
+      event =>
+        event &&
+        event.feedbackId === decision.feedbackId &&
+        event.action === decision.action
+    )
+  ) {
+    return history;
+  }
+
+  if (decision) history.push(decision);
+
+  return history.slice(-FEEDBACK_HISTORY_LIMIT);
+}
+
+async function confirmPending(id, userId = null, options = {}) {
   const targetId = cleanText(id);
   const owner = cleanText(userId);
+  const feedbackId = cleanText(options.feedbackId);
 
   if (!targetId) return { updated: 0, reason: 'invalid' };
 
@@ -3048,10 +3768,23 @@ async function confirmPending(id, userId = null) {
     const item = current[index];
 
     if (!isPending(item) || !canTransition(STATUS_PENDING, STATUS_ACTIVE)) {
+      logLifecycleRejection({
+        action: 'confirm',
+        from: item.status || null,
+        id: targetId,
+        reason: 'not-pending',
+      });
       return { updated: 0, reason: 'not-pending' };
     }
 
-    const { pendingReason, pendingAt, pendingTargetId, pendingMutation, ...rest } = item;
+    const {
+      pendingReason,
+      pendingAt,
+      pendingTargetId,
+      pendingMutation,
+      contestedIds,
+      ...rest
+    } = item;
     const now = new Date().toISOString();
     const next = current.slice();
     const targetIndex = pendingTargetId
@@ -3067,6 +3800,12 @@ async function confirmPending(id, userId = null) {
       const target = current[targetIndex];
 
       if (pendingMutation === DECISION.SUPERSEDE) {
+        const decision = feedbackDecision(
+          'confirm',
+          'user_confirmed_supersede',
+          feedbackId,
+          now
+        );
         const replacement = {
           ...rest,
           status: STATUS_ACTIVE,
@@ -3074,14 +3813,11 @@ async function confirmPending(id, userId = null) {
           validTo: item.validTo || null,
           supersededBy: null,
           supersedes: target.id,
+          confirmationCount: (Number(item.confirmationCount) || 0) + 1,
+          lastConfirmedAt: now,
           updatedAt: now,
-          lastDecision: {
-            action: 'confirm',
-            reason: 'user_confirmed_supersede',
-            at: now,
-            actor: 'user',
-            sourceType: 'user',
-          },
+          lastDecision: decision,
+          feedbackHistory: appendFeedbackHistory(item, decision),
         };
         const rewritten = current
           .filter((_, position) => position !== index)
@@ -3105,9 +3841,22 @@ async function confirmPending(id, userId = null) {
           );
         rewritten.push(replacement);
 
-        await saveMemories(rewritten);
-        memories = rewritten;
+        const resolved = archiveContestedForConfirmation(
+          rewritten,
+          contestedIds,
+          now
+        );
+
+        await saveMemories(resolved);
+        memories = resolved;
         refreshDerivedMemoryIndex('confirm_supersede');
+        logLifecycleEvent({
+          action: 'confirm',
+          from: STATUS_PENDING,
+          to: STATUS_ACTIVE,
+          id: replacement.id,
+          reason: 'user_confirmed_supersede',
+        });
 
         return {
           updated: 1,
@@ -3118,6 +3867,12 @@ async function confirmPending(id, userId = null) {
         };
       }
 
+      const decision = feedbackDecision(
+        'confirm',
+        'user_confirmed_update',
+        feedbackId,
+        now
+      );
       next[targetIndex] = {
         ...target,
         content: item.content,
@@ -3130,20 +3885,30 @@ async function confirmPending(id, userId = null) {
           target.contributions,
           item.contributions
         ),
+        confirmationCount: (Number(item.confirmationCount) || 0) + 1,
+        lastConfirmedAt: now,
         updatedAt: now,
-        lastDecision: {
-          action: 'confirm',
-          reason: 'user_confirmed_update',
-          at: now,
-          actor: 'user',
-          sourceType: 'user',
-        },
+        lastDecision: decision,
+        feedbackHistory: appendFeedbackHistory(target, decision),
       };
       next.splice(index, 1);
 
-      await saveMemories(next);
-      memories = next;
+      const resolved = archiveContestedForConfirmation(
+        next,
+        contestedIds,
+        now
+      );
+
+      await saveMemories(resolved);
+      memories = resolved;
       refreshDerivedMemoryIndex('confirm_update');
+      logLifecycleEvent({
+        action: 'confirm',
+        from: STATUS_PENDING,
+        to: STATUS_ACTIVE,
+        id: target.id,
+        reason: 'user_confirmed_update',
+      });
 
       return {
         updated: 1,
@@ -3153,25 +3918,41 @@ async function confirmPending(id, userId = null) {
       };
     }
 
+    const decision = feedbackDecision(
+      'confirm',
+      'user_confirmed',
+      feedbackId,
+      now
+    );
     next[index] = {
       ...rest,
       status: STATUS_ACTIVE,
       validFrom: now,
       validTo: item.validTo || null,
       supersededBy: null,
+      confirmationCount: (Number(item.confirmationCount) || 0) + 1,
+      lastConfirmedAt: now,
       updatedAt: now,
-      lastDecision: {
-        action: 'confirm',
-        reason: 'user_confirmed',
-        at: now,
-        actor: 'user',
-        sourceType: 'user',
-      },
+      lastDecision: decision,
+      feedbackHistory: appendFeedbackHistory(item, decision),
     };
 
-    await saveMemories(next);
-    memories = next;
+    const resolved = archiveContestedForConfirmation(
+      next,
+      contestedIds,
+      now
+    );
+
+    await saveMemories(resolved);
+    memories = resolved;
     refreshDerivedMemoryIndex('confirm');
+    logLifecycleEvent({
+      action: 'confirm',
+      from: STATUS_PENDING,
+      to: STATUS_ACTIVE,
+      id: targetId,
+      reason: 'user_confirmed',
+    });
 
     return { updated: 1, reason: 'ok', id: targetId, status: STATUS_ACTIVE };
   });
@@ -3202,6 +3983,13 @@ async function rejectPending(id, userId = null) {
 
     await saveMemories(next);
     memories = next;
+    logLifecycleEvent({
+      action: 'reject',
+      from: STATUS_PENDING,
+      to: 'deleted',
+      id: targetId,
+      reason: 'user_rejected_pending',
+    });
 
     return { removed: 1, reason: 'ok', id: targetId };
   });
@@ -3227,6 +4015,12 @@ async function archiveMemory(id, userId = null) {
     const status = item.status || STATUS_ACTIVE;
 
     if (!canTransition(status, STATUS_ARCHIVED)) {
+      logLifecycleRejection({
+        action: 'archive',
+        from: status,
+        id: targetId,
+        reason: 'invalid-state',
+      });
       return { updated: 0, reason: 'invalid-state' };
     }
 
@@ -3251,6 +4045,13 @@ async function archiveMemory(id, userId = null) {
     memories = next;
 
     refreshDerivedMemoryIndex('archive');
+    logLifecycleEvent({
+      action: 'archive',
+      from: status,
+      to: STATUS_ARCHIVED,
+      id: targetId,
+      reason: 'user_archived',
+    });
 
     return { updated: 1, reason: 'ok', id: targetId, status: STATUS_ARCHIVED };
   });
@@ -3519,7 +4320,15 @@ async function supersedeMemory({ id, replacement, actor = 'user' } = {}) {
     const index = current.findIndex(item => item && item.id === targetId);
     if (index < 0) return { updated: 0, reason: 'not-found' };
     const target = current[index];
-    if (!canTransition(target.status || STATUS_ACTIVE, STATUS_SUPERSEDED)) {
+    const targetStatus = target.status || STATUS_ACTIVE;
+
+    if (!canTransition(targetStatus, STATUS_SUPERSEDED)) {
+      logLifecycleRejection({
+        action: 'supersede',
+        from: targetStatus,
+        id: targetId,
+        reason: 'invalid-state',
+      });
       return { updated: 0, reason: 'invalid-state' };
     }
 
@@ -3578,6 +4387,20 @@ async function supersedeMemory({ id, replacement, actor = 'user' } = {}) {
     trimToCapacity(next);
     await saveMemories(next);
     memories = next;
+    logLifecycleEvent({
+      action: 'supersede',
+      from: targetStatus,
+      to: STATUS_SUPERSEDED,
+      id: targetId,
+      reason: 'approved_supersede',
+    });
+    logLifecycleEvent({
+      action: 'create',
+      from: null,
+      to: STATUS_ACTIVE,
+      id: newId,
+      reason: 'approved_supersede',
+    });
 
     return {
       updated: 1,
@@ -3600,7 +4423,15 @@ async function withdrawMemory({ id, sessionId = null, actor = 'user' } = {}) {
     if (index < 0) return { withdrawn: 0, reason: 'not-found' };
 
     const item = current[index];
-    if ((item.status || STATUS_ACTIVE) !== STATUS_ACTIVE) {
+    const status = item.status || STATUS_ACTIVE;
+
+    if (![STATUS_ACTIVE, STATUS_CONTESTED].includes(status)) {
+      logLifecycleRejection({
+        action: 'withdraw',
+        from: status,
+        id: targetId,
+        reason: 'invalid-state',
+      });
       return { withdrawn: 0, reason: 'invalid-state' };
     }
 
@@ -3608,6 +4439,9 @@ async function withdrawMemory({ id, sessionId = null, actor = 'user' } = {}) {
     const kept = targetSession
       ? contributions.filter(contribution => contribution.sessionId !== targetSession)
       : [];
+    const removed = targetSession
+      ? contributions.filter(contribution => contribution.sessionId === targetSession)
+      : contributions.slice();
     const removedContributions = contributions.length - kept.length;
     if (!removedContributions) {
       return { withdrawn: 0, reason: 'no-match' };
@@ -3615,10 +4449,13 @@ async function withdrawMemory({ id, sessionId = null, actor = 'user' } = {}) {
 
     const now = new Date().toISOString();
     const next = current.slice();
+    const nextStatus = kept.length ? status : STATUS_ARCHIVED;
+
     if (kept.length) {
       next[index] = {
         ...item,
         contributions: kept,
+        lastWithdrawalAt: now,
         updatedAt: now,
         lastDecision: {
           action: 'withdraw',
@@ -3634,6 +4471,8 @@ async function withdrawMemory({ id, sessionId = null, actor = 'user' } = {}) {
         status: STATUS_ARCHIVED,
         contributions: [],
         validTo: item.validTo || now,
+        withdrawnAt: now,
+        withdrawnReason: 'withdrawn_all_contributions',
         updatedAt: now,
         lastDecision: {
           action: 'withdraw',
@@ -3645,16 +4484,570 @@ async function withdrawMemory({ id, sessionId = null, actor = 'user' } = {}) {
       };
     }
 
-    await saveMemories(next);
+    await commitWithTombstones(
+      next,
+      [{ ...item, contributions: removed }],
+      'withdraw'
+    );
     memories = next;
     refreshDerivedMemoryIndex('withdraw');
+    logLifecycleEvent({
+      action: 'withdraw',
+      from: status,
+      to: nextStatus,
+      id: targetId,
+      reason: kept.length
+        ? 'withdrawn_session_contributions'
+        : 'withdrawn_all_contributions',
+    });
     return {
       withdrawn: 1,
       reason: 'ok',
       id: targetId,
       removedContributions,
       archived: kept.length === 0,
-      status: kept.length ? STATUS_ACTIVE : STATUS_ARCHIVED,
+      status: nextStatus,
+    };
+  });
+}
+
+// ---- P5 画像反馈：确认 / 否认 / 纠正 ----
+// 反馈是用户对既有记忆的显式裁决，必须走同一个写队列与原子落盘，
+// 并且带 feedbackId 幂等键；它不是一次新的自动抽取。
+
+function normalizeFeedbackId(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/.test(trimmed)) return undefined;
+  return trimmed;
+}
+
+function findFeedbackResult(list, feedbackId, action) {
+  if (!feedbackId) return null;
+
+  const matches = list.filter(
+    item => {
+      if (!item) return false;
+      if (
+        item.lastDecision &&
+        item.lastDecision.feedbackId === feedbackId &&
+        item.lastDecision.action === action
+      ) {
+        return true;
+      }
+      return (
+        Array.isArray(item.feedbackHistory) &&
+        item.feedbackHistory.some(
+          event =>
+            event &&
+            event.feedbackId === feedbackId &&
+            event.action === action
+        )
+      );
+    }
+  );
+
+  // 纠正会同时标记旧条目和新条目；优先返回带 supersedes 的新条目。
+  return (
+    matches.find(item => item.supersedes) ||
+    matches.find(item => (item.status || STATUS_ACTIVE) === STATUS_ACTIVE) ||
+    matches[0] ||
+    null
+  );
+}
+
+// 确认 active/contested，或把 contested 一方的裁决落成 active。
+// pending 的确认走 confirmPending（需要处理 pendingTargetId / contestedIds）。
+async function confirmMemoryFeedback({ id, userId = null, feedbackId = null } = {}) {
+  const targetId = cleanText(id);
+  const owner = cleanText(userId);
+  const fbId = normalizeFeedbackId(feedbackId);
+
+  if (!targetId) return { updated: 0, reason: 'invalid' };
+  if (fbId === undefined) return { updated: 0, reason: 'invalid_feedback_id' };
+
+  return enqueueWrite(async () => {
+    const current = Array.isArray(memories) ? memories : [];
+    const index = current.findIndex(item => item && item.id === targetId);
+
+    if (index < 0) return { updated: 0, reason: 'not-found' };
+
+    const item = current[index];
+
+    if (!ownerAllows(item, owner)) {
+      return { updated: 0, reason: 'forbidden' };
+    }
+
+    const duplicate = findFeedbackResult(current, fbId, 'confirm');
+
+    if (duplicate) {
+      if (duplicate.id !== targetId) {
+        return { updated: 0, reason: 'feedback_id_conflict' };
+      }
+      return {
+        updated: 0,
+        reason: 'ok',
+        duplicate: true,
+        id: duplicate.id,
+        status: duplicate.status || STATUS_ACTIVE,
+      };
+    }
+
+    const status = item.status || STATUS_ACTIVE;
+
+    if (status === STATUS_PENDING) {
+      return { updated: 0, reason: 'use-confirm-pending' };
+    }
+
+    if (status !== STATUS_ACTIVE && status !== STATUS_CONTESTED) {
+      logLifecycleRejection({
+        action: 'confirm',
+        from: status,
+        id: targetId,
+        reason: 'invalid-state',
+      });
+      return { updated: 0, reason: 'invalid-state' };
+    }
+
+    const now = new Date().toISOString();
+    let next = current.slice();
+
+    if (status === STATUS_ACTIVE) {
+      const decision = feedbackDecision(
+        'confirm',
+        'user_confirmed',
+        fbId,
+        now
+      );
+      next[index] = {
+        ...item,
+        confirmationCount: (Number(item.confirmationCount) || 0) + 1,
+        lastConfirmedAt: now,
+        updatedAt: now,
+        lastDecision: decision,
+        feedbackHistory: appendFeedbackHistory(item, decision),
+      };
+
+      await saveMemories(next);
+      memories = next;
+      logLifecycleEvent({
+        action: 'confirm',
+        from: status,
+        to: STATUS_ACTIVE,
+        id: targetId,
+        reason: 'user_confirmed',
+      });
+
+      return { updated: 1, reason: 'ok', id: targetId, status: STATUS_ACTIVE };
+    }
+
+    // contested：用户直接确认旧条目，等同于否决挑战它的 pending 候选。
+    const decision = feedbackDecision(
+      'confirm',
+      'user_resolved_contest',
+      fbId,
+      now
+    );
+    next[index] = {
+      ...item,
+      status: STATUS_ACTIVE,
+      validTo: null,
+      resolvedContestAt: now,
+      confirmationCount: (Number(item.confirmationCount) || 0) + 1,
+      lastConfirmedAt: now,
+      updatedAt: now,
+      lastDecision: decision,
+      feedbackHistory: appendFeedbackHistory(item, decision),
+    };
+
+    const pendingId = cleanText(item.contestedBy);
+    const pendingIndex = pendingId
+      ? next.findIndex(
+          candidate =>
+            candidate && candidate.id === pendingId && candidate.status === STATUS_PENDING
+        )
+      : -1;
+    let archivedContested = 0;
+
+    if (pendingIndex >= 0) {
+      const pending = next[pendingIndex];
+      const contestedIds = new Set(
+        Array.isArray(pending.contestedIds) ? pending.contestedIds : []
+      );
+
+      next[pendingIndex] = {
+        ...pending,
+        status: STATUS_ARCHIVED,
+        validTo: pending.validTo || now,
+        archivedReason: 'contest_resolved_by_user_confirmation',
+        updatedAt: now,
+        lastDecision: feedbackDecision(
+          'archive',
+          'contest_resolved_by_user_confirmation',
+          null,
+          now
+        ),
+      };
+
+      next = next.map(entry => {
+        if (
+          !entry ||
+          entry.id === targetId ||
+          entry.status !== STATUS_CONTESTED ||
+          !contestedIds.has(entry.id)
+        ) {
+          return entry;
+        }
+
+        archivedContested += 1;
+
+        return {
+          ...entry,
+          status: STATUS_ARCHIVED,
+          validTo: entry.validTo || now,
+          archivedReason: 'contested_replaced_by_confirmation',
+          updatedAt: now,
+          lastDecision: feedbackDecision(
+            'archive',
+            'contested_replaced_by_confirmation',
+            null,
+            now
+          ),
+        };
+      });
+    }
+
+    await saveMemories(next);
+    memories = next;
+    refreshDerivedMemoryIndex('confirm');
+    logLifecycleEvent({
+      action: 'confirm',
+      from: status,
+      to: STATUS_ACTIVE,
+      id: targetId,
+      reason: 'user_resolved_contest',
+    });
+
+    return {
+      updated: 1,
+      reason: 'ok',
+      id: targetId,
+      status: STATUS_ACTIVE,
+      archivedContested,
+    };
+  });
+}
+
+// 否认：不物理删除，归档并写墓碑。这样画像审计仍能看到「被谁否认过」，
+// 同时异步抽取无法借同一条来源把已否认的事实复活。
+async function denyMemoryFeedback({
+  id,
+  userId = null,
+  feedbackId = null,
+  reason = 'user_denied',
+} = {}) {
+  const targetId = cleanText(id);
+  const owner = cleanText(userId);
+  const fbId = normalizeFeedbackId(feedbackId);
+  const denyReason = cleanText(reason) || 'user_denied';
+
+  if (!targetId) return { denied: 0, reason: 'invalid' };
+  if (fbId === undefined) return { denied: 0, reason: 'invalid_feedback_id' };
+
+  return enqueueWrite(async () => {
+    const current = Array.isArray(memories) ? memories : [];
+    const index = current.findIndex(item => item && item.id === targetId);
+
+    if (index < 0) return { denied: 0, reason: 'not-found' };
+
+    const item = current[index];
+
+    if (!ownerAllows(item, owner)) {
+      return { denied: 0, reason: 'forbidden' };
+    }
+
+    const duplicate = findFeedbackResult(current, fbId, 'deny');
+
+    if (duplicate) {
+      if (duplicate.id !== targetId) {
+        return { denied: 0, reason: 'feedback_id_conflict' };
+      }
+      return {
+        denied: 0,
+        reason: 'ok',
+        duplicate: true,
+        id: duplicate.id,
+        status: duplicate.status,
+      };
+    }
+
+    const status = item.status || STATUS_ACTIVE;
+
+    if (![STATUS_PENDING, STATUS_ACTIVE, STATUS_CONTESTED].includes(status)) {
+      logLifecycleRejection({
+        action: 'deny',
+        from: status,
+        id: targetId,
+        reason: 'invalid-state',
+      });
+      return { denied: 0, reason: 'invalid-state' };
+    }
+
+    const now = new Date().toISOString();
+    const next = current.slice();
+    const decision = feedbackDecision('deny', denyReason, fbId, now);
+    next[index] = {
+      ...item,
+      status: STATUS_ARCHIVED,
+      validTo: item.validTo || now,
+      withdrawnAt: now,
+      withdrawnReason: denyReason,
+      updatedAt: now,
+      lastDecision: decision,
+      feedbackHistory: appendFeedbackHistory(item, decision),
+    };
+
+    await commitWithTombstones(next, [{ ...item }], 'deny');
+    memories = next;
+    refreshDerivedMemoryIndex('deny');
+    logLifecycleEvent({
+      action: 'deny',
+      from: status,
+      to: STATUS_ARCHIVED,
+      id: targetId,
+      reason: denyReason,
+    });
+
+    return {
+      denied: 1,
+      reason: 'ok',
+      id: targetId,
+      status: STATUS_ARCHIVED,
+      archived: true,
+    };
+  });
+}
+
+// 纠正：保留旧条目的历史（active → superseded；pending → archived），
+// 另建一条 active 新条目，并把用户给出的更正原话作为新的来源贡献。
+// 旧条目的原有贡献全部保留，因此画像仍然能追溯“改之前是什么、谁说的”。
+async function correctMemoryFeedback({
+  id,
+  userId = null,
+  feedbackId = null,
+  content,
+  type,
+  keywords,
+  confidence,
+} = {}) {
+  const targetId = cleanText(id);
+  const owner = cleanText(userId);
+  const fbId = normalizeFeedbackId(feedbackId);
+  const value =
+    typeof content === 'string' ? content.replace(/\s+/g, ' ').trim() : '';
+
+  if (!targetId) return { updated: 0, reason: 'invalid' };
+  if (fbId === undefined) return { updated: 0, reason: 'invalid_feedback_id' };
+  if (!value) return { updated: 0, reason: 'no_content' };
+  if (value.length > 100) return { updated: 0, reason: 'content_too_long' };
+  if (isSensitive(value)) return { updated: 0, reason: 'sensitive_content' };
+
+  let nextType = null;
+  if (type !== undefined) {
+    if (!ALLOWED_TYPES.has(type)) return { updated: 0, reason: 'type_not_allowed' };
+    nextType = type;
+  }
+
+  let nextKeywords = null;
+  if (keywords !== undefined) {
+    nextKeywords = maintenanceKeywords(keywords);
+    if (nextKeywords === null) return { updated: 0, reason: 'invalid_keywords' };
+  }
+
+  let nextConfidence = null;
+  if (confidence !== undefined) {
+    const parsed = Number(confidence);
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+      return { updated: 0, reason: 'invalid_confidence' };
+    }
+    nextConfidence = parsed;
+  }
+
+  return enqueueWrite(async () => {
+    const current = Array.isArray(memories) ? memories : [];
+    const duplicate = findFeedbackResult(current, fbId, 'correct');
+
+    if (duplicate) {
+      if (duplicate.supersedes !== targetId && duplicate.id !== targetId) {
+        return { updated: 0, reason: 'feedback_id_conflict' };
+      }
+      return {
+        updated: 0,
+        reason: 'ok',
+        duplicate: true,
+        id: duplicate.id,
+        supersededId: duplicate.supersedes || null,
+        status: duplicate.status,
+      };
+    }
+
+    const index = current.findIndex(item => item && item.id === targetId);
+
+    if (index < 0) return { updated: 0, reason: 'not-found' };
+
+    const item = current[index];
+
+    if (!ownerAllows(item, owner)) {
+      return { updated: 0, reason: 'forbidden' };
+    }
+
+    const status = item.status || STATUS_ACTIVE;
+
+    if (![STATUS_PENDING, STATUS_ACTIVE, STATUS_CONTESTED].includes(status)) {
+      logLifecycleRejection({
+        action: 'correct',
+        from: status,
+        id: targetId,
+        reason: 'invalid-state',
+      });
+      return { updated: 0, reason: 'invalid-state' };
+    }
+
+    const targetType = nextType || item.type;
+    const targetKeywords =
+      nextKeywords === null
+        ? Array.isArray(item.keywords)
+          ? item.keywords.slice(0, 5)
+          : []
+        : nextKeywords;
+    const targetConfidence =
+      nextConfidence === null
+        ? Number.isFinite(Number(item.confidence))
+          ? Number(item.confidence)
+          : 0.9
+        : nextConfidence;
+
+    if (
+      item.content === value &&
+      item.type === targetType &&
+      JSON.stringify(Array.isArray(item.keywords) ? item.keywords : []) ===
+        JSON.stringify(targetKeywords) &&
+      Number(item.confidence) === targetConfidence
+    ) {
+      return { updated: 0, reason: 'no_change' };
+    }
+
+    const now = new Date().toISOString();
+    const newId = issuedId();
+    const contributions = Array.isArray(item.contributions)
+      ? item.contributions.map(contribution => ({ ...contribution }))
+      : [];
+
+    contributions.push({
+      sessionId: null,
+      sourceQuote: value,
+      createdAt: now,
+      sourceType: 'user',
+      ...(fbId ? { messageId: `feedback:${fbId}` } : {}),
+    });
+
+    const {
+      pendingReason,
+      pendingAt,
+      pendingTargetId,
+      pendingMutation,
+      contestedIds,
+      contestedAt,
+      contestedReason,
+      contestedBy,
+      withdrawnAt,
+      withdrawnReason,
+      lastWithdrawalAt,
+      archivedReason,
+      resolvedContestAt,
+      confirmationCount,
+      lastConfirmedAt,
+      feedbackHistory,
+      ...base
+    } = item;
+
+    const newEntry = {
+      ...base,
+      id: newId,
+      status: STATUS_ACTIVE,
+      content: value,
+      type: targetType,
+      keywords: targetKeywords,
+      confidence: targetConfidence,
+      validFrom: now,
+      validTo: null,
+      supersededBy: null,
+      supersedes: targetId,
+      contributions,
+      createdAt: now,
+      updatedAt: now,
+      sourceType: 'user',
+      provenance: PROVENANCE.USER_ASSERTED,
+      category: classifyCategory(
+        { content: value, type: targetType },
+        PROVENANCE.USER_ASSERTED
+      ),
+      observedAt: now,
+      persistentIntent: true,
+      policyVersion: 'p5.0',
+      decisionVersion: 'p5.0',
+      evidence:
+        item.evidence && typeof item.evidence === 'object' ? item.evidence : null,
+      lastDecision: feedbackDecision('correct', 'user_correction', fbId, now),
+      feedbackHistory: [feedbackDecision('correct', 'user_correction', fbId, now)],
+    };
+
+    const oldNextStatus =
+      status === STATUS_PENDING ? STATUS_ARCHIVED : STATUS_SUPERSEDED;
+    const next = current.slice();
+    const decision = feedbackDecision('correct', 'user_correction', fbId, now);
+
+    next[index] = {
+      ...item,
+      status: oldNextStatus,
+      validTo: item.validTo || now,
+      supersededBy: newId,
+      updatedAt: now,
+      ...(oldNextStatus === STATUS_ARCHIVED
+        ? { archivedReason: 'corrected_by_profile_feedback' }
+        : {}),
+      lastDecision: decision,
+      feedbackHistory: appendFeedbackHistory(item, decision),
+    };
+    next.push(newEntry);
+    trimToCapacity(next);
+
+    await commitWithTombstones(next, [{ ...item }], 'correct');
+    memories = next;
+    refreshDerivedMemoryIndex('correct');
+    logLifecycleEvent({
+      action: 'correct',
+      from: status,
+      to: oldNextStatus,
+      id: targetId,
+      reason: 'user_correction',
+    });
+    logLifecycleEvent({
+      action: 'create',
+      from: null,
+      to: STATUS_ACTIVE,
+      id: newId,
+      reason: 'user_correction',
+    });
+
+    return {
+      updated: 1,
+      reason: 'ok',
+      id: newId,
+      supersededId: targetId,
+      replacedStatus: oldNextStatus,
+      status: STATUS_ACTIVE,
     };
   });
 }
@@ -3754,6 +5147,7 @@ module.exports = {
   MEMORY_SKIP_REASONS,
   STATUS_ACTIVE,
   STATUS_PENDING,
+  STATUS_CONTESTED,
   STATUS_SUPERSEDED,
   STATUS_ARCHIVED,
   loadMemories,
@@ -3763,6 +5157,9 @@ module.exports = {
   getPendingMemoriesForUser,
   checkMemoryOwnership,
   confirmPending,
+  confirmMemoryFeedback,
+  denyMemoryFeedback,
+  correctMemoryFeedback,
   rejectPending,
   archiveMemory,
   updateMemory,

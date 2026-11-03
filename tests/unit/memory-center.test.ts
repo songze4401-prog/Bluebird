@@ -62,6 +62,7 @@ describe('Memory Center 概览与趋势', () => {
       total: 5,
       active: 1,
       pending: 1,
+      contested: 0,
       archived: 1,
       history: 1,
       expired: 1,
@@ -231,6 +232,68 @@ describe('生命周期事件', () => {
     expect(
       events.filter(event => event.memoryId === 'old' && event.type === 'supersede')
     ).toHaveLength(1);
+  });
+
+  it('P5 反馈历史进入生命周期，最近决策不重复', () => {
+    const confirmAt = '2026-10-30T11:00:00.000Z';
+    const correctAt = '2026-10-30T11:05:00.000Z';
+    const item = memory({
+      id: 'fb-1',
+      feedbackHistory: [
+        {
+          action: 'confirm',
+          reason: 'user_confirmed',
+          at: confirmAt,
+          actor: 'user',
+          feedbackId: 'fb-confirm',
+        },
+        {
+          action: 'correct',
+          reason: 'user_correction',
+          at: correctAt,
+          actor: 'user',
+          feedbackId: 'fb-correct',
+        },
+      ],
+      lastDecision: {
+        action: 'correct',
+        reason: 'user_correction',
+        at: correctAt,
+        actor: 'user',
+        feedbackId: 'fb-correct',
+      },
+    });
+
+    const events = collectEntryLifecycleEvents([item]);
+
+    expect(events.filter(event => event.type === 'confirm')).toHaveLength(1);
+    expect(events.filter(event => event.type === 'correct')).toHaveLength(1);
+    expect(
+      events.find(event => event.type === 'correct')?.detail
+    ).toContain('fb-correct');
+  });
+
+  it('contested 状态与 contest 决策进入生命周期', () => {
+    const at = '2026-10-30T11:10:00.000Z';
+    const item = memory({
+      id: 'contest-1',
+      status: 'contested',
+      contestedAt: at,
+      contestedReason: 'ambiguous_conflict',
+      contestedBy: 'pending-1',
+      lastDecision: {
+        action: 'contest',
+        reason: 'ambiguous_conflict',
+        at,
+      },
+    });
+
+    const events = collectEntryLifecycleEvents([item]);
+    const contest = events.find(event => event.type === 'contest');
+
+    expect(contest).toBeTruthy();
+    expect(contest?.memoryId).toBe('contest-1');
+    expect(contest?.targetId).toBe('pending-1');
   });
 
   it('本次会话操作按真实时间进入生命周期并参与排序', () => {

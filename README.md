@@ -29,8 +29,8 @@ npx expo start             # Metro :8081
 ## Quality gates
 
 ```bash
-npm test                    # backend: auto-discovers tests/*.test.js (67 files / 1952 checks)
-npm run test:unit -- --ci   # frontend: 22 suites / 183 cases
+npm test                    # backend: auto-discovers tests/*.test.js (72 files / 2056 checks)
+npm run test:unit -- --ci   # frontend: 22 suites / 188 cases
 npx tsc --noEmit            # TypeScript
 npm run lint                # Expo ESLint
 npm run eval:context        # real-model capability eval (needs DEEPSEEK_API_KEY; not in CI)
@@ -62,6 +62,8 @@ CI (`.github/workflows/ci.yml`) runs TypeScript, lint, the fixed evaluations, an
 - `AGENTS.md` — architecture, data safety, commands, tests, and rules. This is the primary engineering reference.
 - `docs/persona-custom-prompt.md` — the user-authored persona text: field contract, priority order, untrusted-text handling, and validation error codes.
 - `docs/unified-retrieval.md` — unified semantic retrieval/knowledge index: contracts, source connectors, hybrid pipeline, API, limits, verified/blocked capabilities.
+- `docs/p5-profile-feedback.md` — traceable profile and confirm/deny/correct feedback: derived-view contract, source trace, idempotency, tombstones, API and limits.
+- `docs/p6-ops-visualization.md` — Memory Center profile/timeline/graph, manual governance, audit console and permission checks.
 - `docs/observability.md` — monitoring architecture, event/metric contract, alert rules, retention, privacy, and known gaps.
 - `MODEL_ROUTING_RISKS.md` — current status of model-routing risks; the 2026-10-25 original is archived under `docs/archive/`.
 

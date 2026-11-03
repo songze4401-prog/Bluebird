@@ -3,6 +3,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
@@ -28,7 +29,13 @@ import {
 import { formatMessageTime } from '../lib/utils';
 import type { MemoryCenterStyles } from './memory-center-styles';
 
-export type MemoryAction = 'confirm' | 'reject' | 'archive' | 'delete';
+export type MemoryAction =
+  | 'confirm'
+  | 'reject'
+  | 'archive'
+  | 'delete'
+  | 'deny'
+  | 'correct';
 
 function StatusNotice({
   item,
@@ -41,13 +48,17 @@ function StatusNotice({
   const text =
     status === 'pending'
       ? '待确认候选，尚未进入检索'
-      : status === 'archived'
-        ? '已归档，不参与记忆检索'
-        : status === 'superseded'
-          ? '历史版本，已被新版本取代'
-          : isEffectiveMemory(item)
-            ? '活跃记忆，会参与相关对话的检索'
-            : '已过期，不参与记忆检索';
+      : status === 'contested'
+        ? '冲突待裁决，暂不参与检索；请确认一方或否认'
+        : status === 'archived'
+          ? item.withdrawnAt
+            ? '已被用户否认，归档保留审计且不参与检索'
+            : '已归档，不参与记忆检索'
+          : status === 'superseded'
+            ? '历史版本，已被新版本取代'
+            : isEffectiveMemory(item)
+              ? '活跃记忆，会参与相关对话的检索'
+              : '已过期，不参与记忆检索';
 
   return (
     <View style={styles.noticeCard}>
@@ -112,6 +123,7 @@ export function MemoryDetailModal({
   item,
   relations,
   busyAction,
+  initialAction = null,
   onClose,
   onAction,
   onOpenRelated,
@@ -122,11 +134,18 @@ export function MemoryDetailModal({
   item: MemoryItem | null;
   relations: MemoryRelation[];
   busyAction?: string | null;
+  initialAction?: 'correct' | null;
   onClose: () => void;
-  onAction: (action: MemoryAction) => void;
+  onAction: (
+    action: MemoryAction,
+    payload?: { content?: string }
+  ) => void;
   onOpenRelated: (item: MemoryItem) => void;
 }) {
   const [technicalOpen, setTechnicalOpen] = useState(false);
+  const [correcting, setCorrecting] = useState(initialAction === 'correct');
+  const [draft, setDraft] = useState(item?.content || '');
+  const [correctError, setCorrectError] = useState('');
   const localStyles = useMemo(() => createStyles(theme), [theme]);
 
   if (!visible || !item) return null;
@@ -142,6 +161,8 @@ export function MemoryDetailModal({
     if (action === 'confirm') return '确认';
     if (action === 'reject') return '拒绝';
     if (action === 'archive') return '归档';
+    if (action === 'deny') return '否认';
+    if (action === 'correct') return '纠正';
     return '删除';
   };
 
@@ -310,23 +331,155 @@ export function MemoryDetailModal({
             </View>
           )}
 
-          <View style={styles.detailSection}>
-            <Text style={styles.detailLabel}>未接入操作</Text>
-            <View style={styles.disabledActionRow}>
-              <View style={styles.disabledAction}>
-                <Text style={styles.disabledActionTitle}>编辑</Text>
-                <Text style={styles.disabledActionHint}>
-                  服务端暂无单条记忆更新接口。需要更正时，请在对话中直接说明。
-                </Text>
-              </View>
-              <View style={styles.disabledAction}>
-                <Text style={styles.disabledActionTitle}>撤回</Text>
-                <Text style={styles.disabledActionHint}>
-                  记忆中心暂不支持单条撤回；可在原聊天消息上使用撤回。
+          {!!item.feedbackHistory?.length && (
+            <View style={styles.detailSection}>
+              <Text style={styles.detailLabel}>反馈历史</Text>
+              <View style={styles.card}>
+                {item.feedbackHistory.map((feedback, index) => (
+                  <View
+                    key={`${feedback.feedbackId || feedback.at || index}:${feedback.action}`}
+                    style={styles.detailRow}
+                  >
+                    <Text style={styles.detailRowLabel}>
+                      {decisionActionLabel(feedback.action) || '反馈'}
+                    </Text>
+                    <Text style={styles.detailRowValue}>
+                      {reasonLabel(feedback.reason) || '未给出原因'}
+                      {feedback.at
+                        ? ` · ${formatMessageTime(feedback.at, true)}`
+                        : ''}
+                      {feedback.feedbackId ? ` · ${feedback.feedbackId}` : ''}
+                    </Text>
+                  </View>
+                ))}
+                <Text style={styles.summaryNote}>
+                  反馈历史最多保留 20 条；只含动作、原因短码与时间，不含正文。
                 </Text>
               </View>
             </View>
-          </View>
+          )}
+
+          {status !== 'superseded' && status !== 'archived' && (
+            <View style={styles.detailSection}>
+              <Text style={styles.detailLabel}>画像治理</Text>
+              <View style={styles.card}>
+                {correcting ? (
+                  <>
+                    <TextInput
+                      value={draft}
+                      onChangeText={value => {
+                        setDraft(value);
+                        setCorrectError('');
+                      }}
+                      multiline
+                      maxLength={100}
+                      placeholder="输入纠正后的内容"
+                      placeholderTextColor={theme.textMuted}
+                      selectionColor={theme.accent}
+                      style={localStyles.correctInput}
+                      accessibilityLabel="纠正后的记忆内容"
+                    />
+                    <Text style={styles.summaryNote}>
+                      {draft.trim().length}/100 · 保存后旧版本保留为历史，旧来源写墓碑
+                    </Text>
+                    {!!correctError && (
+                      <Text style={styles.errorText}>{correctError}</Text>
+                    )}
+                    <View style={styles.pendingActions}>
+                      <TouchableOpacity
+                        style={[styles.miniButton, busy && styles.miniButtonDisabled]}
+                        disabled={busy}
+                        onPress={() => {
+                          setCorrecting(false);
+                          setCorrectError('');
+                          setDraft(item.content);
+                        }}
+                        accessibilityLabel="取消纠正"
+                      >
+                        <Text style={styles.miniButtonText}>取消</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[
+                          styles.miniButton,
+                          styles.miniButtonPrimary,
+                          busy && styles.miniButtonDisabled,
+                        ]}
+                        disabled={busy}
+                        onPress={() => {
+                          const value = draft.trim();
+                          if (!value) {
+                            setCorrectError('纠正内容不能为空。');
+                            return;
+                          }
+                          if (value === item.content) {
+                            setCorrectError('纠正内容与当前记忆相同。');
+                            return;
+                          }
+                          onAction('correct', { content: value });
+                        }}
+                        accessibilityLabel="保存纠正"
+                      >
+                        <Text
+                          style={[
+                            styles.miniButtonText,
+                            styles.miniButtonTextPrimary,
+                            busy && styles.miniButtonDisabled,
+                          ]}
+                        >
+                          {actionLabel('correct')}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  </>
+                ) : (
+                  <>
+                    <Text style={styles.cardBody}>
+                      纠正会新建 active 版本并保留旧版本；否认会归档并写墓碑。
+                      两者都会写入审计与反馈历史，不物理删除正文。
+                    </Text>
+                    <View style={styles.pendingActions}>
+                      <TouchableOpacity
+                        style={[styles.miniButton, busy && styles.miniButtonDisabled]}
+                        disabled={busy || !hasId}
+                        onPress={() => {
+                          setCorrecting(true);
+                          setDraft(item.content);
+                          setCorrectError('');
+                        }}
+                        accessibilityLabel="纠正这条记忆"
+                      >
+                        <Text
+                          style={[
+                            styles.miniButtonText,
+                            styles.miniButtonTextPrimary,
+                            (busy || !hasId) && styles.miniButtonDisabled,
+                          ]}
+                        >
+                          纠正
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[styles.miniButton, busy && styles.miniButtonDisabled]}
+                        disabled={busy || !hasId}
+                        onPress={() => onAction('deny')}
+                        accessibilityLabel="否认这条记忆"
+                      >
+                        <Text
+                          style={[
+                            styles.miniButtonText,
+                            styles.miniButtonDanger,
+                            (busy || !hasId) && styles.miniButtonDisabled,
+                          ]}
+                        >
+                          否认
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  </>
+                )}
+              </View>
+            </View>
+          )}
 
           <View style={styles.detailSection}>
             <TouchableOpacity
@@ -352,6 +505,12 @@ export function MemoryDetailModal({
                   ['supersedes', item.supersedes || '—'],
                   ['supersededBy', item.supersededBy || '—'],
                   ['pendingTargetId', item.pendingTargetId || '—'],
+                  ['confirmationCount', String(item.confirmationCount || 0)],
+                  ['lastConfirmedAt', item.lastConfirmedAt || '—'],
+                  ['withdrawnAt', item.withdrawnAt || '—'],
+                  ['withdrawnReason', item.withdrawnReason || '—'],
+                  ['archivedReason', item.archivedReason || '—'],
+                  ['contestedBy', item.contestedBy || '—'],
                 ].map(([label, value]) => (
                   <View key={label} style={styles.detailRow}>
                     <Text style={styles.detailRowLabel}>{label}</Text>
@@ -481,6 +640,18 @@ const createStyles = (theme: Theme) =>
     },
     technicalCard: {
       marginTop: 8,
+    },
+    correctInput: {
+      minHeight: 84,
+      padding: 10,
+      borderRadius: 12,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      backgroundColor: theme.surfaceAlt,
+      color: theme.textPrimary,
+      fontSize: 13,
+      lineHeight: 19,
+      textAlignVertical: 'top',
     },
     noIdNote: {
       marginTop: 16,

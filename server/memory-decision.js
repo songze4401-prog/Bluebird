@@ -36,8 +36,8 @@ function reject(reason) {
   return { decision: DECISION.REJECT, reason, target: null };
 }
 
-function needsConfirmation(reason, target = null) {
-  return { decision: DECISION.NEEDS_CONFIRMATION, reason, target };
+function needsConfirmation(reason, target = null, extra = {}) {
+  return { decision: DECISION.NEEDS_CONFIRMATION, reason, target, ...extra };
 }
 
 /**
@@ -87,7 +87,9 @@ function decide({ candidate, matches = [], target = null, rules = DEFAULT_RULES 
   );
 
   if (duplicates.length > 1) {
-    return needsConfirmation('ambiguous_duplicate');
+    return needsConfirmation('ambiguous_duplicate', null, {
+      duplicates: duplicates.map(match => match.item),
+    });
   }
 
   if (duplicates.length === 1) {
@@ -115,7 +117,9 @@ function decide({ candidate, matches = [], target = null, rules = DEFAULT_RULES 
   );
 
   if (conflicts.length > 1) {
-    return needsConfirmation('ambiguous_conflict');
+    return needsConfirmation('ambiguous_conflict', null, {
+      conflicts: conflicts.map(match => match.item),
+    });
   }
 
   if (conflicts.length === 1) {

@@ -1199,9 +1199,28 @@ function publicCapabilities() {
   };
 }
 
-async function searchForContext({ query, sessionId, userId = null, now = Date.now() } = {}) {
+async function searchForContext({
+  query,
+  sessionId,
+  userId = null,
+  now = Date.now(),
+  sources = null,
+  limit = null,
+  tokenBudget = null,
+  timeoutMs = null,
+} = {}) {
   if (!config.enabled || !config.contextEnabled) {
     return { status: 'disabled', count: 0, items: [], trace: null };
+  }
+
+  const contextSources = Array.isArray(sources)
+    ? sources.filter(source =>
+        ['document', 'web', 'code'].includes(source)
+      )
+    : config.contextSources;
+
+  if (!contextSources.length) {
+    return { status: 'no_result', count: 0, items: [], trace: null };
   }
   initialize();
   if (initError) {
@@ -1226,7 +1245,7 @@ async function searchForContext({ query, sessionId, userId = null, now = Date.no
       error: describeError('index_unavailable'),
     };
   }
-  const hasContextSource = config.contextSources.some(
+  const hasContextSource = contextSources.some(
     type => (current.sourcesByType[type] || 0) > 0
   );
   if (!hasContextSource) {
@@ -1237,12 +1256,18 @@ async function searchForContext({ query, sessionId, userId = null, now = Date.no
     query,
     sessionId,
     userId,
-    sources: config.contextSources,
+    sources: contextSources,
     purpose: 'chat_context',
     categories: ['knowledge'],
-    limit: config.limits.contextMaxItems,
-    tokenBudget: config.limits.contextTokenBudget,
-    timeoutMs: config.limits.contextTimeoutMs,
+    limit: Number.isFinite(limit)
+      ? Math.min(Math.max(Math.floor(limit), 1), 10)
+      : config.limits.contextMaxItems,
+    tokenBudget: Number.isFinite(tokenBudget)
+      ? Math.min(Math.max(Math.floor(tokenBudget), 100), 4000)
+      : config.limits.contextTokenBudget,
+    timeoutMs: Number.isFinite(timeoutMs)
+      ? Math.min(Math.max(Math.floor(timeoutMs), 100), 8000)
+      : config.limits.contextTimeoutMs,
     now,
   });
 
