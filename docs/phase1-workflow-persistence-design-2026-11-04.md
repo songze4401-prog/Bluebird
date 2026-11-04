@@ -1,11 +1,11 @@
 # Phase 1 本体第一段：持久化 Workflow 与崩溃恢复设计（2026-11-04）
 
-分支：`phase1/persistent-workflow-2026-11-04`（基于 `e08b168`）。本文件只做设计，不含任何实现；带「推断」的结论未经运行验证。
+分支：`phase1/persistent-workflow-2026-11-04`（基于 `e08b168`）。第四、五、九节已按 P1–P3 的实际实现改写；第一至三、六至八节仍是设计原稿（带「推断」的结论未经运行验证）。
 
 ## 结论先行
 
 - **推荐方案：Outbox / 两阶段（意图先落盘 + 执行后补结果 + 幂等键）**，不选「单文件原子提交」。理由：外部工具副作用不在任何文件里，单文件提交只能解决「文件 A vs 文件 B」，解决不了「副作用已发生但记录没写」——后者正是本链路最危险的窗口。
-- **最危险崩溃窗口：审批执行 `executing` 之后、`memoryService.execute` 返回之后、审批 `completed` 落盘之前**（[approvals.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/approvals.js#L591-L622) L591-L622）。崩在这里：副作用可能已经发生，重启后 `recoverInterrupted` 把审批与任务都标成 `failed`（[approvals.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/approvals.js#L745-L784) L749-L784），系统既不重试也无法证明执行过；若人工再批准一次，就会重复执行。
+- **最危险崩溃窗口：审批执行 `executing` 之后、`memoryService.execute` 返回之后、审批 `completed` 落盘之前**（原 W6c）。**已由 P3 关闭**：审批执行的 `begin` 先于 handler 落盘，重启时按账本三分支收敛（`succeeded` → 收敛为已执行；`started/unknown` → 任务 `recovery` 待核对；只有账本确认没执行过才判失败），详见第九节。
 - **工作量（估算）**：5 个可独立回滚的提交，约 600–900 行新增（含测试），新增 1 个存储模块 + 3 个测试文件；不含 Worker Pool / Blackboard。
 
 ## 一、现状盘点
@@ -35,10 +35,10 @@
 | W2 | 调度 → 拿租约 → `recordRunStart` → `accepted` | runtime.js L601-L628 | `attempts` 已 +1 但状态未推进 | 无 | 租约过期后可被重新领取；未进入 `accepted` 的任务仍属可调度状态 |
 | W3 | `accepted` → 会话归属 → `running` | runtime.js L622-L694 | 会话标记 running、任务仍 `accepted` | 无（还没执行模型） | 重启按可恢复态处理：只读任务 → `retrying`；含 `memory_remember` → `recovery`（tasks.js L1264-L1314） |
 | W4 | 模型/工具执行中（含 checkpoint） | runtime.js L751-L777；checkpoint L569-L592 | 最后一次 checkpoint 之后的进度 | **只读工具可能重跑**；含副作用工具不重跑 | 重启：有副作用 → `recovery` 等人工；只读 → `retrying` 自动重跑（tasks.js L1280-L1314） |
-| W5 | 创建审批：**先把任务移到 `waiting_approval`，再保存审批记录** | approvals.js L399-L406 → L448-L449 | 任务已 `waiting_approval`，但审批记录不存在 | 无 | 若任务没有 `deadlineMs`，启动恢复 `getTaskDeadlineAt` 为 null 直接 `continue`（tasks.js L1252-L1258）→ **永久卡在等待态** |
+| W5 | 创建审批：**先把任务移到 `waiting_approval`，再保存审批记录** | approvals.js L399-L406 → L448-L449 | 任务已 `waiting_approval`，但审批记录不存在 | 无 | 若任务没有 `deadlineMs`，启动恢复 `getTaskDeadlineAt` 为 null 直接 `continue`（tasks.js L1252-L1258）→ **永久卡在等待态**。**P3 已修复**：改为先落审批记录再迁任务（失败回滚记录），并对「pending 记录 + 任务未进等待态」与「等待态无审批记录」两种中间态做启动对账（见第九节） |
 | W6a | 审批执行：任务回 `running` 后、审批置 `executing` 前 | approvals.js L588-L594 | 审批保持 `approved`、任务 `running` | 可能重跑模型 | 重启把 running 任务按只读/副作用分类处理（tasks.js L1264-L1314）；审批仍可再次点击执行 |
-| W6b | 审批 `executing` 已落盘、副作用调用前 | approvals.js L591-L600 | 无副作用 | 无 | 重启把审批与任务标 `failed`（`interrupted`/`approval_interrupted`，approvals.js L749-L784）——**假失败** |
-| **W6c** | **副作用调用返回后、审批 `completed` 落盘前** | approvals.js L600-L622 | **副作用已发生但没有成功记录** | 自动重试不会发生；**人工再次批准会重复执行** | 重启标 `failed`；无任何「已执行」证据，最危险 |
+| W6b | 审批 `executing` 已落盘、副作用调用前 | approvals.js L591-L600 | 无副作用 | 无 | 重启把审批与任务标 `failed`（`interrupted`/`approval_interrupted`，approvals.js L749-L784）——**假失败**。**P3 已修复**：账本有 `started` 行（begin 先于 handler）→ 任务 `recovery`、审批退回 `approved` 带 `side_effect_unknown`，不写 `failed` |
+| **W6c** | **副作用调用返回后、审批 `completed` 落盘前** | approvals.js L600-L622 | **副作用已发生但没有成功记录** | 自动重试不会发生；**人工再次批准会重复执行** | 重启标 `failed`；无任何「已执行」证据，最危险。**P3 已修复**：账本 `started` + handler 已返回时，重启按 `started` 分支进 `recovery` 等人工核对；同键再点执行会被闸门拦住（`side_effect_unknown`），不会重跑 |
 | W6d | 审批 `completed` 已落盘、任务 `completed` 前 | approvals.js L622-L650+ | 审批成功、任务仍 `running` | 推断：任务可能被按失败/恢复收口 | 重启按 running 任务处理；审批与任务结论不一致 |
 | W6e | 审批产物已落盘、任务提交前 | approvals.js L630-L650 | 产物成为 orphan | 无 | 依赖 TTL 168h 清理（artifact-commit 顶部常量） |
 | W7 | 完成路径：产物落盘 → `completeTask` → `recordRunFinish` → 释放租约 → 投递 | runtime.js L795-L847 | 各段各丢一段 | 投递有幂等保护（见下） | 见分项 |
@@ -86,8 +86,8 @@
 新增/调整后的顺序（每步给输入输出与失败分支）：
 
 1. **单实例锁**之后加载 stores（输入：磁盘文件；输出：内存快照；失败：`agent_tasks_corrupted` 直接退出，不自动重建）。
-2. **审批恢复**（现状 L745-L793）：`executing` → 新增「先查 op ledger：有 `started/succeeded` 则标 `unknown` 而不是 `failed`」；R2 overdue 标记；输出待人工清单。
-3. **任务恢复**（现状 tasks.js L1239-L1316）：`waiting_approval` 先做**孤儿审批对账**——任务在等待但 `approvals` 无对应记录 → 无 `deadlineMs` 的转 `recovery`（而非永久 `pending`），有 deadline 的按到期收敛；`running/accepted` 按 side-effect 分类；输出：排队队列 + recovery 清单。
+2. **审批恢复**（P3 已改）：`executing` 逐条查 op ledger 三分支收敛（`succeeded` → 已执行；`started/unknown` → `recovery`；账本确认无行 → `failed`）；再做两条中间态对账（pending 记录推回等待态、等待态无审批记录 → `recovery`）；R2 overdue 标记；输出待人工清单。
+3. **任务恢复**（现状 tasks.js L1239-L1316）：`running/accepted` 按 side-effect 分类；输出：排队队列 + recovery 清单。
 4. **op ledger 扫描**：把 `started` 超期条目转 `unknown`，并对其 task 打 `requiresReview`；输出：需人工核对的 op 列表。
 5. **投递补偿**（现状 L206-L224）+ **事件 outbox flush**：输入终态且未投递任务；失败：`deliveryStatus=failed` 并留事件，不阻塞启动。
 6. **开调度**（现状 L53-L80）：只取 `queued/retrying` 且 `retryAt <= now`；失败：延后 2s 重排，不原地热循环（现状 L67-L73）。
@@ -117,7 +117,7 @@
 | P1 | 新增 `op-ledger` 存储模块（schema、读写、哈希键、清理）+ 单测（不接任何执行器） | 新测试文件全绿；现有套件不变 | 删除模块与新测试 |
 | P2 | runtime 副作用工具路径接 ledger：执行前写 `started`，成功后补 `succeeded`；崩溃 → `unknown` → `recovery` | 崩溃注入 W4 用例：账本唯一键=1，任务 `recovery` 非 `completed` | 还原调用点，保留 P1 模块 |
 | P3 | 审批执行接 ledger（W6b/W6c）+ 审批恢复区分 `unknown|failed` | W6c 用例：账本 1 行、审批/Task 标 `unknown` 人工核对，不标 `failed` | 还原 approvals.js 调用点 |
-| P4 | 修复 W5：创建审批顺序（记录先落盘再移任务，或启动对账兜底）+ 启动恢复对账 | 用例：等待态无审批记录 → 启动后不再永久卡死 | 还原排序/对账 |
+| P4 | 修复 W5：创建审批顺序（记录先落盘再移任务，或启动对账兜底）+ 启动恢复对账。**已并入 P3 落地**（用户要求审批接入与 W5 同一轮收口），剩 P4 只做本轮未覆盖的窗口 | 用例：等待态无审批记录 → 启动后不再永久卡死 | 还原排序/对账 |
 | P5 | 跑完 `run-tests.js` 崩溃注入集 + 计数同步（baseline、doc-counts、CI 注释） | 五门禁 + 全量回归 | 单独回滚该提交 |
 
 每步只碰 1–2 个模块，均可在 `phase1/persistent-workflow-2026-11-04` 上单独 revert。
@@ -133,4 +133,42 @@
 
 **明确不做**：Worker Pool（多进程/线程）、Blackboard、`trustLevel`、云端部署；不改状态词表与 `state-machine.js`；不做 `planId`/`planVersion` 的写入（留给下一段 Workflow Store 本体）。
 
-本轮只产出本设计文档，**未写任何实现代码，未开始 Phase 1 本体，未合并、未开 PR、未触碰 `main`**。
+## 九、P3 审批接入实现口径（已落地）
+
+**执行顺序（`approvals.execute`）**
+
+1. 校验：`approved`、策略、权限、关联任务处于 `waiting_approval`（只读检查，不提前迁状态）。
+2. 算幂等键 `opKey`：`taskId` 取 `record.taskId`（无关联任务时退化为 `approvalId`，账本要求非空）；`stepId` 仍内容寻址，用 `approvalId` 作第三分量加盐——每个审批是一次独立的用户授权，两条同参审批不能合并成一次；`approvalId` 是稳定身份而非位置量，重启后算得出同一个键。
+3. `executing` 与 `opKey` 同一笔落盘。
+4. `guard.before`（账本 `begin`，fsync）先于 handler；写不下去就不执行。命中 `succeeded` 走复用收敛，命中 `started/unknown` 直接进「不确定」分支，不执行。
+5. `begin` 之后才把任务从 `waiting_approval` 迁回 `running`。
+6. `memoryService.execute`（handler）。
+7. `guard.after` 补终态：成功 `succeeded`（存 summary 原文，≤4096 字节）、业务失败 `failed`、抛异常 `unknown`。
+8. 审批记录落终态，再补任务产物与任务状态。
+
+**崩溃分支（`recoverInterrupted` → `reconcileExecuting`）**
+
+| 账本状态 | 审批记录 | 任务 |
+| --- | --- | --- |
+| `succeeded` | `completed`，result 取账本原文 | 补产物后 `completed` |
+| `started` | 先 `markUnknown` 封账，再退回 `approved` + `side_effect_unknown` | `recovery` |
+| `unknown` | 退回 `approved` + `side_effect_unknown` | `recovery` |
+| `failed` | `failed`（沿用账本 errorCode） | `failed` |
+| 无 `opKey`（旧版本残留）/ 账本读不出来 | 退回 `approved` + `side_effect_unknown` | `recovery` |
+| 有 `opKey` 但账本无该行 | `failed`（`approval_interrupted`） | `failed` |
+
+- 审批状态词表没有 `recovery`，所以「不确定」的审批一律退回 `approved` 并带 `errorCode`，由任务侧的 `recovery` 表达「等人工核对」；不新增状态词、不改迁移表。
+- **旧记录**：P3 之前写下的 `executing` 记录没有 `opKey`，旧版本执行前不写账本，查不到行**不能**证明没执行过——按不确定处理，比原来的「一律 failed」更保守。
+- 业务失败（`result.reason !== 'ok'`）与抛异常分开：前者是结构化的「确定没做成」，可判 `failed`；后者可能已写了一半，只能 `unknown`。
+
+**W5 修复**
+
+- `createApproval`：先 `save()` 审批记录，再 `moveTaskToApproval`；迁移失败删除记录、重新保存后抛出。崩在两步之间 → 「记录 pending、任务还在原状态」，不再出现「任务等审批、审批记录不存在」。
+- 启动对账两条：① pending 记录 + 任务未进 `waiting_approval` → 推回等待态；② 任务停在 `waiting_approval` 且没有任何未终结审批记录 → 任务 `recovery` + `approval_record_missing`。
+
+**已知边界**
+
+- 「审批记录已 `completed`、任务还没完成」的极窄窗口未单独对账：若同时丢了产物引用，会按「等待态无未终结审批记录」的规则落 `recovery`——保守，不假装成功。
+- 审批与运行时共用同一个账本文件，靠 `approvalId` 加盐隔离键空间，两者不会互相命中。
+
+P1–P3 已在本分支落地（每步独立提交），**未合并、未开 PR、未触碰 `main`**；P4/P5 仍待排期。

@@ -4020,7 +4020,8 @@ if (!retrievalStatus.enabled) {
 monitoring.initMonitoring();
 
 // 重启恢复：crash 时停在 accepted/running 的任务重新入队；
-// executing 审批标记失败，等待人工重新申请，绝不自动执行。
+// executing 审批按幂等账本收敛：已成功→收敛为已执行，可能已执行→recovery 等人工核对，
+// 只有账本确认没执行过才判失败；一律不自动重试。
 const approvalRecovery = agentApprovals.recoverInterrupted();
 const agentQueue = agentRuntime.initializeTaskQueue();
 console.log(
