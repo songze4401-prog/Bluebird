@@ -79,7 +79,21 @@ const PLAN_KEYS = Object.freeze([
   'goalDigest',
 ]);
 
-const STEP_KEYS = Object.freeze(['stepKey', 'toolName', 'argsDigest', 'label']);
+// Phase 1 交付物 1（Planner 侧）：在既有 step schema 上**增量**增加可执行编排字段。
+// 步骤身份仍是 stepKey（内容寻址），新增字段只描述「这一步要哪个能力、依赖哪一步」，
+// 不引入第二套计划存储，也不改 planId/planVersion 的分配口径。
+const STEP_KEYS = Object.freeze([
+  'stepKey',
+  'toolName',
+  'argsDigest',
+  'label',
+  'goal',
+  'capability',
+  'taskType',
+  'dependsOn',
+]);
+const STEP_GOAL_MAX = 200;
+const STEP_DEPENDS_MAX = 8;
 
 function ensureDir() {
   fs.mkdirSync(AGENTS_DIR, { recursive: true });
@@ -241,6 +255,31 @@ function assertStep(step, index) {
     allowEmpty: true,
   });
   assertString(`${where}.label`, step.label, { max: LABEL_MAX, allowEmpty: true });
+
+  // 可选编排字段：只校验「给了就必须合法」，不给则保持既有四字段 step 兼容。
+  if (step.goal !== undefined) {
+    assertString(`${where}.goal`, step.goal, { max: STEP_GOAL_MAX });
+  }
+  if (step.capability !== undefined) {
+    assertString(`${where}.capability`, step.capability, { max: TOOL_NAME_MAX });
+  }
+  if (step.taskType !== undefined) {
+    assertString(`${where}.taskType`, step.taskType, { max: TOOL_NAME_MAX });
+  }
+  if (step.dependsOn !== undefined) {
+    if (!Array.isArray(step.dependsOn)) {
+      throw planError('plan_invalid', `${where}.dependsOn 必须是数组`);
+    }
+    if (step.dependsOn.length > STEP_DEPENDS_MAX) {
+      throw planError(
+        'plan_invalid',
+        `${where}.dependsOn 不能超过 ${STEP_DEPENDS_MAX} 条`
+      );
+    }
+    step.dependsOn.forEach((dep, depIndex) => {
+      assertString(`${where}.dependsOn[${depIndex}]`, dep, { max: 64 });
+    });
+  }
 }
 
 /**
@@ -617,10 +656,12 @@ function storeBytes(store) {
  * 追加一个不可变版本。
  * - planId 为空 → 新建血缘（`plan_<uuid>`），版本 1；
  * - planId 已存在 → headVersion+1，旧版本原样保留；
+ * - planId 不存在且 allowCreate=true → 以该 id 新建血缘（Planner 的确定性 planId
+ *   需要它；默认 false，避免拼错 planId 被静默当成新建）；
  * - 校验/上限任一失败 → 抛错且不写盘（磁盘上不会留下半截计划）。
  * liveRefs 仅在 Store 触顶需要裁剪时使用：由调用方从任务文件现场扫描传入。
  */
-function appendVersion({ plan, planId = null, liveRefs = [], now } = {}) {
+function appendVersion({ plan, planId = null, liveRefs = [], now, allowCreate = false } = {}) {
   const normalized = validatePlan(plan);
   const digest = digestPlan(normalized);
   const store = read();
@@ -635,8 +676,9 @@ function appendVersion({ plan, planId = null, liveRefs = [], now } = {}) {
 
   const at = iso(now);
   const existing = store.plans[resolvedPlanId];
-  if (!existing && planId !== null && planId !== undefined) {
+  if (!existing && planId !== null && planId !== undefined && !allowCreate) {
     // 指定血缘必须已存在：拼错 planId 时新建血缘会让「重规划」变成静默新建。
+    // Planner 需要「同一目标固定 planId」时才显式传 allowCreate=true。
     throw planError('plan_missing', '计划血缘不存在', 404);
   }
 

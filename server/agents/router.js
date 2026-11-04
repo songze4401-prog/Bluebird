@@ -571,14 +571,24 @@ function createRouter(overrides = {}) {
       workerSessionId = session.id;
     }
 
-    // 写序（硬要求）：计划先落盘并 fsync，任务才带着指针创建。
-    // appendVersion 内部是 writeFileAtomicSync（fsync + rename + 目录 fsync），
-    // 返回时计划已经可读；因此不存在「任务引用了不存在的计划」的持久态。
-    // 若 createTask 随后失败（如任务总数上限），计划会留成孤儿，24h 后由 Store 清理，
-    // 但磁盘上绝不会出现指向不存在计划的任务。
-    const workflowPlan = workflowStore.appendVersion({
-      plan: buildWorkflowPlan(normalized, decision),
-    });
+    // Phase 1 交付物 1（Planner 侧）：批量计划一次落盘，多任务共享同一个
+    // (planId, planVersion)。调用方传入 workflowPlan 时**只校验并复用**，
+    // 不再 appendVersion；未传时保持原行为（每个任务冻结自己的单步计划）。
+    let workflowPlan;
+    if (input.workflowPlan) {
+      const pinned = input.workflowPlan;
+      const frozen = workflowStore.getVersion(pinned.planId, pinned.planVersion);
+      workflowPlan = { planId: frozen.planId, planVersion: frozen.planVersion };
+    } else {
+      // 写序（硬要求）：计划先落盘并 fsync，任务才带着指针创建。
+      // appendVersion 内部是 writeFileAtomicSync（fsync + rename + 目录 fsync），
+      // 返回时计划已经可读；因此不存在「任务引用了不存在的计划」的持久态。
+      // 若 createTask 随后失败（如任务总数上限），计划会留成孤儿，24h 后由 Store 清理，
+      // 但磁盘上绝不会出现指向不存在计划的任务。
+      workflowPlan = workflowStore.appendVersion({
+        plan: buildWorkflowPlan(normalized, decision),
+      });
+    }
 
     const task = taskStore.createTask({
       agentId,
