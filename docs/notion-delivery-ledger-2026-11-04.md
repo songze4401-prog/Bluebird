@@ -576,7 +576,7 @@ enabled = ["executor","researcher","reviewer"]；registeredAgents = 4
 - 重投为同进程调用（`start=true` 时延迟取 `runtime.startTask`），跨进程并发重投未验证（按边界不建跨进程锁）；
 - 死信记录复用 `tasks.json` 与任务事件文件，无独立死信表；死信长期堆积的清理策略未做（超出原文要求）。
 
-**门禁与全量（实测）**：`tsc --noEmit` EXIT=0；`eslint`（改动文件）0 error（余为既存 warning）；`verify-test-coverage` → `backend=2217/2217 nodeSuite=222/222 runner=1995/1995 frontend=188/188 suites=22/22 failed=0`、CI runner 91/91；`sync-doc-counts --check` → `backend 2217、nodeSuite 222、runner 1995、frontend 188、文件 91` EXIT=0；`verify-api-capabilities`（95 路由 / 20 族 / 仅 API 9）EXIT=0；全量 `node scripts/run-tests.js` → 首跑出现 1 个 `memory-bot` 偶发失败，该文件隔离复跑通过（exit 0），第二次全量 `91 个测试文件，全部通过`、`FULL_EXIT=0`。
+**门禁与全量（实测）**：`tsc --noEmit` EXIT=0；`eslint`（改动文件）0 error（余为既存 warning）；`verify-test-coverage` → `backend=2217/2217 nodeSuite=222/222 runner=1995/1995 frontend=188/188 suites=22/22 failed=0`、CI runner 91/91；`sync-doc-counts --check` → `backend 2217、nodeSuite 222、runner 1995、frontend 188、文件 91` EXIT=0；`verify-api-capabilities`（95 路由 / 20 族 / 仅 API 9）EXIT=0；全量 `node scripts/run-tests.js` → 首跑出现 1 个 `memory-bot` 偶发失败，该文件隔离复跑通过（exit 0），第二次全量 `91 个测试文件，全部通过`、`FULL_EXIT=0`；收口复核（本轮台账提交后，前台）再次全量 → `91 个测试文件，全部通过`、`FULL_EXIT=0`。
 
 ---
 
