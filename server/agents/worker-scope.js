@@ -355,6 +355,62 @@ function openWorkerScope({
     return artifactStore.readContent(artifactId);
   }
 
+  /**
+   * Phase 2 第 1 项：跨 Worker 读共享产物。
+   * 两道门都必须过：① 服务端令牌有效且显式允许该产物所属任务（authorizeCross）；
+   * ② 产物已由拥有者登记共享给本任务（artifact-store.share），且按登记版本读取。
+   * 任一不满足：写 worker.scope_denied 审计，错误体不带对方正文，不回显内容。
+   */
+  const SHARED_DENY_CODES = Object.freeze({
+    not_found: 'artifact_not_found',
+    not_shared: 'artifact_not_shared',
+    requester_not_allowed: 'artifact_not_shared',
+    version_mismatch: 'artifact_version_mismatch',
+    invalidated: 'artifact_not_active',
+  });
+
+  function readSharedArtifact(id, { token, version = null } = {}) {
+    assertOwn();
+    const artifactId = truncate(id);
+    const artifact = artifactStore.get(artifactId);
+    if (!artifact) {
+      throw new AgentError('artifact_not_found', '产物不可读', 409, { artifactId });
+    }
+    if (artifact.taskId === boundTaskId) {
+      return artifactStore.readContent(artifactId, { version });
+    }
+    authorizeCross('artifact', artifactId, artifact.taskId, token);
+    const access = artifactStore.sharedAccess(artifactId, {
+      requesterTaskId: boundTaskId,
+      version,
+    });
+    if (!access.ok) {
+      const errorCode = SHARED_DENY_CODES[access.state] || 'artifact_not_shared';
+      auditRead(botId, boundTaskId, boundSessionId, runId, 'worker.scope_denied', {
+        targetType: 'artifact',
+        targetId: artifactId,
+        requesterTaskId: boundTaskId,
+        access: 'denied',
+        reason: access.state,
+        errorCode,
+      });
+      throw new AgentError(errorCode, '跨 Worker 共享产物读取被拒绝', 409, {
+        targetType: 'artifact',
+        targetId: artifactId,
+        reason: access.state,
+      });
+    }
+    auditRead(botId, boundTaskId, boundSessionId, runId, 'worker.scope_read', {
+      targetType: 'artifact',
+      targetId: artifactId,
+      requesterTaskId: boundTaskId,
+      access: 'granted',
+      grantedBy: artifact.share && artifact.share.byTaskId ? artifact.share.byTaskId : null,
+      reason: 'shared_artifact',
+    });
+    return artifactStore.readContent(artifactId, { version: access.version });
+  }
+
   return {
     botId,
     taskId: boundTaskId,
@@ -366,6 +422,7 @@ function openWorkerScope({
     readOwnArtifact,
     readOtherMessages,
     readOtherArtifact,
+    readSharedArtifact,
   };
 }
 

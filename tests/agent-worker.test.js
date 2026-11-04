@@ -1107,6 +1107,124 @@ test('HTTP 回归：direct 会话与缺失会话的既有行为不变', async ()
   assert.ok(Array.isArray(listJson.sessions));
 });
 
+// ---- H2. 共享产物访问控制（Phase 2 第 1 项） ----
+// 证据边界：同一进程 + 库级调用（未新增 HTTP 路由），令牌为服务端签发。
+
+test('共享产物：未登记共享时，令牌允许任务也拒绝读取，留痕且不回显正文', () => {
+  const taskA = makeTask({ goal: '共享未登记甲' });
+  const taskB = makeTask({ goal: '共享未登记乙' });
+  const sessionA = sessions.createSession('memory', { title: '共享甲', scope: 'worker' });
+  const sessionB = sessions.createSession('memory', { title: '共享乙', scope: 'worker' });
+  const scopeA = openScope(taskA.taskId, sessionA.id, 'run_share_deny');
+  openScope(taskB.taskId, sessionB.id, 'run_share_owner');
+  const artifactB = persistScopeArtifact(taskB.taskId, '乙的私有共享候选正文');
+  const grant = workerScope.issueScopeToken({
+    botId: 'memory',
+    taskId: taskA.taskId,
+    sessionId: sessionA.id,
+    allowedTaskIds: [taskB.taskId],
+    grantedBy: 'owner',
+    reason: '尝试共享读取',
+  });
+
+  const denied = captureError(() => scopeA.readSharedArtifact(artifactB.id, { token: grant }));
+  assert.equal(denied && denied.code, 'artifact_not_shared');
+  assert.equal(denied.status, 409);
+  assert.ok(!String(denied.message).includes('乙的私有共享候选正文'));
+  assert.ok(!JSON.stringify(denied).includes('乙的私有共享候选正文'));
+
+  const deniedEvents = taskEvents(taskA.taskId).filter(
+    event => event.eventType === 'worker.scope_denied' && event.payload.targetId === artifactB.id
+  );
+  assert.equal(deniedEvents.length, 1);
+  assert.equal(deniedEvents[0].payload.reason, 'not_shared');
+  assert.equal(deniedEvents[0].payload.errorCode, 'artifact_not_shared');
+  assert.equal(deniedEvents[0].payload.access, 'denied');
+  console.log(
+    '[共享-未登记]',
+    JSON.stringify({
+      artifactId: artifactB.id,
+      code: denied.code,
+      reason: deniedEvents[0].payload.reason,
+      errorCode: deniedEvents[0].payload.errorCode,
+      bodyEchoed: JSON.stringify(denied).includes('乙的私有共享候选正文'),
+    })
+  );
+});
+
+test('共享产物：登记共享后持有效令牌按登记版本可读；无令牌或版本不符被拒', () => {
+  const taskC = makeTask({ goal: '共享接收丙' });
+  const taskD = makeTask({ goal: '共享来源丁' });
+  const sessionC = sessions.createSession('memory', { title: '共享丙', scope: 'worker' });
+  const sessionD = sessions.createSession('memory', { title: '共享丁', scope: 'worker' });
+  const scopeC = openScope(taskC.taskId, sessionC.id, 'run_share_read');
+  openScope(taskD.taskId, sessionD.id, 'run_share_owner_d');
+  const artifactD = persistScopeArtifact(taskD.taskId, '丁的共享正文');
+  const grant = workerScope.issueScopeToken({
+    botId: 'memory',
+    taskId: taskC.taskId,
+    sessionId: sessionC.id,
+    allowedTaskIds: [taskD.taskId],
+    grantedBy: 'owner',
+    reason: '同批次协作',
+  });
+
+  // 登记之前：令牌合法也不放行。
+  const beforeShare = captureError(() =>
+    scopeC.readSharedArtifact(artifactD.id, { token: grant })
+  );
+  assert.equal(beforeShare && beforeShare.code, 'artifact_not_shared');
+
+  // 拥有者登记共享给丙（版本在登记时钉住）。
+  artifactStore.share(artifactD.id, { withTaskIds: [taskC.taskId], byTaskId: taskD.taskId });
+
+  // 无令牌 → 401，且不回显正文。
+  const noToken = captureError(() => scopeC.readSharedArtifact(artifactD.id, {}));
+  assert.equal(noToken && noToken.code, 'worker_scope_token_invalid');
+  assert.equal(noToken.status, 401);
+  assert.ok(!JSON.stringify(noToken).includes('丁的共享正文'));
+
+  const read = scopeC.readSharedArtifact(artifactD.id, {
+    token: grant,
+    version: artifactD.version,
+  });
+  assert.equal(read.content.text, '丁的共享正文');
+  assert.equal(read.version, artifactD.version);
+
+  const wrongVersion = captureError(() =>
+    scopeC.readSharedArtifact(artifactD.id, {
+      token: grant,
+      version: artifactD.version + 1,
+    })
+  );
+  assert.equal(wrongVersion && wrongVersion.code, 'artifact_version_mismatch');
+
+  const deniedEvents = taskEvents(taskC.taskId).filter(
+    event => event.eventType === 'worker.scope_denied' && event.payload.targetId === artifactD.id
+  );
+  assert.deepEqual(
+    deniedEvents.map(event => event.payload.reason).sort(),
+    ['not_shared', 'token_missing', 'version_mismatch']
+  );
+  const readEvents = taskEvents(taskC.taskId).filter(
+    event => event.eventType === 'worker.scope_read' && event.payload.targetId === artifactD.id
+  );
+  assert.ok(readEvents.some(event => event.payload.reason === 'shared_artifact'));
+  console.log(
+    '[共享-登记读取]',
+    JSON.stringify({
+      artifactId: artifactD.id,
+      sharedVersion: artifactStore.get(artifactD.id).share.version,
+      sharedTargets: artifactStore.get(artifactD.id).share.taskIds.length,
+      readVersion: read.version,
+      noTokenCode: noToken.code,
+      wrongVersionCode: wrongVersion.code,
+      denyReasons: deniedEvents.map(event => event.payload.reason),
+      grantedAudit: readEvents.some(event => event.payload.reason === 'shared_artifact'),
+    })
+  );
+});
+
 // ---- I. 依赖管理：阻塞/放行、失败级联、取消级联、全局并发上限 ----
 // 证据边界：同一进程 + 真实 HTTP stub Provider；不含跨进程与真实模型并发。
 
