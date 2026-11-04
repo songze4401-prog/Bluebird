@@ -98,6 +98,8 @@ const NOTES = {
     'idempotency ledger storage (P1): strict canonicalArgs (key order, nested, optional/undefined vs null, string-vs-number, Chinese/space, delimiter ambiguity, NaN/cycle rejection), opKey hashing, begin/finish/markUnknown, 7-day retention and 5000-entry cleanup that never drops started/unknown',
   'agent-side-effect-ledger':
     'runtime idempotency wiring (P2): begin-before-execute, succeeded reuse without re-execution, started residue routes the task to recovery, timeout becomes unknown and blocks retry, failed retries in place with one row per opKey, dedupeKeyOverride escape hatch for intentional repeats, read-only tools write no ledger rows',
+  'agent-workflow-store':
+    'workflow store (C1): key-order-independent plan digest, immutable versions with monotonic +1 and rollback-as-new-version, 8 KB / 32-step / 1 KB-step hard rejects with no half-written file, 10-version soft prune that never evicts a referenced version (including terminal/recovery refs and task-scan live refs), audit-before-delete, corrupted-store and per-version corruption codes',
   'agent-crash-injection':
     'real SIGKILL crash injection (P5): handler-returned-but-unrecorded leaves one unknown ledger row and recovery without re-running the handler, artifacts persisted before state commit stay pending-commit and converge as pending, approval-record-before-state-move self-heals to waiting_approval, an interrupted read-only run leaves no intermediate state',
   'agent-approval-recovery':

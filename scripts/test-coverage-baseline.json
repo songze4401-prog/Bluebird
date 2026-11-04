@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "updateRule": "新增/删除 tests/*.test.js 或改变用例数时，必须在同一变更中更新 files、backendTotal、nodeTestSuiteTotal、runnerTotal、frontend；不得只改总数或删除条目。nodeTestSuiteFiles 只包含由 node --test 七套命令执行的文件；runnerFiles 包含 CI 自定义 runner 逐文件执行的 71 个条目（其中 31 个仍使用 node:test 但按单文件退出码执行）。CI 清单必须覆盖所有 files 条目，verify-test-coverage.js 会检查。文档里的所有计数由 scripts/sync-doc-counts.js 从本文件生成，不要手工改数字。",
-  "backendTotal": 2111,
+  "updateRule": "新增/删除 tests/*.test.js 或改变用例数时，必须在同一变更中更新 files、backendTotal、nodeTestSuiteTotal、runnerTotal、frontend；不得只改总数或删除条目。nodeTestSuiteFiles 只包含由 node --test 七套命令执行的文件；runnerFiles 包含 CI 自定义 runner 逐文件执行的 72 个条目（其中 32 个仍使用 node:test 但按单文件退出码执行）。CI 清单必须覆盖所有 files 条目，verify-test-coverage.js 会检查。文档里的所有计数由 scripts/sync-doc-counts.js 从本文件生成，不要手工改数字。",
+  "backendTotal": 2124,
   "nodeTestSuiteTotal": 222,
-  "runnerTotal": 1889,
+  "runnerTotal": 1902,
   "frontend": {
     "suites": 22,
     "tests": 188
@@ -74,6 +74,7 @@
     "agent-approval-recovery",
     "agent-op-ledger",
     "agent-side-effect-ledger",
+    "agent-workflow-store",
     "agent-crash-injection",
     "agent-watchdog",
     "monitoring-api",
@@ -369,6 +370,11 @@
     "agent-side-effect-ledger": {
       "format": "node",
       "count": 8,
+      "runner": true
+    },
+    "agent-workflow-store": {
+      "format": "node",
+      "count": 13,
       "runner": true
     },
     "agent-crash-injection": {
