@@ -16,6 +16,7 @@ const tasks = require('./tasks');
 const dependencies = require('./dependencies');
 const workerScope = require('./worker-scope');
 const resultDelivery = require('./result-delivery');
+const deadLetter = require('./dead-letter');
 const { projectWorkerContext } = require('./context-projection');
 const { normalizeWorkerResult } = require('./worker-result');
 const { createToolAuthorizer } = require('./tool-gateway');
@@ -578,6 +579,7 @@ function finalizeWaitingApprovalExpiry(task, outcome) {
     status,
     errorCode,
     finishedAt,
+    usage: (result && result.usage) || null,
   });
   tasks.releaseLease(task.taskId);
   resultDelivery.deliverTaskOutcome(task.taskId, { status, result, errorCode });
@@ -1092,6 +1094,7 @@ async function runTask(taskId) {
       runId,
       status: 'completed',
       finishedAt: finalResult.finishedAt,
+      usage: finalResult.usage || null,
     });
     tasks.releaseLease(task.taskId);
     safeEvent(
@@ -1249,6 +1252,15 @@ async function runTask(taskId) {
       errorCode,
       finishedAt: failureResult.finishedAt,
     });
+    // 死信：连续失败已达上限 → 在既有 failed 终态上打标记（不新增状态）。
+    // 只有真正重试耗尽才算死信；取消/超时/结果不确定（recovery）不走这里。
+    if (status === 'failed' && attempts >= maxAttempts) {
+      try {
+        deadLetter.mark(task.taskId, { errorCode, attempts, maxAttempts });
+      } catch (_) {
+        // 死信标记失败不反转任务终态；下次启动可补标。
+      }
+    }
     tasks.releaseLease(task.taskId);
     resultDelivery.deliverTaskOutcome(task.taskId, {
       status,

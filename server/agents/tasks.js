@@ -97,6 +97,8 @@ const EVENT_TYPES = Object.freeze([
   'verification.rejected',
   'verification.conflict',
   'verification.approval_requested',
+  'task.dead_letter',
+  'task.dead_letter_redelivered',
   'task.completed',
   'task.delivery',
   'task.failed',
@@ -184,6 +186,9 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'approvalId',
   'riskLevel',
   'checkCode',
+  'attempts',
+  'maxAttempts',
+  'redeliveredTaskId',
 ]);
 
 let taskCache = null;
@@ -1309,6 +1314,12 @@ function updateTask(taskId, patch = {}) {
   if (patch.startedAt !== undefined) task.startedAt = patch.startedAt;
   if (patch.completedAt !== undefined) task.completedAt = patch.completedAt;
   if (patch.errorCode !== undefined) task.errorCode = patch.errorCode;
+  // 死信是既有终态上的标记字段，不新增状态：只有 deadLetter 模块会写它。
+  if (patch.deadLetter !== undefined) {
+    task.deadLetter = patch.deadLetter && typeof patch.deadLetter === 'object'
+      ? { ...patch.deadLetter }
+      : null;
+  }
   if (patch.runId !== undefined) task.runId = patch.runId;
   if (patch.runStartedAt !== undefined) task.runStartedAt = patch.runStartedAt;
   if (patch.heartbeatAt !== undefined) task.heartbeatAt = patch.heartbeatAt;
@@ -1626,11 +1637,24 @@ function recordRunStart(taskId, { runId, attempt, startedAt } = {}) {
   return publicTask(task);
 }
 
-function recordRunFinish(taskId, { runId, status, errorCode = null, finishedAt } = {}) {
+function normalizeRunUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  const total = Number(usage.total_tokens);
+  if (!Number.isFinite(total) || total < 0) return null;
+  const asInt = value => (Number.isFinite(Number(value)) ? Math.floor(Number(value)) : null);
+  return {
+    prompt_tokens: asInt(usage.prompt_tokens),
+    completion_tokens: asInt(usage.completion_tokens),
+    total_tokens: Math.floor(total),
+  };
+}
+
+function recordRunFinish(taskId, { runId, status, errorCode = null, finishedAt, usage = null } = {}) {
   const state = loadTasks();
   const task = state.tasks[String(taskId || '')];
   if (!task) return null;
   const at = typeof finishedAt === 'string' ? finishedAt : nowIso();
+  const observed = normalizeRunUsage(usage);
   const runs = Array.isArray(task.runs) ? task.runs : [];
   const entry =
     runs.find(item => item.runId === runId && !item.finishedAt) ||
@@ -1640,6 +1664,8 @@ function recordRunFinish(taskId, { runId, status, errorCode = null, finishedAt }
     entry.finishedAt = at;
     entry.status = status || entry.status;
     entry.errorCode = errorCode || null;
+    // 真实供应商 usage：只有本次 attempt 拿到了才写，缺失时保持 null（绝不估算）。
+    entry.usage = observed;
   } else {
     runs.push({
       runId: runId || task.runId || null,
@@ -1648,6 +1674,7 @@ function recordRunFinish(taskId, { runId, status, errorCode = null, finishedAt }
       finishedAt: at,
       status: status || null,
       errorCode: errorCode || null,
+      usage: observed,
     });
   }
   task.runs = runs.slice(-RUN_HISTORY_MAX);
@@ -2055,6 +2082,59 @@ function reloadForTests() {
   outboxCache = null;
 }
 
+// 死信只落在既有终态任务的 deadLetter 标记上，不新增状态、不建第二套存储。
+function listDeadLetters({ status = 'open', limit = 50 } = {}) {
+  const state = loadTasks();
+  const rows = Object.values(state.tasks)
+    .filter(task => task.deadLetter && (!status || task.deadLetter.status === status))
+    .map(task => {
+      const detail = publicTask(task);
+      const artifacts = Array.isArray(task.result && task.result.artifacts)
+        ? task.result.artifacts.map(ref => ({
+            kind: ref && ref.kind,
+            id: ref && ref.id,
+            version: ref && ref.version,
+          }))
+        : [];
+      return {
+        taskId: task.taskId,
+        botId: task.botId,
+        taskType: task.taskType,
+        goal: task.goal,
+        status: detail.status,
+        errorCode: detail.errorCode,
+        attempts: Number(task.attempts) || 0,
+        deadLetter: { ...task.deadLetter },
+        artifacts,
+      };
+    })
+    .sort((left, right) =>
+      String((right.deadLetter && right.deadLetter.createdAt) || '').localeCompare(
+        String((left.deadLetter && left.deadLetter.createdAt) || '')
+      )
+    );
+  return rows.slice(0, Math.max(1, Number(limit) || 50));
+}
+
+// 成本/死信只读视图：全部任务（跨 bot）与 Run 预算账，避免调用方自建第二套存储。
+function listAllTasks() {
+  const state = loadTasks();
+  return Object.values(state.tasks).map(publicTask);
+}
+
+function getRunUsage(runId) {
+  const key = String(runId || '');
+  if (!key) return null;
+  const run = ensureTokenRuns(loadTasks())[key];
+  if (!run) return null;
+  return {
+    runId: key,
+    budget: Number.isInteger(run.budget) ? run.budget : null,
+    used: Number(run.used) || 0,
+    reserved: Number(run.reserved) || 0,
+  };
+}
+
 module.exports = {
   TASKS_FILE,
   EVENTS_FILE,
@@ -2068,8 +2148,11 @@ module.exports = {
   TASK_SCHEMA_VERSION,
   createTask,
   getTask,
+  listDeadLetters,
   getRawTask,
   listTasks,
+  listAllTasks,
+  getRunUsage,
   updateTask,
   transitionTask,
   appendEvent,
