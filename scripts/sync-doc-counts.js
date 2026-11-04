@@ -110,6 +110,8 @@ const NOTES = {
     'approval execution idempotency (P3): begin-before-handler, crash-after-execution resumes to recovery without re-running the handler, a succeeded ledger row converges to executed instead of failed, approval-record-before-state-move (W5) leaves no dangling task, orphan waiting_approval tasks converge to recovery',
   'agent-artifact-content':
     'artifact content replay (A): durable per-artifact body, restart-time read-back with contentHash verification, corrupted/missing content fail-closed (never empty), version chain keeps superseded versions while old refs stay frozen, terminal-task-referenced versions are never cleaned, >256KB rejected with no half state',
+  'agent-orphan-scheduler':
+    'orphan cleanup on a production cadence (B): one startup run plus a 6h period driven by injectable fake timers, single-instance re-entry guard, failures logged without crashing or blocking the next run, TTL boundary measured to the millisecond, and no catch-up for periods missed while the process was down',
   'reply-segmentation':
     'single-message default with a 400-char configurable hard limit, semantic split order (paragraph/newline/sentence), code-block and Markdown-link protection, English word boundaries',
   'monitoring-api':

@@ -24,6 +24,7 @@ const { createSideEffectGuard } = require('./side-effect-guard');
 const crashHook = require('./crash-hook');
 const opLedger = require('./op-ledger');
 const workflowStore = require('./workflow-store');
+const { createCleanupScheduler } = require('./orphan-scheduler');
 
 const MAX_USER_MESSAGE = 4000;
 const HISTORY_MESSAGES = 24;
@@ -1187,6 +1188,15 @@ function convergeWorkflowPlans({ now = Date.now() } = {}) {
   return summary;
 }
 
+// 进程内唯一调度器：initializeTaskQueue 可能被多次调用（测试、热重启路径），
+// start() 幂等，不会叠加定时器。
+let orphanScheduler = null;
+
+function ensureOrphanScheduler() {
+  if (!orphanScheduler) orphanScheduler = createCleanupScheduler();
+  return orphanScheduler;
+}
+
 function initializeTaskQueue() {
   try {
     tasks.flushEventOutbox();
@@ -1262,6 +1272,14 @@ function initializeTaskQueue() {
   } catch (_) {
     artifactScan = null;
   }
+  // 收口 B：孤儿清理挂生产节奏——启动跑一次 + 周期跑（默认 6 小时，A 类）。
+  // 单实例防重入；失败只记账不崩服务；进程崩溃后不补跑漏掉的周期。
+  let orphanCleanup = null;
+  try {
+    orphanCleanup = ensureOrphanScheduler().start({ now: Date.now() });
+  } catch (_) {
+    orphanCleanup = null;
+  }
   scheduleTaskQueue();
   return {
     recovered: recovered.recovered,
@@ -1279,6 +1297,7 @@ function initializeTaskQueue() {
           pending: artifactScan.pending.length,
         }
       : null,
+    orphanCleanup: orphanCleanup ? orphanCleanup.stats : null,
   };
 }
 
