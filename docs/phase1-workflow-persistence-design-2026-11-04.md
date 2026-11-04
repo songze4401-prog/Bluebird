@@ -250,3 +250,209 @@ P1–P3 已在本分支落地（每步独立提交），**未合并、未开 PR�
 - 断电级磁盘一致性（本段只有 SIGKILL）。
 - 多进程 / 多机并发写同一数据目录。
 - 带真实模型的「崩溃后自动续跑完成」（c4 只到 `failed/bot_not_ready`）。
+
+## 十一、Workflow Store 实体化方案（只出方案，不含实现）
+
+### 11.1 结论先行
+
+1. **存法**：新建独立文件 `DATA_DIR/agents/agent-workflows.json`，单实例锁下的单写者、每次变更一次原子写。不塞进 `agent-tasks.json`，也不做「一计划一文件」。
+2. **请求级 plan 现在不是执行计划**：它是按意图选出的「上下文加载模板」（纯函数、无请求级状态）。可持久化的只有它的**决策字段**；检索结果、摘要正文、prompt、token 计数、trace 都不落盘。
+3. **`planId/planVersion` 恒为 null 的原因**：S8 只预埋了字段、读取归一化与注释，没有任何模块产出过「计划」这个实体；任务创建的唯一入口 `router.createTask` 只写 route/budget。接上之后：`planId` 是一条计划血缘的稳定 id，`planVersion` 是该血缘里被任务**冻结**的那一版（正整数、单调、不复用）。
+4. **与 checkpoint 不打架**：checkpoint 是「这次跑到哪」（任务内、可变、序号 +1）；plan 是「要做什么」（任务外、不可变、按版本追加）。恢复只读 plan 定意图、checkpoint 只当遥测，两者都不参与幂等键。
+5. **最大设计风险**：把 `planVersion` 变成第二个并发口径（和 `stateVersion` 抢「谁是最新」），或允许原地改计划让老任务读到被改过的内容。抑制手段见 11.7。
+
+### 11.2 请求级 plan 的真实形状
+
+生成处：[orchestrator.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/context/orchestrator.js#L75-L193) `planForIntent`；入口 [orchestrator.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/context/orchestrator.js#L195-L210) `planContext`；消费处 [engine.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/context/engine.js#L103-L149)。
+
+| 字段 | 来源 | 性质 | 是否落盘 |
+| --- | --- | --- | --- |
+| `intent` | L75-L193（`INTENTS` 枚举） | 决策事实 | 是 |
+| `enabled` | L195-L210 | 决策事实 | 是 |
+| `layers` | L61-L73（8 个子字段） | 决策事实（不是数据） | 是 |
+| `budgets.history` | L87-L95 等 | 决策事实（数字） | 是 |
+| `budgets.retrieval` | L109-L114 等 | 决策事实 | 是 |
+| `budgets.knowledge` | L128 等 | 决策事实 | 是 |
+| `noAnswerThreshold` | L96 等 | 决策事实 | 是 |
+| `reasons[]` | L97 等（短字符串） | 审计标签 | 是 |
+| `applyPlanToConfig` 的派生 config | L212-L223 | 派生值，可重算 | 否 |
+| 记忆/文档/网页命中正文与分数 | retriever 与 engine 内 | 一次性检索结果 | **否** |
+| 摘要文本、conflicts、sources | [engine.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/context/engine.js#L151-L169) | 一次性上下文 | **否** |
+| 拼装后的 prompt / modelMessage / 图片渲染 | [engine.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/context/engine.js#L129-L149) | token 级中间态 | **否** |
+| `trace.recordOrchestration(plan)` | [engine.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/context/engine.js#L124-L127) | 可观测性 | **否**（trace 随响应，不是任务事实） |
+
+**结论**：整块序列化是错的——真正需要跨重启复现的只有「用哪套策略」，而不是「检索到了什么」。计划文档只装左列的决策字段。
+
+补充：`runContextRuntime` 已经接受 `plan` 覆盖参数（[engine.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/context/engine.js#L117-L120)），接上计划时**不需要改签名**（推断：现有调用方是否都传 `null` 需在实施时核对一遍）。
+
+### 11.3 `planId` / `planVersion`：为什么是 null，接上后是什么
+
+现状证据：
+
+- 创建时写 `null`：[tasks.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/tasks.js#L652-L656)。
+- 回读把非法值归一成 `null`：[tasks.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/tasks.js#L398-L401)。
+- 旧数据补 `null`：[task-store.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/task-store.js#L63-L64)。
+- 契约注释明确它既不是 checkpoint 序号也不是 CAS 版本：[contract.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/contract.js#L1-L8)。
+- 唯一读者是 fail-open 的 `actionScope.planVersion` 比对：[failopen-policy.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/failopen-policy.js#L393-L394)，而该判定尚未接执行器。
+
+**为什么没人写**：不存在「计划」这个实体——`classifyIntent` + `planForIntent` 是确定性映射，同一 goal 永远得到同一模板；任务创建链路（[router.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/router.js#L482-L506)）只有 route/budget，没有 plan 概念。字段是 S8 预留，不是遗漏。
+
+**接上之后的语义边界**：
+
+| 字段 | 语义 | 谁能写 | 何时写 |
+| --- | --- | --- | --- |
+| `planId` | `plan_<uuid>`，一条计划血缘的稳定 id；跨版本不变 | 仅 `workflow-store` 在创建血缘时分配，`router.createTask` 把它写进任务 | 任务创建那一次（`stateVersion` 同一笔写入） |
+| `planVersion` | 正整数，该血缘中**被任务冻结**的版本号；单调递增，不复用，不回退 | 仅 `workflow-store.appendVersion` 分配；任务侧只复制，不能自增 | 同上；未来重规划时由服务端再次分配并写入新指针 |
+
+- 任务侧**永不**从 `headVersion` 现场取值；只认 `(planId, planVersion)` 这一对。
+- `planVersion` 不参与 CAS、不参与幂等键、不参与 checkpoint 序号；详见 11.7。
+- fail-open 的 `actionScope.planVersion` 必须与 `task.planVersion` 同源；本段**不接执行器**，只把这条约定写下来。
+
+### 11.4 计划与 checkpoint 的关系
+
+| 维度 | checkpoint | plan |
+| --- | --- | --- |
+| 归属 | 任务记录内字段（[tasks.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/tasks.js#L660)、L664-L666） | 独立 Store（新文件） |
+| 可变性 | 每轮覆盖，`checkpointVersion` +1（L1134-L1141） | 不可变，只追加新版本 |
+| 生命周期 | 随重试推进/重置 | 跨重试、跨重启不变（任务冻结） |
+| 用途 | 进度遥测（round/toolCalls/phase/at） | 意图、预算、步骤、允许工具快照 |
+| 幂等 | 不参与（P2 已明确否掉位置量，[op-ledger.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/op-ledger.js#L177-L178)） | 不参与（opKey 仍是内容寻址） |
+| 恢复时怎么用 | 只读作遥测；缺失不影响正确性 | 必须先解析成功，否则任务不进调度 |
+
+**不打架的三条硬规则**：
+
+1. 两个 `version` 各自只有一个写者：`checkpointVersion` 只由 `recordCheckpoint` 写（L775-L780 已强制），`planVersion` 只由 `workflow-store` 写。任何交叉写入视为缺陷。
+2. 两者都不出现在 `expectedVersion`（CAS）里；CAS 只有 `stateVersion`（见 11.7）。
+3. 恢复判定只依赖 plan 的存在性与内容 digest，不依赖 checkpoint 的数值；checkpoint 与 plan 不一致时**不改任务状态**，只记事件（推断：当前没有这种一致性校验，新增也只做观测）。
+
+### 11.5 存哪：三个选项与取舍
+
+| 维度 | A. 复用 `agent-tasks.json` | B. 独立单文件 `agent-workflows.json` | C. 一计划一文件 |
+| --- | --- | --- | --- |
+| 写放大 | 任务每次状态写入都会重写整份任务文件（现状如此），计划会被顺带重写约 15–25 次/任务（推断：按现有状态迁移与 checkpoint 次数估算） | 只在创建/重规划时写，约 1–2 次/任务 | 每版本一次小写，最优 |
+| 原子性 | 与任务同一次原子写，看似更强 | 单文件内多版本+引用一次原子写；跨文件靠写序（计划先于任务） | 跨文件多方写入，无事务，最弱 |
+| 恢复速度 | 启动只读 1 个文件 | 启动多读 1 个小文件（上限 8 MB） | 需目录扫描 + 逐文件读，最慢 |
+| 容量治理 | 受 `TASK_MAX=500`（[tasks.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/tasks.js#L35)）与终态裁剪影响：**任务被裁掉，计划跟着消失** | 可独立 pin/裁剪，任务存活期不受任务上限影响 | 可独立裁剪 |
+| 回滚 | 改任务 schema，回滚需还原 | 删新文件即回到现状 | 删目录即回到现状 |
+| 结论 | 不选 | **选** | 不选 |
+
+**为什么选 B**：计划的写入频率远低于任务状态（前者 1–2 次/任务，后者每次迁移与每轮 checkpoint 一次），独立文件能把写放大从「随任务写入次数」降到「随计划变更次数」；同时避开 `TASK_MAX` 裁剪误删仍在运行任务的计划。C 选项虽然写放大最小，但恢复要目录扫描、且跨版本/引用没有单文件原子性，对「恢复速度优先」不利。
+
+### 11.6 Store 形状
+
+```json
+{
+  "schemaVersion": 1,
+  "plans": {
+    "plan_xxx": {
+      "planId": "plan_xxx",
+      "headVersion": 2,
+      "createdAt": "…",
+      "updatedAt": "…",
+      "versions": {
+        "1": { "version": 1, "digest": "sha256:…", "createdAt": "…", "plan": { "…": "…" } },
+        "2": { "version": 2, "digest": "sha256:…", "createdAt": "…", "plan": { "…": "…" } }
+      }
+    }
+  },
+  "refs": { "task_yyy": { "planId": "plan_xxx", "planVersion": 2, "pinnedAt": "…" } }
+}
+```
+
+- `plan` 内部字段：`{ intent, enabled, layers, budgets, noAnswerThreshold, reasons, steps[], allowedTools[], budget, goalDigest }`。
+- `steps[]` 元素：`{ stepKey, toolName, argsDigest, label }`；`stepKey` 与 P2 的内容寻址同源（`sha256([toolName, canonicalArgs, override||''])`），**不带 ordinal**——位置量不参与身份，避免重排或重试后漂移。
+- `refs` 是反向引用：既用于 pin（防裁剪），也用于孤儿计划识别。任务终态 + 投递完成后解除引用。
+
+### 11.7 版本语义
+
+- **+1 时机**：`appendVersion` 每次写入新内容（创建、重规划、以及「回退」）→ `headVersion+1`，同时写一条不可变版本。
+- **唯一写者**：只有 `workflow-store` 模块能写这个文件；`router` 只调用它，不直接改文件。启动恢复是只读。
+- **能否回退**：不支持原地回退。回退 = 追加一个「内容等于旧版」的**新版本**（版本号仍 +1），任务指针改到新版本，历史版本不动。这样磁盘上永远没有「同一个版本号对应两份内容」。
+- **与 `stateVersion` 的关系**：`stateVersion` 是任务记录的 CAS 并发令牌（每次任务写入 +1，只有存储层分配，调用方用 `expectedVersion` 声明基版，见 [tasks.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/tasks.js#L667-L669)）；`planVersion` 是**内容版本**，不参与乐观锁、不参与冲突重试。铁律：**同一时刻只有一个并发口径**——任务写入用 `stateVersion`；计划侧冲突一律按「版本不存在」处理（→ `recovery`），不覆盖、不重试。
+- **不允许两个口径交叉**：计划解析绝不比对 `headVersion` 来判断「是否最新」；任务 CAS 绝不看 `planVersion`。会出现「两套并发口径互相打架」的唯一写法，就是拿 `planVersion` 当 expectedVersion（明确禁止）。
+
+### 11.8 任务如何引用、改计划后怎么办
+
+- 任务持 `planId + planVersion` 在创建时一次性冻结，与 `stateVersion` 同一笔写入，**不拆成两次**。
+- 计划被改（追加新版本）后：**旧任务继续按旧版本跑**，不 fail-closed。理由：计划的不可变性就是为了让「老任务 + 新策略」不产生悄然改变的行为；fail-closed 只有在冻结版本**读不出来**时使用（11.9）。
+- 重规划入口：本段**不新增 HTTP 路由**，因此重规划只能内部触发（且仅允许 `queued`/`retrying` 状态；`running`/`waiting_approval` 拒绝，因为审批决定基于旧计划）。本段只实现「创建时冻结」，「重规划」列为后续段（未实现）。
+
+### 11.9 恢复路径
+
+启动顺序在现有第六步之前插一步（不改变既有顺序）：加载 plan store → 对每个 `planId != null` 的任务解析 `(planId, planVersion)` → 失败即收敛，**在进入调度之前**完成。
+
+| 情况 | 判定 | 落点（现有词表，不新增状态） | 是否重试 |
+| --- | --- | --- | --- |
+| 计划缺失（`plans[planId]` 不存在） | `plan_missing` | 任务 `recovery` + `errorCode = plan_missing` | 否，等人工 |
+| 版本不符（`versions[planVersion]` 不存在或 > head） | `plan_version_mismatch` | 任务 `recovery` + `plan_version_mismatch` | 否 |
+| 内容损坏（schema 校验失败 / digest 不匹配） | `plan_corrupt` | 任务 `recovery` + `plan_corrupt` | 否 |
+| 任务 `planId = null`（存量任务） | 无计划 | 维持 P1–P5 现状，不新增行为 | 现状既有规则 |
+| Store 文件整体不可解析 | `plan_store_corrupted` | 所有引用任务 → `recovery`；**服务继续启动** | 否 |
+
+- 与任务 Store 的策略差异：任务文件损坏现状是直接退出（`agent_tasks_corrupted`），计划文件损坏只影响引用它的任务，因此**不重建、不退出**——因为计划不是副作用的真值来源，退出会把无关任务一起拖死。
+- 任务保留 `planId/planVersion` 原值，供人工追溯；不清空指针（清空等于丢失现场）。
+
+### 11.10 裁剪与上限（A/B 两类）
+
+定义：**A 类 = 硬上限**，超过即拒绝落盘、任务不创建（fail-closed）；**B 类 = 软上限**，超过先裁剪未引用条目，仍超再拒绝。
+
+| 类别 | 项 | 数值 | 超限处理 |
+| --- | --- | --- | --- |
+| A | 单份计划快照（序列化 UTF-8） | ≤ 8 KB | 拒绝，`plan_too_large`；任务不创建 |
+| A | `steps` 条数 | ≤ 32 | 拒绝，`plan_step_limit` |
+| A | 单个 step（`toolName`+`argsDigest`+`label`） | ≤ 1 KB；`toolName` ≤ 64 字符、`label` ≤ 200 字符 | 拒绝 |
+| A | `planId` 长度 / `planVersion` 取值 | ≤ 80 字符 / 正整数 | 拒绝 |
+| A | 必填字段与 `digest` | 必须齐全且一致 | 拒绝 |
+| B | 每条计划保留版本数 | ≤ 10（最旧且未被引用的先淘汰） | 裁剪 + 审计一行 |
+| B | 计划总数 | ≤ 2000 | 淘汰「全部版本未被引用且超 7 天」 |
+| B | Store 文件体积 | ≤ 8 MB | 先做 B 类裁剪；仍超则拒绝新计划（`plan_store_full`，A 类兜底） |
+| B | 孤儿计划（无任务引用） | TTL 24h | 启动扫描清理 |
+| B | 解除引用后的版本 | TTL 7 天（与 op-ledger / orphan 同口径；A 类待校准） | 启动扫描清理 |
+
+- **Pin 规则**：被非终态任务引用的版本**永不裁剪**；裁剪顺序只从「未被引用 + 最旧」开始。
+- **不选外部引用**（把大计划放 artifact store 再挂 id）：计划必须在恢复路径上零依赖读取，而 artifact store 有 5000 条上限与 168h TTL，会在任务还活着时把计划删掉。若未来确实需要 >8 KB，再走「artifact 引用 + digest」（推断：届时需重新评估读取依赖，本段不做）。
+
+### 11.11 两个半截状态与注入点
+
+**写序不变量**：计划必须**先** durably 落盘（`writeFileAtomicSync` 返回），再调用 `createTask` 写指针。任何时刻不允许「任务已引用尚未落盘的计划」。
+
+| 半截状态 | 怎么产生 | 后果 | 收敛 |
+| --- | --- | --- | --- |
+| S1 计划已落盘、任务未创建 | 真崩溃在两写之间 | 无任务在跑；磁盘多一份无主计划 | 无害；启动扫描记 `orphan`，24h 后清理（不删除刚创建的，避免和「正在创建」竞争） |
+| S2 任务已引用、计划不存在 | 正常写序**产生不了**；只可能来自外部改文件、裁剪越界、磁盘损坏 | 任务不能执行 | 启动解析 → `recovery` + `plan_missing`，不调度、不重试 |
+| S3 新版本已落盘、任务指针未更新（重规划窗口，后续段） | 崩溃 | 任务仍指旧版本，旧版本有效 | 无需处理，安全 |
+| S4 指针已更新、目标版本缺失 | 仅当裁剪与写入竞争（单实例下不应发生） | 任务不可执行 | 同 S2 |
+
+注入方式：
+
+- S1 用真 SIGKILL：新增钩子点 `plan.after-save`（在 `appendVersion` 落盘后、`createTask` 前），沿用 P5 的 marker + `Atomics.wait` 机制，父进程见 marker 后 `SIGKILL`。重启断言：任务不存在、计划存在、扫描记 `orphan`。
+- S2 **不能用 SIGKILL 制造**（写序保证不会出现），只能「构造态」：手工写一个 `planId` 指向不存在血缘的任务文件，再跑启动恢复，断言 `recovery/plan_missing`。报告里必须如实标注这条是构造态，不是真崩溃。
+
+### 11.12 实施计划（3 个可独立回滚的提交）
+
+| 提交 | 内容 | 做完能验证什么 | 回滚方式 |
+| --- | --- | --- | --- |
+| C1 `feat(agents): add the workflow store` | 新增 `server/agents/workflow-store.js` + `tests/agent-workflow-store.test.js`（约 12 例：schema/digest/不可变/版本 +1/回退=新版本/A 类拒绝/B 类裁剪/pin/损坏读取） | Store 自身不变量成立；**不接线**，对现有行为零影响 | 删模块与测试 |
+| C2 `feat(agents): bind tasks to frozen plan versions` | `router.createTask` 前 `appendVersion`，任务写 `planId/planVersion`；`initializeTaskQueue` 增加解析步骤与三种异常收敛 + `tests/agent-workflow-binding.test.js`（约 6 例） | 新任务带冻结指针；缺失/错版/损坏三类都落 `recovery` + 既有 errorCode | 去掉接线，任务回到 null（存量兼容） |
+| C3 `test(agents): crash-inject the workflow half-states` | S1 真 SIGKILL 1 例 + S2 构造态 1 例；计数同步；文档补「实跑结果」小节 | 半截状态收敛有原始输出 | 删测试与新钩子点 |
+
+每步都跑全量回归 + 五门禁 + 计数同步。估算（推断）：Store ~210 行、接线 ~70 行、测试 ~260 行、文档 ~110 行，合计约 650 行。
+
+### 11.13 边界与风险
+
+**明确不做**
+
+- 不做 Worker Pool、Blackboard、`sourceAuthority`/`trustLevel`、动态组队、图检测上限。
+- 不改任务状态词表与 `state-machine.js` 迁移表；不改 `routes.js`、`sessions.js`。
+- 不新增 HTTP 路由；因此**重规划入口本段不做**（只做创建时冻结）。
+- 不接 fail-open 执行器（`actionScope.planVersion` 仍是死代码）。
+- 不改 P1–P5 已有语义；存量 `planId=null` 任务行为完全不变。
+
+**风险**
+
+1. **双口径**（最高）：任何把 `planVersion` 拿去做 CAS/expectedVersion 的写法都会制造两套并发语义。约束见 11.7，评审时以此为准。
+2. **裁剪误删 → recovery 风暴**：若 pin 失效，批量任务会同时进 `recovery`。缓解：只按 `refs` 判定 pin，裁剪前二次核对引用；上限触顶时先拒绝新计划而不是删旧引用。
+3. **计划与代码演化**：模板字段将来变了，旧计划仍要能读。缓解：`schemaVersion` 固定、digest 只校验不改写、旧版本按自身字段解释，不做跨版本迁移（推断：确需迁移时另开一节）。
+4. **单实例假设**：`BLUEBIRD_ALLOW_MULTI=1` 绕过锁后，plan store 变成多写者，head 可能被覆盖。本段沿用既有假设，不解决，继续标「未验证」。
+
+**本段交付**：仅设计文档这一节，无代码改动。
