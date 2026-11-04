@@ -112,6 +112,8 @@ const NOTES = {
     'artifact content replay (A): durable per-artifact body, restart-time read-back with contentHash verification, corrupted/missing content fail-closed (never empty), version chain keeps superseded versions while old refs stay frozen, terminal-task-referenced versions are never cleaned, >256KB rejected with no half state',
   'agent-orphan-scheduler':
     'orphan cleanup on a production cadence (B): one startup run plus a 6h period driven by injectable fake timers, single-instance re-entry guard, failures logged without crashing or blocking the next run, TTL boundary measured to the millisecond, and no catch-up for periods missed while the process was down',
+  'agent-failopen-enforcement':
+    'fail-open decision wired into the real tool path (C): allowlist hit executes the handler with policyVersion in the audit, a miss denies with zero handler calls and a denied audit row, revocation takes effect on the next call, tasks without a frozen planId/planVersion are refused, R2/R3 still require approval even when an allowlist entry exists, and tools not registered as failOpenEligible keep their old behaviour',
   'reply-segmentation':
     'single-message default with a 400-char configurable hard limit, semantic split order (paragraph/newline/sentence), code-block and Markdown-link protection, English word boundaries',
   'monitoring-api':

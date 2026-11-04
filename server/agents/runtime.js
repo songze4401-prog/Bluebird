@@ -242,6 +242,8 @@ async function execute({
   onProgress = null,
   toolAuthorizer = null,
   onToolDenied = null,
+  // 收口 C：预授权作用域（只对 failOpenEligible 工具生效）
+  failOpen = null,
   runId: runIdOverride = null,
   stream = false,
   onDelta = null,
@@ -296,6 +298,7 @@ async function execute({
       credentialKey,
       toolAuthorizer,
       onToolDenied,
+      failOpen,
       sideEffect: sideEffectGuard,
       stream,
       onDelta,
@@ -791,6 +794,19 @@ async function runTask(taskId) {
       mode: 'delegated_task',
       signal: controller.signal,
       toolAuthorizer: authorizer,
+      // 作用域取自任务记录（planId/planVersion 是创建时冻结的），
+      // 老任务缺这两个字段时如实传 null——判定侧会拒绝而不是当成"无计划继续跑"。
+      failOpen: {
+        taskId: task.taskId,
+        runId,
+        planId: task.planId || null,
+        planVersion: task.planVersion === undefined ? null : task.planVersion,
+        targetScope: `task:${task.taskId}`,
+        subject: projection.userId || null,
+        environment: process.env.BLUEBIRD_ENV || 'dev',
+        resource: `bot:${task.botId}`,
+        operation: 'execute',
+      },
       onToolDenied: ({ name, code }) => {
         safeEvent(
           task.botId,
