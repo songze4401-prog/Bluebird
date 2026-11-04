@@ -27,3 +27,13 @@
 - 审批 SLA 驱动任务终态：属 ④ 范围；审批等待期只受 Task `deadlineMs` 约束，审批记录本身不能触发 `timed_out` / `recovery`。
 - Token / Run 总预算：当前不存在；本阶段只做 `timed_out` / `recovery` 迁移边合法化。
 - 多进程 Worker / 分布式队列：仍为单写者原子文件；启用前需事务型 Store 或文件锁。
+
+## 已知契约变化（2026-11-04）
+
+### C1. 任务完成结果新增产物引用（③，提交 `6204f06`）
+
+- 字段：`task.result.artifacts[]`，元素为 `{kind, id, version}`；`version` 是本次新增的可选键，旧记录没有该键。
+- 旧值 → 新值：`artifacts` 恒为 `[]` → 每次 `completed` 至少一条 `{kind: 'message', version: 1}`；任务若经 `memory_remember` 产出，另有 `{kind: 'memory', ...}`。
+- 影响面：任务 JSON、`GET /agent-tasks/:taskId` 与任务 SSE 出口、`lib/api/types.ts` 的 `AgentTask.result`（已补可选 `artifacts`）。`components/TasksPanel.tsx` 不读取该字段，无渲染变化；`server/agents/routes.js` 为 `publicTask` 透传，无字段裁剪。
+- 回归用例：`tests/agent-artifact-commit.test.js` 的 `a`（正常完成多一条引用）与 `f`（无产物引用路径行为不变）。
+- 回滚方式：`git revert 6204f06`；已落盘的 `agents/agent-artifacts.json` 不影响任务读取，无需迁移任务数据。回滚会使 §11 第 1 步重新失去可验证证据，故未采用。

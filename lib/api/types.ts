@@ -1029,6 +1029,8 @@ export type AgentTask = {
     toolSteps: ToolStep[];
     evidence: Array<{ kind: string; id: string }>;
     changes: Array<{ kind: string; id: string; decision: string }>;
+    // ③ 产物引用：完成时至少一条 message；version 为 2026-11-04 新增的可选字段。
+    artifacts?: Array<{ kind: string; id: string; version?: number }>;
     requiresConfirmation: boolean;
     rounds: number;
     stopReason: string | null;
