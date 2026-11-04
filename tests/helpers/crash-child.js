@@ -335,6 +335,44 @@ async function main() {
       return;
     }
 
+    // 6) 事件已进 outbox、主事件文件尚未写入（事件投递的崩溃窗口）
+    case 'event-after-outbox-save': {
+      tasks.appendEvent({
+        botId: BOT,
+        eventType: 'task.delivery',
+        payload: { status: 'pending', mode: 'crash_probe' },
+        correlationId: 'task_crash_event',
+        dedupeKey: 'crash-single-delivery',
+      });
+      print({ unexpected: 'outbox 落盘后没有被杀' });
+      process.exit(9);
+      return;
+    }
+    case 'event-after-outbox-save-restart': {
+      // 启动恢复会 flushEventOutbox：只补写一次；随后的同键重投必须命中既有槽位。
+      runtime.initializeTaskQueue();
+      const replay = tasks.appendEvent({
+        botId: BOT,
+        eventType: 'task.delivery',
+        payload: { status: 'pending', mode: 'crash_probe' },
+        correlationId: 'task_crash_event',
+        dedupeKey: 'crash-single-delivery',
+      });
+      const rows = tasks
+        .listEvents(BOT, { limit: 200 })
+        .filter(event => event.eventId === replay.eventId);
+      print({
+        scenario: SCENARIO,
+        eventId: replay.eventId,
+        rows: rows.length,
+        dedupeCount: rows[0] ? Number(rows[0].dedupeCount) || 0 : null,
+        replayDeduped: replay.deduped === true,
+        outboxRows: JSON.parse(fs.readFileSync(tasks.OUTBOX_FILE, 'utf8')).events.length,
+      });
+      process.exit(0);
+      return;
+    }
+
     default:
       console.error(`未知场景：${SCENARIO}`);
       process.exit(2);

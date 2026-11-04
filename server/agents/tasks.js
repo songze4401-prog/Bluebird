@@ -22,6 +22,7 @@ const { normalizeWorkerResult } = require('./worker-result');
 const dependencies = require('./dependencies');
 const { LEGACY_ALIASES } = require('./status-vocabulary');
 const approvalDeadline = require('./approval-deadline');
+const crashHook = require('./crash-hook');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -49,6 +50,8 @@ const RESULT_SUMMARY_MAX = 8000;
 const { CONTRACT_VERSION } = require('./contract');
 const CONTEXT_REF_MAX = 200;
 const IDEMPOTENCY_KEY_MAX = 120;
+// 事件幂等键上限：与任务 idempotencyKey 同口径，便于调用方复用同一个业务键。
+const EVENT_DEDUPE_KEY_MAX = 120;
 const PRIORITIES = Object.freeze(['high', 'normal', 'low']);
 const PRIORITY_RANK = Object.freeze({ high: 0, normal: 1, low: 2 });
 // B-06（§25）：Task 级 Token 硬上限的边界与缺省值。
@@ -336,6 +339,51 @@ function safePayload(payload) {
   return out;
 }
 
+function assertEventDedupeKey(value) {
+  if (typeof value !== 'string') {
+    throw new AgentError('invalid_event_dedupe_key', '事件幂等键必须是字符串');
+  }
+  const key = value.trim();
+  if (!key || key.length > EVENT_DEDUPE_KEY_MAX) {
+    throw new AgentError('invalid_event_dedupe_key', `事件幂等键为空或超过 ${EVENT_DEDUPE_KEY_MAX} 字符`);
+  }
+  return key;
+}
+
+// 幂等键 → 确定性 eventId：同一 (botId, dedupeKey) 永远落到同一个事件槽位。
+// 重放/重启/重复投递只会命中既有槽位，不会再产生第二行事件。
+function eventIdForDedupeKey(botId, dedupeKey) {
+  return `evt_${crypto
+    .createHash('sha256')
+    .update(`${botId}\u0000${dedupeKey}`)
+    .digest('hex')
+    .slice(0, 32)}`;
+}
+
+// 事件可能停在主事件文件或 outbox 任一处（崩溃窗口里只在前者或只在后者）。
+function findEventById(eventId) {
+  const hit = loadEvents().events.find(item => item.eventId === eventId);
+  if (hit) return { event: hit, store: 'events' };
+  const queued = loadOutbox().events.find(item => item.eventId === eventId);
+  if (queued) return { event: queued, store: 'outbox' };
+  return null;
+}
+
+// 去重不是静默丢弃：命中槽位后在原记录上累加 dedupeCount/lastDedupedAt，
+// 审计能看出「这条事件被重复投递过几次」，而事件行数仍然只有一行。
+function markEventDeduped(found, now) {
+  const event = found.event;
+  event.dedupeCount = (Number(event.dedupeCount) || 0) + 1;
+  event.lastDedupedAt = now;
+  try {
+    if (found.store === 'events') saveEvents();
+    else saveOutbox();
+  } catch (_) {
+    // 计数落盘失败不影响「只生效一次」的结论：事件行已经在唯一槽位里。
+  }
+  return { ...event, payload: { ...event.payload }, deduped: true };
+}
+
 function appendEvent({
   botId,
   taskId = null,
@@ -344,19 +392,31 @@ function appendEvent({
   eventType,
   payload = {},
   correlationId = null,
+  dedupeKey = null,
 }) {
   assertBot(botId);
   if (!EVENT_TYPES.includes(eventType)) {
     throw new AgentError('invalid_event', '事件类型无效');
   }
+  const now = nowIso();
+  const key = dedupeKey === null || dedupeKey === undefined
+    ? null
+    : assertEventDedupeKey(dedupeKey);
+  const eventId = key ? eventIdForDedupeKey(botId, key) : `evt_${crypto.randomUUID()}`;
+  if (key) {
+    const found = findEventById(eventId);
+    if (found) return markEventDeduped(found, now);
+  }
   const events = loadEvents();
   const event = {
-    eventId: `evt_${crypto.randomUUID()}`,
+    eventId,
+    ...(key ? { dedupeKey: key } : {}),
+    dedupeCount: 0,
     taskId,
     runId,
     botId,
     sessionId,
-    timestamp: nowIso(),
+    timestamp: now,
     eventType,
     payload: safePayload(payload),
     correlationId: correlationId || taskId || runId || null,
@@ -381,6 +441,9 @@ function appendEvent({
     );
   }
   saveOutbox();
+  // 崩溃窗口：outbox 已落盘、主事件文件尚未写入。此处被杀后，重启的
+  // flushEventOutbox 会按 eventId 补写一次，不丢也不重。
+  crashHook.hold('event.after-outbox-save');
 
   try {
     if (!events.events.some(item => item.eventId === event.eventId)) {
