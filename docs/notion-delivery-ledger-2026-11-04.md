@@ -1,6 +1,6 @@
 # Notion 交付台账（2026-11-04）
 
-> **结论**：按 Notion 原文口径，**Phase 0 未完成（0.5，其中“权限边界”已由 Owner 裁决暂缓）**，**Phase 1 交付物 0/3 完成；4 条验收句中 1 条部分满足（预算硬限制 → B-06 = 0.5）**，其余 3 条未满足或无法验证。仓库提交基本都落在「Phase 0 尾巴 / 前置工程」，尚无一条完全满足 Notion Phase 1 的交付与验收。
+> **结论**：按 Notion 原文口径，**Phase 0 未完成（0.5，其中“权限边界”已由 Owner 裁决暂缓）**，**Phase 1 交付物 0/3 完成（按 §5 原句逐句拆为 3 项，Planner 与 Orchestrator 合算为 1 项）；4 条验收要求中 1 条部分满足（预算硬限制 → B-06 = 0.5）**，其余 3 条未满足或无法验证。仓库提交基本都落在「Phase 0 尾巴 / 前置工程」，尚无一条完全满足 Notion Phase 1 的交付与验收。
 >
 > 唯一依据：《Bluebird Agent Runtime｜混合式多 Agent 目标架构 v1.0》
 > https://app.notion.com/p/Bluebird-Agent-Runtime-Agent-v1-0-40da957523c281359607e23f6a3c784f
@@ -22,7 +22,7 @@
 | 编号与名称（原文 §5） | 原文目标 / 交付物（引句） | 退出判据（原文“验收”句） | 状态 | 证据 | 未完成原因 + 下一步 |
 |---|---|---|---|---|---|
 | Phase 0：基线与契约收敛 | “对照当前 HEAD 和已合并实现，确认 Registry、任务队列、Session、Memory、事件、审计和通知链路的真实状态”“统一 Agent Manifest、Task Contract、Result Contract、状态机和权限模型”“输出 ADR” | “没有第二套平行任务协议；关键状态和权限边界可测试” | 0.5 | `docs/phase0-baseline-audit-2026-11-03.md`（判定整体不通过）；ADR 入库 `31a7a9b`；协议收敛 `e08b168`、`7c28a2b`；状态机用例 `tests/agent-recovery.test.js:58`、`:85` | 「权限边界可测试」**Owner 已裁决暂缓（2026-11-04）**：当前按单用户 `local-owner` 口径记录为已知限定，不计入未完成缺口、不安排下一步动作。“没有第二套平行协议”仅完成收敛声明，仍是缺口。 |
-| Phase 1：单主控 + 动态 Worker Pool | “在现有 Runtime 内建立统一 Planner / Orchestrator 接口”“支持少量 Agent 的能力匹配、动态分配、并行和依赖管理”“保留单 Agent 快速路径；先选 2—3 个真实专业 Agent 验证” | “任务路由可追踪、Worker Session 隔离、并发结果不串线、预算硬限制有效” | 0.5 | `docs/phase0-baseline-audit-2026-11-03.md` L68：无 Task/Workflow Orchestrator；`grep "Orchestrator\|orchestrat"` 无编排实现；`server/agents/` 无 Planner 模块；**唯一可复跑部分**＝B-06 预算原子计量（`tests/agent-budget-atomic.test.js` 7 条，提交 `27b99ec`） | 3 项交付物全部未开始（0/3）；验收四项中仅“预算硬限制有效”部分满足（B-06=0.5），“路由可追踪”仅 `router.js` 决策，“Worker Session 隔离”Owner 已裁决暂缓，“并发结果不串线”无并发执行无法验证。下一步＝先做 Phase 1 的最小可执行前置（见文末清单第 1 项）。 |
+| Phase 1：单主控 + 动态 Worker Pool | “在现有 Runtime 内建立统一 Planner / Orchestrator 接口”“支持少量 Agent 的能力匹配、动态分配、并行和依赖管理”“保留单 Agent 快速路径；先选 2—3 个真实专业 Agent 验证” | “任务路由可追踪、Worker Session 隔离、并发结果不串线、预算硬限制有效” | 0.5 | `docs/phase0-baseline-audit-2026-11-03.md` L68：无 Task/Workflow Orchestrator；`grep "Orchestrator\|orchestrat"` 无编排实现；`server/agents/` 无 Planner 模块；**唯一可复跑部分**＝B-06 预算原子计量（`tests/agent-budget-atomic.test.js` 7 条，提交 `27b99ec`） | 3 项交付物全部未开始（0/3，按 §5 原句逐句拆分；Planner 与 Orchestrator 合算 1 项）；4 条验收要求中仅“预算硬限制有效”部分满足（B-06=0.5），“路由可追踪”仅 `router.js` 决策，“Worker Session 隔离”Owner 已裁决暂缓，“并发结果不串线”无并发执行无法验证。下一步＝先做 Phase 1 的最小可执行前置（见文末清单第 1 项）。 |
 | Phase 2：Blackboard + Context Broker | “建立任务级共享产物、证据引用、版本和访问控制”“Worker 私有上下文与共享工作区分离”“支持按需上下文投影和来源追踪” | “跨 Agent 可协作但不能越权读取私有 Session；每个共享结论可追溯来源” | 0 | 全 `server/` grep `blackboard` 仅 1 处注释（`server/agents/artifact-store.js:8`，明确“不承担 Blackboard 的…”）；无 Context Broker 模块 | 未开始。仓库只做了 `artifact-store.js` 的产物版本/正文复读，不等于 Blackboard。下一步＝待拍板 Phase 2 是否按原文整体立项。 |
 | Phase 3：验证闭环 + 事件化工作流 | “引入确定性验证、独立 Reviewer、冲突处理和人工审批节点”“事件、状态、结果投递采用幂等与可恢复设计”“建立失败重试、取消、Checkpoint、死信和成本追踪” | “失败注入、重复事件、Reviewer 检出率和结果投递恢复均有测试证据” | 0 | 已有局部：审批节点 `server/agents/approvals.js`、幂等账本 `server/agents/op-ledger.js`（`a6d3455`）、崩溃注入 `tests/agent-crash-injection.test.js` | 缺确定性验证器、独立 Reviewer、冲突处理、死信与成本追踪；Reviewer 检出率无任何测试。下一步＝待拍板是否单独立项。 |
 | Phase 4：受控自治与自我改进 | “根据真实运行数据动态组队、重规划和选择验证强度”“建立离线评测集、策略版本、灰度发布和回滚”“在权限、预算和审批边界不变的前提下，逐步开放低风险自动化” | “相对基线在成功率、返工率、成本或延迟上有可重复改善，且安全指标不退化” | 0 | 全仓 `.js` grep `benchmark\|holdout` 零命中；无评测集、无灰度/回滚机制 | 未开始；且验收句要求“相对基线可重复改善”，**必须先有真实模型环境与压测数据**。 |
@@ -96,7 +96,9 @@
 
 ## 尚未完成的 Phase 1 交付清单（Notion §5 Phase 1）
 
-对应原文四句交付 + 一句验收：
+对应原文 **3 句交付 + 1 句验收**（验收句内含 4 条要求）：
+
+**拆分口径（判据）**：交付物按 §5 Phase 1 的**原句逐句**拆分，共 3 句、即 3 项；验收句按顿号拆成 4 条要求。**Planner 与 Orchestrator 不拆算**——原句是“建立**统一** Planner / Orchestrator **接口**”，两者同属一个“统一……接口”的宾语，原文没有把它们写成两个交付物；若强行拆成两项会得到 4 项，但那属于自行增补验收要求，故台账统一采用 **3 项交付物 / 4 条验收要求**。
 
 1. **统一 Planner / Orchestrator 接口** —— 未开始（无模块）。完成判据：接口落地 + 调用方接入 + 可复跑用例。
 2. **少量 Agent 的能力匹配、动态分配、并行和依赖管理** —— 未开始。完成判据：能力匹配与分配用例、并行依赖用例。
