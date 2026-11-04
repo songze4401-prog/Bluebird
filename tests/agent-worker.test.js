@@ -28,6 +28,7 @@ const { createToolAuthorizer } = require('../server/agents/tool-gateway');
 const sessions = require('../server/agents/sessions');
 const tasks = require('../server/agents/tasks');
 const artifactStore = require('../server/agents/artifact-store');
+const artifactCommit = require('../server/agents/artifact-commit');
 const workerScope = require('../server/agents/worker-scope');
 const { createAgentRouter } = require('../server/agents/routes');
 const runtime = require('../server/agents/runtime');
@@ -1221,6 +1222,261 @@ test('共享产物：登记共享后持有效令牌按登记版本可读；无�
       wrongVersionCode: wrongVersion.code,
       denyReasons: deniedEvents.map(event => event.payload.reason),
       grantedAudit: readEvents.some(event => event.payload.reason === 'shared_artifact'),
+    })
+  );
+});
+
+// ---- H3. 按需上下文投影与来源追踪（Phase 2 第 2 项） ----
+
+test('上下文投影：持合法令牌但未登记共享 → 整单拒绝，留痕且不含对方内容', () => {
+  const requester = makeTask({ goal: '投影请求方' });
+  const owner = makeTask({ goal: '投影来源方' });
+  const sessionRequester = sessions.createSession('memory', { title: '投影请求会话', scope: 'worker' });
+  const sessionOwner = sessions.createSession('memory', { title: '投影来源会话', scope: 'worker' });
+  const scopeRequester = openScope(requester.taskId, sessionRequester.id, 'run_projection_deny');
+  openScope(owner.taskId, sessionOwner.id, 'run_projection_owner');
+  const privateArtifact = persistScopeArtifact(owner.taskId, '来源私有正文');
+  const token = workerScope.issueScopeToken({
+    botId: 'memory',
+    taskId: requester.taskId,
+    sessionId: sessionRequester.id,
+    allowedTaskIds: [owner.taskId],
+    grantedBy: 'owner',
+    reason: '投影请求',
+  });
+
+  const denied = captureError(() =>
+    scopeRequester.projectSharedContext({
+      refs: [{ id: privateArtifact.id, version: privateArtifact.version }],
+      token,
+    })
+  );
+  assert.equal(denied && denied.code, 'artifact_not_shared');
+  assert.ok(!JSON.stringify(denied).includes('来源私有正文'));
+
+  const deniedEvents = taskEvents(requester.taskId).filter(
+    event => event.eventType === 'worker.scope_denied' && event.payload.targetId === privateArtifact.id
+  );
+  assert.ok(deniedEvents.some(event => event.payload.errorCode === 'artifact_not_shared'));
+  assert.ok(!JSON.stringify(deniedEvents).includes('来源私有正文'));
+  console.log(
+    '[投影-未授权]',
+    JSON.stringify({
+      code: denied.code,
+      bodyEchoed: JSON.stringify(denied).includes('来源私有正文'),
+      deniedAudit: deniedEvents.length,
+    })
+  );
+});
+
+test('上下文投影：请求 v1 而 head 已是 v2 → 拒绝，不悄悄给最新版', () => {
+  const requester = makeTask({ goal: '版本投影请求方' });
+  const owner = makeTask({ goal: '版本投影来源方' });
+  const sessionRequester = sessions.createSession('memory', { title: '版本投影会话', scope: 'worker' });
+  const sessionOwner = sessions.createSession('memory', { title: '版本来源会话', scope: 'worker' });
+  const scopeRequester = openScope(requester.taskId, sessionRequester.id, 'run_projection_version');
+  openScope(owner.taskId, sessionOwner.id, 'run_projection_owner_v');
+  const v1 = artifactStore.persist({
+    kind: 'message',
+    content: { text: 'v1 正文' },
+    taskId: owner.taskId,
+  });
+  artifactStore.share(v1.id, { withTaskIds: [requester.taskId], byTaskId: owner.taskId });
+  const v2 = artifactStore.persist({
+    kind: 'message',
+    content: { text: 'v2 正文' },
+    taskId: owner.taskId,
+  });
+  assert.equal(artifactStore.get(v1.id).status, 'superseded');
+  const token = workerScope.issueScopeToken({
+    botId: 'memory',
+    taskId: requester.taskId,
+    sessionId: sessionRequester.id,
+    allowedTaskIds: [owner.taskId],
+    grantedBy: 'owner',
+    reason: '版本投影',
+  });
+
+  const stale = captureError(() =>
+    scopeRequester.projectSharedContext({ refs: [{ id: v1.id, version: 1 }], token })
+  );
+  assert.equal(stale && stale.code, 'context_projection_stale');
+  assert.equal(stale.details.currentVersion, 1);
+  assert.ok(!JSON.stringify(stale).includes('v1 正文'));
+
+  const noVersion = captureError(() =>
+    scopeRequester.projectSharedContext({ refs: [{ id: v1.id }], token })
+  );
+  assert.equal(noVersion && noVersion.code, 'context_projection_invalid');
+  assert.equal(noVersion.status, 400);
+
+  // 未登记的 v2 不会被悄悄取用。
+  const v2NotShared = captureError(() =>
+    scopeRequester.projectSharedContext({ refs: [{ id: v2.id, version: 2 }], token })
+  );
+  assert.equal(v2NotShared && v2NotShared.code, 'artifact_not_shared');
+
+  const staleEvents = taskEvents(requester.taskId).filter(
+    event =>
+      event.eventType === 'worker.scope_denied' &&
+      event.payload.targetId === v1.id &&
+      event.payload.errorCode === 'context_projection_stale'
+  );
+  assert.equal(staleEvents.length, 1);
+  console.log(
+    '[投影-版本钉住]',
+    JSON.stringify({
+      staleCode: stale.code,
+      currentVersion: stale.details.currentVersion,
+      noVersionCode: noVersion.code,
+      v2Code: v2NotShared.code,
+      staleAudit: staleEvents.length,
+    })
+  );
+});
+
+test('上下文投影：私有 session/messages 不随投影外带', () => {
+  const consumer = makeTask({ goal: '投影消费方' });
+  const owner = makeTask({ goal: '投影私有方' });
+  const sessionConsumer = sessions.createSession('memory', { title: '消费方会话', scope: 'worker' });
+  const sessionOwner = sessions.createSession('memory', {
+    title: '私有会话标题-不可外带',
+    scope: 'worker',
+  });
+  const scopeConsumer = openScope(consumer.taskId, sessionConsumer.id, 'run_projection_private');
+  openScope(owner.taskId, sessionOwner.id, 'run_projection_private_owner');
+  sessions.appendMessages('memory', sessionOwner.id, [
+    { role: 'user', content: 'PRIVATE_ONLY_MARKER 私有正文' },
+  ]);
+  const shared = persistScopeArtifact(owner.taskId, 'SHARED_OK_MARKER 共享正文');
+  artifactStore.share(shared.id, { withTaskIds: [consumer.taskId], byTaskId: owner.taskId });
+  const token = workerScope.issueScopeToken({
+    botId: 'memory',
+    taskId: consumer.taskId,
+    sessionId: sessionConsumer.id,
+    allowedTaskIds: [owner.taskId],
+    grantedBy: 'owner',
+    reason: '私有泄漏回归',
+  });
+
+  const projection = scopeConsumer.projectSharedContext({
+    refs: [{ id: shared.id, version: shared.version }],
+    token,
+  });
+  const payload = JSON.stringify(projection);
+  assert.ok(payload.includes('SHARED_OK_MARKER'));
+  assert.ok(!payload.includes('PRIVATE_ONLY_MARKER'));
+  assert.ok(!payload.includes(sessionOwner.id));
+  assert.ok(!payload.includes('私有会话标题-不可外带'));
+  assert.deepEqual(Object.keys(projection).sort(), ['refs', 'requesterTaskId', 'source']);
+  assert.deepEqual(Object.keys(projection.refs[0]).sort(), [
+    'content',
+    'id',
+    'kind',
+    'provenance',
+    'version',
+  ]);
+  console.log(
+    '[投影-私有隔离]',
+    JSON.stringify({
+      sharedMarker: payload.includes('SHARED_OK_MARKER'),
+      privateMarker: payload.includes('PRIVATE_ONLY_MARKER'),
+      sessionIdLeaked: payload.includes(sessionOwner.id),
+      sessionTitleLeaked: payload.includes('私有会话标题-不可外带'),
+      outputKeys: Object.keys(projection).sort(),
+    })
+  );
+});
+
+test('上下文投影：来源链成功回溯；证据被 invalidated/superseded 即链断裂', () => {
+  const producer = makeTask({ goal: '来源链生产方' });
+  const consumer = makeTask({ goal: '来源链消费方' });
+  const sessionProducer = sessions.createSession('memory', { title: '来源链生产会话', scope: 'worker' });
+  const sessionConsumer = sessions.createSession('memory', { title: '来源链消费会话', scope: 'worker' });
+  openScope(producer.taskId, sessionProducer.id, 'run_projection_chain_owner');
+  const scopeConsumer = openScope(consumer.taskId, sessionConsumer.id, 'run_projection_chain');
+  const token = workerScope.issueScopeToken({
+    botId: 'memory',
+    taskId: consumer.taskId,
+    sessionId: sessionConsumer.id,
+    allowedTaskIds: [producer.taskId],
+    grantedBy: 'owner',
+    reason: '来源追踪',
+  });
+
+  const evidence = artifactStore.persist({
+    kind: 'message',
+    content: { text: '证据正文' },
+    taskId: producer.taskId,
+  });
+  const conclusion = artifactCommit.publishSharedConclusion({
+    taskId: producer.taskId,
+    subject: '可追溯结论',
+    evidence: [{ kind: 'message', id: evidence.id, version: evidence.version }],
+    withTaskIds: [consumer.taskId],
+  });
+  const ok = scopeConsumer.projectSharedContext({
+    refs: [{ id: conclusion.artifact.id, version: conclusion.artifact.version }],
+    token,
+  });
+  assert.deepEqual(ok.refs[0].provenance, [
+    { kind: 'conclusion', id: conclusion.artifact.id, version: conclusion.artifact.version },
+    { kind: 'message', id: evidence.id, version: evidence.version },
+  ]);
+  assert.ok(!JSON.stringify(ok).includes('证据正文'), '链只暴露引用，不暴露正文');
+
+  artifactStore.markStatus(evidence.id, 'invalidated', { by: 'owner', reason: '链断裂用例' });
+  const invalidated = captureError(() =>
+    scopeConsumer.projectSharedContext({
+      refs: [{ id: conclusion.artifact.id, version: conclusion.artifact.version }],
+      token,
+    })
+  );
+  assert.equal(invalidated && invalidated.code, 'artifact_chain_broken');
+  assert.equal(invalidated.details.reason, 'invalidated');
+
+  const evidence2 = artifactStore.persist({
+    kind: 'message',
+    content: { text: '证据二' },
+    taskId: producer.taskId,
+  });
+  const conclusion2 = artifactCommit.publishSharedConclusion({
+    taskId: producer.taskId,
+    subject: '可追溯结论二',
+    evidence: [{ kind: 'message', id: evidence2.id, version: evidence2.version }],
+    withTaskIds: [consumer.taskId],
+  });
+  artifactStore.persist({
+    kind: 'message',
+    content: { text: '证据二新版本' },
+    taskId: producer.taskId,
+  });
+  assert.equal(artifactStore.get(evidence2.id).status, 'superseded');
+  const superseded = captureError(() =>
+    scopeConsumer.projectSharedContext({
+      refs: [{ id: conclusion2.artifact.id, version: conclusion2.artifact.version }],
+      token,
+    })
+  );
+  assert.equal(superseded && superseded.code, 'artifact_chain_broken');
+  assert.equal(superseded.details.reason, 'stale');
+
+  const chainDenied = taskEvents(consumer.taskId).filter(
+    event =>
+      event.eventType === 'worker.scope_denied' &&
+      event.payload.targetType === 'projection' &&
+      event.payload.reason === 'chain_broken'
+  );
+  assert.equal(chainDenied.length, 2);
+  console.log(
+    '[投影-来源链]',
+    JSON.stringify({
+      provenance: ok.refs[0].provenance.map(item => `${item.kind}:${item.id.slice(0, 10)}@v${item.version}`),
+      chainExposesContent: JSON.stringify(ok).includes('证据正文'),
+      invalidatedCode: invalidated.code,
+      invalidatedReason: invalidated.details.reason,
+      supersededReason: superseded.details.reason,
+      chainDeniedAudit: chainDenied.length,
     })
   );
 });

@@ -740,6 +740,58 @@ function auditEntries() {
   return readAudit().entries;
 }
 
+// Phase 2 第 2 项：来源追踪。沿产物正文里的 evidence 引用逐环复读；
+// 链上任一环缺失、版本不符、invalidated 或非 active（含 superseded）即失败，
+// 用固定错误码 artifact_chain_broken 表达，details.reason 区分原因。
+const PROVENANCE_MAX_DEPTH = 3;
+const PROVENANCE_MAX_REFS = 20;
+
+function chainBroken(reason, artifactId) {
+  return new AgentError('artifact_chain_broken', '证据链不可追溯', 409, {
+    reason,
+    artifactId: artifactId || null,
+  });
+}
+
+function resolveProvenance(id, { version = null, maxDepth = PROVENANCE_MAX_DEPTH } = {}) {
+  const chain = [];
+  const visited = new Set();
+  const walk = (refId, refVersion, depth) => {
+    const key = String(refId || '').slice(0, ID_MAX);
+    if (!key) throw chainBroken('missing', null);
+    const artifact = get(key);
+    if (!artifact) throw chainBroken('missing', key);
+    if (
+      Number.isInteger(refVersion) &&
+      Number.isInteger(artifact.version) &&
+      refVersion !== artifact.version
+    ) {
+      throw chainBroken('version_mismatch', key);
+    }
+    if (artifact.status === 'invalidated') throw chainBroken('invalidated', key);
+    if (artifact.status !== 'active') throw chainBroken('stale', key);
+    if (depth > maxDepth) throw chainBroken('depth_exceeded', key);
+    const marker = `${key}@${artifact.version}`;
+    if (visited.has(marker)) throw chainBroken('cycle', key);
+    visited.add(marker);
+    const read = readContent(key, { version: artifact.version });
+    chain.push({ kind: read.kind, id: key, version: artifact.version });
+    const evidence = read.content && read.content.evidence;
+    if (Array.isArray(evidence) && evidence.length > 0) {
+      if (evidence.length > PROVENANCE_MAX_REFS) throw chainBroken('refs_exceeded', key);
+      for (const item of evidence) {
+        walk(
+          item && item.id,
+          item && Number.isInteger(item.version) ? item.version : null,
+          depth + 1
+        );
+      }
+    }
+  };
+  walk(id, Number.isInteger(version) ? version : null, 0);
+  return chain;
+}
+
 module.exports = {
   ARTIFACTS_FILE,
   AUDIT_FILE,
@@ -757,6 +809,7 @@ module.exports = {
   share,
   sharedAccess,
   readSharedArtifact,
+  resolveProvenance,
   assertRefsCommitReady,
   confirmRefs,
   markOrphan,

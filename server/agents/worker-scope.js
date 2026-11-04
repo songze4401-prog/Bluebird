@@ -411,6 +411,100 @@ function openWorkerScope({
     return artifactStore.readContent(artifactId, { version: access.version });
   }
 
+  /**
+   * Phase 2 第 2 项：按需上下文投影。
+   * 私有上下文（本 worker 的 session/messages）永远不出现在返回值里；共享工作区
+   * 只接受"已登记共享 + 版本钉住"的产物引用。全部引用先过白名单，任一不满足即
+   * 整单拒绝（默认拒绝），拒绝写 worker.scope_denied 且错误体不含对方内容。
+   */
+  const PROJECTION_MAX_REFS = 10;
+
+  function denyProjection(refId, reason, errorCode) {
+    auditRead(botId, boundTaskId, boundSessionId, runId, 'worker.scope_denied', {
+      targetType: 'projection',
+      targetId: truncate(refId),
+      requesterTaskId: boundTaskId,
+      access: 'denied',
+      reason,
+      errorCode,
+    });
+  }
+
+  function projectSharedContext({ refs = [], token } = {}) {
+    assertOwn();
+    if (!Array.isArray(refs) || refs.length === 0) {
+      throw new AgentError('context_projection_invalid', '投影请求至少需要一个共享产物引用', 400);
+    }
+    if (refs.length > PROJECTION_MAX_REFS) {
+      throw new AgentError(
+        'context_projection_invalid',
+        `投影请求最多 ${PROJECTION_MAX_REFS} 个引用`,
+        400
+      );
+    }
+    const normalized = [];
+    for (const item of refs) {
+      if (!item || typeof item !== 'object') {
+        throw new AgentError('context_projection_invalid', '投影引用必须是对象', 400);
+      }
+      const id = truncate(item.id);
+      if (!id) throw new AgentError('context_projection_invalid', '投影引用缺少 id', 400);
+      if (!Number.isInteger(item.version) || item.version < 1) {
+        throw new AgentError('context_projection_invalid', '投影引用必须钉住 version', 400, {
+          artifactId: id,
+        });
+      }
+      normalized.push({ id, version: item.version });
+    }
+
+    const projected = [];
+    for (const ref of normalized) {
+      const artifact = artifactStore.get(ref.id);
+      if (!artifact) {
+        denyProjection(ref.id, 'missing', 'artifact_not_found');
+        throw new AgentError('artifact_not_found', '产物引用不可读', 409, { artifactId: ref.id });
+      }
+      // 版本钉住：只接受请求的那一版且必须仍是 active head，绝不悄悄换成最新版。
+      if (artifact.version !== ref.version || artifact.status !== 'active') {
+        const reason = artifact.version !== ref.version ? 'version_mismatch' : 'stale';
+        denyProjection(ref.id, reason, 'context_projection_stale');
+        throw new AgentError('context_projection_stale', '投影拒绝：引用不是当前活动版本', 409, {
+          artifactId: ref.id,
+          requestVersion: ref.version,
+          currentVersion: artifact.version,
+        });
+      }
+      // 令牌 + 共享登记两道门（复用第 1 项，拒绝时已写 worker.scope_denied）。
+      const read = readSharedArtifact(ref.id, { token, version: ref.version });
+      let provenance;
+      try {
+        provenance = artifactStore.resolveProvenance(ref.id, { version: ref.version });
+      } catch (error) {
+        denyProjection(ref.id, 'chain_broken', error.code || 'artifact_chain_broken');
+        throw error;
+      }
+      auditRead(botId, boundTaskId, boundSessionId, runId, 'worker.scope_read', {
+        targetType: 'projection',
+        targetId: ref.id,
+        requesterTaskId: boundTaskId,
+        access: 'granted',
+        reason: 'context_projection',
+      });
+      projected.push({
+        kind: read.kind,
+        id: ref.id,
+        version: ref.version,
+        content: read.content,
+        provenance,
+      });
+    }
+    return {
+      source: 'shared_workspace',
+      requesterTaskId: boundTaskId,
+      refs: projected,
+    };
+  }
+
   return {
     botId,
     taskId: boundTaskId,
@@ -423,6 +517,7 @@ function openWorkerScope({
     readOtherMessages,
     readOtherArtifact,
     readSharedArtifact,
+    projectSharedContext,
   };
 }
 
