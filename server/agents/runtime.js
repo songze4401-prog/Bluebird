@@ -13,6 +13,7 @@ const { assertRunnable } = require('./registry');
 const { getCredentialKey } = require('./credentials');
 const sessions = require('./sessions');
 const tasks = require('./tasks');
+const workerScope = require('./worker-scope');
 const resultDelivery = require('./result-delivery');
 const { projectWorkerContext } = require('./context-projection');
 const { normalizeWorkerResult } = require('./worker-result');
@@ -723,17 +724,13 @@ async function runTask(taskId) {
     if (workerSession.owner && workerSession.owner.taskId !== task.taskId) {
       const ownerTask = tasks.getTask(workerSession.owner.taskId);
       allowTakeover = Boolean(ownerTask && tasks.isTerminalStatus(ownerTask.status));
-      if (!allowTakeover) {
-        throw new AgentError(
-          'worker_session_owner_mismatch',
-          'Worker 会话已归属其他任务',
-          409
-        );
-      }
     }
-    sessions.attachOwner(task.botId, workerSessionId, {
-      agentId: task.botId,
+    // 隔离边界：归属判定与 owner 绑定统一走 worker-scope（拒绝码仍是
+    // worker_session_owner_mismatch），运行时不再手工 attachOwner。
+    workerScope.openWorkerScope({
+      botId: task.botId,
       taskId: task.taskId,
+      sessionId: workerSessionId,
       runId,
       allowTakeover,
     });

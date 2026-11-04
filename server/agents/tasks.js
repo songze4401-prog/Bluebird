@@ -71,6 +71,8 @@ const EVENT_TYPES = Object.freeze([
   'task.started',
   'worker.checkpoint',
   'worker.heartbeat',
+  'worker.scope_read',
+  'worker.scope_denied',
   'tool.denied',
   'model.requested',
   'model.completed',
@@ -142,6 +144,14 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'orchestrationAllocation',
   'orchestrationSelected',
   'orchestrationExcluded',
+  // Phase 1 验收「Worker Session 隔离」：跨作用域读取的审计字段
+  // （targetType/targetId 标明被访问对象，access 区分放行/拒绝）。
+  'targetType',
+  'targetId',
+  'requesterTaskId',
+  'access',
+  'grantedBy',
+  'reason',
   'round',
   'phase',
   'attempts',

@@ -26,6 +26,8 @@ const { normalizeWorkerResult } = require('../server/agents/worker-result');
 const { createToolAuthorizer } = require('../server/agents/tool-gateway');
 const sessions = require('../server/agents/sessions');
 const tasks = require('../server/agents/tasks');
+const artifactStore = require('../server/agents/artifact-store');
+const workerScope = require('../server/agents/worker-scope');
 const runtime = require('../server/agents/runtime');
 
 let providerServer;
@@ -704,4 +706,175 @@ test('执行：会话被运行中的其他任务占用时明确失败，不写�
   assert.equal(finished.result.status, 'failed');
   assert.deepEqual(sessions.getMessages('memory', session.id), before);
   assert.equal(sessions.getSession('memory', session.id).owner.taskId, owner.taskId);
+});
+
+// ---- F. Worker Session 隔离（验收句前半：隔离，不是共享） ----
+// 说明：这里的"两个 Worker"是**测试构造**——同一 memory 主体下的两个任务与两个
+// worker 会话，用来证明作用域边界；真实路径部分是 runtime 的 worker 会话归属已经
+// 统一走 worker-scope（见 server/agents/runtime.js）。不代表多 Agent 并行环境已生效。
+
+function captureError(fn) {
+  try {
+    fn();
+    return null;
+  } catch (error) {
+    return error;
+  }
+}
+
+function persistScopeArtifact(taskId, text) {
+  return artifactStore.persist({ kind: 'message', content: { text }, taskId });
+}
+
+function openScope(taskId, sessionId, runId) {
+  return workerScope.openWorkerScope({
+    botId: 'memory',
+    taskId,
+    sessionId,
+    runId,
+  });
+}
+
+test('隔离：两个 Worker 各写结果，互相读不到对方会话与产物', () => {
+  const taskA = makeTask({ goal: '隔离任务甲' });
+  const taskB = makeTask({ goal: '隔离任务乙' });
+  const sessionA = sessions.createSession('memory', { title: '隔离甲', scope: 'worker' });
+  const sessionB = sessions.createSession('memory', { title: '隔离乙', scope: 'worker' });
+  sessions.appendMessages('memory', sessionA.id, [{ role: 'user', content: '甲的工作记录' }]);
+  sessions.appendMessages('memory', sessionB.id, [{ role: 'user', content: '乙的工作记录' }]);
+  const artifactA = persistScopeArtifact(taskA.taskId, '甲的产物正文');
+  const artifactB = persistScopeArtifact(taskB.taskId, '乙的产物正文');
+  const scopeA = openScope(taskA.taskId, sessionA.id, 'run_a');
+  const scopeB = openScope(taskB.taskId, sessionB.id, 'run_b');
+
+  assert.deepEqual(
+    scopeA.readOwnMessages().map(item => item.content),
+    ['甲的工作记录']
+  );
+  assert.deepEqual(
+    scopeB.readOwnMessages().map(item => item.content),
+    ['乙的工作记录']
+  );
+  assert.deepEqual(scopeA.listOwnArtifacts().map(item => item.id), [artifactA.id]);
+  assert.deepEqual(scopeB.listOwnArtifacts().map(item => item.id), [artifactB.id]);
+
+  const sessionDenied = captureError(() => scopeA.readOtherMessages(sessionB.id));
+  assert.equal(sessionDenied && sessionDenied.code, 'worker_session_owner_mismatch');
+  assert.ok(!String(sessionDenied.message).includes('乙的工作记录'));
+  const artifactDenied = captureError(() => scopeA.readOwnArtifact(artifactB.id));
+  assert.equal(artifactDenied && artifactDenied.code, 'worker_session_owner_mismatch');
+  assert.ok(!JSON.stringify(artifactDenied).includes('乙的产物正文'));
+
+  const denied = tasks
+    .listEvents('memory', { limit: 200 })
+    .filter(event => event.eventType === 'worker.scope_denied' && event.taskId === taskA.taskId);
+  assert.ok(denied.length >= 2);
+  assert.deepEqual(denied.map(event => event.payload.targetType).sort(), ['artifact', 'session']);
+});
+
+test('隔离：同一 Worker 多次运行仍能读到自己的历史与产物', () => {
+  const task = makeTask({ goal: '多轮隔离任务' });
+  const session = sessions.createSession('memory', { title: '多轮', scope: 'worker' });
+  const first = openScope(task.taskId, session.id, 'run_1');
+  sessions.appendMessages('memory', session.id, [{ role: 'user', content: '第一轮记录' }]);
+  const artifact = persistScopeArtifact(task.taskId, '第一轮产物');
+  assert.equal(first.readOwnMessages().length, 1);
+
+  const second = openScope(task.taskId, session.id, 'run_2');
+  assert.deepEqual(
+    second.readOwnMessages().map(item => item.content),
+    ['第一轮记录']
+  );
+  assert.equal(second.readOwnArtifact(artifact.id).content.text, '第一轮产物');
+  assert.equal(sessions.getSession('memory', session.id).owner.runId, 'run_2');
+});
+
+test('隔离：越权读取默认拒绝并留痕，显式授权才放行', () => {
+  const taskA = makeTask({ goal: '越权读取甲' });
+  const taskB = makeTask({ goal: '越权读取乙' });
+  const sessionA = sessions.createSession('memory', { title: '越权甲', scope: 'worker' });
+  const sessionB = sessions.createSession('memory', { title: '越权乙', scope: 'worker' });
+  sessions.appendMessages('memory', sessionB.id, [{ role: 'user', content: '乙的敏感记录' }]);
+  const artifactB = persistScopeArtifact(taskB.taskId, '乙的敏感产物');
+  const scopeA = openScope(taskA.taskId, sessionA.id, 'run_cross');
+  openScope(taskB.taskId, sessionB.id, 'run_owner');
+
+  const denied = captureError(() =>
+    scopeA.readOtherMessages(sessionB.id, { authorization: { grantedBy: '', reason: '' } })
+  );
+  assert.equal(denied && denied.code, 'worker_session_owner_mismatch');
+  assert.ok(!String(denied.message).includes('乙的敏感记录'));
+
+  const granted = scopeA.readOtherMessages(sessionB.id, {
+    authorization: { grantedBy: 'owner', reason: '事故复盘' },
+  });
+  assert.deepEqual(granted.map(item => item.content), ['乙的敏感记录']);
+  const artifactGranted = scopeA.readOtherArtifact(artifactB.id, {
+    authorization: { grantedBy: 'owner', reason: '事故复盘' },
+  });
+  assert.equal(artifactGranted.content.text, '乙的敏感产物');
+
+  const events = tasks
+    .listEvents('memory', { limit: 200 })
+    .filter(
+      event =>
+        event.taskId === taskA.taskId &&
+        ['worker.scope_denied', 'worker.scope_read'].includes(event.eventType)
+    );
+  const deniedEvents = events.filter(event => event.eventType === 'worker.scope_denied');
+  assert.ok(deniedEvents.length >= 1);
+  assert.equal(deniedEvents[0].payload.requesterTaskId, taskA.taskId);
+  assert.equal(deniedEvents[0].payload.access, 'denied');
+  assert.equal(deniedEvents[0].payload.reason, 'no_authorization');
+  const readEvents = events.filter(event => event.eventType === 'worker.scope_read');
+  assert.equal(readEvents.length, 2);
+  for (const event of readEvents) {
+    assert.equal(event.payload.access, 'granted');
+    assert.equal(event.payload.grantedBy, 'owner');
+    assert.equal(event.payload.reason, '事故复盘');
+  }
+});
+
+test('回归：隔离接入后既有会话投影/关闭语义与投影字段不变', () => {
+  const task = makeTask({ goal: '投影回归' });
+  const session = sessions.createSession('memory', { title: '投影回归', scope: 'worker' });
+  openScope(task.taskId, session.id, 'run_proj');
+  const meta = sessions.getSession('memory', session.id);
+  assert.deepEqual(Object.keys(meta).sort(), [
+    'botId',
+    'createdAt',
+    'id',
+    'lifecycle',
+    'messageCount',
+    'owner',
+    'scope',
+    'title',
+    'updatedAt',
+  ]);
+  const projection = {
+    queued: 'running',
+    accepted: 'running',
+    running: 'running',
+    waiting_approval: 'running',
+    retrying: 'running',
+    completed: 'completed',
+    failed: 'failed',
+    cancelled: 'cancelled',
+    timed_out: 'timed_out',
+    recovery: 'failed',
+    uncertain: 'failed',
+  };
+  for (const [input, expected] of Object.entries(projection)) {
+    assert.equal(sessions.deriveLifecycleStatus(input), expected);
+  }
+  assert.equal(sessions.deriveLifecycleStatus('unknown_status'), 'closed');
+  const projected = sessions.closeSession('memory', session.id, {
+    status: 'running',
+    reason: null,
+  });
+  assert.equal(projected.lifecycle.status, 'running');
+  const rejected = captureError(() =>
+    sessions.closeSession('memory', session.id, { status: 'active' })
+  );
+  assert.equal(rejected && rejected.code, 'invalid_lifecycle_status');
 });
