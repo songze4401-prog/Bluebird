@@ -18,6 +18,7 @@ const resultDelivery = require('./result-delivery');
 const { normalizeWorkerResult } = require('./worker-result');
 const { isKnownBot } = require('./manifest');
 const { AgentError } = require('./errors');
+const artifactCommit = require('./artifact-commit');
 const { getInstanceUserId } = require('../user-scope');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
@@ -449,9 +450,23 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
     if (task && task.status === 'running') {
       try {
         if (record.status === 'completed') {
+          // ③ §11 第 1 步：审批执行同样先把产物落盘，再提交引用与完成状态。
+          const artifactRefs = artifactCommit.persistTaskArtifacts({
+            taskId: record.taskId,
+            runId: task.runId || null,
+            artifacts: summary.id
+              ? [
+                  {
+                    kind: 'memory',
+                    content: { id: String(summary.id), decision: record.operation },
+                  },
+                ]
+              : [],
+          });
           const taskResult = normalizeWorkerResult({
             status: 'completed',
             summary: `已执行审批操作：${record.operation}`,
+            artifacts: artifactRefs,
             toolSteps: [],
             evidence: Array.isArray(summary.supersededIds)
               ? summary.supersededIds.map(id => ({ kind: 'memory', id }))
@@ -468,8 +483,8 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
             runId: task.runId || null,
             finishedAt: now,
           });
-          tasks.transitionTask(record.taskId, {
-            to: 'completed',
+          // §11 第 2/3 步：引用与状态同一次写入；校验在 transitionTask 内。
+          artifactCommit.completeTask(record.taskId, {
             completedAt: now,
             result: taskResult,
           });
@@ -505,8 +520,33 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
             reason: record.errorCode,
           });
         }
-      } catch (_) {
-        // 任务状态竞争不影响审批执行结果。
+      } catch (error) {
+        // ③ §11 第 4 步：产物写失败不能静默留在 running，也不能当作 completed；
+        // 已产生副作用（审批操作已执行），收口为 recovery 等人工核对。
+        if (error && typeof error.code === 'string' && error.code.startsWith('artifact_')) {
+          const current = tasks.getRawTask(record.taskId);
+          if (current && current.status === 'running') {
+            const recoveryResult = normalizeWorkerResult({
+              status: 'recovery',
+              summary: '',
+              errorCode: error.code,
+              runId: current.runId || null,
+              finishedAt: nowIso(),
+            });
+            tasks.transitionTask(record.taskId, {
+              to: 'recovery',
+              completedAt: recoveryResult.finishedAt,
+              errorCode: error.code,
+              result: recoveryResult,
+            });
+            deliverTaskResult(record.taskId, {
+              status: 'recovery',
+              result: recoveryResult,
+              errorCode: error.code,
+            });
+          }
+        }
+        // 其他任务状态竞争不影响审批执行结果。
       }
     }
   }

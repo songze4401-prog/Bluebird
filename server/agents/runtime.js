@@ -19,6 +19,7 @@ const { normalizeWorkerResult } = require('./worker-result');
 const { createToolAuthorizer } = require('./tool-gateway');
 const { AgentError } = require('./errors');
 const approvalDeadline = require('./approval-deadline');
+const artifactCommit = require('./artifact-commit');
 
 const MAX_USER_MESSAGE = 4000;
 const HISTORY_MESSAGES = 24;
@@ -186,6 +187,25 @@ function extractEvidence(name, result, evidence, changes) {
   }
 }
 
+// ③ §11 第 1 步的生产者：把工具实际产出、值得长期留存的输出登记为产物候选。
+// 这里只收集元数据（引用/决定），正文不复制到产物存储，避免重复与泄漏。
+function collectArtifacts(name, result, artifacts) {
+  if (!result || result.ok !== true) return;
+  if (name === 'memory_remember') {
+    for (const id of [result.entryId, result.targetId]) {
+      if (!id) continue;
+      artifacts.push({
+        kind: 'memory',
+        content: {
+          id: String(id),
+          decision: String(result.decision || ''),
+          pending: result.pending === true,
+        },
+      });
+    }
+  }
+}
+
 function dedupeById(items) {
 
   const seen = new Set();
@@ -233,6 +253,7 @@ async function execute({
   const policy = buildPolicy({ config, allowedTools, toolsSupported, budget });
   const evidence = [];
   const changes = [];
+  const artifactInputs = [];
   // Worker 生命周期已经有 runId 时复用它，保证任务、事件与结果指向同一次运行。
   const runId = runIdOverride || `run_${crypto.randomUUID()}`;
   let lastRound = 0;
@@ -305,6 +326,7 @@ async function execute({
       onToolResult: result => {
         progressToolCalls += 1;
         extractEvidence(result.name, result.result, evidence, changes);
+        collectArtifacts(result.name, result.result, artifactInputs);
         if (result.ok && result.name === 'memory_search') {
           safeEvent(
             botId,
@@ -392,6 +414,7 @@ async function execute({
     toolsEnabled: toolsSupported && allowedTools.length > 0,
     evidence: dedupeById(evidence),
     changes,
+    artifacts: artifactInputs,
     requiresConfirmation: changes.some(item => item.kind === 'memory.pending'),
     model: {
       providerId: config.modelProfile.providerId,
@@ -769,10 +792,21 @@ async function runTask(taskId) {
       throw emptyReplyError(result.stopReason);
     }
 
+    // ③ §11 第 1 步：先把产物落盘并拿到 artifactRef（含 version），
+    // 再在第 2/3 步把引用与状态一起提交。落盘失败会抛 artifact_*，由 catch 转 retry/recovery。
+    // 产物来源：工具产出的持久对象（如记忆写入）+ 本次最终回复本身（message）。
+    const produced = Array.isArray(result.artifacts) ? result.artifacts.slice() : [];
+    produced.push({ kind: 'message', content: { text: summary } });
+    const artifactRefs = artifactCommit.persistTaskArtifacts({
+      taskId: task.taskId,
+      runId: result.runId || runId,
+      artifacts: produced,
+    });
+
     const finalResult = normalizeWorkerResult({
       status: 'completed',
       summary,
-      artifacts: [],
+      artifacts: artifactRefs,
       toolSteps: result.toolSteps,
       evidence: result.evidence,
       changes: result.changes,
@@ -784,8 +818,9 @@ async function runTask(taskId) {
       finishedAt: nowIso(),
     });
 
-    tasks.transitionTask(task.taskId, {
-      to: 'completed',
+    // §11 第 2/3 步：进入 completed 前，任务记录已持有产物引用；校验门禁在
+    // transitionTask 内执行，状态与 result 同一次落盘（stateVersion 同一次 +1）。
+    artifactCommit.completeTask(task.taskId, {
       completedAt: finalResult.finishedAt,
       result: finalResult,
     });
@@ -883,10 +918,14 @@ async function runTask(taskId) {
       : (error && error.code) || (timedOut ? 'model_timeout' : 'agent_failed');
     const attempts = Number.isInteger(latest.attempts) ? latest.attempts : 0;
     const maxAttempts = Number.isInteger(latest.maxAttempts) ? latest.maxAttempts : 1;
+    // ③ §11 第 4 步：产物写失败绝不允许 completed。无副作用工具的任务按 retry 退避，
+    // 有副作用（已写记忆等）时不能重跑，收口为 recovery 等人工核对。
+    const artifactFailure =
+      typeof errorCode === 'string' && errorCode.startsWith('artifact_');
     const retryable =
       !cancelled &&
       !latest.allowedTools.includes('memory_remember') &&
-      ['model_connection', 'model_rate_limit', 'model_timeout'].includes(errorCode) &&
+      (artifactFailure || ['model_connection', 'model_rate_limit', 'model_timeout'].includes(errorCode)) &&
       attempts < maxAttempts;
 
     if (retryable) {
@@ -912,7 +951,13 @@ async function runTask(taskId) {
       return;
     }
 
-    const status = cancelled ? 'cancelled' : timedOut ? 'timed_out' : 'failed';
+    const status = cancelled
+      ? 'cancelled'
+      : timedOut
+        ? 'timed_out'
+        : artifactFailure
+          ? 'recovery'
+          : 'failed';
     // 统一结果 schema：失败/取消/超时也落一份结果，而不是 result: null。
     const failureResult = normalizeWorkerResult({
       status,
@@ -1037,6 +1082,14 @@ function initializeTaskQueue() {
   } catch (_) {
     // 结果投递恢复失败不阻塞任务队列；下次 SSE/snapshot 或启动再试。
   }
+  // ③ §11 第 5 步（恢复侧）：产物已写但状态提交失败时，启动扫描重新关联同一产物；
+  // 无引用且超过 §38 TTL 的才标记 orphan。扫描失败不影响任务队列启动。
+  let artifactScan = null;
+  try {
+    artifactScan = artifactCommit.scanPendingCommits();
+  } catch (_) {
+    artifactScan = null;
+  }
   scheduleTaskQueue();
   return {
     recovered: recovered.recovered,
@@ -1044,6 +1097,13 @@ function initializeTaskQueue() {
     leftRunning: recovered.leftRunning,
     queued: tasks.queuedCount(),
     concurrency: TASK_CONCURRENCY,
+    artifactScan: artifactScan
+      ? {
+          scanned: artifactScan.scanned,
+          reconciled: artifactScan.reconciled.length,
+          orphaned: artifactScan.orphaned.length,
+        }
+      : null,
   };
 }
 

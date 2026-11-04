@@ -20,6 +20,8 @@ function refs(value, limit = 40) {
     .map(item => ({
       kind: String(item.kind || '').slice(0, 40),
       id: String(item.id || '').slice(0, 120),
+      // ③ §11 第 1 步：产物引用要能带回 version；evidence 不带该键，形状不变。
+      ...(Number.isInteger(item.version) ? { version: item.version } : {}),
     }));
 }
 

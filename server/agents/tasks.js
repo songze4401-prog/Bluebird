@@ -17,6 +17,7 @@ const { getManifest, isKnownBot } = require('./manifest');
 const { AgentError, conflictError } = require('./errors');
 const taskStore = require('./task-store');
 const stateMachine = require('./state-machine');
+const artifactStore = require('./artifact-store');
 const { normalizeWorkerResult } = require('./worker-result');
 const { LEGACY_ALIASES } = require('./status-vocabulary');
 const approvalDeadline = require('./approval-deadline');
@@ -871,6 +872,7 @@ function updateTask(taskId, patch = {}) {
         typeof result.summary === 'string'
           ? result.summary.slice(0, RESULT_SUMMARY_MAX)
           : '',
+      // ③ 产物引用沿用既有 {kind,id} 形状，只增量一个可选 version（§11 第 1 步）。
       artifacts: Array.isArray(result.artifacts)
         ? result.artifacts
             .filter(item => item && typeof item === 'object')
@@ -878,6 +880,7 @@ function updateTask(taskId, patch = {}) {
             .map(item => ({
               kind: String(item.kind || '').slice(0, 40),
               id: String(item.id || '').slice(0, 120),
+              ...(Number.isInteger(item.version) ? { version: item.version } : {}),
             }))
         : [],
       toolSteps: Array.isArray(result.toolSteps)
@@ -964,6 +967,16 @@ function transitionTask(taskId, options = {}) {
   if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
   // ② CAS：必须在 applyTransition 之前校验，否则冲突会留下已改的内存状态。
   assertExpectedVersion(task, options.expectedVersion);
+  // ③ §11 第 3 步：产物引用必须在进入 completed 之前可读、schema 合格。
+  // 校验失败直接抛 artifact_* 错误，任务保持 running，由调用方转入 retrying/recovery。
+  // 空引用放行：没有产物要求的任务保持既有完成路径。
+  if (options.to === 'completed') {
+    artifactStore.assertRefsCommitReady(
+      options.result && Array.isArray(options.result.artifacts)
+        ? options.result.artifacts
+        : []
+    );
+  }
   applyTransition(task, options.to);
   const patch = { ...options };
   delete patch.to;
