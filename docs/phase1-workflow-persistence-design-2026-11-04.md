@@ -496,3 +496,94 @@ P1–P3 已在本分支落地（每步独立提交），**未合并、未开 PR�
 - 不能证明（照旧「未验证」）：断电级磁盘一致性（只测进程被杀，没测掉电/写缓存丢失）；多进程并发写（`BLUEBIRD_ALLOW_MULTI=1` 下 Store 仍是单写者 read-modify-write）；8 MB Store 体积上限的拒绝路径（需要 2000 条计划，未做单测）。
 - **偏离说明**：要求原文是「所有引用它的任务一律 recovery」。已终态任务（`completed`/`failed`/`cancelled`/`timed_out`/`recovery`）在现有状态机里没有出边，改回 `recovery` 既非法也会改写历史结论，因此实现为「非终态一律 recovery，终态保持原状并继续占 pin（不裁）」。这一点在用例 4 中显式断言。
 
+### 11.15 收口补全 A/B/C 实施结果（2026-11-04）
+
+三个独立提交，各自跑过全量回归 + 五门禁：
+
+| 提交 | 内容 | 新增用例 |
+| --- | --- | --- |
+| `1984e7e` `feat(agents): make artifact content replayable` | 产物正文落盘 + 复读校验 + 版本链 + 256 KB 上限 | `tests/agent-artifact-content.test.js` 5 |
+| `71f1de5` `feat(agents): schedule orphan cleanup` | 孤儿清理挂启动 + 6h 周期 + 防重入 + 失败容忍 | `tests/agent-orphan-scheduler.test.js` 6 |
+| `4f681c7` `feat(agents): enforce the fail-open policy in the tool path` | fail-open 判定接入 `executeToolCall` + 任务冻结作用域 | `tests/agent-failopen-enforcement.test.js` 6 |
+
+计数：81 文件 / 2134 项 → **84 文件 / 2151 项**（`backendTotal` 2151、`runnerTotal` 1929、`runnerFiles` 77；`nodeTestSuiteTotal` 222 与 `frontend` 188 不变）。
+
+```
+84/84 个测试文件全部通过（npm test，EXIT 0）
+EXIT_tsc=0  EXIT_lint=0  EXIT_cov=0  EXIT_sync=0  EXIT_api=0
+backend=2151/2151  nodeSuite=222/222  runner=1929/1929  frontend=188/188
+```
+
+#### A. 产物内容与版本链
+
+**实施前盘点**（本段最重要的结论：内容原本**没有**落盘）：
+
+- `persist()` 只把 `content` 归一化后算 `sha256`，随后丢弃正文，[artifact-store.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/artifact-store.js#L280-L300) 只落 `{id,kind,version,contentHash,…}` 元数据。
+- 正文当时唯一的存在形式是**任务结果 JSON 里的引用**（`result.artifacts[] = {kind,id,version}`），也就是「正文留在产出方」——产出方进程退出后不可复读。
+- 大小上限：当时**没有任何正文体积限制**；只有条数上限 `ARTIFACT_MAX = 5000` 与审计 `AUDIT_MAX = 500`。
+
+**实施后**：
+
+1. 正文一产物一文件：`data/agents/artifact-contents/<id>.json`，`writeContent()` 在写索引**之前**落盘（[artifact-store.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/artifact-store.js#L165-L186)）。先正文后索引：最坏只留一个无人引用的正文文件；反过来会得到「索引指向读不回来的正文」。
+2. 复读：`readContent(id,{version})` 校验 `id`/`version`/结构/`contentHash`，任一不符抛 `artifact_content_corrupted`；文件缺失抛 `artifact_content_missing`（[artifact-store.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/artifact-store.js#L188-L250)）。**从不返回空内容**。
+3. 提交门禁也校验可读：`assertRefsCommitReady()` 除状态/版本外还调用 `readContent`（[artifact-store.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/artifact-store.js#L404-L430)）——「索引对但正文读不回来」不允许提交为完成。
+4. 版本链：`version+1`、旧版 `superseded` + `supersededBy` 且保留；引用冻结（id 由 `(taskId,kind,contentHash)` 派生，新版本是新 id，老引用不漂移）。`versionsOf()` 返回全链（[artifact-store.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/artifact-store.js#L252-L262)）。
+5. 上限：`CONTENT_MAX_BYTES = 256 KB`，**A 类**（安全默认值，待实测校准）。超限在写盘前抛 `artifact_content_too_large`，不截断、不留记录、不写正文文件（[artifact-store.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/artifact-store.js#L280-L292)）。**B 类**（如需 >256 KB 的大产物）当前**只支持显式拒绝**，外部引用未实现。
+
+用例 [agent-artifact-content.test.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/tests/agent-artifact-content.test.js) 5 例：复读 + hash（含丢模块实例后重读）、损坏 fail-closed（读取与提交门禁双拒）、版本链保留旧版且老引用冻结、已终态任务引用的版本不被清理、超限拒绝（含正好 256 KB 可落盘）。
+
+```
+✔ 正文超过 256 KB 显式拒绝：不留记录、不写正文文件
+ℹ tests 5  ℹ pass 5  ℹ fail 0
+```
+
+#### B. 孤儿清理挂生产调度
+
+- `server/agents/orphan-scheduler.js`：启动跑一次 + 周期跑，**默认 6 小时（A 类）**，`BLUEBIRD_AGENT_ARTIFACT_CLEANUP_INTERVAL_MS` 可覆盖（0 = 只跑启动清理）。
+- 单实例防重入：`inFlight` 标记，上一轮没结束就跳过本轮，计入 `skipped`（[orphan-scheduler.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/orphan-scheduler.js#L53-L90)）。
+- 失败容忍：捕获 → `failures+1` / `lastError` → `logger.warn` → 下一轮照常；不向启动流程或定时器冒泡。
+- 挂载点：`runtime.initializeTaskQueue()` 在 `scanPendingCommits()` 之后，进程内单例、`start()` 幂等（[runtime.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/runtime.js#L1060-L1120)）。
+- 清理逻辑本身未改：三重校验（重扫引用、终态任务 pin、审计先写后删）仍是 `artifactCommit.cleanupOrphans` 原实现。
+- **明确不声称**：① 进程崩溃/停机期间漏掉的周期**不补跑**，重启只多跑一次启动清理；② 定时器基于 `setTimeout`，机器休眠/长任务会让实际间隔大于配置值，**不承诺准时**；③ 多进程部署下每个进程各跑一份（单实例假设不变）。
+
+用例 [agent-orphan-scheduler.test.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/tests/agent-orphan-scheduler.test.js) 6 例：默认 6h、启动 + 周期（假定时器，不真等）、重入保护、失败不崩且下一轮照常、不补跑、TTL 差 1ms 不删 / 正好到期才删。
+
+```
+✔ TTL 边界：差一毫秒不删，正好到期才删
+ℹ tests 6  ℹ pass 6  ℹ fail 0
+```
+
+#### C. fail-open 接真实执行器
+
+- 判定接在 `executeToolCall` 内、**handler 调用之前**（[agent-runtime.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agent-runtime.js#L541-L567)）：未命中 → 返回 `failopen_denied`、`executed:false`，handler 调用计数不变；命中 → 继续执行，`evaluate()` 已写审计（含 `policyVersion`）。
+- 作用域来自**任务记录冻结的 `planId/planVersion`**（[runtime.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/runtime.js#L797-L809)）；`actionMatches` 的 `planVersion` 分支（[failopen-policy.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/failopen-policy.js#L391-L397)）因此**不再是死代码**：计划版本不符就不命中。
+- 老记录缺 `planId/planVersion` → `failopen_scope_incomplete` 拒绝（fail-closed），不当作「无计划继续跑」。
+- R2/R3：风险等级由服务端工具定义推导（`read→R0`、`reversible_write→R1`、`high_risk→R3`），`evaluate` 在匹配前直接 `risk_not_allowed`；入口再映射为 `approval_required`——**命中 allowlist 也不执行、不绕过审批**。
+- 登记方式：工具需显式 `failOpenEligible: true`（[agent-runtime.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agent-runtime.js#L169-L180)），默认 false。**当前没有任何内置工具登记**：现有工具本来就不等人工审批，若全局接管，「没有策略」会变成「全部拒绝」，那是改 P1–P5 语义的产品决策。机制在真实路径上可执行、有调用计数断言，但**没有生产工具在用**——这条必须如实标出。
+
+用例 [agent-failopen-enforcement.test.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/tests/agent-failopen-enforcement.test.js) 6 例：命中放行且 handler 真被调用、未命中拒绝且计数 0、撤销后拒绝、老记录缺字段拒绝、R3 命中白名单仍 `approval_required`、未登记工具行为不变。
+
+```
+✔ 未登记 failOpenEligible 的工具行为完全不变
+ℹ tests 6  ℹ pass 6  ℹ fail 0
+```
+
+#### 本段的偏离、推断与未验证
+
+**偏离**
+
+1. A 的提交门禁新增「正文可读」校验（要求只写了「复读要校验」）。后果：升级前落盘的历史产物（没有正文文件）再次提交/解析会被判 `artifact_content_missing`。这是 fail-closed 的必然结果，但**没有写迁移脚本**；生产升级需一次性补正文，或接受这批产物不可提交。
+2. C 的接管范围做成「按工具显式登记」而非「所有有副作用工具一律判定」。理由同上：全局接管会把现有写入工具在「无策略」状态下全部变成拒绝，属于改 P1–P5 语义。**推断**：需求原意是「预授权动作」而不是「所有写入」，故按登记制落地。
+
+**推断**
+
+1. 6 小时清理周期与 256 KB 正文上限均为 A 类默认值，未做容量实测（真实产物分布未知）。
+2. `environment = BLUEBIRD_ENV || 'dev'`、`resource = bot:<botId>`、`subject = 任务投影 userId` 是「最小可用作用域」，策略配置必须与这三个维度对齐。
+
+**未验证**
+
+1. 断电级磁盘一致性：正文/索引沿用 `writeFileAtomicSync`，但没做掉电测试（与 P5 同一条边界）。
+2. 多进程：调度器、正文目录、策略判定都假设单写者；`BLUEBIRD_ALLOW_MULTI=1` 下会出现多进程各清一份、策略 `uses` 计数竞争。
+3. superseded 正文的无限增长：本段只保证「不删」，没有保留期/归档策略（产品决策）。
+4. 真实模型环境下的 fail-open 命中率与误拒率：单测用构造策略，未接真实策略库与真实流量。
+
