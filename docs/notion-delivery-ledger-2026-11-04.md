@@ -24,7 +24,7 @@
 | Phase 0：基线与契约收敛 | “对照当前 HEAD 和已合并实现，确认 Registry、任务队列、Session、Memory、事件、审计和通知链路的真实状态”“统一 Agent Manifest、Task Contract、Result Contract、状态机和权限模型”“输出 ADR” | “没有第二套平行任务协议；关键状态和权限边界可测试” | 0.5 | `docs/phase0-baseline-audit-2026-11-03.md`（判定整体不通过）；ADR 入库 `31a7a9b`；协议收敛 `e08b168`、`7c28a2b`；状态机用例 `tests/agent-recovery.test.js:58`、`:85` | 「权限边界可测试」**Owner 已裁决暂缓（2026-11-04）**：当前按单用户 `local-owner` 口径记录为已知限定，不计入未完成缺口、不安排下一步动作。“没有第二套平行协议”仅完成收敛声明，仍是缺口。 |
 | Phase 1：单主控 + 动态 Worker Pool | “在现有 Runtime 内建立统一 Planner / Orchestrator 接口”“支持少量 Agent 的能力匹配、动态分配、并行和依赖管理”“保留单 Agent 快速路径；先选 2—3 个真实专业 Agent 验证” | “任务路由可追踪、Worker Session 隔离、并发结果不串线、预算硬限制有效” | 1.0 | `server/agents/orchestrator.js` + `tests/agent-orchestrator.test.js` 12 条（交付物 1 的 4 条，`93c5b51`；交付物 2 的 7 条 2a–2g，`6a3cc84`；真实注册表路由 1 条，本轮 `agent-orchestrator` 11→12）；`server/agents/planner.js` + `tests/agent-planner.test.js` 4 条（Planner 侧 a–d，计划只落 workflow-store）；`server/agents/dependencies.js`（唯一 `isReady` + `validateGraph`）+ `server/agents/tasks.js`（`dependsOn`/`settleDependencies`）+ `server/agents/runtime.js`（取队前 settle + runTask 前置校验）+ `tests/agent-worker.test.js` 44 条（依赖 5 条 + 并发上限 1 条 + 令牌/HTTP 5 条 + 5 条混合角色并发 1 条，`agent-worker` 37→44）；`server/agents/worker-scope.js` + 服务端作用域令牌（`issueScopeToken`/`revokeScopeToken`，sha256 映射 + allowlist + TTL；HTTP 读端点只认 `x-worker-scope-token`）；`server/agents/manifest.js` 新增 researcher/executor/reviewer 三个真实 Manifest + 真实 LongCat-2.5 一轮验证（证据见「交付物 3 真实模型验证证据」）；B-06 `tests/agent-budget-atomic.test.js` 7 条（`27b99ec`）+ 真实 usage 结算 | 交付物 1 = **1.0**（Orchestrator 唯一入口 + Planner 规则拆解 + 计划只落既有 workflow-store + 批量多步任务共用同一 planId/planVersion），交付物 2 = **1.0**（四项逐条证据见“交付物 2 四项验收证据”），交付物 3 = **1.0**（三个能力标签可扩展的 Manifest + 真实 LongCat 模型一轮：能力匹配/并行重叠/依赖时序/token usage；见“交付物 3 真实模型验证证据”）；合计 **3.0/3**；4 条验收 **4/4**（路由/隔离/并发/预算，逐条证据见 4–7）。**限定**：三个角色共用同一 LongCat-2.5 模型，只是提示词/能力标签分工，不是异构多模型协作；本轮依赖链下游任务因 `maxTokens=320` 触发 `empty_reply`（依赖时序正确，内容未产出）；**真实模型下的拆解/角色分工质量仍未经评测**；**跨进程并发超出 Notion Phase 1 范围，未做（需跨进程锁），不列为缺口**。下一步＝Phase 2 立项拍板。 |
 | Phase 2：Blackboard + Context Broker | “建立任务级共享产物、证据引用、版本和访问控制”“Worker 私有上下文与共享工作区分离”“支持按需上下文投影和来源追踪” | “跨 Agent 可协作但不能越权读取私有 Session；每个共享结论可追溯来源” | 第 1 项 **1.0**；第 2 项 **1.0**；第 3 项 **1.0**（合计 **3/3**） | 第 1 项（2026-11-05，`c60a1bb` + `4573bc6`）：`share()`/`sharedAccess()`/`readSharedArtifact()` + 令牌第二道门 + `publishSharedConclusion()` 证据门禁。第 2 项（2026-11-05，`db4d3cf`）：`worker-scope.projectSharedContext()` 只放行已共享且版本钉住的引用，`artifact-store.resolveProvenance()` 沿 `{kind,id,version}` 链 fail-closed，投影结果仅含产物引用、不带私有 session/messages。第 3 项（2026-11-05，`59b09cb`）：researcher/executor/reviewer 三个真实注册 Agent 的真实任务一次跑通 A→B→复核，executor 自己的 `wst_` 令牌读 reviewer 私有会话在库层与 HTTP 层均 401 且留痕，A 标 invalidated 后 B 的链 `artifact_chain_broken`（reason=invalidated）。用例：`agent-worker` +1（端到端 1 条，含 4+ 证据采集点与事件/审计时间线）；全量 2199/2199 通过。详见「Phase 2 第 1 项验收证据」「Phase 2 第 2 项验收证据」「Phase 2 第 3 项验收证据」 | 三项完成，但**未新增 HTTP 路由**（库级 API + 复用既有会话读端点）；runtime 不自动投影/自动发布；**尚无撤销共享/逐产物吊销入口**；证据均为同进程 + stub Provider，真实模型协作质量未验证。下一步＝Phase 3 立项拍板（待 Owner）。 |
-| Phase 3：验证闭环 + 事件化工作流 | “引入确定性验证、独立 Reviewer、冲突处理和人工审批节点”“事件、状态、结果投递采用幂等与可恢复设计”“建立失败重试、取消、Checkpoint、死信和成本追踪” | “失败注入、重复事件、Reviewer 检出率和结果投递恢复均有测试证据” | 0 | 已有局部：审批节点 `server/agents/approvals.js`、幂等账本 `server/agents/op-ledger.js`（`a6d3455`）、崩溃注入 `tests/agent-crash-injection.test.js` | 缺确定性验证器、独立 Reviewer、冲突处理、死信与成本追踪；Reviewer 检出率无任何测试。下一步＝待拍板是否单独立项。 |
+| Phase 3：验证闭环 + 事件化工作流 | “引入确定性验证、独立 Reviewer、冲突处理和人工审批节点”“事件、状态、结果投递采用幂等与可恢复设计”“建立失败重试、取消、Checkpoint、死信和成本追踪” | “失败注入、重复事件、Reviewer 检出率和结果投递恢复均有测试证据” | 第 1 项 **1.0**；第 2/3 项未开工 | 第 1 项（2026-11-05，`phase3/verification-loop-2026-11-05`，`3370441` + `a9e500a`）：`server/agents/verification-loop.js`（确定性校验/独立审校/冲突裁决/审批门）+ `runtime.js` 完成前门禁 + `approvals.js` 门禁操作 + `tests/agent-verification-loop.test.js` 7 条。已有局部复用：审批 `approvals.js`、幂等账本 `op-ledger.js`（`a6d3455`）、崩溃注入 `tests/agent-crash-injection.test.js`。验收证据见「Phase 3 第 1 项验收证据」 | 第 1 项完成：三处失败注入 + 10 条构造样本混淆矩阵（TP 7/FN 0/TN 2/FP 1）+ 超时不通过。**未验证**：真实模型审校能力；第 2 项（投递幂等可恢复）与第 3 项（死信/成本追踪）未开工。下一步＝第 2 项先做现状对账（P1–P5 账本/崩溃注入已覆盖部分）。 |
 | Phase 4：受控自治与自我改进 | “根据真实运行数据动态组队、重规划和选择验证强度”“建立离线评测集、策略版本、灰度发布和回滚”“在权限、预算和审批边界不变的前提下，逐步开放低风险自动化” | “相对基线在成功率、返工率、成本或延迟上有可重复改善，且安全指标不退化” | 0 | 全仓 `.js` grep `benchmark\|holdout` 零命中；无评测集、无灰度/回滚机制 | 未开始；且验收句要求“相对基线可重复改善”，**必须先有真实模型环境与压测数据**。 |
 
 ---
@@ -415,6 +415,85 @@ enabled = ["executor","researcher","reviewer"]；registeredAgents = 4
 - 协作是**显式**的：任务完成后需显式调用 `publishSharedConclusion` / `projectSharedContext`；runtime 不自动发布、不自动投影。
 - 越权拒绝的审计落在**目标 bot** 的事件流（`taskId=null`，不含令牌与正文）。
 - 无撤销共享、无跨进程锁；不做检索/UI/多用户；`state-machine.js` 与状态词表未改。
+
+---
+
+## Phase 3 第 1 项验收证据（2026-11-05，分支 `phase3/verification-loop-2026-11-05`）
+
+> 原文第 1 项（唯一依据）：「引入**确定性验证**、**独立 Reviewer**、**冲突处理**和**人工审批节点**」。
+> 本轮只做第 1 项；第 2 项（投递幂等可恢复）与第 3 项（死信/成本追踪）**未开工**。
+> 口径：确定性校验与审校任务都跑在**真实任务 / 真实产物存储 / 真实审批记录**上；模型是本地确定性 stub（无外部 API key）。
+> 复跑：`node --test tests/agent-verification-loop.test.js`（7 条）。
+
+**实现（文件 + 行）**：
+
+| 要素 | 落地 | 说明 |
+|---|---|---|
+| 确定性验证（不依赖模型） | `server/agents/verification-loop.js:78`（`verifyDeterministic`） | 结构、必填字段、引用可解析、版本一致、哈希匹配（复读正文 + `contentHash` 双核对）、结论证据可解析、`conclusion` 来源链；失败返回首个明确错误码，`runtime` 禁止进入 `completed` |
+| 独立 Reviewer | `verification-loop.js:311`（`openReview`） | 复用 `orchestrator.orchestrate({agentId:'reviewer', capability:'review.verify', taskType:'review.verify'})`；硬约束：不同 `taskId`、`botId==='reviewer'`、独立 Worker Session；生产者是 reviewer 时抛 `verification_review_not_independent`；被审产物按版本登记共享 |
+| 审校结论 | `verification-loop.js:429`（`parseVerdict`） | 只接受 `pass/fail/needs_human`；`pass/fail` 必须带可解析证据，缺证据/证据读不回来/JSON 不可解析一律降级 `needs_human`（fail-closed） |
+| 冲突处理 | `verification-loop.js:494`（`resolveConflict`）、`:562`（`planGate`） | 机械通过+审校否、机械失败+审校通过 → `conflict`（保守不通过）；机械失败是机械事实，永远不被审校 `pass` 覆盖；无法结论 → `needs_human`，绝不按通过 |
+| 人工审批节点 | `approvals.js:69`（`GATE_OPERATIONS`）、`:844`（门禁分支）、`verification-loop.js:604`（`requestHumanApproval`） | 复用同一条审批记录与 `riskLevel/expiresAt/SLA`：`review.conflict`=R2（30 分钟 SLA，到期只标 `overdue`，保持 `pending`）、`review.escalate`=R3；门禁操作无外部副作用，不进操作账本、不写记忆 |
+| Runtime 门禁 | `server/agents/runtime.js:937-1040` | `completed` 前先跑确定性校验；`requiresReview` 任务等待独立审校终态（`:130` `waitForReviewTask`），冲突/高风险/审校不可用 → 停 `waiting_approval`；审批超时永不通过 |
+| 审计事件 | `server/agents/tasks.js` 事件白名单 | `verification.review_opened` / `.verdict` / `.rejected` / `.conflict` / `.approval_requested`（只落扁平标量与引用，不落正文；状态词表未改） |
+
+**失败注入（3 处，实测 `[EVIDENCE]` 原始输出）**：
+
+1. 确定性校验失败（注入校验码；真实产物仍可读，注入点为 `verification-loop.js:51` `setFaultInjection`，仅测试用）：
+```
+[EVIDENCE] inject-a {"taskId":"task_e775e51f-105f-46f2-b597-4aae299a7859","finalStatus":"failed","errorCode":"verification_hash_mismatch","event":{"payload":{"status":"failed","errorCode":"verification_hash_mismatch","checkCode":"verification_hash_mismatch","deterministicOk":false,"mode":"verification"}}}
+```
+2. Reviewer 判否（构造"结论与证据矛盾"的结论，审校独立任务真实返回 `fail`；机械与审校一致拒绝）：
+```
+[EVIDENCE] inject-b {"taskId":"task_9a807d88-0d91-44dc-8c57-c36f896a8554","reviewTaskId":"task_9067c6c7-e323-4dbf-b5cf-a40e1557f3e6","reviewerVerdict":"fail","reviewerEvidence":[{"kind":"message","id":"art_bce9b7f6d0a8c3cddc1e86613b064a09","version":1}],"finalStatus":"failed","errorCode":"verification_hash_mismatch","event":{"status":"failed","errorCode":"verification_hash_mismatch","checkCode":"verification_hash_mismatch","deterministicOk":false,"verdict":"fail","mode":"verification"}}
+```
+3. 两者相反（机械注入失败 vs 审校 `pass`）→ `conflict` → 人工审批；超时只标 `overdue`，任务仍 `waiting_approval`，最终由人工拒绝转 `cancelled`：
+```
+[EVIDENCE] inject-c {"taskId":"task_da660d2a-e50d-4856-b860-83a9675bb7a8","reviewTaskId":"task_2f0b6fda-250a-43ef-822b-8cabbeced717","reviewerVerdict":"pass","deterministicInjected":"verification_version_mismatch","approval":{"approvalId":"appr_de9abcfa-bd0b-425b-aad4-2f99ac30f532","riskLevel":"R2","statusAfterTimeout":"pending","overdue":true,"expiresAt":"2026-11-04T17:13:55.847Z"},"taskAfterTimeout":"waiting_approval","finalStatus":"cancelled","conflictEvent":{"verdict":"pass","reviewTaskId":"task_2f0b6fda-250a-43ef-822b-8cabbeced717","producerTaskId":"task_da660d2a-e50d-4856-b860-83a9675bb7a8","deterministicOk":false,"conflict":true,"decision":"conflict","checkCode":"verification_version_mismatch"}}
+```
+人工批准路径（明确覆盖、非静默通过）：
+```
+[EVIDENCE] approval-approve {"taskId":"task_e7bd52d5-ab15-492c-a410-bfb15927d420","approvalId":"appr_866999dc-bdcb-477f-9f7f-15b100025a27","approvalStatus":"completed","approvalResult":{"reason":"ok","gate":"review.conflict","decision":"human_override","artifactId":"art_270d8f917845de4156f42cd75eb673c2"},"taskStatus":"completed","taskSummary":"已执行审批操作：review.conflict"}
+```
+裁决纯函数（双向冲突 + 无法结论）：
+```
+[EVIDENCE] resolve-conflict {"detOk_reviewPass":"pass","detOk_reviewFail":"conflict","detFail_reviewPass":"conflict","detFail_reviewFail":"fail","detOk_reviewUnparseable":"needs_human"}
+```
+
+**Reviewer 检出率（10 条构造样本混淆矩阵，实测）**：
+
+| 指标 | 数值 |
+|---|---|
+| TP / FN | **7 / 0** |
+| TN / FP | **2 / 1** |
+| 检出率（TP/(TP+FN)） | **100%** |
+| 误报率（FP/(FP+TN)） | **33.3%（1/3）** |
+
+| 样本 | 标签 | 是否拦截 | 拦截阶段 / 错误码 |
+|---|---|---|---|
+| clean_message | 0 | 否 | pass |
+| clean_conclusion | 0 | 否 | pass |
+| clean_ambiguous | 0 | **是（FP）** | 审校 `needs_human`（claims 存在但 facts 缺失 → 保守转人工） |
+| structure_missing_summary | 1 | 是 | 确定性 `verification_field_missing` |
+| ref_dangling | 1 | 是 | 确定性 `verification_ref_unresolvable` |
+| version_mismatch | 1 | 是 | 确定性 `verification_version_mismatch` |
+| hash_mismatch | 1 | 是 | 确定性 `verification_hash_mismatch` |
+| evidence_broken | 1 | 是 | 确定性 `verification_evidence_invalid` |
+| conclusion_without_evidence | 1 | 是 | 确定性 `verification_evidence_invalid` |
+| claim_contradicts_evidence | 1 | 是 | 审校 `fail` + 机械 `pass` → `conflict` |
+
+> **必须声明的边界**：以上是**构造样本，不代表真实缺陷分布**；审校器在本轮是**确定性替身**（按 claims/facts 一致性规则判定，不接收样本标签），**真实模型下的检出能力未验证、不计入验收**。FP=1 来自保守策略（审校无法给出结论即转人工），是有意的 fail-closed 代价。
+> 原始行：`[EVIDENCE] confusion-matrix {"note":"构造样本，不代表真实缺陷分布；审校器为确定性替身，真实模型检出能力未验证","TP":7,"FN":0,"TN":2,"FP":1,"detectionRate":1,"falsePositiveRate":0.3333…}`
+
+**判定**：四项要素均有可复跑证据与真实任务终态，**Phase 3 第 1 项 = 1.0**（第 2/3 项未开工，不计入）。
+
+**限定与偏离**：
+- 审校是**显式/按需**的：只有 `task.requiresReview === true` 的任务在完成前进入独立审校；其余任务仅做确定性校验。未改 `state-machine.js` 与状态词表，未新增 HTTP 路由。
+- 生产者通过轮询等待审校终态（上限 `BLUEBIRD_AGENT_REVIEW_WAIT_MS`，默认 30s；`TASK_CONCURRENCY>=2` 才可并行）；等待超时按"审校不可用"转人工，绝不当通过。跨进程/多实例并发不在本轮范围。
+- 人工批准表示"人工确认越过保守裁决"，任务以审批摘要收口；被审产物在冲突时已标 `invalidated` 留痕，**不回填生产者正文**（保守语义，避免把冲突结论洗成正常完成）。
+- 未验证：真实模型审校质量、真实缺陷分布下的检出率/误报率、跨进程恢复。
+
+**计数与门禁（实测）**：`agent-verification-loop` 新增 7 条；`verify-test-coverage` → `backend=2206/2206 nodeSuite=222/222 runner=1984/1984 frontend=188/188 suites=22/22 文件 88/88 failed=0`；`tsc --noEmit` EXIT=0、`eslint`（改动文件）0 error、`verify-api-capabilities`（95 路由 / 20 族 / 仅 API 9）EXIT=0、`sync-doc-counts --check` EXIT=0；全量 `node scripts/run-tests.js` → `88 个测试文件，全部通过`，`FULL_EXIT=0`。
 
 ---
 
