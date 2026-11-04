@@ -21,6 +21,7 @@ const { AgentError } = require('./errors');
 const artifactCommit = require('./artifact-commit');
 const failOpenPolicy = require('./failopen-policy');
 const opLedger = require('./op-ledger');
+const crashHook = require('./crash-hook');
 const { createSideEffectGuard } = require('./side-effect-guard');
 const { getInstanceUserId } = require('../user-scope');
 
@@ -348,6 +349,8 @@ function completeApprovalTask(record, summary, now) {
           ]
         : [],
     });
+    // P5 注入点：产物已落盘（pending-commit）、任务状态还没提交。
+    crashHook.hold('artifact.after-persist');
     const taskResult = normalizeWorkerResult({
       status: 'completed',
       summary: `已执行审批操作：${record.operation}`,
@@ -638,6 +641,8 @@ function createApproval({
   // 任务还在原状态」，重启时由 recoverInterrupted 的待审批对账推回 waiting_approval。
   current.approvals[record.approvalId] = record;
   save();
+  // P5 注入点：审批记录已落盘、任务还没迁到 waiting_approval（W5 的崩溃窗口）。
+  crashHook.hold('approval.after-record-save');
 
   // S6 入口前置：审批只能从 running 进入；queued/accepted 先补齐执行前迁移，
   // 再把任务暂停在 waiting_approval。迁移失败时回滚审批记录并向上抛出。

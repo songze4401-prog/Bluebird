@@ -26,6 +26,7 @@
 const crypto = require('crypto');
 const { tagModelMessage } = require('./context/projection');
 
+const crashHook = require('./agents/crash-hook');
 const { createChatCompletion } = require('./model-adapter');
 const monitoring = require('./monitoring');
 const memorySearchTool = require('./tool-memory-search');
@@ -581,6 +582,8 @@ async function executeToolCall(name, rawArgs, context) {
 
   try {
     const result = remember(await Promise.race([handlerPromise, timeoutPromise]));
+    // P5 注入点：handler 已返回、结果尚未落账本 / 未写任务结果。
+    crashHook.hold('tool.after-handler');
     // P2：真正执行完才补终态；执行前 begin 已落盘，崩溃时留下 started 会被判 recovery。
     if (sideEffect && ledgerOpKey) {
       sideEffect.after({

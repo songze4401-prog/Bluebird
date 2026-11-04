@@ -392,6 +392,25 @@ function markUnknown(opKey, { errorCode = null, now } = {}) {
 }
 
 /**
+ * 启动封账（P5）：单进程部署下，进程启动时不可能还有正在执行的工具调用，
+ * 所有 started 条目都是上次崩溃的残留——统一转 unknown，等待人工核对。
+ * 绝不能留 started 让下一次同键调用复用它（那会把「不知道执行没执行」当成可复用）。
+ */
+function sealStarted({ now, errorCode = 'recovery_side_effect_unknown' } = {}) {
+  const store = read();
+  const sealed = [];
+  for (const entry of Object.values(store.ops)) {
+    if (entry.status !== 'started') continue;
+    entry.status = 'unknown';
+    entry.finishedAt = iso(now);
+    entry.errorCode = errorCode;
+    sealed.push(entry.opKey);
+  }
+  if (sealed.length > 0) write(store);
+  return sealed;
+}
+
+/**
  * 清理：
  *  a) 超过保留期、状态为终态、且所属任务已终态（或已被裁剪）的条目；
  *  b) 超过上限时按时间淘汰最老的「可删」条目。
@@ -472,5 +491,6 @@ module.exports = {
   finish,
   retry,
   markUnknown,
+  sealStarted,
   cleanup,
 };

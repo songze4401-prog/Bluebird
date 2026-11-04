@@ -21,6 +21,8 @@ const { AgentError } = require('./errors');
 const approvalDeadline = require('./approval-deadline');
 const artifactCommit = require('./artifact-commit');
 const { createSideEffectGuard } = require('./side-effect-guard');
+const crashHook = require('./crash-hook');
+const opLedger = require('./op-ledger');
 
 const MAX_USER_MESSAGE = 4000;
 const HISTORY_MESSAGES = 24;
@@ -712,6 +714,8 @@ async function runTask(taskId) {
       startedAt: new Date(runningSince).toISOString(),
       retryAt: null,
     });
+    // P5 注入点：任务已进入 running，回合还没开始。
+    crashHook.hold('task.after-running');
     safeEvent(
       task.botId,
       'task.started',
@@ -1066,6 +1070,13 @@ function initializeTaskQueue() {
   // 单进程部署：启动时不存在仍存活的其他 Worker，旧租约一律视为过期。
   // 多 Worker 场景由调用方传入存活 owner 集合，未过期的租约保持 running。
   const recovered = tasks.recoverInterrupted({ ownerId: null });
+  // P5：启动即封账——上次崩溃留下的 started 全部转 unknown，绝不留给下一次调用复用。
+  let sealedOps = [];
+  try {
+    sealedOps = opLedger.sealStarted();
+  } catch (_) {
+    sealedOps = [];
+  }
   for (const taskId of recovered.taskIds || []) {
     const task = tasks.getRawTask(taskId);
     if (!task) continue;
@@ -1124,11 +1135,13 @@ function initializeTaskQueue() {
     leftRunning: recovered.leftRunning,
     queued: tasks.queuedCount(),
     concurrency: TASK_CONCURRENCY,
+    sealedOps: sealedOps.length,
     artifactScan: artifactScan
       ? {
           scanned: artifactScan.scanned,
           reconciled: artifactScan.reconciled.length,
           orphaned: artifactScan.orphaned.length,
+          pending: artifactScan.pending.length,
         }
       : null,
   };

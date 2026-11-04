@@ -171,4 +171,82 @@
 - 「审批记录已 `completed`、任务还没完成」的极窄窗口未单独对账：若同时丢了产物引用，会按「等待态无未终结审批记录」的规则落 `recovery`——保守，不假装成功。
 - 审批与运行时共用同一个账本文件，靠 `approvalId` 加盐隔离键空间，两者不会互相命中。
 
-P1–P3 已在本分支落地（每步独立提交），**未合并、未开 PR、未触碰 `main`**；P4/P5 仍待排期。
+P1–P3 已在本分支落地（每步独立提交），**未合并、未开 PR、未触碰 `main`**；P4 已并入 P3；P5 见下一节。
+
+## 十、P5 真崩溃注入实跑结果（2026-11-04）
+
+### 10.1 注入方法（如何保证「每次都杀在同一个窗口」）
+
+- **落点写在代码里，不靠猜状态**：`server/agents/crash-hook.js` 只暴露一个 `hold(point)`；四个注入点是代码中的固定语句（见 10.2 表），不是「轮询到某个状态就杀」。
+- **未启用时零副作用**：`BLUEBIRD_TEST_CRASH_HOOK` 为空时，每个调用点只做一次字符串比较就返回。
+- **先写 marker 再阻塞**：命中后同步写 `<markerDir>/crash-<pid>-<point>.json`（含 pid / 点 / 时间），再用 `Atomics.wait` 阻塞事件循环。父进程**只在 marker 出现后**才读磁盘快照并 `child.kill('SIGKILL')`。marker 与阻塞在同一条同步路径上，所以「看到 marker」等价于「进程已停在窗口内且不会再往前走」。
+- **真信号**：断言子进程 `exit.signal === 'SIGKILL'`（或非零退出码），不是 mock、不是抛异常模拟。
+- **不挂死、不静默跳过**：`hold` 最多阻塞 20s（父进程 25s 内没看到 marker 就判失败），子进程用例 `timeout: 90000`，超时即失败；注入点没命中、没被杀掉、重启没收敛，一律 fail，不 skip。
+- **重启侧**：另一个进程以同一 `BLUEBIRD_DATA_DIR` 重新跑 `initializeTaskQueue()` / `approvals.recoverInterrupted()`，按真实启动恢复流程收敛，再把磁盘上的实际状态打成一行 JSON 交给父进程断言。
+
+### 10.2 四个注入点的实测（本机原始输出）
+
+| # | 注入点（代码位置） | 杀掉时的实际状态 | 重启后的实际状态 | 账本实际内容 |
+| --- | --- | --- | --- | --- |
+| c1 | `agent-runtime.js` handler 返回之后、`sideEffect.after` 之前（`tool.after-handler`） | 任务 `running`；账本 1 行 `started` | 任务 `recovery` / `recovery_uncertain_side_effects`；账本仍 1 行但变 `unknown`（`attempt=1`）；`sealedOps=1`；handler 未重跑 | 1 行，`started → unknown` |
+| c2 | `approvals.js` `persistTaskArtifacts` 之后、`normalizeWorkerResult` 之前（`artifact.after-persist`） | 审批 `completed`、任务 `running`、产物 `pending-commit`、账本 1 行 `succeeded` | 审批 `completed`、任务 `recovery`、产物仍 `pending-commit`；扫描 `scanned=1 reconciled=0 orphaned=0 pending=1` | 1 行 `succeeded` |
+| c3 | `approvals.js` 审批记录 `save()` 之后、`moveTaskToApproval` 之前（W5 窗口，`approval.after-record-save`） | 审批 `pending`、任务 `running`、账本为空 | `reconciled=1 dangling=0`；任务回到 `waiting_approval`、审批仍 `pending` | 空（还没执行） |
+| c4 | `runtime.js` 任务迁到 `running` 之后、`task.started` 事件之前（`task.after-running`） | 任务 `running`；账本 0 行（只读工具） | 任务 `failed`（`bot_not_ready`，attempts=2），terminal=true，不是中间态 | 0 行 |
+
+原始输出（同一轮）：
+
+```
+[p5-c1] atKill task=running ledger=started | after task=recovery/recovery_uncertain_side_effects ledger=unknown rows=1 sealed=1 handlerRerun=false
+[p5-c2] atKill approval=completed task=running artifact=pending-commit ledger=succeeded | after approval=completed task=recovery artifact=pending-commit scan(scanned=1,reconciled=0,orphaned=0,pending=1)
+[p5-c3] atKill approval=pending task=running | after reconciled=1 dangling=0 task=waiting_approval approval=pending
+[p5-c4] atKill task=running ledgerRows=0 | after task=failed terminal=true retryAt=null attempts=2 errorCode=bot_not_ready
+```
+
+**逐条结论**
+
+1. **工具已执行、结果未落盘**：真 SIGKILL 之后账本停在 `started`；重启先 `recoverInterrupted` 再 `opLedger.sealStarted()`（启动即把遗留 `started` 封成 `unknown`），任务是 `recovery`，账本只有一行、handler 没有第二次执行。这一条是「崩溃不重复执行」的直接证据。
+2. **产物已写、状态未提交**：产物留在 `pending-commit`，任务不假装 `completed`（落 `recovery`），扫描把它计为 `pending` 而不是 `committed`。没有出现「状态完成但产物没落」，也没有出现「产物已确认但任务状态没提交」。注意 `reconciled=0`：此刻任务 `result` 里没有产物引用，扫描正确地**不**做幂等关联，只记 pending 等 TTL——这正是「宁可不合并，也不猜」。
+3. **W5 窗口**：审批记录已落盘、任务还没进 `waiting_approval`，重启的双向对账把任务推回等待态（`reconciled=1`、`dangling=0`），任务不悬空、审批不丢失。结论是确定的「推回等待态」，不是「靠事件重放碰运气」。
+4. **正常执行中途崩溃（只读工具）**：任务离开 `running`，落到终态 `failed`。**这条有偏离**：本沙箱没有可用模型，重启后的续跑走不到「模型成功返回」，最终以 `bot_not_ready` 明确失败收口。所以这里证明的是「不悬空、有确定去向」，**没有**证明「续跑完成」。
+
+### 10.3 这套注入能证明什么、不能证明什么
+
+**能证明**
+- 进程内状态（Promise 链、内存里的任务对象、未 flush 的结果）在真 SIGKILL 后确实丢失，而磁盘上的账本/产物/审批记录能作为唯一事实来源把状态收敛到确定态。
+- 「handler 已执行、结果未落账本」这种最危险窗口下，重启不会重跑 handler（账本行数不变且为 `unknown`）。
+- 四个窗口的收敛结果是可重复的（见 10.4），不是一次性偶然。
+
+**不能证明（仍标「未验证」）**
+- **断电级磁盘一致性**：SIGKILL 只杀进程，页缓存仍由 OS 正常回刷；没有测掉电 / 内核崩溃 / 磁盘写坏。`writeFileAtomicSync` 的 `fsync` 顺序在真实掉电下是否成立，本段没有证据。
+- **多进程 / 多机并发**：所有用例都是单进程写入，`BLUEBIRD_ALLOW_MULTI=1` 或两个实例共享数据目录时的并发写、租约竞争、账本互相覆盖，全部未验证。
+- **模型路径的续跑完成**：c4 只能在无模型沙箱里落到 `failed`，带真实模型的「中断后自动续跑并完成」没有演练。
+
+### 10.4 稳定性（本机连续 3 次）
+
+三次均为 `tests 4 / pass 4 / fail 0 / skipped 0`、`EXIT 0`，逐用例输出与 10.2 完全一致（c1 `sealed=1 handlerRerun=false`、c2 `pending=1`、c3 `reconciled=1 dangling=0`、c4 `failed/bot_not_ready`）。用例本身没有 `skip` 分支，CI 环境若不支持子进程 SIGKILL 也只能整条 fail，不会静默通过。
+
+### 10.5 本段计数
+
+本段新增 1 个测试文件 `tests/agent-crash-injection.test.js`（4 个用例，`node:test`，runner 逐文件执行），计数由基线派生：
+
+- 文件：77 → **78**
+- 后端用例：2107 → **2111**（node:test 222 不变 + 自建 runner 1885 → 1889）
+- runner 条目：70 → **71**（其中 `node:test` 文件 30 → 31）
+- 前端不变：22 套 / 188 项
+
+### 10.6 全量回归与五门禁（2026-11-04，本机）
+
+| 项 | EXIT | 关键输出 |
+| --- | --- | --- |
+| `node scripts/run-tests.js` | 0 | `78 个测试文件，全部通过`；`p5-c1`–`p5-c4` 四条实测行与 10.2 一致 |
+| `npx tsc --noEmit` | 0 | 无输出 |
+| `npx expo lint` | 0 | 无输出 |
+| `node scripts/verify-test-coverage.js` | 0 | `backend=2111/2111 nodeSuite=222/222 runner=1889/1889`；`frontend=188/188 suites=22/22 failed=0`；`CI runner 覆盖：78/78` |
+| `node scripts/sync-doc-counts.js --check` | 0 | `backend 2111、nodeSuite 222、runner 1889、frontend 188、文件 78` |
+| `node scripts/verify-api-capabilities.js` | 0 | `后端路由 95 条、路由族 20 个、仅 API 的能力 9 个` |
+
+### 10.7 仍未验证的边界（照旧）
+
+- 断电级磁盘一致性（本段只有 SIGKILL）。
+- 多进程 / 多机并发写同一数据目录。
+- 带真实模型的「崩溃后自动续跑完成」（c4 只到 `failed/bot_not_ready`）。
