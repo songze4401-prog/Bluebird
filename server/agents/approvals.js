@@ -59,6 +59,63 @@ const APPROVAL_POLICY_FIELDS = Object.freeze([
   'policyVersion',
 ]);
 
+// Phase 3 第 1 项：验证闭环的"人工审批门"。
+// 这两个操作的执行不触碰记忆/外部副作用，因此不走 memoryService 参数校验与
+// 权限白名单；但仍复用同一条审批记录、riskLevel/expiresAt/SLA 与超时语义：
+// - review.conflict：冲突裁决（机械校验与审校相反），R2 + 30 分钟 SLA，
+//   到期只标 overdue，**绝不**自动通过。
+// - review.escalate：高风险审校不通过或审校无法给出结论，R3（无自动超时）。
+// payload 只允许固定标量键，防止把正文/凭证塞进审批记录。
+const GATE_OPERATIONS = Object.freeze({
+  'review.conflict': Object.freeze({
+    risk: 'medium',
+    allowedKeys: Object.freeze([
+      'producerTaskId',
+      'artifactId',
+      'version',
+      'verdict',
+      'checkCode',
+      'decision',
+      'conflict',
+    ]),
+  }),
+  'review.escalate': Object.freeze({
+    risk: 'high',
+    allowedKeys: Object.freeze([
+      'producerTaskId',
+      'artifactId',
+      'version',
+      'verdict',
+      'checkCode',
+      'decision',
+      'conflict',
+    ]),
+  }),
+});
+
+function gateOperation(operation) {
+  return Object.prototype.hasOwnProperty.call(GATE_OPERATIONS, String(operation || ''))
+    ? GATE_OPERATIONS[String(operation)]
+    : null;
+}
+
+function validateGatePayload(gate, payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { ok: false, error: 'payload' };
+  }
+  const value = {};
+  for (const key of gate.allowedKeys) {
+    const item = payload[key];
+    if (item === undefined || item === null) continue;
+    if (typeof item === 'string') value[key] = item.slice(0, 200);
+    else if (typeof item === 'number' && Number.isFinite(item)) value[key] = item;
+    else if (typeof item === 'boolean') value[key] = item;
+    else return { ok: false, error: key };
+  }
+  if (!value.producerTaskId) return { ok: false, error: 'producerTaskId' };
+  return { ok: true, value };
+}
+
 let cache = null;
 // R2 的 escalation/overdue 计时器：只做标记与事件，不推进任何批准流程。
 const deadlineTimers = new Map();
@@ -559,13 +616,19 @@ function createApproval({
   requestedBy = 'agent',
 } = {}) {
   assertBot(botId);
-  const checked = memoryService.validate(operation, payload);
+  const gate = gateOperation(operation);
+  const checked = gate
+    ? validateGatePayload(gate, payload)
+    : memoryService.validate(operation, payload);
   if (!checked.ok) {
     throw new AgentError('invalid_approval', `审批参数无效：${checked.error}`);
   }
-  const profile = permissions.getPermissionProfile(botId);
-  if (!profile.allowedOperations.includes(operation)) {
-    throw new AgentError('operation_not_allowed', '该操作不在当前 Bot 权限范围');
+  // 门禁操作没有记忆副作用，不受记忆操作权限白名单约束（风险由 riskLevel 表达）。
+  if (!gate) {
+    const profile = permissions.getPermissionProfile(botId);
+    if (!profile.allowedOperations.includes(operation)) {
+      throw new AgentError('operation_not_allowed', '该操作不在当前 Bot 权限范围');
+    }
   }
 
   const requestTaskId =
@@ -596,7 +659,7 @@ function createApproval({
   }
 
   const now = nowIso();
-  const risk = memoryService.RISK[operation] || 'high';
+  const risk = gate ? gate.risk : memoryService.RISK[operation] || 'high';
   const riskLevel = RISK_LEVEL_BY_RISK[risk] || 'R3';
   const createdAt = Date.parse(now);
   // R2 有 30 分钟审批 SLA 与升级点；R3 两者为 null，表示不设自动批准超时。
@@ -778,13 +841,16 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
     );
   }
 
-  const permission = permissions.checkOperation({
-    botId: record.botId,
-    operation: record.operation,
-    approved: true,
-  });
-  if (!permission.ok) {
-    throw new AgentError('operation_not_allowed', '当前权限不允许执行该操作', 403);
+  const gate = gateOperation(record.operation);
+  if (!gate) {
+    const permission = permissions.checkOperation({
+      botId: record.botId,
+      operation: record.operation,
+      approved: true,
+    });
+    if (!permission.ok) {
+      throw new AgentError('operation_not_allowed', '当前权限不允许执行该操作', 403);
+    }
   }
 
   if (record.taskId) {
@@ -796,6 +862,38 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
         409
       );
     }
+  }
+
+  // 门禁操作（review.conflict / review.escalate）没有外部副作用与记忆写入，
+  // 因此不进操作账本、不调用 memoryService；人工批准只表达"允许越过保守裁决"，
+  // 任务按既有 completeApprovalTask 收口。拒绝走既有 decide() → cancelled。
+  if (gate) {
+    const gateNow = nowIso();
+    const gateResult = {
+      reason: 'ok',
+      gate: record.operation,
+      decision: 'human_override',
+      artifactId: record.payload.artifactId || null,
+    };
+    record.status = 'completed';
+    record.errorCode = null;
+    record.result = gateResult;
+    record.executedBy = String(actor || permissions.SINGLE_USER_ACTOR).slice(0, 80);
+    record.executedAt = gateNow;
+    save();
+    if (record.taskId) completeApprovalTask(record, gateResult, gateNow);
+    recordEvent(
+      record.botId,
+      'approval.resolved',
+      {
+        status: 'completed',
+        decision: 'human_override',
+        taskType: record.operation,
+        mode: 'approval',
+      },
+      { approvalId: record.approvalId, taskId: record.taskId, sessionId: record.sessionId }
+    );
+    return publicApproval(record);
   }
 
   // P3：幂等键先算出来并与 executing 同一笔落盘，重启时才能按 opKey 精确对账；
@@ -1090,4 +1188,5 @@ module.exports = {
   approvalPolicyState,
   recoverInterrupted,
   reloadForTests,
+  GATE_OPERATIONS,
 };

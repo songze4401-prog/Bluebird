@@ -27,6 +27,7 @@ const crashHook = require('./crash-hook');
 const opLedger = require('./op-ledger');
 const workflowStore = require('./workflow-store');
 const { createCleanupScheduler } = require('./orphan-scheduler');
+const verificationLoop = require('./verification-loop');
 
 const MAX_USER_MESSAGE = 4000;
 const HISTORY_MESSAGES = 24;
@@ -34,6 +35,12 @@ const MAX_TASK_TOOLS = 6;
 // 工具调用次数预算与“允许的工具种类数”无关。旧实现用工具种类数当上限，
 // 3 个工具就只能调用 3 次，正常的多次检索会提前耗尽预算。
 const MAX_TASK_TOOL_CALLS = 6;
+// Phase 3 第 1 项：生产者等待独立审校任务收敛的上限。超时即按"审校不可用"
+// 保守处理（转人工），绝不当成通过；上限不超过单个 Task deadline 的量级。
+const REVIEW_WAIT_MS = Math.min(
+  60000,
+  Math.max(5000, Number(process.env.BLUEBIRD_AGENT_REVIEW_WAIT_MS) || 30000)
+);
 // Worker 心跳：运行期间每 N 毫秒刷新任务 heartbeatAt 并写一条安全事件。
 // 只证明"执行器仍活着"，不携带任何内容。
 const HEARTBEAT_MS = Math.min(
@@ -118,6 +125,17 @@ function safeEvent(botId, eventType, payload = {}, context = {}) {
       }`
     );
   }
+}
+
+async function waitForReviewTask(taskId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const reviewTask = tasks.getRawTask(taskId);
+    if (!reviewTask) return null;
+    if (tasks.isTerminalStatus(reviewTask.status)) return reviewTask;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  return tasks.getRawTask(taskId);
 }
 
 function allowedToolsFor(config, manifest, taskTools) {
@@ -913,6 +931,156 @@ async function runTask(taskId) {
       runId: result.runId || runId,
       finishedAt: nowIso(),
     });
+
+    // Phase 3 第 1 项：进入 completed 前先过确定性验证（不依赖模型的机械校验）。
+    // 校验失败不得进入 completed；错误码直接落到任务 errorCode。
+    const verification = verificationLoop.verifyDeterministic({
+      taskId: task.taskId,
+      result: finalResult,
+    });
+
+    const current = tasks.getRawTask(task.taskId);
+    if (!current) return;
+
+    const primary = verificationLoop.primaryArtifactRef(finalResult);
+    let review = null;
+    if (current.requiresReview === true) {
+      // 独立审校：必须是一个独立任务（不同 taskId + 独立 worker 作用域），
+      // 由既有 orchestrator 路由到 reviewer；绝不在本任务内自查自批。
+      if (!primary) {
+        review = {
+          decision: 'needs_human',
+          valid: false,
+          code: 'review_artifact_missing',
+          evidence: [],
+          reviewTaskId: null,
+        };
+      } else {
+        let opened = null;
+        try {
+          opened = verificationLoop.openReview({
+            producerTaskId: task.taskId,
+            artifactRef: primary,
+            runId,
+          });
+        } catch (error) {
+          // 无法建立独立审校：按"审校不可用"保守处理，绝不当作通过。
+          safeEvent(
+            task.botId,
+            'verification.verdict',
+            {
+              verdict: 'needs_human',
+              producerTaskId: task.taskId,
+              deterministicOk: verification.ok,
+              errorCode: (error && error.code) || 'verification_review_unavailable',
+              mode: 'review',
+            },
+            { taskId: task.taskId, runId, sessionId: task.sessionId }
+          );
+          review = {
+            decision: 'needs_human',
+            valid: false,
+            code: 'review_unavailable',
+            evidence: [],
+            reviewTaskId: null,
+          };
+        }
+        if (opened) {
+          // 审校任务由 orchestrator → router 创建时已入队，这里只等待其终态，
+          // 不重复执行（避免与队列调度并发跑同一任务）。
+          review = verificationLoop.parseVerdict(
+            await waitForReviewTask(opened.reviewTaskId, REVIEW_WAIT_MS)
+          );
+        }
+      }
+
+      // 审校期间任务可能已取消/被审批冻结/超时收敛：以当前状态为准。
+      const afterReview = tasks.getRawTask(task.taskId);
+      if (
+        deadlineExceeded ||
+        !afterReview ||
+        tasks.isTerminalStatus(afterReview.status) ||
+        afterReview.cancelRequested ||
+        afterReview.status === 'waiting_approval'
+      ) {
+        return;
+      }
+
+      const resolution = verificationLoop.planGate({
+        deterministic: verification,
+        review,
+        task: afterReview,
+      });
+      verificationLoop.auditResolution({
+        producerTask: afterReview,
+        deterministic: verification,
+        review,
+        resolution,
+        runId,
+      });
+
+      if (resolution.action === 'approval') {
+        // 冲突 / 高风险审校不通过 / 审校无法给出结论：默认保守（不通过 + 标 conflict），
+        // 停在审批节点等人工；审批超时只标 overdue，绝不解释为通过。
+        verificationLoop.invalidateArtifactRefs(finalResult, {
+          reason: resolution.errorCode || 'verification_conflict',
+        });
+        verificationLoop.requestHumanApproval({
+          producerTask: afterReview,
+          artifactRef: primary,
+          resolution,
+          deterministic: verification,
+          review,
+          runId,
+        });
+        return;
+      }
+      if (resolution.action === 'reject') {
+        verificationLoop.invalidateArtifactRefs(finalResult, {
+          reason: resolution.errorCode || 'review_rejected',
+        });
+        safeEvent(
+          task.botId,
+          'verification.rejected',
+          {
+            status: 'failed',
+            errorCode: resolution.errorCode,
+            checkCode: verification.errorCode || '',
+            deterministicOk: verification.ok,
+            verdict: review && review.decision ? review.decision : 'needs_human',
+            mode: 'verification',
+          },
+          { taskId: task.taskId, runId, sessionId: task.sessionId }
+        );
+        throw new AgentError(
+          resolution.errorCode || 'review_rejected',
+          '独立审校与机械校验一致判定不通过',
+          409
+        );
+      }
+      // action === complete：两边一致通过，继续进入 completed。
+    } else if (!verification.ok) {
+      verificationLoop.invalidateArtifactRefs(finalResult, {
+        reason: verification.errorCode,
+      });
+      safeEvent(
+        task.botId,
+        'verification.rejected',
+        {
+          status: 'failed',
+          errorCode: verification.errorCode,
+          checkCode: verification.errorCode,
+          deterministicOk: false,
+          mode: 'verification',
+        },
+        { taskId: task.taskId, runId, sessionId: task.sessionId }
+      );
+      throw new AgentError(
+        verification.errorCode || verificationLoop.VERIFY_CODES.structure,
+        '确定性验证未通过，不得进入 completed',
+        409
+      );
+    }
 
     // §11 第 2/3 步：进入 completed 前，任务记录已持有产物引用；校验门禁在
     // transitionTask 内执行，状态与 result 同一次落盘（stateVersion 同一次 +1）。

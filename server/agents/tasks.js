@@ -88,6 +88,12 @@ const EVENT_TYPES = Object.freeze([
   'approval.escalated',
   'approval.overdue',
   'approval.resolved',
+  // Phase 3 第 1 项：验证闭环的审计事件（只记录裁决与引用，不记录正文）。
+  'verification.review_opened',
+  'verification.verdict',
+  'verification.rejected',
+  'verification.conflict',
+  'verification.approval_requested',
   'task.completed',
   'task.delivery',
   'task.failed',
@@ -164,6 +170,17 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'neverStarted',
   'blockedBy',
   'dependencyTaskId',
+  // Phase 3 第 1 项：验证闭环只落扁平标量（审校任务 id、被审产物引用与裁决码）。
+  'verdict',
+  'reviewTaskId',
+  'producerTaskId',
+  'artifactId',
+  'version',
+  'deterministicOk',
+  'conflict',
+  'approvalId',
+  'riskLevel',
+  'checkCode',
 ]);
 
 let taskCache = null;
