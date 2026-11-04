@@ -248,16 +248,13 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
     '/agents/:botId/sessions/:sessionId',
     route(async (req, res) => {
       const botId = req.params.botId;
-      // Worker 会话读作用域：direct 会话保持既有行为；worker 会话默认拒绝跨任务读，
-      // requesterTaskId 声明本任务上下文，或 grantedBy+reason 显式授权（均写审计）。
+      // Worker 会话读作用域：direct 会话保持既有行为；worker 会话只认服务端签发的
+      // 作用域令牌（x-worker-scope-token），不接受调用方自报的 requesterTaskId /
+      // grantedBy。非法令牌 401、越界 409，均写审计且不回显对方内容。
       const session = workerScope.authorizeSessionRead({
         botId,
         sessionId: req.params.sessionId,
-        requesterTaskId: req.query.requesterTaskId,
-        authorization:
-          req.query.grantedBy || req.query.reason
-            ? { grantedBy: req.query.grantedBy, reason: req.query.reason }
-            : null,
+        token: req.get('x-worker-scope-token') || null,
       });
       res.json({
         session,

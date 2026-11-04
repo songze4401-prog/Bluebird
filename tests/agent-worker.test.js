@@ -196,6 +196,26 @@ test.before(async () => {
     apiKey: 'worker-bot-key',
   });
   config.setCredentialId('memory', credential.credentialId);
+  // 并发混合角色用例需要三个真实注册角色也处于 enabled；只配模型档案与凭证，
+  // 不发起网络调用（路由/并发证据不依赖外部模型）。
+  for (const botId of ['researcher', 'executor', 'reviewer']) {
+    config.updateConfig(botId, {
+      enabled: true,
+      modelProfile: {
+        providerId,
+        modelId: 'worker-test-model',
+        temperature: 0.2,
+        maxTokens: 256,
+        timeoutMs: 20000,
+      },
+    });
+    const roleCredential = credentials.putCredential({
+      botId,
+      providerId,
+      apiKey: 'worker-bot-key',
+    });
+    config.setCredentialId(botId, roleCredential.credentialId);
+  }
 
   // HTTP 层隔离回归：直接挂载 createAgentRouter，requireAuth 放行（不改生产认证模型）。
   const app = express();
@@ -728,9 +748,9 @@ test('执行：会话被运行中的其他任务占用时明确失败，不写�
 });
 
 // ---- F. Worker Session 隔离（验收句前半：隔离，不是共享） ----
-// 说明：这里的"两个 Worker"是**测试构造**——同一 memory 主体下的两个任务与两个
-// worker 会话，用来证明作用域边界；真实路径部分是 runtime 的 worker 会话归属已经
-// 统一走 worker-scope（见 server/agents/runtime.js）。不代表多 Agent 并行环境已生效。
+// 说明：这里是同一主体下的两个任务与两个 worker 会话，用来验证作用域边界；
+// runtime 的 worker 会话归属已统一走 worker-scope。多角色真实路由证据见
+// agent-orchestrator.test.js 的「真实注册表」用例，本文件不承担那条证据。
 
 function captureError(fn) {
   try {
@@ -778,10 +798,12 @@ test('隔离：两个 Worker 各写结果，互相读不到对方会话与产物
   assert.deepEqual(scopeB.listOwnArtifacts().map(item => item.id), [artifactB.id]);
 
   const sessionDenied = captureError(() => scopeA.readOtherMessages(sessionB.id));
-  assert.equal(sessionDenied && sessionDenied.code, 'worker_session_owner_mismatch');
+  assert.equal(sessionDenied && sessionDenied.code, 'worker_scope_token_invalid');
+  assert.equal(sessionDenied.status, 401);
   assert.ok(!String(sessionDenied.message).includes('乙的工作记录'));
   const artifactDenied = captureError(() => scopeA.readOwnArtifact(artifactB.id));
-  assert.equal(artifactDenied && artifactDenied.code, 'worker_session_owner_mismatch');
+  assert.equal(artifactDenied && artifactDenied.code, 'worker_scope_token_invalid');
+  assert.equal(artifactDenied.status, 401);
   assert.ok(!JSON.stringify(artifactDenied).includes('乙的产物正文'));
 
   const denied = tasks
@@ -789,6 +811,7 @@ test('隔离：两个 Worker 各写结果，互相读不到对方会话与产物
     .filter(event => event.eventType === 'worker.scope_denied' && event.taskId === taskA.taskId);
   assert.ok(denied.length >= 2);
   assert.deepEqual(denied.map(event => event.payload.targetType).sort(), ['artifact', 'session']);
+  assert.ok(denied.every(event => event.payload.reason === 'token_missing'));
 });
 
 test('隔离：同一 Worker 多次运行仍能读到自己的历史与产物', () => {
@@ -808,7 +831,7 @@ test('隔离：同一 Worker 多次运行仍能读到自己的历史与产物', 
   assert.equal(sessions.getSession('memory', session.id).owner.runId, 'run_2');
 });
 
-test('隔离：越权读取默认拒绝并留痕，显式授权才放行', () => {
+test('隔离：无令牌越权读取被拒并留痕，服务端签发令牌才放行', () => {
   const taskA = makeTask({ goal: '越权读取甲' });
   const taskB = makeTask({ goal: '越权读取乙' });
   const sessionA = sessions.createSession('memory', { title: '越权甲', scope: 'worker' });
@@ -818,19 +841,30 @@ test('隔离：越权读取默认拒绝并留痕，显式授权才放行', () =>
   const scopeA = openScope(taskA.taskId, sessionA.id, 'run_cross');
   openScope(taskB.taskId, sessionB.id, 'run_owner');
 
-  const denied = captureError(() =>
-    scopeA.readOtherMessages(sessionB.id, { authorization: { grantedBy: '', reason: '' } })
-  );
-  assert.equal(denied && denied.code, 'worker_session_owner_mismatch');
+  const denied = captureError(() => scopeA.readOtherMessages(sessionB.id));
+  assert.equal(denied && denied.code, 'worker_scope_token_invalid');
+  assert.equal(denied.status, 401);
   assert.ok(!String(denied.message).includes('乙的敏感记录'));
 
-  const granted = scopeA.readOtherMessages(sessionB.id, {
-    authorization: { grantedBy: 'owner', reason: '事故复盘' },
+  const forged = captureError(() =>
+    scopeA.readOtherMessages(sessionB.id, { token: `wst_${'x'.repeat(32)}` })
+  );
+  assert.equal(forged && forged.code, 'worker_scope_token_invalid');
+
+  // 服务端签发、显式允许 target 的令牌才放行；授权人与理由来自令牌映射，
+  // 不由调用方自报。
+  const grant = workerScope.issueScopeToken({
+    botId: 'memory',
+    taskId: taskA.taskId,
+    sessionId: sessionA.id,
+    allowedTaskIds: [taskB.taskId],
+    allowedSessionIds: [sessionB.id],
+    grantedBy: 'owner',
+    reason: '事故复盘',
   });
+  const granted = scopeA.readOtherMessages(sessionB.id, { token: grant });
   assert.deepEqual(granted.map(item => item.content), ['乙的敏感记录']);
-  const artifactGranted = scopeA.readOtherArtifact(artifactB.id, {
-    authorization: { grantedBy: 'owner', reason: '事故复盘' },
-  });
+  const artifactGranted = scopeA.readOtherArtifact(artifactB.id, { token: grant });
   assert.equal(artifactGranted.content.text, '乙的敏感产物');
 
   const events = tasks
@@ -841,10 +875,16 @@ test('隔离：越权读取默认拒绝并留痕，显式授权才放行', () =>
         ['worker.scope_denied', 'worker.scope_read'].includes(event.eventType)
     );
   const deniedEvents = events.filter(event => event.eventType === 'worker.scope_denied');
-  assert.ok(deniedEvents.length >= 1);
-  assert.equal(deniedEvents[0].payload.requesterTaskId, taskA.taskId);
-  assert.equal(deniedEvents[0].payload.access, 'denied');
-  assert.equal(deniedEvents[0].payload.reason, 'no_authorization');
+  assert.ok(deniedEvents.length >= 2);
+  assert.deepEqual(
+    deniedEvents.map(event => event.payload.reason).sort(),
+    ['token_forged', 'token_missing']
+  );
+  for (const event of deniedEvents) {
+    assert.equal(event.payload.requesterTaskId, taskA.taskId);
+    assert.equal(event.payload.access, 'denied');
+    assert.equal(event.payload.errorCode, 'worker_scope_token_invalid');
+  }
   const readEvents = events.filter(event => event.eventType === 'worker.scope_read');
   assert.equal(readEvents.length, 2);
   for (const event of readEvents) {
@@ -852,6 +892,8 @@ test('隔离：越权读取默认拒绝并留痕，显式授权才放行', () =>
     assert.equal(event.payload.grantedBy, 'owner');
     assert.equal(event.payload.reason, '事故复盘');
   }
+  // 审计只落授权元数据，不落令牌原文。
+  assert.ok(!JSON.stringify(events).includes(grant));
 });
 
 test('回归：隔离接入后既有会话投影/关闭语义与投影字段不变', () => {
@@ -898,13 +940,15 @@ test('回归：隔离接入后既有会话投影/关闭语义与投影字段不�
   assert.equal(rejected && rejected.code, 'invalid_lifecycle_status');
 });
 
-// ---- G. HTTP 读端点：Worker 作用域对外生效 ----
-// 说明：通过 createAgentRouter 直接挂载（requireAuth 放行），验证的是真实路由处理器；
-// 调用方身份 requesterTaskId 是自报值（生产仍是单用户 local-owner，无调用者认证）。
+// ---- G. HTTP 读端点：Worker 作用域令牌对外生效 ----
+// 通过 createAgentRouter 直接挂载（requireAuth 放行），验证真实路由处理器；
+// worker 会话读只认 x-worker-scope-token，不接受调用方自报的 requesterTaskId/grantedBy。
 
-async function getSessionHttp(sessionId, query = '') {
+async function getSessionHttp(sessionId, token = null) {
+  const headers = token ? { 'x-worker-scope-token': token } : {};
   const response = await fetch(
-    `${agentApiBase}/agents/memory/sessions/${encodeURIComponent(sessionId)}${query}`
+    `${agentApiBase}/agents/memory/sessions/${encodeURIComponent(sessionId)}`,
+    { headers }
   );
   const json = await response.json();
   return { status: response.status, json };
@@ -917,21 +961,29 @@ function httpScopeFixture() {
   const sessionB = sessions.createSession('memory', { title: 'HTTP 乙', scope: 'worker' });
   sessions.appendMessages('memory', sessionA.id, [{ role: 'user', content: '甲的 HTTP 正文' }]);
   sessions.appendMessages('memory', sessionB.id, [{ role: 'user', content: '乙的 HTTP 正文' }]);
-  openScope(taskA.taskId, sessionA.id, 'run_http_a');
-  openScope(taskB.taskId, sessionB.id, 'run_http_b');
-  return { taskA, taskB, sessionA, sessionB };
+  const scopeA = openScope(taskA.taskId, sessionA.id, 'run_http_a');
+  const scopeB = openScope(taskB.taskId, sessionB.id, 'run_http_b');
+  return {
+    taskA,
+    taskB,
+    sessionA,
+    sessionB,
+    tokenA: scopeA.token,
+    tokenB: scopeB.token,
+  };
 }
 
-test('HTTP 隔离：跨 Worker 读会话消息被拒（409 + 既有错误码）', async () => {
-  const { taskA, sessionB } = httpScopeFixture();
-  const denied = await getSessionHttp(sessionB.id, `?requesterTaskId=${taskA.taskId}`);
+test('HTTP 隔离：有效令牌跨作用域 409，无令牌 401，均留痕且不回显内容', async () => {
+  const { taskA, sessionB, tokenA } = httpScopeFixture();
+  const denied = await getSessionHttp(sessionB.id, tokenA);
   assert.equal(denied.status, 409);
   assert.equal(denied.json.code, 'worker_session_owner_mismatch');
   assert.ok(!JSON.stringify(denied.json).includes('乙的 HTTP 正文'));
 
   const anonymous = await getSessionHttp(sessionB.id);
-  assert.equal(anonymous.status, 409);
-  assert.equal(anonymous.json.code, 'worker_session_owner_mismatch');
+  assert.equal(anonymous.status, 401);
+  assert.equal(anonymous.json.code, 'worker_scope_token_invalid');
+  assert.ok(!JSON.stringify(anonymous.json).includes('乙的 HTTP 正文'));
 
   const events = tasks
     .listEvents('memory', { limit: 200 })
@@ -945,9 +997,9 @@ test('HTTP 隔离：跨 Worker 读会话消息被拒（409 + 既有错误码）'
   assert.ok(events.some(event => event.payload.requesterTaskId === null));
 });
 
-test('HTTP 隔离：本 Worker 读自己的会话 → 200 且只返回自己消息', async () => {
-  const { taskA, sessionA } = httpScopeFixture();
-  const own = await getSessionHttp(sessionA.id, `?requesterTaskId=${taskA.taskId}`);
+test('HTTP 隔离：本 Worker 令牌读自己的会话 → 200 且只返回自己消息', async () => {
+  const { taskA, sessionA, tokenA } = httpScopeFixture();
+  const own = await getSessionHttp(sessionA.id, tokenA);
   assert.equal(own.status, 200);
   assert.deepEqual(
     own.json.messages.map(item => item.content),
@@ -956,12 +1008,18 @@ test('HTTP 隔离：本 Worker 读自己的会话 → 200 且只返回自己消�
   assert.equal(own.json.session.owner.taskId, taskA.taskId);
 });
 
-test('HTTP 隔离：显式授权读他人 Worker 会话 → 200 且写 worker.scope_read', async () => {
-  const { taskA, sessionB } = httpScopeFixture();
-  const granted = await getSessionHttp(
-    sessionB.id,
-    `?requesterTaskId=${taskA.taskId}&grantedBy=owner&reason=${encodeURIComponent('事故复盘')}`
-  );
+test('HTTP 隔离：服务端签发授权令牌读他人 Worker 会话 → 200 且写 worker.scope_read', async () => {
+  const { taskA, taskB, sessionA, sessionB } = httpScopeFixture();
+  const grant = workerScope.issueScopeToken({
+    botId: 'memory',
+    taskId: taskA.taskId,
+    sessionId: sessionA.id,
+    allowedTaskIds: [taskB.taskId],
+    allowedSessionIds: [sessionB.id],
+    grantedBy: 'owner',
+    reason: '事故复盘',
+  });
+  const granted = await getSessionHttp(sessionB.id, grant);
   assert.equal(granted.status, 200);
   assert.deepEqual(
     granted.json.messages.map(item => item.content),
@@ -977,6 +1035,56 @@ test('HTTP 隔离：显式授权读他人 Worker 会话 → 200 且写 worker.sc
   assert.equal(events[0].payload.grantedBy, 'owner');
   assert.equal(events[0].payload.reason, '事故复盘');
   assert.equal(events[0].payload.access, 'granted');
+});
+
+test('HTTP 令牌：伪造、过期、吊销均 401，审计留痕且不回显内容', async () => {
+  const { taskA, sessionA } = httpScopeFixture();
+  const forged = `wst_${'f'.repeat(43)}`;
+  const deniedForged = await getSessionHttp(sessionA.id, forged);
+  assert.equal(deniedForged.status, 401);
+  assert.equal(deniedForged.json.code, 'worker_scope_token_invalid');
+  assert.ok(!JSON.stringify(deniedForged.json).includes('甲的 HTTP 正文'));
+
+  const expiredTask = makeTask({ goal: '令牌过期任务' });
+  const expiredSession = sessions.createSession('memory', { title: '令牌过期', scope: 'worker' });
+  sessions.appendMessages('memory', expiredSession.id, [
+    { role: 'user', content: '到期会话正文' },
+  ]);
+  const expiredScope = workerScope.openWorkerScope({
+    botId: 'memory',
+    taskId: expiredTask.taskId,
+    sessionId: expiredSession.id,
+    runId: 'run_expired',
+    tokenTtlMs: 5,
+  });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const deniedExpired = await getSessionHttp(expiredSession.id, expiredScope.token);
+  assert.equal(deniedExpired.status, 401);
+  assert.equal(deniedExpired.json.code, 'worker_scope_token_invalid');
+  assert.ok(!JSON.stringify(deniedExpired.json).includes('到期会话正文'));
+
+  const revokedScope = openScope(taskA.taskId, sessionA.id, 'run_revoked');
+  assert.equal(workerScope.revokeScopeToken(revokedScope.token), true);
+  const deniedRevoked = await getSessionHttp(sessionA.id, revokedScope.token);
+  assert.equal(deniedRevoked.status, 401);
+  assert.equal(deniedRevoked.json.code, 'worker_scope_token_invalid');
+
+  const events = tasks
+    .listEvents('memory', { limit: 200 })
+    .filter(
+      event =>
+        event.eventType === 'worker.scope_denied' &&
+        [sessionA.id, expiredSession.id].includes(event.payload.targetId)
+    );
+  const reasons = new Set(events.map(event => event.payload.reason));
+  assert.ok(reasons.has('token_forged'));
+  assert.ok(reasons.has('token_expired'));
+  assert.ok(reasons.has('token_revoked'));
+  // 审计只落授权元数据，不落令牌原文。
+  const serialized = JSON.stringify(events);
+  assert.ok(!serialized.includes(forged));
+  assert.ok(!serialized.includes(expiredScope.token));
+  assert.ok(!serialized.includes(revokedScope.token));
 });
 
 test('HTTP 回归：direct 会话与缺失会话的既有行为不变', async () => {
@@ -1292,4 +1400,160 @@ test('并发：两条任务同时跑，结果、产物引用与会话各归各�
   assert.equal(rawB.status, 'completed');
   assert.equal(sessions.getSession('memory', a.sessionId).owner.taskId, taskA.taskId);
   assert.equal(sessions.getSession('memory', b.sessionId).owner.taskId, taskB.taskId);
+});
+
+// 能证明：同一进程内，5 条混合角色在 TASK_CONCURRENCY=2 下的结果/产物/预算互不串线，
+// 且超发被预算闸门拒绝。不能证明：跨进程隔离（超出 Notion Phase 1 范围，需跨进程锁）。
+test('并发：5 条混合角色受 TASK_CONCURRENCY=2 约束，结果/产物/预算互不串线且超发被拒', async () => {
+  await drainPendingTasks();
+  const TOKEN_BUDGET = 12000;
+  const specs = [
+    {
+      agentId: 'researcher',
+      taskType: 'memory.recall',
+      allowedTools: ['memory_search'],
+      marker: 'MIX_RESEARCH_ALPHA',
+    },
+    {
+      agentId: 'executor',
+      taskType: 'memory.write',
+      allowedTools: ['memory_remember'],
+      marker: 'MIX_EXECUTOR_BETA',
+    },
+    {
+      agentId: 'reviewer',
+      taskType: 'review.verify',
+      allowedTools: ['knowledge_search'],
+      marker: 'MIX_REVIEW_GAMMA',
+    },
+    {
+      agentId: 'memory',
+      taskType: 'memory.search',
+      allowedTools: ['memory_search'],
+      marker: 'MIX_MEMORY_DELTA',
+    },
+    {
+      agentId: 'researcher',
+      taskType: 'memory.recall',
+      allowedTools: ['knowledge_search'],
+      marker: 'MIX_RESEARCH_EPSILON',
+    },
+  ];
+  const created = specs.map(spec =>
+    tasks.createTask({
+      agentId: spec.agentId,
+      taskType: spec.taskType,
+      goal: `SLOW_TASK ${spec.marker} 混合并发`,
+      allowedTools: spec.allowedTools,
+      deadlineMs: 20000,
+      budget: {
+        maxRounds: 3,
+        maxToolCalls: 6,
+        maxReadOnlyRetries: 1,
+        tokenBudget: TOKEN_BUDGET,
+      },
+    })
+  );
+  for (const task of created) runtime.startTask(task.taskId);
+
+  let peak = 0;
+  let maxQueued = 0;
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    const stats = runtime.getQueueStats();
+    peak = Math.max(peak, stats.active);
+    maxQueued = Math.max(maxQueued, stats.queued);
+    const current = created.map(task => tasks.getTask(task.taskId));
+    if (current.every(item => tasks.isTerminalStatus(item.status))) break;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  const finished = await Promise.all(created.map(task => waitForTask(task.taskId)));
+
+  assert.equal(peak, 2, `峰值并行应为 2（实际 ${peak}）`);
+  assert.ok(finished.every(item => item.status === 'completed'), '每条任务都应完成');
+
+  // 结果互不可见：每条只含自己的标记，不含其他任务的标记 / taskId / sessionId。
+  for (let index = 0; index < finished.length; index += 1) {
+    const own = finished[index];
+    const otherMarkers = specs.filter((_, i) => i !== index).map(spec => spec.marker);
+    const otherTaskIds = created.filter((_, i) => i !== index).map(task => task.taskId);
+    const otherSessionIds = finished.filter((_, i) => i !== index).map(item => item.sessionId);
+    assert.ok(own.result.summary.includes(specs[index].marker));
+    for (const marker of otherMarkers) {
+      assert.ok(!JSON.stringify(own).includes(marker), `结果串入其他标记：${marker}`);
+    }
+    for (const id of otherTaskIds) assert.ok(!JSON.stringify(own).includes(id));
+    for (const id of otherSessionIds) assert.ok(!JSON.stringify(own).includes(id));
+    assert.equal(own.agentId, specs[index].agentId);
+  }
+
+  // 产物各归各：产物 taskId 是自己的，跨任务无共享 id。
+  const artifactIds = finished.map(item => item.result.artifacts.map(ref => ref.id));
+  for (let index = 0; index < finished.length; index += 1) {
+    assert.ok(artifactIds[index].length > 0);
+    for (const id of artifactIds[index]) {
+      assert.equal(artifactStore.get(id).taskId, finished[index].taskId);
+    }
+    for (let other = 0; other < artifactIds.length; other += 1) {
+      if (other === index) continue;
+      assert.deepEqual(
+        artifactIds[index].filter(id => artifactIds[other].includes(id)),
+        []
+      );
+    }
+    assert.equal(
+      sessions.getSession(finished[index].agentId, finished[index].sessionId).owner.taskId,
+      finished[index].taskId
+    );
+  }
+
+  // 预算各归各：每条只用自己的 tokenBudget，remaining = 上限 - 自己已用。
+  const usages = finished.map(item => {
+    const snapshot = tasks.getTaskBudgetSnapshot(item.taskId);
+    assert.equal(snapshot.limit, TOKEN_BUDGET);
+    assert.equal(snapshot.remaining, TOKEN_BUDGET - snapshot.used);
+    return snapshot;
+  });
+  assert.ok(usages.every(item => item.used === 2), `每条应只记自己的 2 tokens（实际 ${usages.map(item => item.used).join(',')}）`);
+  assert.equal(
+    usages.reduce((sum, item) => sum + item.used, 0),
+    2 * finished.length,
+    '总用量应等于各任务自身用量之和，不存在共享账本串线'
+  );
+
+  // 超发被拒：在已用基础上再申请 1 token 以上必须 budget_exceeded，且不改账本。
+  const target = finished[0].taskId;
+  const beforeReserve = tasks.getTaskBudgetSnapshot(target);
+  assert.throws(
+    () =>
+      tasks.reserveTaskBudget(target, {
+        amount: beforeReserve.remaining + 1,
+      }),
+    error => error.code === 'budget_exceeded'
+  );
+  const afterReserve = tasks.getTaskBudgetSnapshot(target);
+  assert.deepEqual(afterReserve, beforeReserve, '拒绝超发不得修改预算账本');
+
+  const timeline = finished
+    .map(item => ({
+      taskId: item.taskId,
+      agentId: item.agentId,
+      taskType: item.taskType,
+      runStartedAt: item.runStartedAt,
+      completedAt: item.completedAt,
+      durationMs: Date.parse(item.completedAt) - Date.parse(item.runStartedAt),
+      used: tasks.getTaskBudgetSnapshot(item.taskId).used,
+    }))
+    .sort((a, b) => Date.parse(a.runStartedAt) - Date.parse(b.runStartedAt));
+  console.log('[并发-5条混合角色]', JSON.stringify({
+    concurrency: runtime.getQueueStats().concurrency,
+    peakActive: peak,
+    maxQueued: maxQueued,
+    timeline,
+    overIssue: {
+      taskId: target,
+      attempted: beforeReserve.remaining + 1,
+      remaining: beforeReserve.remaining,
+    },
+  }));
 });

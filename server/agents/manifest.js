@@ -199,9 +199,8 @@ const MANIFESTS = Object.freeze({
   [REVIEWER_BOT_ID]: REVIEWER_BOT_MANIFEST,
 });
 
-// 测试注入点：Phase 1 交付物 2 的多候选用例需要两个以上「已注册主体」，
-// 而真实注册表当前只有 memory。测试通过本函数临时追加 Manifest，
-// 让 Task Store / Registry 的既有校验路径保持不变；生产代码不调用，默认恒为空。
+// 测试注入点：容量/多候选等边界用例需要额外主体；真实路由证据改用已注册的
+// researcher / executor / reviewer，不再依赖本注入。生产代码不调用，默认恒为空。
 let testManifests = Object.create(null);
 
 function setTestManifests(manifests) {

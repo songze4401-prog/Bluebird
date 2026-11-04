@@ -1,6 +1,6 @@
 # Notion 交付台账（2026-11-04）
 
-> **结论**：按 Notion 原文口径，**Phase 0 未完成（0.5，其中“权限边界”已由 Owner 裁决暂缓）**，**Phase 1 交付物 3.0/3（第 1 项 1.0；第 2 项 1.0；第 3 项 1.0，真实 LongCat 模型一轮验证；按 §5 原句逐句拆为 3 项，Planner 与 Orchestrator 合算 1 项）**；4 条验收要求：预算硬限制**已满足**（B-06=1，真实供应商 usage 结算），任务路由可追踪 / Worker Session 隔离 / 并发结果不串线**部分满足**（单任务级或同进程证据，跨进程未验证）。
+> **结论**：按 Notion 原文口径，**Phase 0 未完成（0.5，其中“权限边界”已由 Owner 裁决暂缓）**，**Phase 1 交付物 3.0/3（第 1 项 1.0；第 2 项 1.0；第 3 项 1.0，真实 LongCat 模型一轮验证；按 §5 原句逐句拆为 3 项，Planner 与 Orchestrator 合算 1 项）**；4 条验收要求 **4/4 已满足（2026-11-04）**：预算硬限制（B-06=1，真实供应商 usage 结算）、任务路由可追踪（真实注册的 researcher/executor/reviewer 分派 + 候选集/依据落盘）、Worker Session 隔离（服务端签发令牌，含过期与吊销路径）、并发结果不串线（5 条混合角色 + `TASK_CONCURRENCY=2`）。**跨进程并发超出 Notion Phase 1 范围，未做；需跨进程锁，不计为未闭合缺口。**
 >
 > 唯一依据：《Bluebird Agent Runtime｜混合式多 Agent 目标架构 v1.0》
 > https://app.notion.com/p/Bluebird-Agent-Runtime-Agent-v1-0-40da957523c281359607e23f6a3c784f
@@ -22,7 +22,7 @@
 | 编号与名称（原文 §5） | 原文目标 / 交付物（引句） | 退出判据（原文“验收”句） | 状态 | 证据 | 未完成原因 + 下一步 |
 |---|---|---|---|---|---|
 | Phase 0：基线与契约收敛 | “对照当前 HEAD 和已合并实现，确认 Registry、任务队列、Session、Memory、事件、审计和通知链路的真实状态”“统一 Agent Manifest、Task Contract、Result Contract、状态机和权限模型”“输出 ADR” | “没有第二套平行任务协议；关键状态和权限边界可测试” | 0.5 | `docs/phase0-baseline-audit-2026-11-03.md`（判定整体不通过）；ADR 入库 `31a7a9b`；协议收敛 `e08b168`、`7c28a2b`；状态机用例 `tests/agent-recovery.test.js:58`、`:85` | 「权限边界可测试」**Owner 已裁决暂缓（2026-11-04）**：当前按单用户 `local-owner` 口径记录为已知限定，不计入未完成缺口、不安排下一步动作。“没有第二套平行协议”仅完成收敛声明，仍是缺口。 |
-| Phase 1：单主控 + 动态 Worker Pool | “在现有 Runtime 内建立统一 Planner / Orchestrator 接口”“支持少量 Agent 的能力匹配、动态分配、并行和依赖管理”“保留单 Agent 快速路径；先选 2—3 个真实专业 Agent 验证” | “任务路由可追踪、Worker Session 隔离、并发结果不串线、预算硬限制有效” | 1.0 | `server/agents/orchestrator.js` + `tests/agent-orchestrator.test.js` 11 条（交付物 1 的 4 条：唯一入口/显式失败/兼容路径/落盘轨迹，`93c5b51`；交付物 2 的 7 条：2a–2d 容量感知择一 `6a3cc84`，2e–2g 依赖图/环/悬空依赖；本轮 `agent-orchestrator` 8→11）；`server/agents/planner.js` + `tests/agent-planner.test.js` 4 条（Planner 侧 a–d，计划只落 workflow-store）；`server/agents/dependencies.js`（唯一 `isReady` + `validateGraph`）+ `server/agents/tasks.js`（`dependsOn`/`settleDependencies`）+ `server/agents/runtime.js`（取队前 settle + runTask 前置校验）+ `tests/agent-worker.test.js` 42 条（其中依赖 5 条 + 并发上限 1 条，`agent-worker` 37→42）；`server/agents/worker-scope.js` + Worker Session 隔离 9 条（内部 a–d + HTTP a–d + 同进程真并发 1 条，上一轮）；`server/agents/manifest.js` 新增 researcher/executor/reviewer 三个真实 Manifest + 真实 LongCat-2.5 一轮验证（证据见「交付物 3 真实模型验证证据」）；B-06 `tests/agent-budget-atomic.test.js` 7 条（`27b99ec`）+ 真实 usage 结算 | 交付物 1 = **1.0**（Orchestrator 唯一入口 + Planner 规则拆解 + 计划只落既有 workflow-store + 批量多步任务共用同一 planId/planVersion），交付物 2 = **1.0**（四项逐条证据见“交付物 2 四项验收证据”），交付物 3 = **1.0**（三个能力标签可扩展的 Manifest + 真实 LongCat 模型一轮：能力匹配/并行重叠/依赖时序/token usage；见“交付物 3 真实模型验证证据”）；合计 **3.0/3**。**限定**：三个角色共用同一 LongCat-2.5 模型，只是提示词/能力标签分工，不是异构多模型协作；本轮依赖链下游任务因 `maxTokens=320` 触发 `empty_reply`（依赖时序正确，内容未产出）；**真实模型下的拆解/角色分工质量仍未经评测**。下一步＝Phase 2 立项拍板，或补跨进程并发与多 Agent 端到端追踪。 |
+| Phase 1：单主控 + 动态 Worker Pool | “在现有 Runtime 内建立统一 Planner / Orchestrator 接口”“支持少量 Agent 的能力匹配、动态分配、并行和依赖管理”“保留单 Agent 快速路径；先选 2—3 个真实专业 Agent 验证” | “任务路由可追踪、Worker Session 隔离、并发结果不串线、预算硬限制有效” | 1.0 | `server/agents/orchestrator.js` + `tests/agent-orchestrator.test.js` 12 条（交付物 1 的 4 条，`93c5b51`；交付物 2 的 7 条 2a–2g，`6a3cc84`；真实注册表路由 1 条，本轮 `agent-orchestrator` 11→12）；`server/agents/planner.js` + `tests/agent-planner.test.js` 4 条（Planner 侧 a–d，计划只落 workflow-store）；`server/agents/dependencies.js`（唯一 `isReady` + `validateGraph`）+ `server/agents/tasks.js`（`dependsOn`/`settleDependencies`）+ `server/agents/runtime.js`（取队前 settle + runTask 前置校验）+ `tests/agent-worker.test.js` 44 条（依赖 5 条 + 并发上限 1 条 + 令牌/HTTP 5 条 + 5 条混合角色并发 1 条，`agent-worker` 37→44）；`server/agents/worker-scope.js` + 服务端作用域令牌（`issueScopeToken`/`revokeScopeToken`，sha256 映射 + allowlist + TTL；HTTP 读端点只认 `x-worker-scope-token`）；`server/agents/manifest.js` 新增 researcher/executor/reviewer 三个真实 Manifest + 真实 LongCat-2.5 一轮验证（证据见「交付物 3 真实模型验证证据」）；B-06 `tests/agent-budget-atomic.test.js` 7 条（`27b99ec`）+ 真实 usage 结算 | 交付物 1 = **1.0**（Orchestrator 唯一入口 + Planner 规则拆解 + 计划只落既有 workflow-store + 批量多步任务共用同一 planId/planVersion），交付物 2 = **1.0**（四项逐条证据见“交付物 2 四项验收证据”），交付物 3 = **1.0**（三个能力标签可扩展的 Manifest + 真实 LongCat 模型一轮：能力匹配/并行重叠/依赖时序/token usage；见“交付物 3 真实模型验证证据”）；合计 **3.0/3**；4 条验收 **4/4**（路由/隔离/并发/预算，逐条证据见 4–7）。**限定**：三个角色共用同一 LongCat-2.5 模型，只是提示词/能力标签分工，不是异构多模型协作；本轮依赖链下游任务因 `maxTokens=320` 触发 `empty_reply`（依赖时序正确，内容未产出）；**真实模型下的拆解/角色分工质量仍未经评测**；**跨进程并发超出 Notion Phase 1 范围，未做（需跨进程锁），不列为缺口**。下一步＝Phase 2 立项拍板。 |
 | Phase 2：Blackboard + Context Broker | “建立任务级共享产物、证据引用、版本和访问控制”“Worker 私有上下文与共享工作区分离”“支持按需上下文投影和来源追踪” | “跨 Agent 可协作但不能越权读取私有 Session；每个共享结论可追溯来源” | 0 | 全 `server/` grep `blackboard` 仅 1 处注释（`server/agents/artifact-store.js:8`，明确“不承担 Blackboard 的…”）；无 Context Broker 模块 | 未开始。仓库只做了 `artifact-store.js` 的产物版本/正文复读，不等于 Blackboard。下一步＝待拍板 Phase 2 是否按原文整体立项。 |
 | Phase 3：验证闭环 + 事件化工作流 | “引入确定性验证、独立 Reviewer、冲突处理和人工审批节点”“事件、状态、结果投递采用幂等与可恢复设计”“建立失败重试、取消、Checkpoint、死信和成本追踪” | “失败注入、重复事件、Reviewer 检出率和结果投递恢复均有测试证据” | 0 | 已有局部：审批节点 `server/agents/approvals.js`、幂等账本 `server/agents/op-ledger.js`（`a6d3455`）、崩溃注入 `tests/agent-crash-injection.test.js` | 缺确定性验证器、独立 Reviewer、冲突处理、死信与成本追踪；Reviewer 检出率无任何测试。下一步＝待拍板是否单独立项。 |
 | Phase 4：受控自治与自我改进 | “根据真实运行数据动态组队、重规划和选择验证强度”“建立离线评测集、策略版本、灰度发布和回滚”“在权限、预算和审批边界不变的前提下，逐步开放低风险自动化” | “相对基线在成功率、返工率、成本或延迟上有可重复改善，且安全指标不退化” | 0 | 全仓 `.js` grep `benchmark\|holdout` 零命中；无评测集、无灰度/回滚机制 | 未开始；且验收句要求“相对基线可重复改善”，**必须先有真实模型环境与压测数据**。 |
@@ -79,7 +79,7 @@
 | 4 | 条目未挂阶段 | §22（14 条）、§30（11 条）为无编号 checkbox，未绑定阶段 | v1.3 重编为 A/B 编号，但仍未给归属 | 所有者 |
 | 5 | 版本优先级 | 原文止于 v1.2 | 仓库有 v1.3 封版（2026-11-03），自称“封版后不再追加架构章节” | 所有者（v1.3 能否改写 Notion 验收） |
 | 6 | 需真实环境/压测的 4 项 | A-06（样本集评测报告）、A-07（benchmark/holdout）、B-07（压测报告）、A-13（跑通留 trace） | 均无对应数据/脚本 | 先由所有者决定是否投入真实模型环境 |
-| 7 | 预算原子计量 | §25 要求“服务端原子预留 / 扣减”“Run 总预算是额外闸门” | 已实现并验证（B-06=1，`27b99ec` + 2026-11-04 真实 usage）：Task token 上限强制、原子 reserve/settle/release、父子覆盖、Run 闸门、retryable=false；真实 LongCat usage 已进入结算 | 无争议；跨进程并发仍待压测 |
+| 7 | 预算原子计量 | §25 要求“服务端原子预留 / 扣减”“Run 总预算是额外闸门” | 已实现并验证（B-06=1，`27b99ec` + 2026-11-04 真实 usage）：Task token 上限强制、原子 reserve/settle/release、父子覆盖、Run 闸门、retryable=false；真实 LongCat usage 已进入结算 | 无争议；跨进程并发超出 Notion 范围，未做（需跨进程锁） |
 
 ---
 
@@ -104,7 +104,7 @@
 ## 交付物 2 四项验收证据（§5“能力匹配、动态分配、并行和依赖管理”）
 
 > 判定口径：四项**各自都有可复跑用例与实际输出**才记 1；本轮四项齐全 → **1.0**（不是一句话概括）。
-> 证据边界：多 Agent 是测试构造（`manifest.setTestManifests`）；并发为同一进程 + 确定性 stub Provider，不代表跨进程/真实模型。
+> 证据边界：容量/多候选边界用例仍注入假 Manifest（仅边界，不作为多 Agent 路由证据）；真实多 Agent 路由证据改用已注册的 researcher/executor/reviewer（文件末「真实注册表」用例）；并发为同一进程 + 确定性 stub Provider；**跨进程超出 Notion 范围，未做；需跨进程锁**。
 
 | 项 | 对应用例（可复跑） | 实际输出 / 断言 |
 |---|---|---|
@@ -201,7 +201,57 @@
 - 三个 Agent **共用同一 LongCat-2.5 模型**，差异只在系统提示词、能力标签与工具白名单——这是**角色分工**，**不是异构多模型协作**。
 - 依赖链下游任务失败（`empty_reply`），因此“真实模型多步链路完整产出”未验证；能力匹配/并行重叠/依赖时序三条验收成立。
 - **真实模型下的角色分工质量（审校检出率、检索命中率）未经评测**；单轮样本，不代表稳定性。
-- B-06 升级依据是**真实供应商 usage 已进入任务预算结算**；跨进程/多实例并发仍不在证据范围。
+- B-06 升级依据是**真实供应商 usage 已进入任务预算结算**；跨进程/多实例并发超出 Notion Phase 1 范围，未做（需跨进程锁）。
+
+---
+
+## 验收证据补强（2026-11-04 第二轮：令牌 / 真实路由 / 5 条并发）
+
+### 1）Worker 作用域令牌（对应验收“Worker Session 隔离”，升 1 依据）
+
+| 要求 | 实现 | 可复跑证据 |
+|---|---|---|
+| 不可伪造、服务端保存映射 | `worker-scope.js` `issueScopeToken()`：`wst_` + 24 字节 `crypto.randomBytes`（base64url），服务端 Map 以 **sha256(令牌)** 为键；记录只存授权元数据，不存令牌原文 | `node --test tests/agent-worker.test.js`「隔离：无令牌越权读取被拒并留痕，服务端签发令牌才放行」 |
+| 读接口只认令牌 | `routes.js` `GET /agents/:botId/sessions/:sessionId` 只读 `x-worker-scope-token`，已删除 `requesterTaskId/grantedBy/reason` 查询参数路径 | 「HTTP 隔离：本 Worker 令牌读自己的会话 → 200…」 |
+| 令牌表达允许的 target | 记录含 `allowedTaskIds` / `allowedSessionIds`；会话按 `sessionId` 或 `owner.taskId` 判定，产物按所属 `taskId` 判定 | 内部越权用例 + HTTP 授权用例 |
+| 过期立即失效 | `expiresAt`（`openWorkerScope({ tokenTtlMs })` 可设），校验时 `now >= expiresAt` 即拒 | 「HTTP 令牌：伪造、过期、吊销均 401…」（TTL=5ms，等待 20ms） |
+| 吊销立即失效 | `revokeScopeToken(token)` 写 `revokedAt`，下一次校验即拒 | 同上（吊销后同一令牌 401） |
+| 拒绝留痕、不回显内容 | 非法令牌 401 `worker_scope_token_invalid`；有效但越界 409 `worker_session_owner_mismatch`；均写 `worker.scope_denied`（payload 含 targetType/targetId/access/reason/errorCode）；错误体与审计均不含对方正文、不含令牌原文 | 三条 HTTP 用例均断言 `!JSON.stringify(...).includes(对方正文/令牌)` |
+| 既有行为不变 | direct 会话无令牌仍 200；缺失会话仍 404 `agent_session_not_found`；列表接口不变 | 「HTTP 回归：direct 会话与缺失会话的既有行为不变」 |
+
+实测：`agent-worker` **44/44 通过**，覆盖无令牌/伪造 401、过期 401、吊销 401、跨作用域 409、本作用域 200、授权 200、direct/404 零回归。
+**边界**：仅 worker 级授权令牌，不引入用户体系/多用户模型；**跨进程隔离超出 Notion 范围，未做；需跨进程锁**。
+
+### 2）路由可追踪（真实注册的 researcher / executor / reviewer）
+
+用例：`tests/agent-orchestrator.test.js`「路由可追踪（真实注册表）：三个真实 Agent 按目标分派…」。该用例 `manifest.setTestManifests({})` 后直接读 `registry.listAgents()`，不使用假 Manifest。
+
+```
+enabled = ["executor","researcher","reviewer"]；registeredAgents = 4
+目标“检索浅烘咖啡偏好证据” → taskType=memory.recall  → agentId=researcher
+目标“写入用户偏好”         → taskType=memory.write   → agentId=executor
+目标“审校结论证据”         → taskType=review.verify  → agentId=reviewer
+每条轨迹：basis=explicit_capability、candidates=["对应 Agent"]、matchedAgentIds=["对应 Agent"]、
+          selected="对应 Agent"、allocation=selected_with_capacity
+```
+
+`task.route.orchestration` 与 `route.decided` 事件均落上述字段；`agent-orchestrator` **12/12 通过**。
+**边界**：假 Manifest 仅保留给容量/多候选边界用例；三角色仍共用同一模型（角色分工，非异构模型）；真实模型下的委派质量未评测。
+
+### 3）5 条混合角色并发（同进程证据，对应验收“并发结果不串线”）
+
+用例：`tests/agent-worker.test.js`「并发：5 条混合角色受 TASK_CONCURRENCY=2 约束…」。实测 `concurrency=2`、`peakActive=2`，5 条任务同时排队、按闸门放行。
+
+| 任务（后缀） | Agent | taskType | runStartedAt | completedAt | used |
+|---|---|---|---|---|---|
+| 5480 | researcher | memory.recall | 02.246Z | 02.982Z | 2 |
+| 2c4a | executor | memory.write | 02.446Z | 03.113Z | 2 |
+| b0aa | reviewer | review.verify | 03.017Z | 03.688Z | 2 |
+| df75 | memory | memory.search | 03.145Z | 03.811Z | 2 |
+| 2b9b | researcher | memory.recall | 03.722Z | 04.301Z | 2 |
+
+断言：每条结果只含自己的标记，不含其他任务的标记/taskId/sessionId；产物 `taskId` 各归各且 id 无交集；会话 owner 各指本任务；每条 `used=2`、`remaining=12000-used`、总用量=各任务用量之和；超发 `remaining+1`（11999）被 `budget_exceeded` 拒绝且账本不变。
+**边界**：同一进程、确定性 stub Provider；**跨进程并发超出 Notion 范围，未做；需跨进程锁**。
 
 ---
 
@@ -222,13 +272,13 @@
 
 **拆分口径（判据）**：交付物按 §5 Phase 1 的**原句逐句**拆分，共 3 句、即 3 项；验收句按顿号拆成 4 条要求。**Planner 与 Orchestrator 不拆算**——原句是“建立**统一** Planner / Orchestrator **接口**”，两者同属一个“统一……接口”的宾语，原文没有把它们写成两个交付物；若强行拆成两项会得到 4 项，但那属于自行增补验收要求，故台账统一采用 **3 项交付物 / 4 条验收要求**。
 
-1. **统一 Planner / Orchestrator 接口** —— **1.0**（2026-11-04）：Orchestrator 侧仍只有 `server/agents/orchestrator.js`（`orchestrate()`/`createTaskGraph()`）一个入口，`server/tool-dispatch-bot.js` 的真实创建路径已迁移；Planner 侧新增 `server/agents/planner.js`（`plan():119` 规则拆解、`planAndCreate():174` 驱动多步任务），产出**只落既有 `workflow-store`**（`appendVersion:664`、`getVersion:759`、`validatePlan:289`、`stepKeyFor:197`），未另存计划、未引入第三套版本口径；多步任务复用 `orchestrator.js:220 createTaskGraph` 批量入口，`router.js:577-591` 对 `workflowPlan` 只校验复用不 append。用例 `tests/agent-planner.test.js` a–d 四条（目标→计划落盘、计划→批量任务且 dependsOn 正确、拆不出来显式失败且零计划零任务、同目标两次调用取出/追加语义一致），证据见「交付物 1 Planner 侧验收证据」。**限定**：真实模型下的拆解质量未验证——本轮只用确定性规则/模板，不接真实模型；当前仅 1 个注册主体，“统一”只覆盖一条真实路径。
-2. **少量 Agent 的能力匹配、动态分配、并行和依赖管理** —— **1.0**（2026-11-04）：四项**逐条证据**见上一节「交付物 2 四项验收证据」，摘录：①能力匹配＝`orchestrator.js` 按 `capabilities ∩ acceptedTaskTypes` 匹配（1a/2a–2c）；②动态分配＝按并发余量 + `routingPriority` 择一，满容量写 `saturatedAgentIds`/`excludedReasons`（2a 选闲、2c 全满排队）；③并行＝`TASK_CONCURRENCY` 全局闸门，3 条 SLOW_TASK 峰值 `peakActive=2`、区间重叠 ≈573ms、第 3 条在前两条完成前不启动；④依赖管理＝`dependsOn` 字段（≤8、同 botId）+ 唯一 `isReady` 纯函数 + `queued` 不出队 + 上游完成自动放行、失败/取消级联（含下游的下游）+ 批量图环检测 409 且零落盘。用例：`tests/agent-orchestrator.test.js` 2a–2g（11 条）、`tests/agent-worker.test.js` 依赖 5 条 + 并发上限 1 条（42 条）。**证据限定**：多主体是**测试构造**（`manifest.setTestManifests`），真实注册表仍只有 memory；并发是同一进程 + 确定性 stub Provider；“动态分配”仍是容量感知择一，不是 Worker Pool 弹性伸缩；重规划未实现（不在 §5 该句四项内）。
+1. **统一 Planner / Orchestrator 接口** —— **1.0**（2026-11-04）：Orchestrator 侧仍只有 `server/agents/orchestrator.js`（`orchestrate()`/`createTaskGraph()`）一个入口，`server/tool-dispatch-bot.js` 的真实创建路径已迁移；Planner 侧新增 `server/agents/planner.js`（`plan():119` 规则拆解、`planAndCreate():174` 驱动多步任务），产出**只落既有 `workflow-store`**（`appendVersion:664`、`getVersion:759`、`validatePlan:289`、`stepKeyFor:197`），未另存计划、未引入第三套版本口径；多步任务复用 `orchestrator.js:220 createTaskGraph` 批量入口，`router.js:577-591` 对 `workflowPlan` 只校验复用不 append。用例 `tests/agent-planner.test.js` a–d 四条（目标→计划落盘、计划→批量任务且 dependsOn 正确、拆不出来显式失败且零计划零任务、同目标两次调用取出/追加语义一致），证据见「交付物 1 Planner 侧验收证据」。**限定**：真实模型下的拆解质量未验证——本轮只用确定性规则/模板，不接真实模型；当前注册主体 4 个（memory + researcher/executor/reviewer），统一入口已覆盖真实多角色路径。
+2. **少量 Agent 的能力匹配、动态分配、并行和依赖管理** —— **1.0**（2026-11-04）：四项**逐条证据**见上一节「交付物 2 四项验收证据」，摘录：①能力匹配＝`orchestrator.js` 按 `capabilities ∩ acceptedTaskTypes` 匹配（1a/2a–2c）；②动态分配＝按并发余量 + `routingPriority` 择一，满容量写 `saturatedAgentIds`/`excludedReasons`（2a 选闲、2c 全满排队）；③并行＝`TASK_CONCURRENCY` 全局闸门，3 条 SLOW_TASK 峰值 `peakActive=2`、区间重叠 ≈573ms、第 3 条在前两条完成前不启动；④依赖管理＝`dependsOn` 字段（≤8、同 botId）+ 唯一 `isReady` 纯函数 + `queued` 不出队 + 上游完成自动放行、失败/取消级联（含下游的下游）+ 批量图环检测 409 且零落盘。用例：`tests/agent-orchestrator.test.js` 2a–2g（11 条）+ 真实注册表路由 1 条（`agent-orchestrator` 12 条）、`tests/agent-worker.test.js` 依赖 5 条 + 并发上限 1 条 + 混合角色并发 1 条（44 条）。**证据限定**：容量/多候选边界用例仍注入假 Manifest（仅用于边界，不作为多 Agent 路由证据）；真实路由证据改用已注册的 researcher/executor/reviewer（见文件末真实注册表用例）；并发是同一进程 + 确定性 stub Provider；**跨进程并发超出 Notion 范围，未做；需跨进程锁**；“动态分配”仍是容量感知择一，不是 Worker Pool 弹性伸缩；重规划未实现（不在 §5 该句四项内）。
 3. **保留单 Agent 快速路径；先选 2–3 个真实专业 Agent 验证** —— **1.0**（2026-11-04）：保留 Memory Bot 单 Agent 快速路径不变；新增 `researcher`/`executor`/`reviewer` 三份 Manifest（`manifest.js` 的 `roleManifest()` 工厂，能力标签 + 独立 Prompt/工具白名单，无角色 if/else，第 4 个只需追加注册项）。真实 LongCat-2.5 一轮验证：能力匹配三选一均正确、两任务并行区间重叠、依赖下游在上游完成后 27ms 启动、5 个任务真实 usage 合计 16,829。证据见「交付物 3 真实模型验证证据」。**限定**：三角色同一模型换提示词＝角色分工，非异构多模型；依赖链下游因 `maxTokens=320` 失败（`empty_reply`）；真实模型下的角色质量未评测。
-4. **验收“任务路由可追踪”** —— 部分满足：`route.decided` 事件含 candidates/selected/capability，`task.route.orchestration` 含意图摘要、匹配依据、候选集与规则（用例 `tests/agent-orchestrator.test.js` 1d，`93c5b51`）；交付物 2 又补了候选优先级顺序、满容量主体与排除原因（2a–2d）；尚缺跨任务/多 Agent 的端到端追踪。
-5. **验收“Worker Session 隔离”** —— **部分满足（读边界对内/对外均生效，2026-11-04）**：`server/agents/worker-scope.js` 是唯一读边界——自己的会话历史与产物可读，跨 Worker 默认拒绝，显式 `{grantedBy, reason}` 授权才放行；拒绝沿用既有 `worker_session_owner_mismatch`，审计复用 `tasks.appendEvent`（`worker.scope_denied` / `worker.scope_read`），未新建错误码族或审计存储；runtime 的 worker 会话归属统一走该边界（`sessions.js` 零改动）；HTTP `GET /agents/:botId/sessions/:sessionId` 已接入 `authorizeSessionRead`（本轮），拒绝返回 409 + 既有码，direct 会话与缺失会话响应保持原样。用例 `tests/agent-worker.test.js` 9 条（内部 a–d 4 条 + HTTP a–d 4 条 + 真并发 1 条，`agent-worker` 28→37）：互读 409、自身 200、授权 200 且留痕、零回归。**证据限定**：两个 Worker 是**测试构造**（同一 memory 主体的两个任务/会话）；`requesterTaskId` 是调用方自报值（生产仍是单用户 local-owner，无可验证调用者身份），挡住误读而非抗恶意伪造；跨进程隔离未验证。
-6. **验收“并发结果不串线”** —— **部分满足（同一进程内并发证据，2026-11-04）**：`Promise.allSettled` 同时启动两条 SLOW_TASK 任务，执行区间重叠 **492ms**（串行执行不会出现区间重叠）；A 摘要只含 `CONCURRENT_ALPHA`、B 只含 `CONCURRENT_BETA`，任务 id、runId、sessionId、产物 id 均无交集，产物 `taskId` 各归各，`stateVersion` 各自推进。用例 `tests/agent-worker.test.js`「并发：两条任务同时跑，结果、产物引用与会话各归各且不串线」。**证据限定**：同一进程、确定性 stub provider；跨进程与真实模型并发未验证。
-7. **验收“预算硬限制有效”** —— **已满足（B-06 = 1，2026-11-04）**：原子 reserve/settle/release、父子覆盖、Run 闸门有 7 条可复跑用例（`27b99ec`）；本轮真实 LongCat 调用的供应商 `usage` 已进入任务预算结算（5 个任务 `used` 分别 2849/4156/4191/4337/1296，均为真实值而非估算）。**限定**：跨进程并发仍未验证。
+4. **验收“任务路由可追踪”** —— **已满足（1.0，2026-11-04）**：新增用例 `tests/agent-orchestrator.test.js`「路由可追踪（真实注册表）」，**不再注入假 Manifest**，直接读 `registry.listAgents()`：注册主体 4 个（memory + researcher/executor/reviewer），enabled 3 个；三个目标分别路由到 `researcher`（`memory.recall`）/`executor`（`memory.write`）/`reviewer`（`review.verify`），`task.agentId` 与 `decision.selectedAgentId` 一致。轨迹逐条含候选集与选择依据：`task.route.orchestration` 的 `basis=explicit_capability`、`candidateOrder=["对应 Agent"]`、`matchedAgentIds=["对应 Agent"]`、`selectedAgentId`、`registeredAgents=4`、`allocation=selected_with_capacity`；`route.decided` 事件落 `selected`/`candidates`/`orchestrationBasis`/`orchestrationRegisteredAgents`。用例 12/12 通过，实测输出见汇报。**限定**：三个角色共用同一 LongCat-2.5 模型（提示词/能力标签分工，非异构模型）；真实性验证的是“不同目标落到不同真实注册 Agent”，真实模型下的委派质量未评测；假 Manifest 仅保留给容量/多候选边界用例。
+5. **验收“Worker Session 隔离”** —— **已满足（1.0，2026-11-04）**：`server/agents/worker-scope.js` 是唯一读边界；本轮补齐**服务端签发的最小身份令牌**：`issueScopeToken()` 生成 `wst_` + 24 字节随机值，服务端以 sha256 保存映射（不存原文），令牌显式声明 `allowedTaskIds`/`allowedSessionIds`、带 TTL；`revokeScopeToken()` 吊销后立即失效。HTTP `GET /agents/:botId/sessions/:sessionId` **只认 `x-worker-scope-token`**，删除 `requesterTaskId/grantedBy/reason` 自报路径；非法令牌 401 `worker_scope_token_invalid`、有效但越界 409 `worker_session_owner_mismatch`，均写 `worker.scope_denied`，错误体不回显对方正文，审计不落令牌原文。用例 `tests/agent-worker.test.js` 共 44 条，其中隔离/令牌：无令牌与伪造被拒并留痕、服务端授权令牌放行、HTTP 跨作用域 409、无令牌 401、本 Worker 令牌 200、授权令牌 200 且留痕、**伪造/过期/吊销均 401**、direct 会话与缺失会话 404 行为不变。**限定**：这是 **worker 级授权令牌**，不是用户体系/多用户模型（Owner 划定范围）；**跨进程隔离超出 Notion Phase 1 范围，未做；需跨进程锁**。
+6. **验收“并发结果不串线”** —— **已满足（1.0，同一进程证据，2026-11-04）**：用例 `tests/agent-worker.test.js`「并发：5 条混合角色受 `TASK_CONCURRENCY=2` 约束…」同时启动 **5 条**任务（researcher ×2、executor、reviewer、memory），实测 `peakActive=2`，5 条均在约 2.1s 内完成，时间线各条独立（`runStartedAt` 02.246/02.446/03.017/03.145/03.722，`completedAt` 02.982/03.113/03.688/03.811/04.301）。断言：每条结果只含自己的标记，不含其他任务的标记/taskId/sessionId；产物 `taskId` 各归各且 id 无交集；会话 owner 各自指向本任务；每条 `tokenUsage.used=2`、`remaining=12000-used`、总用量=各任务自身用量之和，无共享账本；超发申请 `remaining+1` 被 `budget_exceeded` 拒绝且账本不变。**限定**：同一进程、确定性 stub Provider；**跨进程并发超出 Notion Phase 1 范围，未做；需跨进程锁**。
+7. **验收“预算硬限制有效”** —— **已满足（B-06 = 1，2026-11-04）**：原子 reserve/settle/release、父子覆盖、Run 闸门有 7 条可复跑用例（`27b99ec`）；本轮真实 LongCat 调用的供应商 `usage` 已进入任务预算结算（5 个任务 `used` 分别 2849/4156/4191/4337/1296，均为真实值而非估算）；并发用例另证每任务预算独立账本、超发被拒。**限定**：跨进程并发超出 Notion Phase 1 范围，未做；需跨进程锁。
 
 ---
 

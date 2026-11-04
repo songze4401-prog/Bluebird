@@ -11,10 +11,10 @@
  *   `decideInternal` 的 atCapacity；一个满容量时选未满的，全部满容量时显式进入既有队列。
  *
  * 不能证明什么：
- * - “动态分配效果好”不可证：用例里的多主体是**测试构造**（注入假 Agent 注册项），
- *   真实环境当前只有 1 个已注册主体（memory），多 Agent 并未实际运行；
- * - Worker Pool、并行执行、依赖管理、多会话隔离不在本轮范围，未实现；
- * - 真实模型环境下的委派效果未验证。
+ * - 文件末「真实注册表」用例覆盖 researcher / executor / reviewer 的真实 Manifest 路由；
+ *   其余多主体用例仍注入假 Manifest，仅用于容量/多候选边界，不作为多 Agent 路由证据；
+ * - “动态分配效果好”不可证：真实模型下的委派质量未评测；
+ * - Worker Pool、并行执行、依赖管理、多会话隔离不在本轮范围，未实现。
  */
 const test = require('node:test');
 const assert = require('node:assert');
@@ -34,9 +34,12 @@ const manifest = require('../server/agents/manifest');
 const tasks = require('../server/agents/tasks');
 const botSessions = require('../server/agents/sessions');
 const orchestratorModule = require('../server/agents/orchestrator');
+const registry = require('../server/agents/registry');
+const configModule = require('../server/agents/config');
+const credentials = require('../server/agents/credentials');
+const apiConfigs = require('../server/api-configs');
 
-// 多主体**测试构造**：真实注册表只有 memory。这里把假 Manifest 注入注册表，
-// 使 Task Store / Registry 的既有校验与落盘路径保持真实（不是另一套内存替身）。
+// 假 Manifest 仅用于容量/多候选边界用例（不与真实路由证据混用）。
 manifest.setTestManifests({
   'agent-a': { ...manifest.MEMORY_BOT_MANIFEST, botId: 'agent-a' },
   'agent-b': { ...manifest.MEMORY_BOT_MANIFEST, botId: 'agent-b' },
@@ -270,7 +273,7 @@ test('交付物1d 轨迹落盘：候选集、匹配依据、最终选择', () =>
 
 // ============================================================================
 // 交付物 2：容量感知的择一分配
-// 注意：以下多主体全部是**测试构造**（注入假 Agent 描述），真实注册表只有 memory 一个主体。
+// 以下多主体注入假 Agent 描述，仅用于容量/多候选边界；真实注册表路由证据见文件末。
 // ============================================================================
 
 function multiAgent(botId, overrides = {}) {
@@ -600,5 +603,149 @@ test('交付物2d 单主体路径行为不变：与 Router 纯决策对齐，新
       candidateOrder: viaOrchestrator.orchestration.candidateOrder,
     },
   }));
+});
+
+// ============================================================================
+// 真实注册表路由证据（本轮收口）：
+// 不使用 setTestManifests，直接读 registry.listAgents() 的真实 Manifest；
+// 三个目标分别落到 researcher / executor / reviewer，轨迹含候选集与选择依据。
+// 不发起模型调用（startTask 置空），只验证路由与轨迹落盘。
+// ============================================================================
+
+function enableRealRoles() {
+  const created = apiConfigs.addModelProvider({
+    name: 'Orchestrator Real Roles',
+    baseUrl: 'http://127.0.0.1:9/v1',
+    apiKey: 'route-evidence-key',
+    models: [
+      {
+        id: 'route-evidence-model',
+        name: 'Route Evidence Model',
+        capabilities: { tools: true },
+      },
+    ],
+  });
+  if (created.error) throw new Error(`测试服务商创建失败：${created.error}`);
+  const providerId = created.provider.id;
+  for (const botId of ['researcher', 'executor', 'reviewer']) {
+    configModule.updateConfig(botId, {
+      enabled: true,
+      modelProfile: {
+        providerId,
+        modelId: 'route-evidence-model',
+        temperature: 0.2,
+        maxTokens: 256,
+        timeoutMs: 20000,
+      },
+    });
+    const credential = credentials.putCredential({
+      botId,
+      providerId,
+      apiKey: 'route-evidence-key',
+    });
+    configModule.setCredentialId(botId, credential.credentialId);
+  }
+}
+
+function makeRealRegistryOrchestrator() {
+  const getAgents = () => registry.listAgents();
+  const router = routerModule.createRouter({
+    getAgents,
+    startTask: () => {},
+  });
+  return orchestratorModule.createOrchestrator({
+    router,
+    getAgents,
+    decide: input => router.decide(input),
+  });
+}
+
+test('路由可追踪（真实注册表）：三个真实 Agent 按目标分派，轨迹含候选集与选择依据', () => {
+  // 清掉边界用例的假 Manifest，确保本条只读真实注册表。
+  manifest.setTestManifests({});
+  resetAgentStore();
+  enableRealRoles();
+
+  const agents = registry.listAgents();
+  const enabled = agents
+    .filter(agent => agent.status === 'enabled')
+    .map(agent => agent.botId)
+    .sort();
+  assert.equal(agents.length, 4);
+  assert.deepEqual(enabled, ['executor', 'researcher', 'reviewer']);
+
+  const orchestrator = makeRealRegistryOrchestrator();
+  const cases = [
+    {
+      capability: 'memory.recall',
+      taskType: 'memory.recall',
+      goal: '检索关于浅烘咖啡的既有偏好证据',
+      expected: 'researcher',
+    },
+    {
+      capability: 'memory.write',
+      taskType: 'memory.write',
+      goal: '把用户偏好浅烘写入长期记忆',
+      expected: 'executor',
+    },
+    {
+      capability: 'review.verify',
+      taskType: 'review.verify',
+      goal: '审校结论是否有可复核证据',
+      expected: 'reviewer',
+    },
+  ];
+
+  const rows = cases.map(item => {
+    const result = orchestrator.orchestrate({
+      goal: item.goal,
+      capability: item.capability,
+      taskType: item.taskType,
+      parentSessionId: 's_real_route_main',
+    });
+    assert.equal(result.task.agentId, item.expected);
+    assert.equal(result.decision.selectedAgentId, item.expected);
+    assert.equal(result.orchestration.basis, 'explicit_capability');
+    assert.deepEqual(result.orchestration.matchedAgentIds, [item.expected]);
+    assert.deepEqual(result.orchestration.candidateOrder, [item.expected]);
+    assert.equal(result.orchestration.registeredAgents, 4);
+    assert.equal(result.orchestration.allocation, 'selected_with_capacity');
+
+    const raw = tasks.getRawTask(result.task.taskId);
+    assert.equal(raw.agentId, item.expected);
+    assert.equal(raw.taskType, item.taskType);
+    assert.deepEqual(raw.route.orchestration, result.orchestration);
+
+    const decided = tasks
+      .listEvents(item.expected, { limit: 50 })
+      .find(
+        event =>
+          event.eventType === 'route.decided' && event.taskId === result.task.taskId
+      );
+    assert.ok(decided, 'route.decided 事件必须存在');
+    assert.equal(decided.payload.selected, item.expected);
+    assert.equal(decided.payload.candidates, item.expected);
+    assert.equal(decided.payload.orchestrationBasis, 'explicit_capability');
+    assert.equal(decided.payload.orchestrationMatchedAgents, item.expected);
+    assert.equal(decided.payload.orchestrationRegisteredAgents, 4);
+
+    return {
+      goal: item.goal,
+      taskId: result.task.taskId,
+      agentId: raw.agentId,
+      taskType: raw.taskType,
+      basis: result.orchestration.basis,
+      registeredAgents: result.orchestration.registeredAgents,
+      candidates: result.orchestration.candidateOrder,
+      matchedAgentIds: result.orchestration.matchedAgentIds,
+      selected: result.orchestration.selectedAgentId,
+      allocation: result.orchestration.allocation,
+      eventSelected: decided.payload.selected,
+      eventCandidates: decided.payload.candidates,
+    };
+  });
+
+  assert.deepEqual(rows.map(row => row.agentId), ['researcher', 'executor', 'reviewer']);
+  console.log('[真实注册表路由]', JSON.stringify({ enabled, rows }));
 });
 
