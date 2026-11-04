@@ -466,3 +466,148 @@ test('g. 已提交产物不得删除；错误产物只标记 invalidated 并保�
   assert.ok(!cleanup.cleaned.includes(artifactId));
   assert.ok(artifactStore.get(artifactId));
 });
+
+// ---- h/i. Phase 2 第 1 项：证据引用 fail-closed 与版本不可变 ----
+
+function captureError(fn) {
+  try {
+    fn();
+    return null;
+  } catch (error) {
+    return error;
+  }
+}
+
+test('h. 共享结论：证据缺失/未钉版本/不可读一律拒绝；带证据的结论可被同批次任务按版本追溯', () => {
+  const producer = makeTask({ goal: 'CONCLUSION 证据门禁' });
+  const consumer = makeTask({ goal: 'CONCLUSION 消费方' });
+  const source = artifactStore.persist({
+    kind: 'message',
+    content: { text: '结论依据正文' },
+    taskId: producer.taskId,
+  });
+  const base = {
+    taskId: producer.taskId,
+    subject: '共享结论',
+    withTaskIds: [consumer.taskId],
+  };
+
+  const missingEvidence = captureError(() =>
+    artifactCommit.publishSharedConclusion({ ...base, evidence: [] })
+  );
+  assert.equal(missingEvidence && missingEvidence.code, 'artifact_evidence_missing');
+  assert.equal(missingEvidence.status, 409);
+
+  const noVersion = captureError(() =>
+    artifactCommit.publishSharedConclusion({
+      ...base,
+      evidence: [{ kind: 'message', id: source.id }],
+    })
+  );
+  assert.equal(noVersion && noVersion.code, 'artifact_evidence_invalid');
+
+  const unreadable = captureError(() =>
+    artifactCommit.publishSharedConclusion({
+      ...base,
+      evidence: [{ kind: 'message', id: 'art_missing', version: 1 }],
+    })
+  );
+  assert.equal(unreadable && unreadable.code, 'artifact_not_found');
+
+  const countConclusions = () =>
+    artifactStore.all().filter(item => item.kind === 'conclusion' && item.taskId === producer.taskId)
+      .length;
+  const before = countConclusions();
+  const published = artifactCommit.publishSharedConclusion({
+    ...base,
+    evidence: [{ kind: 'message', id: source.id, version: source.version }],
+  });
+  assert.equal(countConclusions(), before + 1, '被拒绝的尝试不得写入结论产物');
+  assert.deepEqual(published.ref, {
+    kind: 'conclusion',
+    id: published.artifact.id,
+    version: published.artifact.version,
+  });
+
+  const read = artifactStore.readSharedArtifact(published.artifact.id, {
+    requesterTaskId: consumer.taskId,
+  });
+  assert.deepEqual(read.content.evidence, [
+    { kind: 'message', id: source.id, version: source.version },
+  ]);
+  const foreign = captureError(() =>
+    artifactStore.readSharedArtifact(published.artifact.id, {
+      requesterTaskId: 'task_foreign',
+    })
+  );
+  assert.equal(foreign && foreign.code, 'artifact_not_shared');
+  assert.ok(!JSON.stringify(foreign).includes('结论依据正文'));
+  console.log(
+    '[共享结论-证据门禁]',
+    JSON.stringify({
+      missing: missingEvidence.code,
+      noVersion: noVersion.code,
+      unreadable: unreadable.code,
+      conclusionRef: published.ref,
+      evidencePinned: read.content.evidence.map(item => `${item.id.slice(0, 12)}@v${item.version}`),
+      foreignCode: foreign.code,
+      bodyEchoed: JSON.stringify(foreign).includes('结论依据正文'),
+    })
+  );
+});
+
+test('i. 版本不可变：追加新版本后旧版内容不变，旧版证据引用仍可复读', () => {
+  const producer = makeTask({ goal: 'IMMUTABLE 版本' });
+  const consumer = makeTask({ goal: 'IMMUTABLE 消费方' });
+  const v1 = artifactStore.persist({
+    kind: 'message',
+    content: { text: '第一版正文' },
+    taskId: producer.taskId,
+  });
+  const v1Hash = v1.contentHash;
+  const published = artifactCommit.publishSharedConclusion({
+    taskId: producer.taskId,
+    subject: '引用第一版',
+    evidence: [{ kind: 'message', id: v1.id, version: v1.version }],
+    withTaskIds: [consumer.taskId],
+  });
+
+  const v2 = artifactStore.persist({
+    kind: 'message',
+    content: { text: '第二版正文' },
+    taskId: producer.taskId,
+  });
+  assert.equal(v2.version, 2);
+  const v1After = artifactStore.get(v1.id);
+  assert.equal(v1After.status, 'superseded');
+  assert.equal(v1After.contentHash, v1Hash, '旧版内容地址不得改变');
+  assert.equal(artifactStore.readContent(v1.id, { version: 1 }).content.text, '第一版正文');
+
+  // 共享结论里的旧版证据引用仍可复读（来源可追溯）。
+  const conclusion = artifactStore.readSharedArtifact(published.artifact.id, {
+    requesterTaskId: consumer.taskId,
+  });
+  const evidence = conclusion.content.evidence[0];
+  assert.equal(evidence.id, v1.id);
+  assert.equal(evidence.version, 1);
+  assert.equal(
+    artifactStore.readContent(evidence.id, { version: evidence.version }).content.text,
+    '第一版正文'
+  );
+
+  // 新的完成提交不能把已被 superseded 的旧版当 active 引用。
+  const staleCommit = captureError(() =>
+    artifactStore.assertRefsCommitReady([{ kind: 'message', id: v1.id, version: 1 }])
+  );
+  assert.equal(staleCommit && staleCommit.code, 'artifact_not_active');
+  console.log(
+    '[版本不可变]',
+    JSON.stringify({
+      v1: { id: v1.id.slice(0, 12), version: v1.version, status: v1After.status },
+      v2: { id: v2.id.slice(0, 12), version: v2.version },
+      hashUnchanged: v1After.contentHash === v1Hash,
+      evidenceStillReadable: evidence.version === 1,
+      staleCommitCode: staleCommit.code,
+    })
+  );
+});

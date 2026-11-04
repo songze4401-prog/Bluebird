@@ -11,6 +11,10 @@
  */
 const artifactStore = require('./artifact-store');
 const tasks = require('./tasks');
+const { AgentError } = require('./errors');
+
+// Phase 2 第 1 项：共享结论的证据引用上限（沿用产物引用 schema {kind,id,version}）。
+const EVIDENCE_MAX = 20;
 
 // §38：orphan/pending-commit 默认 TTL 168 小时（7 天），可按环境配置。
 const DEFAULT_ORPHAN_TTL_MS = 168 * 60 * 60 * 1000;
@@ -82,6 +86,79 @@ function completeTask(taskId, options = {}) {
     }
   }
   return written;
+}
+
+/**
+ * Phase 2 第 1 项：共享结论的证据引用。
+ * fail-closed：缺证据数组 / 空数组 / 引用未钉住 version / 产物读不回来，一律拒绝，
+ * 不写入任何结论产物。引用 schema 仍是既有的 {kind,id,version}。
+ */
+function normalizeEvidence(evidence) {
+  if (!Array.isArray(evidence) || evidence.length === 0) {
+    throw new AgentError('artifact_evidence_missing', '共享结论必须携带证据引用', 409, {
+      refCount: 0,
+    });
+  }
+  if (evidence.length > EVIDENCE_MAX) {
+    throw new AgentError(
+      'artifact_evidence_invalid',
+      `证据引用最多 ${EVIDENCE_MAX} 条`,
+      400,
+      { refCount: evidence.length }
+    );
+  }
+  const refs = [];
+  for (const item of evidence) {
+    if (!item || typeof item !== 'object') {
+      throw new AgentError('artifact_evidence_invalid', '证据引用必须是对象', 400);
+    }
+    const id = String(item.id || '').slice(0, 120);
+    if (!id) {
+      throw new AgentError('artifact_evidence_invalid', '证据引用缺少 id', 400);
+    }
+    if (!Number.isInteger(item.version) || item.version < 1) {
+      throw new AgentError('artifact_evidence_invalid', '证据引用必须钉住 version', 400, {
+        artifactId: id,
+      });
+    }
+    // 复读正文，证明该版本此刻可追溯；读不回来即不可作为共享结论的来源。
+    const content = artifactStore.readContent(id, { version: item.version });
+    refs.push({ kind: content.kind, id, version: item.version });
+  }
+  return refs;
+}
+
+/**
+ * 发布共享结论：先校验证据（fail-closed），再落 conclusion 产物并登记共享。
+ * 结论正文内嵌证据引用集合，使"每个共享结论可追溯来源"可被读方复核。
+ */
+function publishSharedConclusion({
+  taskId,
+  runId = null,
+  subject = '',
+  evidence = [],
+  withTaskIds = [],
+  now = Date.now(),
+} = {}) {
+  const owner = String(taskId || '').slice(0, 120);
+  if (!owner) throw new AgentError('artifact_ref_invalid', '共享结论缺少 taskId', 400);
+  const evidenceRefs = normalizeEvidence(evidence);
+  const artifact = artifactStore.persist({
+    kind: 'conclusion',
+    content: {
+      subject: String(subject).slice(0, 4000),
+      evidence: evidenceRefs,
+    },
+    taskId: owner,
+    runId,
+    now,
+  });
+  artifactStore.share(artifact.id, { withTaskIds, byTaskId: owner, now });
+  return {
+    artifact,
+    ref: { kind: artifact.kind, id: artifact.id, version: artifact.version },
+    evidence: evidenceRefs,
+  };
 }
 
 function referencedArtifacts() {
@@ -191,4 +268,6 @@ module.exports = {
   completeTask,
   scanPendingCommits,
   cleanupOrphans,
+  normalizeEvidence,
+  publishSharedConclusion,
 };

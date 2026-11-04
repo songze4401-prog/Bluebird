@@ -198,7 +198,7 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-87 files, 2192 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
+87 files, 2194 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
 node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js tests/monitoring.test.js   # node:test suites (222)
@@ -253,7 +253,7 @@ node tests/agent-dispatch.test.js          # 13 — main tool → Bot task, expl
 node tests/agent-router.test.js            # 49 — router decision chain, task contract v1, fast/slow budgets, idempotency/priority queue, route events privacy, delegate_to_bot compatibility
 node tests/agent-worker.test.js            # 46 — worker lifecycle/runId, session owner/scope/lifecycle, context projection, tool gateway audit, unified result schema, cancel/timeout/model-failure terminal states, retry backoff via retrying state, concurrency isolation
 node tests/agent-recovery.test.js          # 29 — state machine transitions, task-store schema migration, leases/retry backoff/checkpoint version/run history, restart recovery (queued/retrying/recovery/live lease), SIGKILL fault injection, delivery idempotency and crash redelivery
-node tests/agent-artifact-commit.test.js   # 7
+node tests/agent-artifact-commit.test.js   # 9
 node tests/agent-artifact-content.test.js  # 5 — artifact content replay (A): durable per-artifact body, restart-time read-back with contentHash verification, corrupted/missing content fail-closed (never empty), version chain keeps superseded versions while old refs stay frozen, terminal-task-referenced versions are never cleaned, >256KB rejected with no half state
 node tests/agent-budget-atomic.test.js     # 7
 node tests/agent-orchestrator.test.js      # 12
