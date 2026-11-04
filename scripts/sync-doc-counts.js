@@ -89,11 +89,31 @@ const NOTES = {
   'agent-router':
     'router decision chain, task contract v1, fast/slow budgets, idempotency/priority queue, route events privacy, delegate_to_bot compatibility',
   'agent-worker':
-    'worker lifecycle/runId, session owner/scope/lifecycle, context projection, tool gateway audit, unified result schema, cancel/timeout/model-failure terminal states, concurrency isolation',
+    'worker lifecycle/runId, session owner/scope/lifecycle, context projection, tool gateway audit, unified result schema, cancel/timeout/model-failure terminal states, retry backoff via retrying state, concurrency isolation',
   'agent-recovery':
-    'state machine transitions, task-store schema migration, leases/retry backoff/checkpoint version/run history, restart recovery (queued/uncertain/live lease), SIGKILL fault injection, delivery idempotency and crash redelivery',
+    'state machine transitions, task-store schema migration, leases/retry backoff/checkpoint version/run history, restart recovery (queued/retrying/recovery/live lease), SIGKILL fault injection, delivery idempotency and crash redelivery',
   'agent-watchdog':
     'watchdog health classification, action planning with whitelist/cooldown/breaker, intake pause and resume, offline recovery, escalation, audit fields, dry-run, external supervisor restart drill',
+  'agent-op-ledger':
+    'idempotency ledger storage (P1): strict canonicalArgs (key order, nested, optional/undefined vs null, string-vs-number, Chinese/space, delimiter ambiguity, NaN/cycle rejection), opKey hashing, begin/finish/markUnknown, 7-day retention and 5000-entry cleanup that never drops started/unknown',
+  'agent-side-effect-ledger':
+    'runtime idempotency wiring (P2): begin-before-execute, succeeded reuse without re-execution, started residue routes the task to recovery, timeout becomes unknown and blocks retry, failed retries in place with one row per opKey, dedupeKeyOverride escape hatch for intentional repeats, read-only tools write no ledger rows',
+  'agent-workflow-store':
+    'workflow store (C1): key-order-independent plan digest, immutable versions with monotonic +1 and rollback-as-new-version, 8 KB / 32-step / 1 KB-step hard rejects with no half-written file, 10-version soft prune that never evicts a referenced version (including terminal/recovery refs and task-scan live refs), audit-before-delete, corrupted-store and per-version corruption codes',
+  'agent-workflow-binding':
+    'task-to-plan binding (C2): plan is durably written before the task exists, A-class rejection leaves no task and no half-written plan, task-creation failure leaves only a harmless orphan plan, whole-store corruption fail-closes every bound non-terminal task to recovery while legacy planId=null tasks are untouched, per-task missing/mismatch/corrupt codes, planVersion and stateVersion never move each other, expectedVersion only honours stateVersion, idempotent replay adds no plan',
+  'agent-workflow-crash':
+    'workflow half-state crash injection (C3): a real SIGKILL right after the plan file is fsynced but before the task exists leaves exactly one durable orphan plan and zero task pointers (killed only after the marker, never by polling), and a constructed keyed-to-missing-plan task is fail-closed to recovery with plan_missing on restart while a healthy control task stays queued',
+  'agent-crash-injection':
+    'real SIGKILL crash injection (P5): handler-returned-but-unrecorded leaves one unknown ledger row and recovery without re-running the handler, artifacts persisted before state commit stay pending-commit and converge as pending, approval-record-before-state-move self-heals to waiting_approval, an interrupted read-only run leaves no intermediate state',
+  'agent-approval-recovery':
+    'approval execution idempotency (P3): begin-before-handler, crash-after-execution resumes to recovery without re-running the handler, a succeeded ledger row converges to executed instead of failed, approval-record-before-state-move (W5) leaves no dangling task, orphan waiting_approval tasks converge to recovery',
+  'agent-artifact-content':
+    'artifact content replay (A): durable per-artifact body, restart-time read-back with contentHash verification, corrupted/missing content fail-closed (never empty), version chain keeps superseded versions while old refs stay frozen, terminal-task-referenced versions are never cleaned, >256KB rejected with no half state',
+  'agent-orphan-scheduler':
+    'orphan cleanup on a production cadence (B): one startup run plus a 6h period driven by injectable fake timers, single-instance re-entry guard, failures logged without crashing or blocking the next run, TTL boundary measured to the millisecond, and no catch-up for periods missed while the process was down',
+  'agent-failopen-enforcement':
+    'fail-open decision wired into the real tool path (C): allowlist hit executes the handler with policyVersion in the audit, a miss denies with zero handler calls and a denied audit row, revocation takes effect on the next call, tasks without a frozen planId/planVersion are refused, R2/R3 still require approval even when an allowlist entry exists, and tools not registered as failOpenEligible keep their old behaviour',
   'reply-segmentation':
     'single-message default with a 400-char configurable hard limit, semantic split order (paragraph/newline/sentence), code-block and Markdown-link protection, English word boundaries',
   'monitoring-api':

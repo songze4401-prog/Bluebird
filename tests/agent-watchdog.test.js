@@ -54,8 +54,8 @@ function staleTask(overrides = {}) {
     deadlineMs: 20000,
     ...overrides,
   });
-  tasks.updateTask(task.taskId, { status: 'accepted' });
-  tasks.updateTask(task.taskId, { status: 'running' });
+  tasks.transitionTask(task.taskId, { to: 'accepted' });
+  tasks.transitionTask(task.taskId, { to: 'running' });
   tasks.updateTask(task.taskId, { heartbeatAt: '2026-10-01T00:00:00.000Z' });
   tasks.acquireLease(task.taskId, { ownerId: 'dead-worker', now: Date.now() - 120000, ttlMs: 1000 });
   return tasks.getTask(task.taskId);
@@ -271,7 +271,7 @@ test('Watchdog：服务停机 + 租约过期 → 受控恢复只读任务并写�
   const result = watchdog.runOnce({ now: Date.now() });
   assert.ok(result.executed.some(item => item.action === 'recover_interrupted'));
   const recovered = tasks.getTask(task.taskId);
-  assert.equal(recovered.status, 'queued');
+  assert.equal(recovered.status, 'retrying');
   assert.notEqual(recovered.status, 'completed');
   const lines = auditLines(watchdog.AUDIT_FILE);
   const recovery = lines.find(item => item.action === 'recover_interrupted');
@@ -282,16 +282,16 @@ test('Watchdog：服务停机 + 租约过期 → 受控恢复只读任务并写�
   assert.ok(recovery.result.recovered >= 1);
 });
 
-test('Watchdog：服务停机 + 写任务 → uncertain，不伪装成功', () => {
+test('Watchdog：服务停机 + 写任务 → recovery，不伪装成功', () => {
   reset();
   const task = staleTask({ allowedTools: ['memory_remember'] });
   watchdog.runOnce({ now: Date.now() });
   const recovered = tasks.getTask(task.taskId);
-  assert.equal(recovered.status, 'uncertain');
+  assert.equal(recovered.status, 'recovery');
   assert.equal(recovered.requiresReview, true);
   const lines = auditLines(watchdog.AUDIT_FILE);
   const recovery = lines.filter(item => item.action === 'recover_interrupted').at(-1);
-  assert.ok(recovery.result.uncertain >= 1);
+  assert.ok(recovery.result.recovery >= 1);
 });
 
 test('Watchdog：服务存活时只告警与暂停接单，不写任务状态', () => {
@@ -387,8 +387,8 @@ test('Watchdog：投递失败产生告警审计', () => {
     deadlineMs: 20000,
     parentSessionId: parent.id,
   });
-  tasks.updateTask(task.taskId, { status: 'accepted' });
-  tasks.updateTask(task.taskId, { status: 'failed' });
+  tasks.transitionTask(task.taskId, { to: 'accepted' });
+  tasks.transitionTask(task.taskId, { to: 'failed' });
   tasks.updateTask(task.taskId, { deliveryStatus: 'failed', deliveryErrorCode: 'parent_session_missing' });
   watchdog.runOnce({ now: Date.now() });
   const alert = auditLines(watchdog.AUDIT_FILE).find(item => item.action === 'alert');
@@ -410,7 +410,7 @@ test('Watchdog：重复运行不会重复恢复同一任务', () => {
   reset();
   const task = staleTask();
   watchdog.runOnce({ now: Date.now() });
-  assert.equal(tasks.getTask(task.taskId).status, 'queued');
+  assert.equal(tasks.getTask(task.taskId).status, 'retrying');
   watchdog.runOnce({ now: Date.now() + 30000 });
   const lines = auditLines(watchdog.AUDIT_FILE).filter(
     item => item.action === 'recover_interrupted'

@@ -4,6 +4,10 @@
  *
  * 隔离键是 botId + sessionId；所有读写都要求两者同时匹配，
  * 主控 /history 与 Bot 工作台不会互相看到对方会话。
+ *
+ * lifecycle.status 不是第二套状态机：它是对所属 Task 状态的投影，
+ * 词表（active/running/completed/failed/cancelled/timed_out/closed）只为兼容
+ * 既有 API 而保留；会话收尾一律经 deriveLifecycleStatus 后再写。
  */
 const fs = require('fs');
 const path = require('path');
@@ -11,6 +15,7 @@ const crypto = require('crypto');
 const { writeFileAtomicSync } = require('../atomic-write');
 const { isKnownBot } = require('./manifest');
 const { AgentError } = require('./errors');
+const { LEGACY_ALIASES } = require('./status-vocabulary');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -32,6 +37,48 @@ const LIFECYCLE_STATES = Object.freeze([
   'timed_out',
   'closed',
 ]);
+
+// Task 状态 → Session 生命周期投影：5 个同名值直接沿用，非终态任务投影为
+// running（会话存在但任务未完成）。closeSession 只接受这张表 + closed 的产物。
+const TASK_STATUS_PROJECTION = Object.freeze({
+  running: 'running',
+  completed: 'completed',
+  failed: 'failed',
+  cancelled: 'cancelled',
+  timed_out: 'timed_out',
+});
+const PENDING_TASK_STATUSES = Object.freeze([
+  'queued',
+  'accepted',
+  'waiting_approval',
+  // S7：retrying 是等待下一次 attempt 的非终态，投影为 running 而不是 closed。
+  'retrying',
+]);
+// recovery 不呈现给会话层：结果未知且需人工核对，投影为 failed（不是仍在运行）。
+const RECOVERY_LIFECYCLE_STATUS = 'failed';
+const PROJECTED_LIFECYCLE_STATUSES = Object.freeze([
+  'running',
+  'completed',
+  'failed',
+  'cancelled',
+  'timed_out',
+  'closed',
+]);
+
+function deriveLifecycleStatus(taskStatus) {
+  // 旧记录/旧客户端可能仍传 uncertain；读边界先归一为 recovery 再投影。
+  const normalized = LEGACY_ALIASES[taskStatus] || taskStatus;
+  if (Object.prototype.hasOwnProperty.call(TASK_STATUS_PROJECTION, normalized)) {
+    return TASK_STATUS_PROJECTION[normalized];
+  }
+  if (PENDING_TASK_STATUSES.includes(normalized)) return 'running';
+  if (normalized === 'recovery') return RECOVERY_LIFECYCLE_STATUS;
+  console.warn(
+    '[agents] deriveLifecycleStatus 收到未知 Task 状态，会话生命周期回退 closed:',
+    JSON.stringify(taskStatus)
+  );
+  return 'closed';
+}
 
 let cache = null;
 
@@ -298,10 +345,16 @@ function closeSession(botId, sessionId, { status = 'closed', reason = null } = {
   const current = load();
   const meta = findMeta(botId, sessionId);
   if (!meta) return null;
-  const finalStatus = LIFECYCLE_STATES.includes(status) ? status : 'closed';
+  // 只接受投影产物，避免调用方绕过 Task 状态再写第二套生命周期。
+  if (!PROJECTED_LIFECYCLE_STATUSES.includes(status)) {
+    throw new AgentError(
+      'invalid_lifecycle_status',
+      '会话生命周期状态必须由 Task 状态投影产生'
+    );
+  }
   meta.lifecycle = {
     ...(meta.lifecycle || defaultLifecycle()),
-    status: finalStatus,
+    status,
     closedAt: nowIso(),
     closeReason: typeof reason === 'string' ? reason.slice(0, 120) : null,
   };
@@ -405,6 +458,7 @@ module.exports = {
   MESSAGE_MAX,
   SCOPES,
   LIFECYCLE_STATES,
+  deriveLifecycleStatus,
   listSessions,
   getSession,
   createSession,

@@ -2,20 +2,14 @@
 /**
  * 统一 Worker 结果 schema（阶段 2）。
  *
- * completed / failed / cancelled / timed_out 都写成同一形状：
+ * completed / failed / cancelled / timed_out / recovery 都写成同一形状：
  * status、summary、artifacts、evidence、toolSteps、changes、
  * requiresConfirmation / requiresApproval、errorCode、rounds、
  * stopReason、model、runId、finishedAt。
  * 这里只做规范化与截断，不判断业务含义。
  */
 
-const TERMINAL_STATUSES = Object.freeze([
-  'completed',
-  'failed',
-  'cancelled',
-  'timed_out',
-  'uncertain',
-]);
+const { TERMINAL_STATUSES } = require('./status-vocabulary');
 const SUMMARY_MAX = 8000;
 
 function refs(value, limit = 40) {
@@ -26,6 +20,8 @@ function refs(value, limit = 40) {
     .map(item => ({
       kind: String(item.kind || '').slice(0, 40),
       id: String(item.id || '').slice(0, 120),
+      // ③ §11 第 1 步：产物引用要能带回 version；evidence 不带该键，形状不变。
+      ...(Number.isInteger(item.version) ? { version: item.version } : {}),
     }));
 }
 

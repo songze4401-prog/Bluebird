@@ -999,12 +999,18 @@ export type AgentTask = {
   deliveryStatus?: 'pending' | 'delivered' | 'failed' | 'not_applicable';
   deliveryErrorCode?: string | null;
   allowedTools: string[];
+  // S8：计划版本指针。仅由 Workflow Engine 写入；未接入 Workflow Store 时为 null，
+  // 不会是 'v1' 之类的占位字符串。版本号是整数（每次重规划单调 +1）。
+  planId?: string | null;
+  planVersion?: number | null;
   deadlineMs: number;
   status:
     | 'queued'
     | 'accepted'
     | 'running'
     | 'waiting_approval'
+    | 'retrying'
+    | 'recovery'
     | 'completed'
     | 'failed'
     | 'cancelled'
@@ -1023,6 +1029,8 @@ export type AgentTask = {
     toolSteps: ToolStep[];
     evidence: Array<{ kind: string; id: string }>;
     changes: Array<{ kind: string; id: string; decision: string }>;
+    // ③ 产物引用：完成时至少一条 message；version 为 2026-11-04 新增的可选字段。
+    artifacts?: Array<{ kind: string; id: string; version?: number }>;
     requiresConfirmation: boolean;
     rounds: number;
     stopReason: string | null;

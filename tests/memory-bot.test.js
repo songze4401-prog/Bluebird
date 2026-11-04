@@ -672,8 +672,8 @@ test('持久任务队列：并发限制、失败隔离与重启恢复', async ()
     allowedTools: ['memory_search'],
     deadlineMs: 20000,
   });
-  tasks.updateTask(interrupted.taskId, { status: 'accepted' });
-  tasks.updateTask(interrupted.taskId, { status: 'running' });
+  tasks.transitionTask(interrupted.taskId, { to: 'accepted' });
+  tasks.transitionTask(interrupted.taskId, { to: 'running' });
   responseDelayMs = 0;
   // 模拟进程重启：清空内存缓存，从 agent-tasks.json 重新加载 interrupted 状态。
   tasks.reloadForTests();

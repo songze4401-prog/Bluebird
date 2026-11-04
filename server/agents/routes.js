@@ -20,8 +20,9 @@ const { resolveUserId } = require('../user-scope');
 const { describeAgentError } = require('./errors');
 
 function sendError(res, error) {
-  const info = describeAgentError(error);
-  res.status(info.status).json({ error: info.error, code: info.code });
+  const { status, ...body } = describeAgentError(error);
+  // 既有键 code/error 保持不变；② CAS 的 conflict 会额外带出七个契约字段。
+  res.status(status).json(body);
 }
 
 function route(handler) {
@@ -306,12 +307,8 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
         }
         send('done', result);
       } catch (error) {
-        const info = describeAgentError(error);
-        send('error', {
-          code: info.code,
-          error: info.error,
-          status: info.status,
-        });
+        const { status, ...rest } = describeAgentError(error);
+        send('error', { ...rest, status });
       } finally {
         if (!res.writableEnded) res.end();
       }

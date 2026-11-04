@@ -2,11 +2,15 @@
 /**
  * Task Store 接口（阶段 3）。
  *
- * 业务层只依赖这里声明的读写接口，不直接碰文件名或 JSON 结构：
+ * 本文件是 `agent-tasks.json` 这张任务表的唯一事实源，范围只覆盖这一个文件：
  *   read()  → { store, migrated, fromVersion }
  *   write(store)
  *   migrate(raw)
  *
+ * 业务层只依赖这里声明的读写接口，不直接碰文件名或 JSON 结构；但这只是约定
+ * 边界——read() 返回可变对象，业务层仍会直接改字段，落盘必须走 saveTasks → write()。
+ * 事件/outbox（agent-events.json、agent-event-outbox.json）与 Session、Approval
+ * 各自有独立 store，不归本文件管辖；事件仅通知/审计，不拥有事实权威。
  * 当前实现是单机原子文件（writeFileAtomicSync），并由进程启动时的单实例锁
  * 保证只有一个写者。未来替换 SQLite/PostgreSQL 时保持同一接口即可。
  */
@@ -14,6 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const { writeFileAtomicSync } = require('../atomic-write');
 const { AgentError } = require('./errors');
+const { CONTRACT_VERSION } = require('./contract');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -49,9 +54,18 @@ function normalizeTask(task) {
   };
   add('agentId', task.botId || null);
   add('workerSessionId', task.sessionId || null);
-  add('contractVersion', 1);
+  add('contractVersion', CONTRACT_VERSION);
   add('priority', 'normal');
   add('contextRef', null);
+  // S8：计划版本指针的只读默认视图。故意不参与 migrated 判定——仅因新增
+  // 两个可空键就改写旧文件会破坏“旧数据原文件字节不变”的读边界；
+  // 首次真实写入（任何业务变更落盘）时再自然带出。
+  if (task.planId === undefined) task.planId = null;
+  if (task.planVersion === undefined) task.planVersion = null;
+  // ② CAS：任务记录的单调递增版本，由存储层在每次真实写入时分配。
+  // 与 S8 同一读边界策略——默认值不参与 migrated 判定，旧文件不被重写；
+  // 首次业务写入时自然带出。它不是 checkpointVersion（后者是检查点序号）。
+  if (task.stateVersion === undefined) task.stateVersion = 0;
   add('idempotencyKey', null);
   add('route', null);
   add('budget', null);

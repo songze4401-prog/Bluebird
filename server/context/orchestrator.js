@@ -4,6 +4,10 @@
  * 每轮先判断意图，再决定加载哪些层、每层预算与无答案阈值；不调用模型。
  * 目标不是“把所有记忆/知识都塞进去”，而是让检索量、token 成本与当前任务
  * 匹配；无法判断时退回 general（保持既有全量行为）。
+ *
+ * 注意：本模块的 `plan` 是“请求级上下文加载策略”（intent + budgets），
+ * 与 Task Contract 的 `planId`/`planVersion`（Workflow Engine 计划版本指针）
+ * 不是一回事，两者不得混用或互相改名。
  */
 const INTENTS = Object.freeze({
   CHITCHAT: 'chitchat',

@@ -26,6 +26,8 @@
 const crypto = require('crypto');
 const { tagModelMessage } = require('./context/projection');
 
+const crashHook = require('./agents/crash-hook');
+const failOpenPolicy = require('./agents/failopen-policy');
 const { createChatCompletion } = require('./model-adapter');
 const monitoring = require('./monitoring');
 const memorySearchTool = require('./tool-memory-search');
@@ -134,6 +136,7 @@ function registerTool(definition) {
     timeoutMs,
     readOnly,
     risk,
+    failOpenEligible,
   } = definition;
 
   if (!TOOL_NAME_RE.test(name || '')) {
@@ -164,7 +167,17 @@ function registerTool(definition) {
     throw new TypeError(`[agent] 工具 risk 非法：${name}`);
   }
 
-  tools.set(name, { ...definition, risk: resolvedRisk });
+  if (failOpenEligible !== undefined && typeof failOpenEligible !== 'boolean') {
+    throw new TypeError(`[agent] 工具 failOpenEligible 必须是布尔值：${name}`);
+  }
+
+  // failOpenEligible：该工具是否作为"预授权动作"参与 allowlist 判定（§33）。
+  // 默认 false：未登记的工具保持既有语义，不会被 allowlist 判定接管。
+  tools.set(name, {
+    ...definition,
+    risk: resolvedRisk,
+    failOpenEligible: failOpenEligible === true,
+  });
 }
 
 function unregisterTool(name) {
@@ -319,6 +332,79 @@ async function consumeCompletionStream(stream, onDelta) {
  *   超时（timeoutMs）仍是硬边界，两者都通过同一个 AbortController
  *   通知 handler——handler 必须在可等待点检查 signal。
  */
+// ---- fail-open 执行闸门（收口 C） ----
+// 风险等级由服务端工具定义推导，不接受调用方自报降级。
+const FAIL_OPEN_RISK = { read: 'R0', reversible_write: 'R1', high_risk: 'R3' };
+const FAIL_OPEN_SCOPE_FIELDS = [
+  'taskId',
+  'planId',
+  'planVersion',
+  'targetScope',
+  'subject',
+  'environment',
+  'resource',
+];
+
+function failOpenDigestOf(value) {
+  return crypto.createHash('sha256').update(stableStringify(value)).digest('hex');
+}
+
+/**
+ * 判定一次"预授权动作"是否放行。
+ * - 作用域字段缺失（含老任务没有 planId/planVersion）→ fail-closed，不当作"无计划可继续"。
+ * - R2/R3 一律不放行，allowlist 命中也不放行——它们必须走审批，不因命中白名单被绕过。
+ * - 判定本身写审计（含 policyVersion）；审计写失败时 evaluate 返回 allowed=false。
+ */
+function evaluateFailOpenScope(def, scope, paramsDigest) {
+  const riskLevel = FAIL_OPEN_RISK[def.risk] || 'R3';
+  const missing = FAIL_OPEN_SCOPE_FIELDS.filter(
+    key => scope[key] === null || scope[key] === undefined || scope[key] === ''
+  );
+  if (missing.length) {
+    return {
+      active: true,
+      ok: false,
+      code: 'failopen_scope_incomplete',
+      reason: 'scope_incomplete',
+      missing,
+      policyVersion: failOpenPolicy.currentPolicyVersion(),
+    };
+  }
+  const verdict = failOpenPolicy.evaluate({
+    tool: def.name,
+    operation: String(scope.operation || 'execute'),
+    paramsDigest,
+    targetScope: scope.targetScope,
+    // 计划版本是任务记录里冻结的版本，不是调用方现算的版本。
+    planVersion: String(scope.planVersion),
+    subject: scope.subject,
+    environment: scope.environment,
+    resource: scope.resource,
+    riskLevel,
+    taskId: scope.taskId,
+    runId: scope.runId || null,
+    traceId: scope.traceId || null,
+  });
+  if (verdict.allowed === true) {
+    return {
+      active: true,
+      ok: true,
+      policyId: verdict.policyId,
+      policyVersion: verdict.policyVersion,
+      matchedRule: verdict.matchedRule,
+      traceId: verdict.traceId,
+    };
+  }
+  return {
+    active: true,
+    ok: false,
+    code: riskLevel === 'R2' || riskLevel === 'R3' ? 'approval_required' : 'failopen_denied',
+    reason: verdict.reason,
+    policyVersion: verdict.policyVersion,
+    traceId: verdict.traceId,
+  };
+}
+
 async function executeToolCall(name, rawArgs, context) {
   const def = tools.get(String(name || ''));
   const policy = context && context.policy ? context.policy : null;
@@ -380,6 +466,27 @@ async function executeToolCall(name, rawArgs, context) {
       error: '当前 Agent 策略不允许该工具',
     };
   }
+  // 预授权动作的 allowlist 判定接在真实执行路径上：只有在工具登记为
+  // failOpenEligible 且调用方给出冻结作用域时接管，其余工具保持既有语义。
+  // R2/R3 分支先判：命中白名单也不执行，仍落回审批（confirmation/approval）。
+  const failOpenScope =
+    def.failOpenEligible === true && context && context.failOpen ? context.failOpen : null;
+  if (failOpenScope && def.risk === 'high_risk') {
+    const gate = evaluateFailOpenScope(def, failOpenScope, failOpenDigestOf(rawArgs ?? null));
+    monitor.complete({
+      ok: false,
+      code: gate.code || 'approval_required',
+      durationMs: Date.now() - startedAt,
+      executed: false,
+    });
+    return {
+      ok: false,
+      code: gate.code || 'approval_required',
+      error: '该动作风险等级不允许 fail-open，必须走审批',
+      failOpenReason: gate.reason || null,
+      policyVersion: gate.policyVersion ?? null,
+    };
+  }
   if (def.risk === 'high_risk') {
     monitor.complete({
       ok: false,
@@ -431,8 +538,49 @@ async function executeToolCall(name, rawArgs, context) {
     return { ok: false, code: 'invalid_params', error: validated.error };
   }
 
-  // 同请求去重：同工具 + 同规范化参数直接复用上次结果
-  const dedupeKey = `${def.name}|${stableStringify(validated.args)}`;
+  // R0/R1 预授权动作：未命中 allowlist 一律拒绝执行（handler 不被调用），
+  // 命中则继续执行——判定本身已写审计，含 policyVersion。
+  if (failOpenScope) {
+    const gate = evaluateFailOpenScope(def, failOpenScope, failOpenDigestOf(validated.args));
+    if (gate.ok !== true) {
+      monitor.complete({
+        ok: false,
+        code: gate.code,
+        durationMs: Date.now() - startedAt,
+        executed: false,
+      });
+      if (typeof context.onToolDenied === 'function') {
+        try {
+          context.onToolDenied({ name: def.name, code: gate.code, reason: gate.reason || null });
+        } catch (_) {
+          // 审计失败不能改变拒绝结果。
+        }
+      }
+      return {
+        ok: false,
+        code: gate.code,
+        error: 'fail-open 判定未放行，已拒绝执行',
+        failOpenReason: gate.reason || null,
+        policyVersion: gate.policyVersion ?? null,
+      };
+    }
+  }
+
+  // P2：副作用工具的幂等闸门。只有任务执行器（有 taskId）会注入 context.sideEffect，
+  // 且只对 readOnly === false 的工具生效；无副作用工具不会多出账本行。
+  const sideEffect = context.sideEffect && def.readOnly === false ? context.sideEffect : null;
+  // 逃生阀：显式 dedupeKeyOverride 只参与幂等键，不进入工具参数与业务语义。
+  const split = sideEffect
+    ? sideEffect.splitOverride(validated.args)
+    : { args: validated.args, override: null };
+  const toolArgs = split.args;
+  let ledgerOpKey = null;
+
+  // 同请求去重：同工具 + 同规范化参数直接复用上次结果；
+  // 带显式覆盖时按覆盖值区分，允许同一请求内真正执行两次相同参数。
+  const dedupeKey = `${def.name}|${stableStringify(toolArgs)}${
+    split.override ? `|#${split.override}` : ''
+  }`;
   if (context.cache.has(dedupeKey)) {
     const cached = { ...context.cache.get(dedupeKey), deduped: true };
     const serializedCached = JSON.stringify(cached);
@@ -446,6 +594,55 @@ async function executeToolCall(name, rawArgs, context) {
       truncated: serializedCached ? serializedCached.length > TOOL_RESULT_MAX : false,
     });
     return cached;
+  }
+
+  if (sideEffect) {
+    const verdict = sideEffect.before({
+      toolName: def.name,
+      args: toolArgs,
+      override: split.override,
+    });
+
+    if (verdict.mode === 'reuse') {
+      const reused = {
+        ...(verdict.result && typeof verdict.result === 'object' ? verdict.result : {}),
+        ok: true,
+        reused: true,
+        opKey: verdict.opKey,
+        resultDigest: verdict.resultDigest || null,
+      };
+      if (verdict.resultOmitted === true) reused.resultOmitted = true;
+      context.cache.set(dedupeKey, reused);
+      monitor.complete({
+        ok: true,
+        code: null,
+        durationMs: Date.now() - startedAt,
+        deduped: true,
+        executed: false,
+        resultBytes: JSON.stringify(reused).length,
+      });
+      return reused;
+    }
+
+    if (verdict.mode === 'blocked') {
+      const blocked = {
+        ok: false,
+        code: verdict.code,
+        error:
+          verdict.code === 'side_effect_unknown'
+            ? '该副作用可能已执行，已转入 recovery 等待人工核对'
+            : '幂等账本不可用，副作用已阻止执行',
+      };
+      monitor.complete({
+        ok: false,
+        code: blocked.code,
+        durationMs: Date.now() - startedAt,
+        executed: false,
+      });
+      return blocked;
+    }
+
+    ledgerOpKey = verdict.opKey;
   }
 
   const timeoutMs =
@@ -483,7 +680,7 @@ async function executeToolCall(name, rawArgs, context) {
   //    这里的作用是语义清晰 + 告警静默，不是"防崩进程"。
   const handlerPromise = Promise.resolve()
     .then(() =>
-      def.handler(validated.args, {
+      def.handler(toolArgs, {
         sessionId: context.sessionId,
         memoryScopeSessionId: context.memoryScopeSessionId || context.sessionId,
         userId: context.userId || null,
@@ -519,6 +716,17 @@ async function executeToolCall(name, rawArgs, context) {
 
   try {
     const result = remember(await Promise.race([handlerPromise, timeoutPromise]));
+    // P5 注入点：handler 已返回、结果尚未落账本 / 未写任务结果。
+    crashHook.hold('tool.after-handler');
+    // P2：真正执行完才补终态；执行前 begin 已落盘，崩溃时留下 started 会被判 recovery。
+    if (sideEffect && ledgerOpKey) {
+      sideEffect.after({
+        opKey: ledgerOpKey,
+        status: result.ok === true ? 'succeeded' : 'failed',
+        result,
+        errorCode: result.code || null,
+      });
+    }
     const serialized = JSON.stringify(result);
     monitor.complete({
       ok: result.ok === true,
@@ -537,6 +745,14 @@ async function executeToolCall(name, rawArgs, context) {
         code: 'tool_timeout',
         error: `工具执行超时（>${timeoutMs}ms），已中止`,
       });
+      // 超时后 handler 可能仍在后台完成副作用：不能写 failed，只能写 unknown。
+      if (sideEffect && ledgerOpKey) {
+        sideEffect.after({
+          opKey: ledgerOpKey,
+          status: 'unknown',
+          errorCode: result.code,
+        });
+      }
       monitor.complete({
         ok: false,
         code: result.code,
@@ -546,6 +762,9 @@ async function executeToolCall(name, rawArgs, context) {
       return result;
     }
     const result = remember({ ok: false, code: 'tool_error', error: '工具内部错误' });
+    if (sideEffect && ledgerOpKey) {
+      sideEffect.after({ opKey: ledgerOpKey, status: 'failed', errorCode: result.code });
+    }
     monitor.complete({
       ok: false,
       code: result.code,
@@ -624,6 +843,11 @@ async function runAgentTurn({
   onToolResult,
   toolAuthorizer = null,
   onToolDenied = null,
+  // 收口 C：任务执行器注入的"预授权作用域"（含任务冻结的 planVersion）。
+  // 只对登记为 failOpenEligible 的工具生效；不传时行为完全不变。
+  failOpen = null,
+  // P2：任务执行器的副作用幂等闸门；主控直聊不传，行为完全不变。
+  sideEffect = null,
   credentialKey = null,
   stream = false,
   onDelta = null,
@@ -704,6 +928,8 @@ async function runAgentTurn({
       authorizer: toolAuthorizer,
       onToolDenied,
       round,
+      sideEffect,
+      failOpen,
     };
     let result = await executeToolCall(toolName, rawArgs, toolContext);
     toolCallCount += 1;

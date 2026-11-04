@@ -3,7 +3,7 @@
  * 阶段 3 恢复与故障注入回归。
  *
  * 覆盖：状态机合法迁移、Store schema v1→v2 迁移、租约获取/续约/过期、
- * 重试退避、checkpoint 版本、运行历史、启动恢复（重排队/uncertain/保持运行）、
+ * 重试退避、checkpoint 版本、运行历史、启动恢复（重排队/recovery/保持运行）、
  * 强制终止进程后的恢复、结果投递幂等与崩溃补投、存储损坏/写入失败的显式路径。
  */
 const fs = require('fs');
@@ -47,8 +47,8 @@ function makeTask(overrides = {}) {
 }
 
 function toRunning(task, ownerId = 'dead-owner') {
-  tasks.updateTask(task.taskId, { status: 'accepted' });
-  tasks.updateTask(task.taskId, { status: 'running' });
+  tasks.transitionTask(task.taskId, { to: 'accepted' });
+  tasks.transitionTask(task.taskId, { to: 'running' });
   tasks.acquireLease(task.taskId, { ownerId });
   return tasks.getTask(task.taskId);
 }
@@ -56,7 +56,14 @@ function toRunning(task, ownerId = 'dead-owner') {
 // ---- A. 状态机 ----
 
 test('状态机：主链路合法迁移', () => {
-  const chain = ['queued', 'accepted', 'running', 'waiting_approval', 'completed'];
+  const chain = [
+    'queued',
+    'accepted',
+    'running',
+    'waiting_approval',
+    'running',
+    'completed',
+  ];
   for (let i = 0; i < chain.length - 1; i += 1) {
     assert.equal(stateMachine.canTransition(chain[i], chain[i + 1]), true);
     stateMachine.assertTransition(chain[i], chain[i + 1]);
@@ -75,10 +82,10 @@ test('状态机：跳步与回退被拒绝', () => {
   );
 });
 
-test('状态机：uncertain 是终态，只能由中间态进入', () => {
-  assert.equal(stateMachine.isTerminal('uncertain'), true);
-  assert.equal(stateMachine.canTransition('running', 'uncertain'), true);
-  assert.equal(stateMachine.canTransition('uncertain', 'queued'), false);
+test('状态机：recovery 是终态，只能由中间态进入', () => {
+  assert.equal(stateMachine.isTerminal('recovery'), true);
+  assert.equal(stateMachine.canTransition('running', 'recovery'), true);
+  assert.equal(stateMachine.canTransition('recovery', 'queued'), false);
 });
 
 test('状态机：只有 accepted/running 需要恢复', () => {
@@ -207,8 +214,8 @@ test('租约：释放后清空，终态任务不能再获取', () => {
   tasks.acquireLease(task.taskId, { ownerId: 'worker-a' });
   assert.equal(tasks.releaseLease(task.taskId).lease, null);
   const done = makeTask();
-  tasks.updateTask(done.taskId, { status: 'accepted' });
-  tasks.updateTask(done.taskId, { status: 'failed' });
+  tasks.transitionTask(done.taskId, { to: 'accepted' });
+  tasks.transitionTask(done.taskId, { to: 'failed' });
   assert.throws(
     () => tasks.acquireLease(done.taskId, { ownerId: 'worker-a' }),
     error => error && error.code === 'task_lease_terminal'
@@ -227,18 +234,20 @@ test('checkpoint：每次写入递增 checkpointVersion', () => {
   assert.equal(second.checkpoint.toolCalls, 1);
 });
 
-test('重试：写 retryAt/lastErrorCode，队列在到期前跳过', () => {
+test('重试：retrying 为正式状态，退避到期后由队列直接取走', () => {
   resetStore();
   const task = toRunning(makeTask());
   const retried = tasks.setRetry(task.taskId, { errorCode: 'model_timeout' });
-  assert.equal(retried.status, 'queued');
+  assert.equal(retried.status, 'retrying');
   assert.equal(retried.lastErrorCode, 'model_timeout');
   assert.ok(retried.retryAt);
+  // running → queued 的回退边已删除；退避到期仍以 retrying 出队，不经 queued。
+  assert.equal(stateMachine.canTransition('running', 'queued'), false);
+  assert.equal(stateMachine.canTransition('retrying', 'running'), true);
   assert.equal(tasks.nextQueuedTask(), null);
-  assert.equal(
-    tasks.nextQueuedTask(Date.parse(retried.retryAt) + 1).taskId,
-    task.taskId
-  );
+  const due = tasks.nextQueuedTask(Date.parse(retried.retryAt) + 1);
+  assert.equal(due.taskId, task.taskId);
+  assert.equal(due.status, 'retrying');
 });
 
 test('运行历史：记录 run 起止，且只保留最近 5 条', () => {
@@ -268,42 +277,46 @@ test('运行历史：记录 run 起止，且只保留最近 5 条', () => {
 
 // ---- E. 启动恢复 ----
 
-test('恢复：只读任务重排队，绝不直接报告成功', () => {
+test('恢复：只读任务回到 retrying 且可立即被重新调度，绝不直接报告成功', () => {
   resetStore();
   const task = toRunning(makeTask());
   tasks.reloadForTests();
   const result = tasks.recoverInterrupted({ ownerId: null });
   assert.equal(result.recovered, 1);
-  assert.equal(result.uncertain, 0);
+  assert.equal(result.recovery, 0);
   const recovered = tasks.getTask(task.taskId);
-  assert.equal(recovered.status, 'queued');
+  assert.equal(recovered.status, 'retrying');
+  assert.ok(recovered.retryAt);
+  assert.equal(tasks.nextQueuedTask().taskId, task.taskId);
   assert.equal(recovered.lastErrorCode, 'recovered_after_restart');
   assert.ok(recovered.recoveredAt);
   assert.notEqual(recovered.status, 'completed');
 });
 
-test('恢复：可能产生副作用的任务标记 uncertain 等待人工处理', () => {
+test('恢复：可能产生副作用的任务标记 recovery 等待人工处理', () => {
   resetStore();
   const task = toRunning(makeTask({ allowedTools: ['memory_remember'] }));
   tasks.reloadForTests();
   const result = tasks.recoverInterrupted({ ownerId: null });
-  assert.equal(result.uncertain, 1);
+  assert.equal(result.recovery, 1);
   const recovered = tasks.getTask(task.taskId);
-  assert.equal(recovered.status, 'uncertain');
+  assert.equal(recovered.status, 'recovery');
   assert.equal(recovered.requiresReview, true);
   assert.equal(recovered.errorCode, 'recovery_uncertain_side_effects');
-  assert.equal(recovered.result.status, 'uncertain');
+  assert.equal(recovered.result.status, 'recovery');
   assert.notEqual(recovered.status, 'completed');
 });
 
 test('恢复：waiting_approval 保持暂停，不被自动执行', () => {
   resetStore();
   const task = makeTask();
-  tasks.updateTask(task.taskId, { status: 'waiting_approval' });
+  tasks.transitionTask(task.taskId, { to: 'accepted' });
+  tasks.transitionTask(task.taskId, { to: 'running' });
+  tasks.transitionTask(task.taskId, { to: 'waiting_approval' });
   tasks.reloadForTests();
   const result = tasks.recoverInterrupted({ ownerId: null });
   assert.equal(result.recovered, 0);
-  assert.equal(result.uncertain, 0);
+  assert.equal(result.recovery, 0);
   assert.equal(tasks.getTask(task.taskId).status, 'waiting_approval');
 });
 
@@ -320,7 +333,7 @@ test('恢复：租约由其他存活 owner 持有时保持 running', () => {
   assert.equal(tasks.getTask(task.taskId).status, 'running');
 });
 
-test('恢复：uncertain 结果按 taskId 幂等投递到父会话', () => {
+test('恢复：recovery 结果按 taskId 幂等投递到父会话', () => {
   resetStore();
   const parent = mainSessions.createSession({ title: '恢复投递' });
   const task = toRunning(
@@ -333,7 +346,7 @@ test('恢复：uncertain 结果按 taskId 幂等投递到父会话', () => {
   const after = mainSessions.getMessages(parent.id);
   assert.equal(after.length, before + 1);
   assert.ok(after.at(-1).content.includes('【Memory Bot 任务未完成】'));
-  assert.ok(after.at(-1).content.includes('uncertain'));
+  assert.ok(after.at(-1).content.includes('recovery'));
   resultDelivery.recoverPending();
   assert.equal(mainSessions.getMessages(parent.id).length, before + 1);
 });
@@ -343,15 +356,15 @@ test('健康快照：只含计数与时间点', () => {
   makeTask({ goal: '排队' });
   const running = toRunning(makeTask({ goal: '运行中' }));
   const done = makeTask({ goal: '完成' });
-  tasks.updateTask(done.taskId, { status: 'accepted' });
-  tasks.updateTask(done.taskId, { status: 'running' });
-  tasks.updateTask(done.taskId, { status: 'completed' });
+  tasks.transitionTask(done.taskId, { to: 'accepted' });
+  tasks.transitionTask(done.taskId, { to: 'running' });
+  tasks.transitionTask(done.taskId, { to: 'completed' });
   const health = tasks.healthSnapshot(Date.now() + 120000);
   assert.equal(health.schemaVersion, 2);
   assert.equal(health.counts.queued, 1);
   assert.equal(health.counts.running, 1);
   assert.equal(health.counts.terminal, 1);
-  assert.equal(health.counts.uncertain, 0);
+  assert.equal(health.counts.recovery, 0);
   assert.equal(health.expiredLeases, 1);
   assert.equal(health.checkedAt.includes('T'), true);
   assert.ok(!JSON.stringify(health).includes('运行中'));
@@ -360,18 +373,18 @@ test('健康快照：只含计数与时间点', () => {
 
 // ---- F. 强制终止进程后的恢复 ----
 
-test('崩溃注入：子进程 SIGKILL 后恢复只读任务并标记写任务 uncertain', () => {
+test('崩溃注入：子进程 SIGKILL 后恢复只读任务并标记写任务 recovery', () => {
   resetStore();
   const script = `
 process.env.BLUEBIRD_DATA_DIR = ${JSON.stringify(TMP)};
 const tasks = require('./server/agents/tasks');
 const readOnly = tasks.createTask({ botId: 'memory', taskType: 'memory.search', goal: '崩溃只读', allowedTools: ['memory_search'], deadlineMs: 20000 });
-tasks.updateTask(readOnly.taskId, { status: 'accepted' });
-tasks.updateTask(readOnly.taskId, { status: 'running' });
+tasks.transitionTask(readOnly.taskId, { to: 'accepted' });
+tasks.transitionTask(readOnly.taskId, { to: 'running' });
 tasks.acquireLease(readOnly.taskId, { ownerId: 'dead-child' });
 const writeTask = tasks.createTask({ botId: 'memory', taskType: 'memory.search', goal: '崩溃写入', allowedTools: ['memory_remember'], deadlineMs: 20000 });
-tasks.updateTask(writeTask.taskId, { status: 'accepted' });
-tasks.updateTask(writeTask.taskId, { status: 'running' });
+tasks.transitionTask(writeTask.taskId, { to: 'accepted' });
+tasks.transitionTask(writeTask.taskId, { to: 'running' });
 tasks.acquireLease(writeTask.taskId, { ownerId: 'dead-child' });
 console.log('CHILD_READY');
 process.kill(process.pid, 'SIGKILL');
@@ -387,11 +400,12 @@ process.kill(process.pid, 'SIGKILL');
   tasks.reloadForTests();
   const result = tasks.recoverInterrupted({ ownerId: null });
   assert.equal(result.recovered, 1);
-  assert.equal(result.uncertain, 1);
+  assert.equal(result.recovery, 1);
   const all = tasks.allTasks();
   assert.equal(all.filter(task => task.status === 'completed').length, 0);
-  assert.equal(all.filter(task => task.status === 'queued').length, 1);
-  assert.equal(all.filter(task => task.status === 'uncertain').length, 1);
+  assert.equal(all.filter(task => task.status === 'queued').length, 0);
+  assert.equal(all.filter(task => task.status === 'retrying').length, 1);
+  assert.equal(all.filter(task => task.status === 'recovery').length, 1);
 });
 
 // ---- G. 投递幂等与崩溃补投 ----
@@ -400,9 +414,10 @@ test('投递：重复调用只生成一条父会话消息', () => {
   resetStore();
   const parent = mainSessions.createSession({ title: '投递幂等' });
   const task = makeTask({ parentSessionId: parent.id });
-  tasks.updateTask(task.taskId, { status: 'accepted' });
-  tasks.updateTask(task.taskId, {
-    status: 'completed',
+  tasks.transitionTask(task.taskId, { to: 'accepted' });
+  tasks.transitionTask(task.taskId, { to: 'running' });
+  tasks.transitionTask(task.taskId, {
+    to: 'completed',
     result: { status: 'completed', summary: '完成' },
   });
   const finished = tasks.getTask(task.taskId);
@@ -424,9 +439,10 @@ test('投递：终态但未投递的任务在恢复时补投一次', () => {
   resetStore();
   const parent = mainSessions.createSession({ title: '崩溃补投' });
   const task = makeTask({ parentSessionId: parent.id });
-  tasks.updateTask(task.taskId, { status: 'accepted' });
-  tasks.updateTask(task.taskId, {
-    status: 'completed',
+  tasks.transitionTask(task.taskId, { to: 'accepted' });
+  tasks.transitionTask(task.taskId, { to: 'running' });
+  tasks.transitionTask(task.taskId, {
+    to: 'completed',
     result: { status: 'completed', summary: '完成' },
   });
   assert.equal(tasks.getTask(task.taskId).deliveryStatus, 'pending');
@@ -452,7 +468,7 @@ test('存储：写入失败向调用方抛出受控错误，不伪装成功', ()
   };
   try {
     assert.throws(
-      () => tasks.updateTask(task.taskId, { status: 'accepted' }),
+      () => tasks.transitionTask(task.taskId, { to: 'accepted' }),
       error => error && error.code === 'EACCES'
     );
   } finally {
@@ -469,4 +485,96 @@ test('存储：损坏的任务文件在读取时明确报错', () => {
     () => tasks.getTask('task_any'),
     error => error && error.code === 'agent_tasks_corrupted'
   );
+});
+
+// ---- G. ② CAS：任务记录乐观并发 ----
+
+test('CAS：同一 expectedVersion 的两个写者，后者 conflict 且前者数据保留', async () => {
+  resetStore();
+  const task = makeTask();
+  const snapshot = tasks.getTask(task.taskId);
+  assert.equal(snapshot.stateVersion, 0);
+  // Node 是单线程且本 Store 是同步写，无法在进程内做到指令级并行；这里让两个
+  // 写者都从同一快照出发、在同一批微任务里发起写入——这正是“丢更新”的时序。
+  // 能证明：先执行者的写入保留、后执行者得到 conflict；不能证明：多进程同时读文件。
+  const results = await Promise.allSettled([
+    Promise.resolve().then(() =>
+      tasks.transitionTask(task.taskId, {
+        to: 'accepted',
+        expectedVersion: snapshot.stateVersion,
+      })
+    ),
+    Promise.resolve().then(() =>
+      tasks.updateTask(task.taskId, {
+        lastErrorCode: 'writer_b',
+        expectedVersion: snapshot.stateVersion,
+      })
+    ),
+  ]);
+
+  assert.equal(results[0].status, 'fulfilled');
+  assert.equal(results[0].value.status, 'accepted');
+  assert.equal(results[0].value.stateVersion, 1);
+
+  assert.equal(results[1].status, 'rejected');
+  const conflict = results[1].reason;
+  assert.equal(conflict.code, 'conflict');
+  assert.equal(conflict.status, 409);
+  const details = conflict.details || {};
+  assert.equal(details.retryable, true);
+  assert.match(details.errorFingerprint, /^[0-9a-f]{64}$/);
+  assert.equal(typeof details.failedAt, 'string');
+  assert.equal(details.taskId, task.taskId);
+  assert.equal(details.runId, null);
+  assert.equal(details.causeRef, `task:${task.taskId}`);
+
+  // 内存：先写者的结果保留，后写者什么都没改。
+  const current = tasks.getTask(task.taskId);
+  assert.equal(current.status, 'accepted');
+  assert.equal(current.stateVersion, 1);
+  assert.equal(current.lastErrorCode, null);
+
+  // 磁盘：与内存一致，未被第二个写者覆盖。
+  const raw = JSON.parse(
+    fs.readFileSync(path.join(AGENTS_DIR, 'agent-tasks.json'), 'utf8')
+  );
+  assert.equal(raw.tasks[task.taskId].status, 'accepted');
+  assert.equal(raw.tasks[task.taskId].stateVersion, 1);
+  assert.equal(raw.tasks[task.taskId].lastErrorCode, null);
+});
+
+test('CAS：冲突后重读并用最新版本重试成功，版本单调递增', () => {
+  resetStore();
+  const task = makeTask();
+  const first = tasks.transitionTask(task.taskId, { to: 'accepted' });
+  assert.equal(first.stateVersion, 1);
+
+  assert.throws(
+    () => tasks.transitionTask(task.taskId, { to: 'running', expectedVersion: 0 }),
+    error => error && error.code === 'conflict'
+  );
+  const afterConflict = tasks.getTask(task.taskId);
+  assert.equal(afterConflict.status, 'accepted');
+  assert.equal(afterConflict.stateVersion, 1);
+
+  const retried = tasks.transitionTask(task.taskId, {
+    to: 'running',
+    expectedVersion: afterConflict.stateVersion,
+  });
+  assert.equal(retried.status, 'running');
+  assert.equal(retried.stateVersion, 2);
+});
+
+test('CAS：不传 expectedVersion 的既有调用保持可写', () => {
+  resetStore();
+  const task = makeTask();
+  const accepted = tasks.transitionTask(task.taskId, { to: 'accepted' });
+  assert.equal(accepted.stateVersion, 1);
+  // 旧调用方（runtime / 测试）不带版本，行为与 ② 之前一致。
+  const heartbeat = tasks.updateTask(task.taskId, {
+    heartbeatAt: '2026-11-04T00:00:00.000Z',
+  });
+  assert.equal(heartbeat.status, 'accepted');
+  assert.equal(heartbeat.heartbeatAt, '2026-11-04T00:00:00.000Z');
+  assert.equal(heartbeat.stateVersion, 2);
 });

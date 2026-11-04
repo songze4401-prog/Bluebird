@@ -4,17 +4,23 @@
  *
  * - 任务保存目标、状态与结构化结果；事件只允许安全标量字段，
  *   绝不记录 Prompt、Key、记忆正文或模型推理。
- * - 事件是 UI 状态的唯一事实来源；客户端不得自行编造进度。
+ * - 任务状态的唯一事实来源是 task-store 的持久化记录（见 task-store.js）；
+ *   事件只是通知/审计通道，不拥有状态权威，客户端不得自行编造进度。
+ * - 状态只有一个写入入口：transitionTask（迁移校验 + 与其余字段同一次落盘）。
+ *   updateTask 只写非状态字段，收到 status 会显式拒绝，避免出现第二条写入路径。
  */
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { writeFileAtomicSync } = require('../atomic-write');
 const { getManifest, isKnownBot } = require('./manifest');
-const { AgentError } = require('./errors');
+const { AgentError, conflictError } = require('./errors');
 const taskStore = require('./task-store');
 const stateMachine = require('./state-machine');
+const artifactStore = require('./artifact-store');
 const { normalizeWorkerResult } = require('./worker-result');
+const { LEGACY_ALIASES } = require('./status-vocabulary');
+const approvalDeadline = require('./approval-deadline');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -38,7 +44,8 @@ const PARENT_USER_TEXT_MAX = 4000;
 const RESULT_SUMMARY_MAX = 8000;
 // Task Contract v1：这些字段是 Router/Worker 之间的冻结契约。
 // 旧字段 botId / sessionId 保留为同一值的别名，避免破坏既有 API 与前端。
-const CONTRACT_VERSION = 1;
+// S9：契约版本唯一定义在 contract.js，避免多处常量漂移。
+const { CONTRACT_VERSION } = require('./contract');
 const CONTEXT_REF_MAX = 200;
 const IDEMPOTENCY_KEY_MAX = 120;
 const PRIORITIES = Object.freeze(['high', 'normal', 'low']);
@@ -67,6 +74,8 @@ const EVENT_TYPES = Object.freeze([
   'memory.write_proposed',
   'memory.changed',
   'approval.requested',
+  'approval.escalated',
+  'approval.overdue',
   'approval.resolved',
   'task.completed',
   'task.delivery',
@@ -159,7 +168,22 @@ function loadTasks() {
       // 存储暂不可写时保留内存中的规范视图；下一次成功写入会一并落盘。
     }
   }
+  // S5 读边界：旧记录里的 uncertain 在内存中映射为 recovery，
+  // 不回写文件（migrate 不批量改写，原文件字节保持不变）。
+  applyLegacyStatusAliases(taskCache);
   return taskCache;
+}
+
+function applyLegacyStatusAliases(state) {
+  for (const task of Object.values(state.tasks || {})) {
+    if (!task) continue;
+    const aliasedStatus = LEGACY_ALIASES[task.status];
+    if (aliasedStatus) task.status = aliasedStatus;
+    if (task.result) {
+      const aliasedResultStatus = LEGACY_ALIASES[task.result.status];
+      if (aliasedResultStatus) task.result.status = aliasedResultStatus;
+    }
+  }
 }
 
 function loadEvents() {
@@ -369,6 +393,13 @@ function publicTask(task, { includeResult = true } = {}) {
     idempotencyKey: task.idempotencyKey || null,
     route: task.route ? clone(task.route) : null,
     budget: task.budget ? clone(task.budget) : null,
+    // S8：计划版本指针。仅在 Workflow Engine 创建/重规划计划时由引擎写入；
+    // 未接入 Workflow Store 时保持 null，绝不返回占位版本（0 也视为未写入）。
+    planId: task.planId || null,
+    planVersion:
+      Number.isInteger(task.planVersion) && task.planVersion > 0
+        ? task.planVersion
+        : null,
     // Worker 运行期元数据（不属于 Task Contract 字段，随执行更新）。
     runId: task.runId || null,
     runStartedAt: task.runStartedAt || null,
@@ -381,6 +412,8 @@ function publicTask(task, { includeResult = true } = {}) {
     checkpointVersion: Number.isInteger(task.checkpointVersion)
       ? task.checkpointVersion
       : 0,
+    // ② CAS：对外只读的当前版本，调用方写入时据此传 expectedVersion。
+    stateVersion: Number.isInteger(task.stateVersion) ? task.stateVersion : 0,
     runs: Array.isArray(task.runs) ? clone(task.runs) : [],
     requiresReview: task.requiresReview === true,
     deliveredToParentAt: task.deliveredToParentAt || null,
@@ -500,6 +533,8 @@ function createTask({
   parentMessageId = null,
   parentUserText = null,
   parentUserId = null,
+  planId = null,
+  planVersion = null,
 } = {}) {
   const resolvedAgentId = String(agentId || botId || '');
   assertBot(resolvedAgentId);
@@ -581,6 +616,24 @@ function createTask({
   const cleanRoute = normalizeRoute(route);
   const cleanBudget = normalizeBudget(budget);
 
+  // 计划指针只接受「两个都在」或「两个都不在」：单边取值无法表达冻结版本，
+  // 写入后只会变成无法解析的悬空引用（启动时会被收敛为 recovery）。
+  const cleanPlanId = planId === null || planId === undefined ? null : planId;
+  const cleanPlanVersion =
+    planVersion === null || planVersion === undefined ? null : planVersion;
+  if (cleanPlanId !== null || cleanPlanVersion !== null) {
+    if (
+      typeof cleanPlanId !== 'string' ||
+      cleanPlanId.trim().length === 0 ||
+      cleanPlanId.length > 80
+    ) {
+      throw new AgentError('invalid_task', 'planId 必须是 1 到 80 字的非空字符串');
+    }
+    if (!Number.isInteger(cleanPlanVersion) || cleanPlanVersion <= 0) {
+      throw new AgentError('invalid_task', 'planVersion 必须是正整数');
+    }
+  }
+
   // 同一 Agent 的相同幂等键返回既有任务，不重复创建、不重复入队。
   // Router 在建立 Worker 会话之前也会先查一次，避免产生空会话。
   const existing = findByIdempotencyKey(resolvedAgentId, cleanIdempotencyKey);
@@ -616,6 +669,11 @@ function createTask({
     idempotencyKey: cleanIdempotencyKey,
     route: cleanRoute,
     budget: cleanBudget,
+    // S8：计划版本指针（Task Contract 新增可空字段）。由 Workflow Store 在任务
+    // 创建之前落盘，router 在**同一次任务写入**里带上 planId + planVersion，
+    // 因此不存在「任务先引用、计划后落盘」的窗口。null 表示该任务没有冻结计划。
+    planId: cleanPlanId,
+    planVersion: cleanPlanVersion,
     runId: null,
     runStartedAt: null,
     heartbeatAt: null,
@@ -623,7 +681,12 @@ function createTask({
     lease: null,
     retryAt: null,
     lastErrorCode: null,
+    // checkpointVersion 是 checkpoint 序号（recordCheckpoint 每次 +1），
+    // 不是 CAS/并发版本；CAS 版本是 stateVersion（创建时为 0，首次写入 +1）。
     checkpointVersion: 0,
+    // ② CAS：任务记录的单调递增版本。只有存储层（本文件的写入路径）能分配，
+    // 调用方只能通过 expectedVersion 声明“基于哪一版修改”。
+    stateVersion: 0,
     runs: [],
     requiresReview: false,
     parentSessionId: cleanParentSession,
@@ -692,15 +755,55 @@ function listTasks(botId, { limit = 20, parentSessionId = null } = {}) {
     .map(task => publicTask(task));
 }
 
+// ② CAS：版本由存储层分配，调用方只读。每次真实落盘 +1，绝不信任写入方自报。
+function bumpStateVersion(task) {
+  task.stateVersion = (Number.isInteger(task.stateVersion) ? task.stateVersion : 0) + 1;
+  return task.stateVersion;
+}
+
+// ② CAS：先校验后写。expectedVersion 为空（undefined/null）表示“旧调用方不带版本”，
+// 保持既有可写行为；携带时必须与当前 stateVersion 严格相等，否则抛 conflict。
+// 冲突发生在任何内存改动之前，因此内存与磁盘都不会被改动。
+function assertExpectedVersion(task, expectedVersion) {
+  if (expectedVersion === undefined || expectedVersion === null) return;
+  const current = Number.isInteger(task.stateVersion) ? task.stateVersion : 0;
+  if (expectedVersion !== current) {
+    throw conflictError({
+      taskId: task.taskId,
+      expectedVersion,
+      currentVersion: current,
+      runId: task.runId || null,
+      causeRef: task.taskId ? `task:${task.taskId}` : null,
+    });
+  }
+}
+
 function updateTask(taskId, patch = {}) {
   const tasks = loadTasks();
   const task = tasks.tasks[String(taskId || '')];
   if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
 
+  // 状态只允许经 transitionTask 写入；这里显式拒绝而不是静默丢弃，
+  // 否则会留下一条看不见的第二写入路径。
   if (patch.status !== undefined) {
-    stateMachine.assertTransition(task.status, patch.status);
-    task.status = patch.status;
+    throw new AgentError(
+      'task_status_requires_transition',
+      '任务状态只能经 transitionTask 写入',
+      400
+    );
   }
+  // S9：checkpointVersion 是 checkpoint 序号，只能由 recordCheckpoint 递增写入。
+  // 它不是 CAS 版本；并发版本是 stateVersion（② 实现，见下方 assertExpectedVersion）。
+  if (patch.checkpointVersion !== undefined) {
+    throw new AgentError(
+      'task_checkpoint_version_read_only',
+      'checkpointVersion 只能由 recordCheckpoint 写入',
+      400
+    );
+  }
+  // ② CAS：在任何字段被修改之前校验版本，冲突时内存与磁盘都保持原样。
+  // 与 checkpointVersion 无关（后者是检查点序号，不是并发版本）。
+  assertExpectedVersion(task, patch.expectedVersion);
   if (patch.cancelRequested !== undefined) {
     task.cancelRequested = patch.cancelRequested === true;
   }
@@ -766,9 +869,6 @@ function updateTask(taskId, patch = {}) {
       };
     }
   }
-  if (Number.isInteger(patch.checkpointVersion) && patch.checkpointVersion >= 0) {
-    task.checkpointVersion = patch.checkpointVersion;
-  }
   if (patch.deliveredToParentAt !== undefined) {
     task.deliveredToParentAt = patch.deliveredToParentAt;
   }
@@ -794,6 +894,7 @@ function updateTask(taskId, patch = {}) {
         typeof result.summary === 'string'
           ? result.summary.slice(0, RESULT_SUMMARY_MAX)
           : '',
+      // ③ 产物引用沿用既有 {kind,id} 形状，只增量一个可选 version（§11 第 1 步）。
       artifacts: Array.isArray(result.artifacts)
         ? result.artifacts
             .filter(item => item && typeof item === 'object')
@@ -801,6 +902,7 @@ function updateTask(taskId, patch = {}) {
             .map(item => ({
               kind: String(item.kind || '').slice(0, 40),
               id: String(item.id || '').slice(0, 120),
+              ...(Number.isInteger(item.version) ? { version: item.version } : {}),
             }))
         : [],
       toolSteps: Array.isArray(result.toolSteps)
@@ -851,8 +953,56 @@ function updateTask(taskId, patch = {}) {
     };
   }
   task.updatedAt = nowIso();
+  bumpStateVersion(task);
   saveTasks();
   return publicTask(task);
+}
+
+// 状态写入的唯一实现：先校验迁移合法性，再改内存。
+// recoverInterrupted 需要批量改状态后只落盘一次，因此复用这个内部函数；
+// 对外只能经 transitionTask。
+function applyTransition(task, to) {
+  stateMachine.assertTransition(task.status, to);
+  // S6b：审批等待期同样受 Task deadline 约束。进入 waiting_approval 时统一挂计时，
+  // 离开时统一清除，避免任何一条入口路径留下永久等待的资源占用。
+  if (task.status === 'waiting_approval' && to !== 'waiting_approval') {
+    approvalDeadline.disarm(task.taskId);
+  }
+  task.status = to;
+  if (to === 'waiting_approval') {
+    const dueAt = getTaskDeadlineAt(task);
+    if (dueAt !== null) approvalDeadline.arm(task.taskId, dueAt - Date.now());
+  }
+}
+
+/**
+ * 任务状态唯一对外写入入口。
+ * options.to             目标状态（必经 assertTransition 校验）
+ * options.expectedVersion ② CAS：可选，基于哪一版修改；不匹配抛 conflict 且不改动
+ * options.writer         审计/日志标识，不改变行为，也不写入任务记录
+ * 其余字段（result/completedAt/errorCode/...）与状态在同一次落盘内写入，
+ * 保持“状态与结果同一次写”的既有语义。
+ */
+function transitionTask(taskId, options = {}) {
+  const tasks = loadTasks();
+  const task = tasks.tasks[String(taskId || '')];
+  if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+  // ② CAS：必须在 applyTransition 之前校验，否则冲突会留下已改的内存状态。
+  assertExpectedVersion(task, options.expectedVersion);
+  // ③ §11 第 3 步：产物引用必须在进入 completed 之前可读、schema 合格。
+  // 校验失败直接抛 artifact_* 错误，任务保持 running，由调用方转入 retrying/recovery。
+  // 空引用放行：没有产物要求的任务保持既有完成路径。
+  if (options.to === 'completed') {
+    artifactStore.assertRefsCommitReady(
+      options.result && Array.isArray(options.result.artifacts)
+        ? options.result.artifacts
+        : []
+    );
+  }
+  applyTransition(task, options.to);
+  const patch = { ...options };
+  delete patch.to;
+  return updateTask(taskId, patch);
 }
 
 function isTerminalStatus(status) {
@@ -901,6 +1051,7 @@ function acquireLease(
     heartbeatAt: iso,
   };
   task.updatedAt = iso;
+  bumpStateVersion(task);
   saveTasks();
   return publicTask(task);
 }
@@ -924,6 +1075,7 @@ function renewLease(
   task.lease.expiresAt = new Date(now + Math.max(1000, ttlMs)).toISOString();
   task.heartbeatAt = iso;
   task.updatedAt = iso;
+  bumpStateVersion(task);
   saveTasks();
   return publicTask(task);
 }
@@ -934,6 +1086,7 @@ function releaseLease(taskId) {
   if (!task) return null;
   task.lease = null;
   task.updatedAt = nowIso();
+  bumpStateVersion(task);
   saveTasks();
   return publicTask(task);
 }
@@ -957,6 +1110,7 @@ function recordRunStart(taskId, { runId, attempt, startedAt } = {}) {
   });
   task.runs = runs.slice(-RUN_HISTORY_MAX);
   task.updatedAt = at;
+  bumpStateVersion(task);
   saveTasks();
   return publicTask(task);
 }
@@ -987,6 +1141,7 @@ function recordRunFinish(taskId, { runId, status, errorCode = null, finishedAt }
   }
   task.runs = runs.slice(-RUN_HISTORY_MAX);
   task.updatedAt = at;
+  bumpStateVersion(task);
   saveTasks();
   return publicTask(task);
 }
@@ -1006,17 +1161,19 @@ function recordCheckpoint(taskId, checkpoint = {}, now = Date.now()) {
     (Number.isInteger(task.checkpointVersion) ? task.checkpointVersion : 0) + 1;
   task.heartbeatAt = at;
   task.updatedAt = at;
+  bumpStateVersion(task);
   saveTasks();
   return publicTask(task);
 }
 
+// S7：运行失败进入正式重试态 retrying；退避到期由调度器直接启动 attempt。
+// 不再写 queued，也不再把 retryAt 藏在排队态里。
 function setRetry(taskId, { errorCode, retryAt, now = Date.now() } = {}) {
   const state = loadTasks();
   const task = state.tasks[String(taskId || '')];
   if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
-  stateMachine.assertTransition(task.status, 'queued');
+  applyTransition(task, 'retrying');
   const at = new Date(now).toISOString();
-  task.status = 'queued';
   task.retryAt =
     typeof retryAt === 'string'
       ? retryAt
@@ -1029,6 +1186,7 @@ function setRetry(taskId, { errorCode, retryAt, now = Date.now() } = {}) {
   task.heartbeatAt = null;
   task.lease = null;
   task.updatedAt = at;
+  bumpStateVersion(task);
   saveTasks();
   return publicTask(task);
 }
@@ -1040,20 +1198,89 @@ function hasSideEffectTools(task) {
   );
 }
 
+// S6b：deadline 沿用既有语义——本次执行起点 + deadlineMs（与 runtime.js 的
+// runningSince + deadlineMs 一致）。审批等待的墙钟时间计入，不重新计时。
+// 旧数据缺少 startedAt 时退回 updatedAt / createdAt，绝不新造第二个期限来源。
+function getTaskDeadlineAt(task) {
+  if (!task) return null;
+  const budget =
+    Number.isInteger(task.deadlineMs) && task.deadlineMs > 0 ? task.deadlineMs : null;
+  if (!budget) return null;
+  const anchor = Date.parse(task.startedAt || task.updatedAt || task.createdAt || '');
+  return Number.isFinite(anchor) ? anchor + budget : null;
+}
+
+// S6b 收敛：与 S6 的 convergeExpiredWaitingApproval 同一规则。
+// 副作用未知 → recovery；否则 → timed_out。审批记录不在本函数内改动。
+function expireWaitingApproval(task, now = Date.now()) {
+  const finishedAt = new Date(now).toISOString();
+  const status = hasSideEffectTools(task) ? 'recovery' : 'timed_out';
+  const errorCode =
+    status === 'recovery' ? 'recovery_uncertain_side_effects' : 'deadline_exceeded';
+  applyTransition(task, status);
+  task.completedAt = finishedAt;
+  task.errorCode = errorCode;
+  task.lastErrorCode = errorCode;
+  if (status === 'recovery') task.requiresReview = true;
+  task.result = normalizeWorkerResult({
+    status,
+    summary: '',
+    errorCode,
+    runId: task.runId || null,
+    finishedAt,
+  });
+  task.lease = null;
+  task.retryAt = null;
+  task.heartbeatAt = null;
+  task.updatedAt = finishedAt;
+  return { status, errorCode, result: task.result, finishedAt, runId: task.runId || null };
+}
+
+/**
+ * S6b：把已过期的 waiting_approval 任务按 §32.1 收敛。
+ * 只处理“仍在等待且期限已到”的任务；未到期或已离开等待态返回 null（不早触发）。
+ * 返回收敛结果供 runtime 补 run history / 投递 / 事件；审批记录保持 pending。
+ */
+function convergeWaitingApprovalDeadline(taskId, { now = Date.now() } = {}) {
+  const state = loadTasks();
+  const task = state.tasks[String(taskId || '')];
+  if (!task || task.status !== 'waiting_approval') return null;
+  const dueAt = getTaskDeadlineAt(task);
+  if (dueAt === null || dueAt > now) return null;
+  const outcome = expireWaitingApproval(task, now);
+  bumpStateVersion(task);
+  saveTasks();
+  return outcome;
+}
+
 // 启动恢复：租约仍由未过期且不同的 owner 持有时保持 running；
-// 只读任务重新排队；可能产生副作用的任务标记 uncertain 等待人工处理，
+// 只读任务重新排队；可能产生副作用的任务标记 recovery 等待人工核对，
 // 绝不凭空报告成功。
 function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
   const state = loadTasks();
   const at = new Date(now).toISOString();
   let recovered = 0;
-  let uncertain = 0;
+  let recovery = 0;
   let leftRunning = 0;
   const taskIds = [];
-  const uncertainTaskIds = [];
+  const recoveryTaskIds = [];
+  const expiredWaitingApproval = [];
   let changed = false;
 
   for (const task of Object.values(state.tasks)) {
+    // S6b：重启后 waiting_approval 也必须按 deadline 收敛——不能只依赖“活着的计时器”。
+    if (task.status === 'waiting_approval') {
+      const dueAt = getTaskDeadlineAt(task);
+      if (dueAt === null) continue;
+      if (dueAt > now) {
+        approvalDeadline.arm(task.taskId, dueAt - now);
+        continue;
+      }
+      changed = true;
+      expireWaitingApproval(task, now);
+      expiredWaitingApproval.push(task.taskId);
+      continue;
+    }
     if (!stateMachine.isRecoverable(task.status)) continue;
     if (
       task.lease &&
@@ -1065,27 +1292,39 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
       continue;
     }
     changed = true;
+    bumpStateVersion(task);
     task.updatedAt = at;
     task.lease = null;
     task.retryAt = null;
     task.heartbeatAt = null;
     if (hasSideEffectTools(task)) {
-      task.status = 'uncertain';
+      applyTransition(task, 'recovery');
       task.completedAt = at;
       task.errorCode = 'recovery_uncertain_side_effects';
       task.lastErrorCode = 'recovery_uncertain_side_effects';
       task.requiresReview = true;
       task.result = normalizeWorkerResult({
-        status: 'uncertain',
+        status: 'recovery',
         summary: '',
         errorCode: 'recovery_uncertain_side_effects',
         runId: task.runId || null,
         finishedAt: at,
       });
-      uncertain += 1;
-      uncertainTaskIds.push(task.taskId);
+      recovery += 1;
+      recoveryTaskIds.push(task.taskId);
+    } else if (task.status === 'running') {
+      // S7：running → queued 的回退边已删除；重启时未完成的运行态按重试收口，
+      // retryAt 设为当前时刻，调度器下一次遍历即可直接启动 attempt。
+      applyTransition(task, 'retrying');
+      task.retryAt = at;
+      task.recoveredAt = at;
+      task.lastErrorCode = 'recovered_after_restart';
+      task.errorCode = null;
+      task.requiresReview = false;
+      recovered += 1;
+      taskIds.push(task.taskId);
     } else {
-      task.status = 'queued';
+      applyTransition(task, 'queued');
       task.recoveredAt = at;
       task.lastErrorCode = 'recovered_after_restart';
       task.errorCode = null;
@@ -1097,12 +1336,63 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
   if (changed) saveTasks();
   return {
     recovered,
-    uncertain,
+    // 自 S5 起该字段随正式状态改名；语义仍是“进入 recovery 的任务数”。
+    recovery,
     leftRunning,
     taskIds,
-    uncertainTaskIds,
-    queued: Object.values(state.tasks).filter(task => task.status === 'queued').length,
+    recoveryTaskIds,
+    expiredWaitingApproval,
+    // S7：retrying 也是“等待下一次调度”的队列成员。
+    queued: Object.values(state.tasks).filter(
+      task => task.status === 'queued' || task.status === 'retrying'
+    ).length,
   };
+}
+
+// 计划不可用时的收敛：非终态任务一律落 recovery（fail-closed）。
+// 只用状态机已声明的边：queued → accepted → recovery、retrying → running → recovery，
+// 不新增状态、不改迁移表。已终态任务不反转（终态没有出边），只计入 skippedTerminal。
+function forcePlanRecovery(taskId, { errorCode, now = Date.now() } = {}) {
+  const state = loadTasks();
+  const task = state.tasks[String(taskId || '')];
+  if (!task) return { changed: false, status: null, skipped: 'not_found' };
+  if (stateMachine.isTerminal(task.status)) {
+    return { changed: false, status: task.status, skipped: 'terminal' };
+  }
+  const path = recoveryPath(task.status);
+  if (!path) return { changed: false, status: task.status, skipped: 'no_path' };
+
+  for (const step of path) applyTransition(task, step);
+  const at = new Date(now).toISOString();
+  bumpStateVersion(task);
+  task.updatedAt = at;
+  task.completedAt = at;
+  task.lease = null;
+  task.retryAt = null;
+  task.heartbeatAt = null;
+  task.errorCode = errorCode;
+  task.lastErrorCode = errorCode;
+  task.requiresReview = true;
+  task.result = normalizeWorkerResult({
+    status: 'recovery',
+    summary: '',
+    errorCode,
+    runId: task.runId || null,
+    finishedAt: at,
+  });
+  saveTasks();
+  return { changed: true, status: 'recovery', errorCode };
+}
+
+function recoveryPath(from) {
+  if (from === 'recovery') return null;
+  if (stateMachine.canTransition(from, 'recovery')) return ['recovery'];
+  const next = stateMachine.TRANSITIONS[from] || [];
+  for (const mid of next) {
+    if (mid === from) continue;
+    if (stateMachine.canTransition(mid, 'recovery')) return [mid, 'recovery'];
+  }
+  return null;
 }
 
 // 给 Watchdog / 运维读取的稳定健康快照：只有计数与时间点，不含任务正文。
@@ -1114,16 +1404,17 @@ function healthSnapshot(now = Date.now()) {
     running: 0,
     waitingApproval: 0,
     terminal: 0,
-    uncertain: 0,
+    recovery: 0,
   };
   let expiredLeases = 0;
   let retryScheduled = 0;
   let oldestQueuedAt = null;
   for (const task of Object.values(state.tasks)) {
     if (task.status === 'waiting_approval') counts.waitingApproval += 1;
-    else if (task.status === 'uncertain') counts.uncertain += 1;
+    else if (task.status === 'recovery') counts.recovery += 1;
     else if (stateMachine.isTerminal(task.status)) counts.terminal += 1;
-    else if (task.status === 'queued') {
+    else if (task.status === 'queued' || task.status === 'retrying') {
+      // S7：retrying 归入队列计数，保持 healthSnapshot 的字段集合不变。
       counts.queued += 1;
       if (!oldestQueuedAt || String(task.createdAt) < oldestQueuedAt) {
         oldestQueuedAt = task.createdAt || null;
@@ -1150,12 +1441,17 @@ function healthSnapshot(now = Date.now()) {
 }
 
 // 队列顺序：优先级（high → normal → low）优先，同级按创建时间，最后用 taskId
-// 兜底。尚未到 retryAt 的任务暂不出队，避免失败后立即重试形成风暴。
+// 兜底。S7 起队列成员含正式重试态 retrying；尚未到 retryAt 的任务暂不出队，
+// 避免失败后立即重试形成风暴。
 function nextQueuedTask(now = Date.now()) {
   const current = loadTasks();
   return (
     Object.values(current.tasks)
-      .filter(task => task.status === 'queued' && task.cancelRequested !== true)
+      .filter(
+        task =>
+          (task.status === 'queued' || task.status === 'retrying') &&
+          task.cancelRequested !== true
+      )
       .filter(task => !task.retryAt || Date.parse(task.retryAt) <= now)
       .sort((a, b) => {
         const byPriority = priorityRank(a.priority) - priorityRank(b.priority);
@@ -1169,7 +1465,9 @@ function nextQueuedTask(now = Date.now()) {
 
 function queuedCount() {
   return Object.values(loadTasks().tasks).filter(
-    task => task.status === 'queued' && task.cancelRequested !== true
+    task =>
+      (task.status === 'queued' || task.status === 'retrying') &&
+      task.cancelRequested !== true
   ).length;
 }
 
@@ -1194,6 +1492,7 @@ module.exports = {
   getRawTask,
   listTasks,
   updateTask,
+  transitionTask,
   appendEvent,
   listEvents,
   flushEventOutbox,
@@ -1203,6 +1502,9 @@ module.exports = {
   nextQueuedTask,
   queuedCount,
   recoverInterrupted,
+  forcePlanRecovery,
+  getTaskDeadlineAt,
+  convergeWaitingApprovalDeadline,
   findByIdempotencyKey,
   priorityRank,
   acquireLease,

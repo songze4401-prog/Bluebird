@@ -29,7 +29,7 @@ npx expo start             # Metro :8081
 ## Quality gates
 
 ```bash
-npm test                    # backend: auto-discovers tests/*.test.js (72 files / 2056 checks)
+npm test                    # backend: auto-discovers tests/*.test.js (84 files / 2151 checks)
 npm run test:unit -- --ci   # frontend: 22 suites / 188 cases
 npx tsc --noEmit            # TypeScript
 npm run lint                # Expo ESLint
@@ -60,6 +60,7 @@ CI (`.github/workflows/ci.yml`) runs TypeScript, lint, the fixed evaluations, an
 ## Documentation
 
 - `AGENTS.md` — architecture, data safety, commands, tests, and rules. This is the primary engineering reference.
+- `docs/handover-2026-11-03.md` — handover snapshot: current baseline, what P1–P6 actually proves, unverified/blocked items with evidence, hard constraints, and the acceptance command chain.
 - `docs/persona-custom-prompt.md` — the user-authored persona text: field contract, priority order, untrusted-text handling, and validation error codes.
 - `docs/unified-retrieval.md` — unified semantic retrieval/knowledge index: contracts, source connectors, hybrid pipeline, API, limits, verified/blocked capabilities.
 - `docs/p5-profile-feedback.md` — traceable profile and confirm/deny/correct feedback: derived-view contract, source trace, idempotency, tombstones, API and limits.

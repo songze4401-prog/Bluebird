@@ -438,9 +438,9 @@ test('队列：按 high → normal → low 出队，同级按创建时间', () =
   const low = createTask({ priority: 'low', goal: '低' });
   const high = createTask({ priority: 'high', goal: '高' });
   assert.equal(tasks.nextQueuedTask().taskId, high.taskId);
-  tasks.updateTask(high.taskId, { status: 'accepted' });
+  tasks.transitionTask(high.taskId, { to: 'accepted' });
   assert.equal(tasks.nextQueuedTask().taskId, normal.taskId);
-  tasks.updateTask(normal.taskId, { status: 'accepted' });
+  tasks.transitionTask(normal.taskId, { to: 'accepted' });
   assert.equal(tasks.nextQueuedTask().taskId, low.taskId);
 });
 
@@ -652,9 +652,9 @@ test('负载统计：排队与运行中的任务计入队列深度与并发', ()
   const a = createTask({ goal: '任务A' });
   const b = createTask({ goal: '任务B' });
   const c = createTask({ goal: '任务C' });
-  tasks.updateTask(a.taskId, { status: 'accepted' });
-  tasks.updateTask(b.taskId, { status: 'accepted' });
-  tasks.updateTask(b.taskId, { status: 'running' });
+  tasks.transitionTask(a.taskId, { to: 'accepted' });
+  tasks.transitionTask(b.taskId, { to: 'accepted' });
+  tasks.transitionTask(b.taskId, { to: 'running' });
   const load = routerModule.computeLoad(tasks);
   assert.equal(load.queuedTotal, 3);
   assert.equal(load.runningByAgent.memory, 2);
