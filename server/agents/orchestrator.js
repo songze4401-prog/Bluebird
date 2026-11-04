@@ -21,6 +21,7 @@
  */
 const crypto = require('crypto');
 const { AgentError } = require('./errors');
+const dependencies = require('./dependencies');
 
 // A 类常量：意图关键词 → 能力 的最小映射。只覆盖已注册 Memory Bot 的能力，
 // 是「最小可用」而不是通用 NLU；后续有第二个专业 Agent 时必须由 Manifest 扩展，
@@ -120,6 +121,7 @@ function buildAllocation(probe, agents, matchedAgentIds) {
 function createOrchestrator(overrides = {}) {
   const getAgents = overrides.getAgents || (() => require('./registry').listAgents());
   const router = overrides.router || require('./router');
+  const taskStore = overrides.tasks || require('./tasks');
   // 容量探针必须复用 Router 的 decideInternal（同一份 load 快照口径），
   // 不在编排层重新统计 running / concurrencyLimit。
   const decide =
@@ -207,12 +209,73 @@ function createOrchestrator(overrides = {}) {
     return { ...result, orchestration };
   }
 
-  return { orchestrate };
+  /**
+   * Phase 1 交付物 2「依赖管理」批量入口。
+   *
+   * definitions: [{ key, goal|intent, dependsOn?: [key|taskId], 其余字段交给 orchestrate }]
+   * - 先整图校验（上限/悬空引用/环）再落盘：校验失败时**零任务创建**；
+   * - 通过后按拓扑序逐条复用 orchestrate → router.dispatch 创建，key 解析为真实 taskId；
+   * - 依赖边必须同 agentId，跨主体直接拒绝。
+   */
+  function createTaskGraph(input = {}, context = {}) {
+    const request = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+    const definitions = Array.isArray(request.definitions) ? request.definitions : [];
+    if (!definitions.length) {
+      throw new AgentError('validation_failed', '依赖图需要至少一个节点', 400);
+    }
+
+    const requestedAgentId = normalizeText(request.agentId || request.botId, 80) || null;
+    const declaredAgentIds = definitions
+      .map(item => normalizeText(item && (item.agentId || item.botId), 80) || null)
+      .filter(Boolean);
+    const distinct = [...new Set(declaredAgentIds)];
+    if (distinct.length > 1) {
+      throw new AgentError('dependency_not_found', '依赖图节点必须属于同一 Agent', 400);
+    }
+    if (requestedAgentId && distinct.length === 1 && distinct[0] !== requestedAgentId) {
+      throw new AgentError('dependency_not_found', '依赖图节点与请求的 Agent 不一致', 400);
+    }
+    const agentId = requestedAgentId || distinct[0] || null;
+
+    // 零副作用校验：任何任务创建之前完成。
+    const { order } = dependencies.validateGraph({
+      nodes: definitions.map(item => ({
+        key: item && typeof item.key === 'string' ? item.key.trim() : '',
+        // 原样传入，让 normalizeRefs 对非法类型/空值/重复/超限给出 400。
+        dependsOn: item ? item.dependsOn : undefined,
+      })),
+      tasksById: taskStore.rawTasksById(),
+    });
+
+    const byKey = new Map(
+      definitions.map(item => [String(item.key).trim(), item])
+    );
+    const created = {};
+    const results = [];
+    for (const key of order) {
+      const definition = byKey.get(key) || {};
+      const dependsOn = (Array.isArray(definition.dependsOn) ? definition.dependsOn : []).map(
+        ref => (created[ref] ? created[ref].taskId : ref)
+      );
+      const payload = { ...definition, dependsOn };
+      delete payload.key;
+      const result = orchestrate(
+        { ...payload, ...(agentId ? { agentId } : {}) },
+        context
+      );
+      created[key] = result.task;
+      results.push({ key, ...result });
+    }
+    return { agentId, order, tasks: created, results };
+  }
+
+  return { orchestrate, createTaskGraph };
 }
 
 module.exports = {
   createOrchestrator,
   orchestrate: (input, context) => createOrchestrator().orchestrate(input, context),
+  createTaskGraph: (input, context) => createOrchestrator().createTaskGraph(input, context),
   resolveCapability,
   buildAllocation,
   INTENT_CAPABILITY_RULES,

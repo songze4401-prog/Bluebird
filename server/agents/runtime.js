@@ -13,6 +13,7 @@ const { assertRunnable } = require('./registry');
 const { getCredentialKey } = require('./credentials');
 const sessions = require('./sessions');
 const tasks = require('./tasks');
+const dependencies = require('./dependencies');
 const workerScope = require('./worker-scope');
 const resultDelivery = require('./result-delivery');
 const { projectWorkerContext } = require('./context-projection');
@@ -60,6 +61,9 @@ function scheduleTaskQueue() {
   if (scheduling) return;
   scheduling = true;
   try {
+    // Phase 1 交付物 2：每次取队前先收敛依赖失败（含下游的下游），
+    // 这样所有终态写入路径都不必各自埋钩子——它们最终都会走到这里。
+    tasks.settleDependencies();
     while (activeRuns.size < TASK_CONCURRENCY) {
       const next = tasks.nextQueuedTask();
       if (!next) break;
@@ -587,6 +591,10 @@ async function runTask(taskId) {
   if (!task) return;
   // waiting_approval 是暂停态，不是终态；由 approvals.execute/reject 收尾。
   if (tasks.isTerminalStatus(task.status) || task.status === 'waiting_approval') return;
+  // Phase 1 交付物 2：依赖未就绪不在执行侧启动。
+  // 判定复用 dependencies.isReady（与 tasks.nextQueuedTask 是同一实现），
+  // 这里只是防「取队后依赖态变化」的二次确认，未就绪立即回队列。
+  if (!dependencies.isReady(task, tasks.rawTasksById())) return;
 
   const controller = new AbortController();
   activeRuns.set(task.taskId, controller);

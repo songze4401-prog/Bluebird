@@ -19,6 +19,7 @@ const taskStore = require('./task-store');
 const stateMachine = require('./state-machine');
 const artifactStore = require('./artifact-store');
 const { normalizeWorkerResult } = require('./worker-result');
+const dependencies = require('./dependencies');
 const { LEGACY_ALIASES } = require('./status-vocabulary');
 const approvalDeadline = require('./approval-deadline');
 
@@ -90,6 +91,7 @@ const EVENT_TYPES = Object.freeze([
   'task.completed',
   'task.delivery',
   'task.failed',
+  'task.dependency_failed',
   'task.cancelled',
   'task.timed_out',
   'task.uncertain',
@@ -157,6 +159,11 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'attempts',
   'leaseOwner',
   'retryAt',
+  // Phase 1 交付物 2（依赖管理）：依赖失败收敛轨迹。neverStarted 明确写
+  // 「该任务从未进入 running」，避免把 accepted 误读成真的执行过。
+  'neverStarted',
+  'blockedBy',
+  'dependencyTaskId',
 ]);
 
 let taskCache = null;
@@ -435,6 +442,8 @@ function publicTask(task, { includeResult = true } = {}) {
       : { reserved: 0, used: 0 },
     parentTaskId: task.parentTaskId || null,
     budgetRunId: task.budgetRunId || null,
+    // Phase 1 交付物 2：依赖边（只读）。空数组表示无依赖，保持快速路径。
+    dependsOn: Array.isArray(task.dependsOn) ? [...task.dependsOn] : [],
     // S8：计划版本指针。仅在 Workflow Engine 创建/重规划计划时由引擎写入；
     // 未接入 Workflow Store 时保持 null，绝不返回占位版本（0 也视为未写入）。
     planId: task.planId || null,
@@ -847,6 +856,9 @@ function createTask({
   parentTaskId = null,
   runId = null,
   runBudget = null,
+  // Phase 1 交付物 2：依赖边。只允许指向**已存在**且同 agentId 的任务，
+  // 上限 8；循环依赖只能由批量编排入口产生，那里会在落盘前整图校验。
+  dependsOn = null,
 } = {}) {
   const resolvedAgentId = String(agentId || botId || '');
   assertBot(resolvedAgentId);
@@ -971,6 +983,22 @@ function createTask({
   if (existing) return { ...existing, idempotent: true };
 
   const tasks = loadTasks();
+  // 依赖边校验：必须在任何裁剪/落盘之前完成，失败时磁盘与内存都不变。
+  const cleanDependsOn =
+    dependsOn === null || dependsOn === undefined ? [] : dependencies.normalizeRefs(dependsOn);
+  for (const depTaskId of cleanDependsOn) {
+    const dep = tasks.tasks[depTaskId];
+    if (!dep) {
+      throw new AgentError('dependency_not_found', `依赖任务不存在：${depTaskId}`, 400);
+    }
+    if ((dep.agentId || dep.botId) !== resolvedAgentId) {
+      throw new AgentError(
+        'dependency_not_found',
+        `依赖任务不属于同一 Agent：${depTaskId}`,
+        400
+      );
+    }
+  }
   const pruned =
     Object.keys(tasks.tasks).length >= TASK_MAX
       ? pruneDeliveredTerminalTasks(tasks)
@@ -1060,6 +1088,7 @@ function createTask({
     // B-06：预算归属与计量初值。reserved/used 只由 reserve/settle/release 改写。
     parentTaskId: cleanParentTaskId,
     budgetRunId: effectiveRunId,
+    dependsOn: cleanDependsOn,
     tokenUsage: { reserved: 0, used: 0 },
     runId: null,
     runStartedAt: null,
@@ -1337,6 +1366,15 @@ function updateTask(taskId, patch = {}) {
             modelId: String(result.model.modelId || '').slice(0, 120),
           }
         : null,
+      // 依赖失败收敛标记：只在结果显式声明时保留，普通结果形状不变。
+      ...(result.neverStarted === true
+        ? {
+            neverStarted: true,
+            blockedBy: Array.isArray(result.blockedBy)
+              ? result.blockedBy.slice(0, 8).map(item => String(item).slice(0, 120))
+              : [],
+          }
+        : {}),
     };
   }
   task.updatedAt = nowIso();
@@ -1398,6 +1436,12 @@ function isTerminalStatus(status) {
 
 function allTasks() {
   return Object.values(loadTasks().tasks);
+}
+
+// 只读任务表快照（同一内存视图）：runTask 前置就绪校验与 nextQueuedTask
+// 共用 dependencies.isReady 时，需要同一份 tasksById 口径。
+function rawTasksById() {
+  return loadTasks().tasks;
 }
 
 function priorityRank(priority) {
@@ -1827,9 +1871,75 @@ function healthSnapshot(now = Date.now()) {
   };
 }
 
+// 依赖失败收敛（Phase 1 交付物 2）。
+// 未开始（status=queued）且依赖已终态未成功的任务 → failed；
+// 状态机没有 queued → failed 这条边（queued 只到 accepted/cancelled/timed_out），
+// 因此按 queued → accepted → failed 两步收敛，并在 result 与事件里写
+// neverStarted=true，明确「该任务从未进入 running」。
+// 返回已收敛的 [taskId, errorCode, blockedBy] 列表，供调度与探针核对。
+function settleDependencies() {
+  const state = loadTasks();
+  const settled = [];
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    for (const task of Object.values(state.tasks)) {
+      if (task.status !== 'queued' || task.cancelRequested === true) continue;
+      const deps = Array.isArray(task.dependsOn) ? task.dependsOn : [];
+      if (!deps.length) continue;
+      const blocked = dependencies.blockers(task, state.tasks);
+      // 还有依赖在跑 → 继续排队，不判死。
+      if (!blocked.failed.length && !blocked.missing.length) continue;
+
+      const cancelledOnly =
+        blocked.failed.length > 0 &&
+        blocked.failed.every(item => item.status === 'cancelled');
+      const errorCode = cancelledOnly ? 'dependency_cancelled' : 'dependency_failed';
+      const blockedBy = [
+        ...blocked.failed.map(item => item.taskId),
+        ...blocked.missing,
+      ];
+      const finishedAt = nowIso();
+      const result = normalizeWorkerResult({
+        status: 'failed',
+        summary: `依赖未成功完成，任务未开始执行：${blockedBy.join(', ')}`.slice(0, 500),
+        errorCode,
+        finishedAt,
+        neverStarted: true,
+        blockedBy,
+      });
+      transitionTask(task.taskId, { to: 'accepted' });
+      transitionTask(task.taskId, {
+        to: 'failed',
+        completedAt: finishedAt,
+        errorCode,
+        lastErrorCode: errorCode,
+        result,
+      });
+      settled.push({ taskId: task.taskId, errorCode, blockedBy });
+      appendEvent({
+        botId: task.agentId || task.botId,
+        taskId: task.taskId,
+        eventType: 'task.dependency_failed',
+        payload: {
+          status: 'failed',
+          errorCode,
+          neverStarted: true,
+          blockedBy: blockedBy.join(','),
+          dependencyTaskId: blockedBy[0] || '',
+        },
+      });
+      settled.push({ taskId: task.taskId, errorCode, blockedBy });
+      progressed = true;
+    }
+  }
+  return settled;
+}
+
 // 队列顺序：优先级（high → normal → low）优先，同级按创建时间，最后用 taskId
 // 兜底。S7 起队列成员含正式重试态 retrying；尚未到 retryAt 的任务暂不出队，
 // 避免失败后立即重试形成风暴。
+// Phase 1 交付物 2：依赖未就绪的任务不出队；就绪判定复用 dependencies.isReady（唯一实现）。
 function nextQueuedTask(now = Date.now()) {
   const current = loadTasks();
   return (
@@ -1840,6 +1950,7 @@ function nextQueuedTask(now = Date.now()) {
           task.cancelRequested !== true
       )
       .filter(task => !task.retryAt || Date.parse(task.retryAt) <= now)
+      .filter(task => dependencies.isReady(task, current.tasks))
       .sort((a, b) => {
         const byPriority = priorityRank(a.priority) - priorityRank(b.priority);
         if (byPriority !== 0) return byPriority;
@@ -1887,7 +1998,9 @@ module.exports = {
   safePayload,
   isTerminalStatus,
   allTasks,
+  rawTasksById,
   nextQueuedTask,
+  settleDependencies,
   queuedCount,
   recoverInterrupted,
   forcePlanRecovery,

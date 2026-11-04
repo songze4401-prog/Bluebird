@@ -999,7 +999,245 @@ test('HTTP 回归：direct 会话与缺失会话的既有行为不变', async ()
   assert.ok(Array.isArray(listJson.sessions));
 });
 
-// ---- H. 真并发：同一进程内两条任务同时执行，结果不串线 ----
+// ---- I. 依赖管理：阻塞/放行、失败级联、取消级联、全局并发上限 ----
+// 证据边界：同一进程 + 真实 HTTP stub Provider；不含跨进程与真实模型并发。
+
+async function drainPendingTasks() {
+  for (const task of tasks.allTasks()) {
+    if (!tasks.isTerminalStatus(task.status) && task.status !== 'waiting_approval') {
+      try {
+        runtime.cancelTask(task.taskId);
+      } catch (_) {
+        // 已终态/正在收敛的忽略
+      }
+    }
+  }
+  await new Promise(resolve => setTimeout(resolve, 60));
+}
+
+function taskEvents(taskId, limit = 300) {
+  return tasks
+    .listEvents('memory', { limit })
+    .filter(event => event.taskId === taskId);
+}
+
+test('依赖：上游未完成时下游保持 queued，上游完成后自动执行', async () => {
+  await drainPendingTasks();
+  const upstream = makeTask({ goal: 'SLOW_TASK DEP_BLOCK 上游依赖' });
+  const downstream = makeTask({
+    goal: 'DEP_RELEASE 下游任务',
+    dependsOn: [upstream.taskId],
+  });
+  runtime.startTask(upstream.taskId);
+  runtime.startTask(downstream.taskId);
+
+  const runningUpstream = await waitForStatus(upstream.taskId, 'running', 3000);
+  assert.equal(runningUpstream.status, 'running');
+  const blocked = tasks.getTask(downstream.taskId);
+  assert.equal(blocked.status, 'queued', '上游未完成时下游不得出队');
+  assert.equal(blocked.runStartedAt, null);
+  assert.equal(
+    taskEvents(downstream.taskId).filter(event => event.eventType === 'task.started').length,
+    0
+  );
+
+  const finishedUpstream = await waitForTask(upstream.taskId);
+  assert.equal(finishedUpstream.status, 'completed');
+  const finishedDownstream = await waitForTask(downstream.taskId);
+  assert.equal(finishedDownstream.status, 'completed');
+
+  const rawDown = tasks.getRawTask(downstream.taskId);
+  const downStarted = taskEvents(downstream.taskId).find(
+    event => event.eventType === 'task.started'
+  );
+  assert.ok(
+    Date.parse(rawDown.runStartedAt) >= Date.parse(finishedUpstream.completedAt),
+    '下游只能在依赖完成后启动'
+  );
+  assert.ok(downStarted && Date.parse(downStarted.timestamp) >= Date.parse(finishedUpstream.completedAt));
+
+  console.log('[依赖-放行时序]', JSON.stringify({
+    upstream: {
+      taskId: upstream.taskId,
+      status: finishedUpstream.status,
+      completedAt: finishedUpstream.completedAt,
+    },
+    downstream: {
+      taskId: downstream.taskId,
+      blockedStatus: blocked.status,
+      runStartedAt: rawDown.runStartedAt,
+      status: rawDown.status,
+      startedEventAt: downStarted.timestamp,
+    },
+  }));
+});
+
+test('依赖：上游 failed → 下游 dependency_failed 且 neverStarted=true（从未 running）', async () => {
+  await drainPendingTasks();
+  const upstream = makeTask({ goal: 'FAIL_TASK DEP_FAIL 上游必败' });
+  const downstream = makeTask({
+    goal: 'DEP_FAIL_DOWNSTREAM 下游',
+    dependsOn: [upstream.taskId],
+  });
+  runtime.startTask(upstream.taskId);
+  runtime.startTask(downstream.taskId);
+
+  const finishedUpstream = await waitForTask(upstream.taskId);
+  assert.equal(finishedUpstream.status, 'failed');
+  const finishedDownstream = await waitForTask(downstream.taskId);
+
+  assert.equal(finishedDownstream.status, 'failed');
+  assert.equal(finishedDownstream.errorCode, 'dependency_failed');
+  assert.equal(finishedDownstream.result.neverStarted, true);
+  assert.deepEqual(finishedDownstream.result.blockedBy, [upstream.taskId]);
+  // 两步收敛的证据：有 accepted 事件，但绝无 started 事件、无 runStartedAt。
+  const events = taskEvents(downstream.taskId);
+  assert.equal(events.filter(event => event.eventType === 'task.started').length, 0);
+  assert.equal(tasks.getRawTask(downstream.taskId).runStartedAt, null);
+  const settleEvent = events.find(event => event.eventType === 'task.dependency_failed');
+  assert.ok(settleEvent);
+  assert.equal(settleEvent.payload.neverStarted, true);
+  assert.equal(settleEvent.payload.blockedBy, upstream.taskId);
+
+  console.log('[依赖-失败级联]', JSON.stringify({
+    upstream: { status: finishedUpstream.status, errorCode: finishedUpstream.errorCode },
+    downstream: {
+      status: finishedDownstream.status,
+      errorCode: finishedDownstream.errorCode,
+      neverStarted: finishedDownstream.result.neverStarted,
+      blockedBy: finishedDownstream.result.blockedBy,
+      runStartedAt: tasks.getRawTask(downstream.taskId).runStartedAt,
+      startedEvents: events.filter(event => event.eventType === 'task.started').length,
+      event: {
+        eventType: settleEvent.eventType,
+        neverStarted: settleEvent.payload.neverStarted,
+        blockedBy: settleEvent.payload.blockedBy,
+      },
+    },
+  }));
+});
+
+test('依赖：失败级联到下游的下游（一次取队内收敛整条链）', async () => {
+  await drainPendingTasks();
+  const root = makeTask({ goal: 'FAIL_TASK DEP_CHAIN_ROOT 根任务必败' });
+  const middle = makeTask({
+    goal: 'DEP_CHAIN_MIDDLE 中间任务',
+    dependsOn: [root.taskId],
+  });
+  const leaf = makeTask({
+    goal: 'DEP_CHAIN_LEAF 末端任务',
+    dependsOn: [middle.taskId],
+  });
+  runtime.startTask(root.taskId);
+  runtime.startTask(middle.taskId);
+  runtime.startTask(leaf.taskId);
+
+  const finishedRoot = await waitForTask(root.taskId);
+  assert.equal(finishedRoot.status, 'failed');
+  const [finishedMiddle, finishedLeaf] = await Promise.all([
+    waitForTask(middle.taskId),
+    waitForTask(leaf.taskId),
+  ]);
+  for (const item of [finishedMiddle, finishedLeaf]) {
+    assert.equal(item.status, 'failed');
+    assert.equal(item.errorCode, 'dependency_failed');
+    assert.equal(item.result.neverStarted, true);
+    assert.equal(tasks.getRawTask(item.taskId).runStartedAt, null);
+  }
+  assert.deepEqual(finishedMiddle.result.blockedBy, [root.taskId]);
+  assert.deepEqual(finishedLeaf.result.blockedBy, [middle.taskId]);
+
+  console.log('[依赖-多级级联]', JSON.stringify({
+    root: { status: finishedRoot.status },
+    middle: {
+      status: finishedMiddle.status,
+      errorCode: finishedMiddle.errorCode,
+      blockedBy: finishedMiddle.result.blockedBy,
+    },
+    leaf: {
+      status: finishedLeaf.status,
+      errorCode: finishedLeaf.errorCode,
+      blockedBy: finishedLeaf.result.blockedBy,
+    },
+  }));
+});
+
+test('依赖：上游 cancelled → 下游 dependency_cancelled 且 neverStarted=true', async () => {
+  await drainPendingTasks();
+  const upstream = makeTask({ goal: 'DEP_CANCEL_UPSTREAM 上游取消' });
+  const downstream = makeTask({
+    goal: 'DEP_CANCEL_DOWNSTREAM 下游',
+    dependsOn: [upstream.taskId],
+  });
+  runtime.cancelTask(upstream.taskId);
+  const cancelledUpstream = tasks.getTask(upstream.taskId);
+  assert.equal(cancelledUpstream.status, 'cancelled');
+
+  runtime.startTask(downstream.taskId);
+  const finishedDownstream = await waitForTask(downstream.taskId);
+  assert.equal(finishedDownstream.status, 'failed');
+  assert.equal(finishedDownstream.errorCode, 'dependency_cancelled');
+  assert.equal(finishedDownstream.result.neverStarted, true);
+  assert.equal(tasks.getRawTask(downstream.taskId).runStartedAt, null);
+
+  console.log('[依赖-取消级联]', JSON.stringify({
+    upstream: { status: cancelledUpstream.status },
+    downstream: {
+      status: finishedDownstream.status,
+      errorCode: finishedDownstream.errorCode,
+      neverStarted: finishedDownstream.result.neverStarted,
+      runStartedAt: tasks.getRawTask(downstream.taskId).runStartedAt,
+    },
+  }));
+});
+
+test('并发：3 条任务受全局 TASK_CONCURRENCY=2 限制，峰值并行=2 且第 3 条延后', async () => {
+  await drainPendingTasks();
+  const t1 = makeTask({ goal: 'SLOW_TASK CONC3_ALPHA 并发三甲' });
+  const t2 = makeTask({ goal: 'SLOW_TASK CONC3_BETA 并发三乙' });
+  const t3 = makeTask({ goal: 'SLOW_TASK CONC3_GAMMA 并发三丙' });
+  runtime.startTask(t1.taskId);
+  runtime.startTask(t2.taskId);
+  runtime.startTask(t3.taskId);
+
+  let peak = 0;
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline) {
+    peak = Math.max(peak, runtime.getQueueStats().active);
+    const all = [t1, t2, t3].map(item => tasks.getTask(item.taskId));
+    if (all.every(item => tasks.isTerminalStatus(item.status))) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  const [a, b, c] = await Promise.all([
+    waitForTask(t1.taskId),
+    waitForTask(t2.taskId),
+    waitForTask(t3.taskId),
+  ]);
+  assert.equal(peak, 2, `峰值并行应为 2（实际 ${peak}）`);
+  assert.ok([a, b, c].every(item => item.status === 'completed'));
+  // 第 3 条必须等前两条之一完成才启动：证明并行闸门是全局 TASK_CONCURRENCY。
+  const third = [a, b, c].sort(
+    (x, y) => Date.parse(x.runStartedAt) - Date.parse(y.runStartedAt)
+  )[2];
+  const firstTwoCompleted = [a, b, c]
+    .filter(item => item.taskId !== third.taskId)
+    .map(item => Date.parse(item.completedAt));
+  assert.ok(Date.parse(third.runStartedAt) >= Math.min(...firstTwoCompleted));
+
+  console.log('[并发-全局上限]', JSON.stringify({
+    concurrency: process.env.BLUEBIRD_AGENT_TASK_CONCURRENCY || '(default=2)',
+    peakActive: peak,
+    tasks: [a, b, c].map(item => ({
+      taskId: item.taskId,
+      runStartedAt: item.runStartedAt,
+      completedAt: item.completedAt,
+      status: item.status,
+    })),
+    thirdStartedAt: third.runStartedAt,
+    firstTwoCompletedAt: firstTwoCompleted,
+  }));
+});
+
 // 能证明：同一进程内 Promise 级并发下，结果/产物/会话归属互不混入。
 // 不能证明：跨进程隔离、真实模型并发（stub provider 仍是确定性回显）。
 

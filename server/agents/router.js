@@ -612,6 +612,9 @@ function createRouter(overrides = {}) {
       runId: normalizeString(input.runId) || null,
       runBudget:
         Number.isInteger(input.runBudget) && input.runBudget > 0 ? input.runBudget : null,
+      // Phase 1 交付物 2：依赖边原样交给 Task Store 做同 botId/上限校验；
+      // Router 不重算依赖语义，也不在此落盘。
+      dependsOn: input.dependsOn === undefined ? [] : input.dependsOn,
     });
 
     if (task.idempotent === true) {

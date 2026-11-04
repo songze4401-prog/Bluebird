@@ -1,6 +1,6 @@
 # Notion 交付台账（2026-11-04）
 
-> **结论**：按 Notion 原文口径，**Phase 0 未完成（0.5，其中“权限边界”已由 Owner 裁决暂缓）**，**Phase 1 交付物 0.5/3（第 1 项“统一 Planner / Orchestrator 接口”部分完成；按 §5 原句逐句拆为 3 项，Planner 与 Orchestrator 合算 1 项）；4 条验收要求中 2 条部分满足（预算硬限制 → B-06=0.5；任务路由可追踪 → 交付物 1 轨迹）**，其余 2 条未满足或无法验证。仓库提交基本都落在「Phase 0 尾巴 / 前置工程」，尚无一条完全满足 Notion Phase 1 的交付与验收。
+> **结论**：按 Notion 原文口径，**Phase 0 未完成（0.5，其中“权限边界”已由 Owner 裁决暂缓）**，**Phase 1 交付物 1.5/3（第 1 项“统一 Planner / Orchestrator 接口”0.5；第 2 项“能力匹配、动态分配、并行和依赖管理”1.0；第 3 项 0；按 §5 原句逐句拆为 3 项，Planner 与 Orchestrator 合算 1 项）**；4 条验收要求中 2 条部分满足（预算硬限制 → B-06=0.5；任务路由可追踪 → 交付物 1 轨迹），其余 2 条未满足或无法验证。仓库提交基本都落在「Phase 0 尾巴 / 前置工程」，尚无一条完全满足 Notion Phase 1 的交付与验收。
 >
 > 唯一依据：《Bluebird Agent Runtime｜混合式多 Agent 目标架构 v1.0》
 > https://app.notion.com/p/Bluebird-Agent-Runtime-Agent-v1-0-40da957523c281359607e23f6a3c784f
@@ -22,7 +22,7 @@
 | 编号与名称（原文 §5） | 原文目标 / 交付物（引句） | 退出判据（原文“验收”句） | 状态 | 证据 | 未完成原因 + 下一步 |
 |---|---|---|---|---|---|
 | Phase 0：基线与契约收敛 | “对照当前 HEAD 和已合并实现，确认 Registry、任务队列、Session、Memory、事件、审计和通知链路的真实状态”“统一 Agent Manifest、Task Contract、Result Contract、状态机和权限模型”“输出 ADR” | “没有第二套平行任务协议；关键状态和权限边界可测试” | 0.5 | `docs/phase0-baseline-audit-2026-11-03.md`（判定整体不通过）；ADR 入库 `31a7a9b`；协议收敛 `e08b168`、`7c28a2b`；状态机用例 `tests/agent-recovery.test.js:58`、`:85` | 「权限边界可测试」**Owner 已裁决暂缓（2026-11-04）**：当前按单用户 `local-owner` 口径记录为已知限定，不计入未完成缺口、不安排下一步动作。“没有第二套平行协议”仅完成收敛声明，仍是缺口。 |
-| Phase 1：单主控 + 动态 Worker Pool | “在现有 Runtime 内建立统一 Planner / Orchestrator 接口”“支持少量 Agent 的能力匹配、动态分配、并行和依赖管理”“保留单 Agent 快速路径；先选 2—3 个真实专业 Agent 验证” | “任务路由可追踪、Worker Session 隔离、并发结果不串线、预算硬限制有效” | 0.5 | `server/agents/orchestrator.js` + `tests/agent-orchestrator.test.js` 8 条（交付物 1 的 4 条：唯一入口/显式失败/兼容路径/落盘轨迹，`93c5b51`；交付物 2 的 4 条：2a–2d 容量感知择一，`6a3cc84`）；`server/agents/worker-scope.js` + `tests/agent-worker.test.js` 9 条（内部隔离 a–d 4 条 + HTTP a–d 4 条 + 同进程真并发 1 条，本轮）；B-06 `tests/agent-budget-atomic.test.js` 7 条（`27b99ec`） | 交付物 1 = **0.5**（接口已落地并接入一条真实创建路径；Planner 规划侧未实现），交付物 2 = **0.5**（能力匹配 + 容量感知择一已落地，并行/依赖管理未做），交付物 3 = 0（合计 1.0/3，按 §5 原句逐句拆分；Planner 与 Orchestrator 合算 1 项）；4 条验收要求均部分满足（预算硬限制、路由可追踪、Worker Session 隔离、并发结果不串线）；尚缺跨进程/真实模型并发与多 Agent 端到端追踪。下一步＝交付物 2 剩余（并行执行/依赖管理/Worker Pool）。 |
+| Phase 1：单主控 + 动态 Worker Pool | “在现有 Runtime 内建立统一 Planner / Orchestrator 接口”“支持少量 Agent 的能力匹配、动态分配、并行和依赖管理”“保留单 Agent 快速路径；先选 2—3 个真实专业 Agent 验证” | “任务路由可追踪、Worker Session 隔离、并发结果不串线、预算硬限制有效” | 0.5 | `server/agents/orchestrator.js` + `tests/agent-orchestrator.test.js` 11 条（交付物 1 的 4 条：唯一入口/显式失败/兼容路径/落盘轨迹，`93c5b51`；交付物 2 的 7 条：2a–2d 容量感知择一 `6a3cc84`，2e–2g 依赖图/环/悬空依赖；本轮 `agent-orchestrator` 8→11）；`server/agents/dependencies.js`（唯一 `isReady` + `validateGraph`）+ `server/agents/tasks.js`（`dependsOn`/`settleDependencies`）+ `server/agents/runtime.js`（取队前 settle + runTask 前置校验）+ `tests/agent-worker.test.js` 42 条（其中依赖 5 条 + 并发上限 1 条，`agent-worker` 37→42）；`server/agents/worker-scope.js` + Worker Session 隔离 9 条（内部 a–d + HTTP a–d + 同进程真并发 1 条，上一轮）；B-06 `tests/agent-budget-atomic.test.js` 7 条（`27b99ec`） | 交付物 1 = **0.5**（接口已落地并接入一条真实创建路径；Planner 规划侧未实现），交付物 2 = **1.0**（四项逐条证据见“交付物 2 四项验收证据”，能力匹配/动态分配/并行/依赖管理均有可复跑用例与实际输出），交付物 3 = 0（合计 1.5/3，按 §5 原句逐句拆分；Planner 与 Orchestrator 合算 1 项）；4 条验收要求均部分满足（预算硬限制、路由可追踪、Worker Session 隔离、并发结果不串线）；尚缺跨进程/真实模型并发与多 Agent 端到端追踪。下一步＝交付物 3（2–3 个真实专业 Agent 验证，需真实模型环境）。 |
 | Phase 2：Blackboard + Context Broker | “建立任务级共享产物、证据引用、版本和访问控制”“Worker 私有上下文与共享工作区分离”“支持按需上下文投影和来源追踪” | “跨 Agent 可协作但不能越权读取私有 Session；每个共享结论可追溯来源” | 0 | 全 `server/` grep `blackboard` 仅 1 处注释（`server/agents/artifact-store.js:8`，明确“不承担 Blackboard 的…”）；无 Context Broker 模块 | 未开始。仓库只做了 `artifact-store.js` 的产物版本/正文复读，不等于 Blackboard。下一步＝待拍板 Phase 2 是否按原文整体立项。 |
 | Phase 3：验证闭环 + 事件化工作流 | “引入确定性验证、独立 Reviewer、冲突处理和人工审批节点”“事件、状态、结果投递采用幂等与可恢复设计”“建立失败重试、取消、Checkpoint、死信和成本追踪” | “失败注入、重复事件、Reviewer 检出率和结果投递恢复均有测试证据” | 0 | 已有局部：审批节点 `server/agents/approvals.js`、幂等账本 `server/agents/op-ledger.js`（`a6d3455`）、崩溃注入 `tests/agent-crash-injection.test.js` | 缺确定性验证器、独立 Reviewer、冲突处理、死信与成本追踪；Reviewer 检出率无任何测试。下一步＝待拍板是否单独立项。 |
 | Phase 4：受控自治与自我改进 | “根据真实运行数据动态组队、重规划和选择验证强度”“建立离线评测集、策略版本、灰度发布和回滚”“在权限、预算和审批边界不变的前提下，逐步开放低风险自动化” | “相对基线在成功率、返工率、成本或延迟上有可重复改善，且安全指标不退化” | 0 | 全仓 `.js` grep `benchmark\|holdout` 零命中；无评测集、无灰度/回滚机制 | 未开始；且验收句要求“相对基线可重复改善”，**必须先有真实模型环境与压测数据**。 |
@@ -46,7 +46,7 @@
 | A-07 | “Benchmark 基线可选且记录完整配置；评测集有 holdout 和轮换”· §22；规则见 §14 | 待确认（原文未写） | §14 五类可比较基线 + 配置记录字段 + holdout/轮换规则 | 0 | 全仓 `.js` grep `benchmark\|holdout` 零命中 | 未开始；**必须真实模型环境与可重复评测数据**。 |
 | A-08 | “审批超时、批量、升级和申诉规则明确”· §22；规则见 §15 | 待确认（依据：§15 审批吞吐，原文未写） | §15 动作/参数摘要/影响/风险/证据/有效期；批量规则；超时升级；申诉复核 | 0.5 | `approvals.js:49` `R2_SLA_MS=30min`、`escalationAt`（50%）、`overdue/escalatedAt`；`tests/agent-approval-policy.test.js` a、b、c | 缺批量审批、申诉改判、审批负载分配与指标。 |
 | A-09 | “provenance / taint 贯穿 Task、Artifact 和 Tool Gateway”· §22；规则见 §16 | 待确认（原文未写） | §16 Task Contract 增 `provenanceRefs/taintLabels/taintPolicyVersion`，Gateway 每次校验 | 0 | `provenance` 命中全在 `server/memory.js`、`server/profile.js`（记忆域），与 Task/Artifact/Gateway 无关；`taint` 零命中 | 未开始。 |
-| A-10 | “失败模式清单和 Artifact 环检测明确”· §22；规则见 §17 | 待确认（原文未写） | §17 九类失败模式表 + 三类图环检测（委派/依赖/产物 lineage） | 0 | `grep cycle\|dependsOn` 在 `server/agents/` 仅 `lineage` 注释命中，无环检测实现 | 未开始。 |
+| A-10 | “失败模式清单和 Artifact 环检测明确”· §22；规则见 §17 | 待确认（原文未写） | §17 九类失败模式表 + 三类图环检测（委派/依赖/产物 lineage） | 0.5 | 依赖环检测已落地（2026-11-04）：`server/agents/dependencies.js` `validateGraph`（Kahn 拓扑余集判定）+ `tests/agent-orchestrator.test.js` 交付物2f（A↔B → 409 `dependency_cycle`、`taskCountBefore=0/taskCountAfter=0`）、交付物2g（悬空引用 400 零落盘） | 三类环检测只完成**依赖环**；委派环、产物 lineage 环、九类失败模式清单仍未实现。下一步＝按 §17 补委派/lineage 环检测与失败模式表。 |
 | A-11 | “规划 / 审批 / 验证延迟纳入 SLO，有停止重规划判据”· §22；规则见 §18 | 待确认（原文未写） | §18 P50/P95/P99 采集 + deadline/剩余预算/最小收益门槛 | 0 | `runtime.js` 仅 `tool_call_budget` 截断（`:462`），非 SLO；无重规划停止判据 | 未开始；SLO 阈值需真实运行数据。 |
 | A-12 | “组件预算、stub 边界和 Owner 角色明确”· §22；规则见 §19 | 待确认（依据：§19 说“Phase 0 必须明确到人”，原文未写阶段归属） | §19 6 个交付模块表 + Owner 角色 + 可 stub 清单 | 0.5 | v1.3 §41 责任人已指定（`e950997` 文档记录） | 条目判据要求“管理评审记录（非代码测试）”，无记录；按硬规矩不计 1。 |
 | A-13 | “有端到端 worked example”· §22；示例见 §20 | 待确认（原文未写） | §20 十三步流程（含 planVersion v2、fencing、waiting_approval） | 0 | 仅 §20 文档文本；全仓未找到可执行示例脚本或 trace 产物 | 缺可跑脚本与 trace。 |
@@ -63,7 +63,7 @@
 | B-10 | “R2 30 分钟转人工 fail-closed；R3 只接受显式批准”· §30；规则见 §29 | 待确认（原文未写） | §29 风险级别 SLA 表 | 1 | `approvals.js:49`（30 min）、`:52-54`（R2/R3 映射）；`tests/agent-approval-policy.test.js` a（R2 到期仍 pending、任务未放行）、b（R3 长期 pending）、g（老记录缺字段 fail-closed） | 核心满足；备注：原文“转人工队列”在代码中体现为 pending 列表（`pendingCount()`），无独立队列实体。 |
 | B-11 | “审批请求有持久化 SLA、提醒、升级和取消路径，不会静默永久挂起”· §30；规则见 §29 | 待确认（原文未写） | §29 持久化 deadline/escalationAt、通知重试记录、责任队列；六态 pending/approved/rejected/expired/escalated/cancelled | 0.5 | `approvals.js:36-43` 状态为 pending/approved/rejected/executing/completed/failed；持久化 `riskLevel/expiresAt/escalationAt/policyVersion`；`:496-507` 到期只标记 | 六态中的 expired/escalated/cancelled 未落地；无通知重试记录与提醒任务。 |
 
-**汇总**：`1` = 1 项（B-10）；`0.5` = 12 项（A-01、A-03、A-06、A-08、A-12、A-14、B-01、B-02、B-03、B-04、B-06、B-11）；`0` = 12 项（A-02、A-04、A-05、A-07、A-09、A-10、A-11、A-13、B-05、B-07、B-08、B-09）。
+**汇总**：`1` = 1 项（B-10）；`0.5` = 13 项（A-01、A-03、A-06、A-08、A-10、A-12、A-14、B-01、B-02、B-03、B-04、B-06、B-11）；`0` = 11 项（A-02、A-04、A-05、A-07、A-09、A-11、A-13、B-05、B-07、B-08、B-09）。
 
 **阶段归属**：25 条全部「待确认」——原文 §22/§30 均未把条目挂到阶段，本台账**不做归属推断**，只在“依据”列写出原文哪一节在讲它。
 
@@ -80,6 +80,44 @@
 | 5 | 版本优先级 | 原文止于 v1.2 | 仓库有 v1.3 封版（2026-11-03），自称“封版后不再追加架构章节” | 所有者（v1.3 能否改写 Notion 验收） |
 | 6 | 需真实环境/压测的 4 项 | A-06（样本集评测报告）、A-07（benchmark/holdout）、B-07（压测报告）、A-13（跑通留 trace） | 均无对应数据/脚本 | 先由所有者决定是否投入真实模型环境 |
 | 7 | 预算原子计量 | §25 要求“服务端原子预留 / 扣减”“Run 总预算是额外闸门” | 已核查并已实现（B-06=0.5，`27b99ec`）：Task token 上限强制、原子 reserve/settle/release、父子覆盖、Run 闸门、retryable=false；缺真实 usage 与跨进程并发验证 | 无争议；剩余验证依赖真实模型环境/多进程压测 |
+
+---
+
+## 新增错误码清单（Phase 1 交付物 2：依赖管理）
+
+> 放行结论：以下 4 个码**全部落在既有六类语义内**，没有自成一套新族；`errors.js` 未新增类，`AgentError` 仍以 `{code, status}` 表达。
+> 六类基线：`validation_failed` / `not_authorized` / `conflict` / `budget_exceeded` / `dependency_failed` / `internal_error`。
+
+| 错误码 | 触发条件 | HTTP 状态 | 归属既有六类 | 与其他码的关系 |
+|---|---|---|---|---|
+| `dependency_cycle` | 批量编排 `validateGraph` 的 Kahn 拓扑排序后仍有未出队节点（含自依赖、A↔B 等环）；落盘前抛出 | **409** | `conflict`（同 409 语义：图与既有不变量冲突，重试无效） | 新码字面量，但沿用 `conflict` 类的状态与语义；`details.cycle` 给出环上 key，`retryable=false` |
+| `dependency_not_found` | ① `dependsOn` 非数组/含空值/重复/超过 8 个；② 依赖 taskId 不存在；③ 依赖任务不属于同一 `agentId`；④ 批量节点 key 为空/重复/悬空引用/跨 Agent | **400** | `validation_failed`（入参在服务端可判定为非法） | 创建与批量入口共用同一校验；**不**用于运行时依赖记录被裁剪（该情形归 `dependency_failed`） |
+| `dependency_failed` | 任务结果码（非抛错）：`queued` 任务的全部依赖已终态但未成功（`failed` / `timed_out` / `recovery`，或依赖记录缺失） | 读取任务 **200**，`task.status=failed` | **复用既有 `dependency_failed` 类**：同一 code 字面量、同一语义“上游未成功导致本任务无法执行”。此前该类只有清单、无落地（B-01 已登记），本轮首次在任务 Result 中实现 | 与 `dependency_cancelled` 是“类与子因”关系；任务 `result.neverStarted=true` + `blockedBy` 数组 |
+| `dependency_cancelled` | 任务结果码：上游依赖终态为 `cancelled`，且不存在其他非取消的失败依赖 | 读取任务 **200**，`task.status=failed` | `dependency_failed` 类的**子因**（detail），不单列族 | 仅为让审计区分“上游被取消”与“上游执行失败”；状态机与 HTTP 语义与 `dependency_failed` 相同 |
+
+补充约束（与实现一致）：
+- 任务结果码不改变 HTTP 成功语义：任务已按状态机收敛为 `failed`，读取接口仍是 200。
+- `queued → failed` **不是**合法边（`state-machine.js`：`queued` 仅到 `accepted`/`cancelled`/`timed_out`），依赖失败收敛走 `queued → accepted → failed` 两步；`result.neverStarted=true` 与事件 `task.dependency_failed.payload.neverStarted=true` 明确“该任务从未进入 `running`”，并有“无 `task.started` 事件、`runStartedAt=null`”的用例断言。
+
+---
+
+## 交付物 2 四项验收证据（§5“能力匹配、动态分配、并行和依赖管理”）
+
+> 判定口径：四项**各自都有可复跑用例与实际输出**才记 1；本轮四项齐全 → **1.0**（不是一句话概括）。
+> 证据边界：多 Agent 是测试构造（`manifest.setTestManifests`）；并发为同一进程 + 确定性 stub Provider，不代表跨进程/真实模型。
+
+| 项 | 对应用例（可复跑） | 实际输出 / 断言 |
+|---|---|---|
+| ① 能力匹配 | `tests/agent-orchestrator.test.js` 交付物1a、2a–2c | 入口按 `capabilities ∩ acceptedTaskTypes` 匹配；`[交付物2b 轨迹] {"candidateOrder":["agent-a","agent-b","agent-c"],"selected":"agent-a","allocation":"selected_with_capacity","excludedReasons":"agent-b:lower_priority;agent-c:lower_priority","secondSelected":"agent-a"}`；1b 匹配不到时显式失败且不建任务 |
+| ② 动态分配 | `tests/agent-orchestrator.test.js` 交付物2a、2c | 2a：`agent-a` 满容量 → `selectedAgentId=agent-b`，轨迹 `saturatedAgentIds:["agent-a"]`、`excludedReasons:"agent-a:at_capacity"`；2c：两候选全满 → `allocation:"queued_all_at_capacity"`、`degraded:true`、任务仍 `queued`；容量口径复用 Router `decideInternal.atCapacity` |
+| ③ 并行 | `tests/agent-worker.test.js`「并发：3 条任务受全局 TASK_CONCURRENCY=2 限制，峰值并行=2 且第 3 条延后」 | `[并发-全局上限] {"concurrency":"(default=2)","peakActive":2,...}`：t1 `runStartedAt=12:42:57.176Z`、t2 `12:42:57.240Z`，区间重叠 ≈ 573ms；t3 `runStartedAt=12:42:57.775Z`，前两条最早 `completedAt=12:42:57.749Z`，断言 `t3.runStartedAt >= min(前两条 completedAt)`；3 条全部 `completed` |
+| ④ 依赖管理 | `tests/agent-orchestrator.test.js` 交付物2e–2g；`tests/agent-worker.test.js` 依赖 5 条 | 2e：`order:["upstream","downstream"]`、下游 `dependsOn` 落成真实 taskId、状态 `queued`、`runStartedAt:null`；2f 环：`code=dependency_cycle,status=409,taskCountBefore=0,taskCountAfter=0`；2g 悬空：`dependency_not_found,400` 且零落盘；worker：`[依赖-放行时序]` 上游 `completedAt=12:42:56.583Z` → 下游 `runStartedAt=12:42:56.609Z`（阻断期 `blockedStatus:"queued"`）；`[依赖-失败级联]` 下游 `errorCode=dependency_failed,neverStarted=true,runStartedAt=null,startedEvents=0`；`[依赖-多级级联]` middle/leaf 两级均 `dependency_failed` 且 `blockedBy` 指向上一跳；`[依赖-取消级联]` 下游 `dependency_cancelled,neverStarted=true` |
+
+**同源证据（`isReady` 只有一个实现）**：
+- 唯一纯函数：`server/agents/dependencies.js:34` `function isReady(task, tasksById)`
+- 调用点 1（取队入口）：`server/agents/tasks.js:1953` `.filter(task => dependencies.isReady(task, current.tasks))`
+- 调用点 2（`runTask` 前置校验）：`server/agents/runtime.js:597` `if (!dependencies.isReady(task, tasks.rawTasksById())) return;`
+- 依赖失败收敛入口：`server/agents/runtime.js:66` `tasks.settleDependencies()`（`tasks.js` 内 `blockers` 与 `transitionTask` 两步收敛）
 
 ---
 
@@ -101,7 +139,7 @@
 **拆分口径（判据）**：交付物按 §5 Phase 1 的**原句逐句**拆分，共 3 句、即 3 项；验收句按顿号拆成 4 条要求。**Planner 与 Orchestrator 不拆算**——原句是“建立**统一** Planner / Orchestrator **接口**”，两者同属一个“统一……接口”的宾语，原文没有把它们写成两个交付物；若强行拆成两项会得到 4 项，但那属于自行增补验收要求，故台账统一采用 **3 项交付物 / 4 条验收要求**。
 
 1. **统一 Planner / Orchestrator 接口** —— **0.5**：唯一入口 `server/agents/orchestrator.js`（`orchestrate()`）已落地，`server/tool-dispatch-bot.js` 的真实创建路径已迁移；能力筛选复用 `registry` Manifest，选主体/契约/预算/幂等/事件/建任务复用 `router.dispatch`，不另起路由。用例 `tests/agent-orchestrator.test.js` 中交付物 1 的 4 条（`93c5b51`）。**未完成**：Planner 侧（目标拆解/多步规划）未实现；当前仅 1 个注册主体，“统一”只覆盖一条真实路径。
-2. **少量 Agent 的能力匹配、动态分配、并行和依赖管理** —— **0.5**：能力匹配与「按并发余量 + 路由优先级择一」已落地（`orchestrator.js` 的 `buildAllocation`）；容量口径**复用** Router `decideInternal` 的 `atCapacity`（`router.js` 选择段），未另造 running/limit 统计；候选顺序、满容量标记、排除原因写入 `task.route.orchestration` 与 `route.decided` 事件。用例 `tests/agent-orchestrator.test.js` 2a–2d（2a 一满一闲选闲、2b 多候选择一并跑两次一致、2c 全满显式排队、2d 单主体对齐 Router 决策）。**未完成**：并行执行、依赖管理、Worker Pool、重规划。**证据限定**：用例中的多主体是**测试构造**（`manifest.setTestManifests` 注入假 Manifest），真实注册表仍只有 memory 一个主体，不代表多 Agent 环境已在运行。
+2. **少量 Agent 的能力匹配、动态分配、并行和依赖管理** —— **1.0**（2026-11-04）：四项**逐条证据**见上一节「交付物 2 四项验收证据」，摘录：①能力匹配＝`orchestrator.js` 按 `capabilities ∩ acceptedTaskTypes` 匹配（1a/2a–2c）；②动态分配＝按并发余量 + `routingPriority` 择一，满容量写 `saturatedAgentIds`/`excludedReasons`（2a 选闲、2c 全满排队）；③并行＝`TASK_CONCURRENCY` 全局闸门，3 条 SLOW_TASK 峰值 `peakActive=2`、区间重叠 ≈573ms、第 3 条在前两条完成前不启动；④依赖管理＝`dependsOn` 字段（≤8、同 botId）+ 唯一 `isReady` 纯函数 + `queued` 不出队 + 上游完成自动放行、失败/取消级联（含下游的下游）+ 批量图环检测 409 且零落盘。用例：`tests/agent-orchestrator.test.js` 2a–2g（11 条）、`tests/agent-worker.test.js` 依赖 5 条 + 并发上限 1 条（42 条）。**证据限定**：多主体是**测试构造**（`manifest.setTestManifests`），真实注册表仍只有 memory；并发是同一进程 + 确定性 stub Provider；“动态分配”仍是容量感知择一，不是 Worker Pool 弹性伸缩；重规划未实现（不在 §5 该句四项内）。
 3. **保留单 Agent 快速路径；先选 2–3 个真实专业 Agent 验证** —— 未开始；**需要真实模型环境**才能产出验证证据。
 4. **验收“任务路由可追踪”** —— 部分满足：`route.decided` 事件含 candidates/selected/capability，`task.route.orchestration` 含意图摘要、匹配依据、候选集与规则（用例 `tests/agent-orchestrator.test.js` 1d，`93c5b51`）；交付物 2 又补了候选优先级顺序、满容量主体与排除原因（2a–2d）；尚缺跨任务/多 Agent 的端到端追踪。
 5. **验收“Worker Session 隔离”** —— **部分满足（读边界对内/对外均生效，2026-11-04）**：`server/agents/worker-scope.js` 是唯一读边界——自己的会话历史与产物可读，跨 Worker 默认拒绝，显式 `{grantedBy, reason}` 授权才放行；拒绝沿用既有 `worker_session_owner_mismatch`，审计复用 `tasks.appendEvent`（`worker.scope_denied` / `worker.scope_read`），未新建错误码族或审计存储；runtime 的 worker 会话归属统一走该边界（`sessions.js` 零改动）；HTTP `GET /agents/:botId/sessions/:sessionId` 已接入 `authorizeSessionRead`（本轮），拒绝返回 409 + 既有码，direct 会话与缺失会话响应保持原样。用例 `tests/agent-worker.test.js` 9 条（内部 a–d 4 条 + HTTP a–d 4 条 + 真并发 1 条，`agent-worker` 28→37）：互读 409、自身 200、授权 200 且留痕、零回归。**证据限定**：两个 Worker 是**测试构造**（同一 memory 主体的两个任务/会话）；`requesterTaskId` 是调用方自报值（生产仍是单用户 local-owner，无可验证调用者身份），挡住误读而非抗恶意伪造；跨进程隔离未验证。

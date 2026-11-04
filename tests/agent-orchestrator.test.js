@@ -64,6 +64,15 @@ function routing() {
   return JSON.parse(JSON.stringify(routingModule.DEFAULT_ROUTING));
 }
 
+function captureError(fn) {
+  try {
+    fn();
+    return null;
+  } catch (error) {
+    return error;
+  }
+}
+
 function resetAgentStore() {
   fs.rmSync(path.join(DATA_DIR, 'agents'), { recursive: true, force: true });
   tasks.reloadForTests();
@@ -412,6 +421,125 @@ test('交付物2c 全部候选满容量 → 显式排队（高优先级主体 + 
       orchestrationSaturated: decided.payload.orchestrationSaturated,
       orchestrationExcluded: decided.payload.orchestrationExcluded,
     },
+  }));
+});
+
+// ============================================================================
+// 交付物 2 续：依赖管理（批量编排 + 整图校验 + 环零落盘）
+// ============================================================================
+
+test('交付物2e 依赖图合法 → 按拓扑序创建并落盘 dependsOn', () => {
+  resetAgentStore();
+  const agents = [multiAgent('agent-a')];
+  const orchestrator = makeOrchestrator(agents);
+  const graph = orchestrator.createTaskGraph({
+    agentId: 'agent-a',
+    definitions: [
+      {
+        key: 'upstream',
+        capability: 'memory.search',
+        taskType: 'memory.search',
+        goal: '先检索甲',
+      },
+      {
+        key: 'downstream',
+        capability: 'memory.search',
+        taskType: 'memory.search',
+        goal: '再检索乙',
+        dependsOn: ['upstream'],
+      },
+    ],
+  });
+
+  assert.deepEqual(graph.order, ['upstream', 'downstream']);
+  assert.equal(graph.agentId, 'agent-a');
+  const upRaw = tasks.getRawTask(graph.tasks.upstream.taskId);
+  const downRaw = tasks.getRawTask(graph.tasks.downstream.taskId);
+  assert.equal(upRaw.agentId, 'agent-a');
+  assert.deepEqual(upRaw.dependsOn, []);
+  assert.deepEqual(downRaw.dependsOn, [upRaw.taskId], 'key 必须解析为真实 taskId');
+  // 依赖未完成时下游保持 queued，不提前进入 accepted/running。
+  assert.equal(downRaw.status, 'queued');
+  assert.equal(downRaw.runStartedAt, null);
+
+  console.log('[交付物2e 依赖图]', JSON.stringify({
+    order: graph.order,
+    upstream: { taskId: upRaw.taskId, dependsOn: upRaw.dependsOn, status: upRaw.status },
+    downstream: {
+      taskId: downRaw.taskId,
+      dependsOn: downRaw.dependsOn,
+      status: downRaw.status,
+      runStartedAt: downRaw.runStartedAt,
+    },
+  }));
+});
+
+test('交付物2f 依赖图有环 → 409 dependency_cycle 且整批零落盘', () => {
+  resetAgentStore();
+  const agents = [multiAgent('agent-a')];
+  const orchestrator = makeOrchestrator(agents);
+  const before = tasks.allTasks().length;
+  const error = captureError(() =>
+    orchestrator.createTaskGraph({
+      agentId: 'agent-a',
+      definitions: [
+        {
+          key: 'A',
+          capability: 'memory.search',
+          taskType: 'memory.search',
+          goal: '环甲',
+          dependsOn: ['B'],
+        },
+        {
+          key: 'B',
+          capability: 'memory.search',
+          taskType: 'memory.search',
+          goal: '环乙',
+          dependsOn: ['A'],
+        },
+      ],
+    })
+  );
+  assert.equal(error.code, 'dependency_cycle');
+  assert.equal(error.status, 409);
+  assert.deepEqual(error.details.cycle.sort(), ['A', 'B']);
+  assert.equal(tasks.allTasks().length, before, '环必须在落盘前被拒，不得创建任何任务');
+  console.log('[交付物2f 环拒绝]', JSON.stringify({
+    code: error.code,
+    status: error.status,
+    cycle: error.details.cycle,
+    taskCountBefore: before,
+    taskCountAfter: tasks.allTasks().length,
+  }));
+});
+
+test('交付物2g 悬空依赖 → 400 dependency_not_found 且零落盘', () => {
+  resetAgentStore();
+  const agents = [multiAgent('agent-a')];
+  const orchestrator = makeOrchestrator(agents);
+  const before = tasks.allTasks().length;
+  const error = captureError(() =>
+    orchestrator.createTaskGraph({
+      agentId: 'agent-a',
+      definitions: [
+        {
+          key: 'A',
+          capability: 'memory.search',
+          taskType: 'memory.search',
+          goal: '悬空依赖',
+          dependsOn: ['task_not_exists'],
+        },
+      ],
+    })
+  );
+  assert.equal(error.code, 'dependency_not_found');
+  assert.equal(error.status, 400);
+  assert.equal(tasks.allTasks().length, before);
+  console.log('[交付物2g 悬空依赖]', JSON.stringify({
+    code: error.code,
+    status: error.status,
+    taskCountBefore: before,
+    taskCountAfter: tasks.allTasks().length,
   }));
 });
 

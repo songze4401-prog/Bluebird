@@ -85,6 +85,9 @@ function normalizeTask(task) {
   if (task.tokenUsage === undefined) task.tokenUsage = { reserved: 0, used: 0 };
   if (task.parentTaskId === undefined) task.parentTaskId = null;
   if (task.budgetRunId === undefined) task.budgetRunId = null;
+  // Phase 1 交付物 2：依赖边的只读默认视图。与 stateVersion 同一读边界策略——
+  // 只补默认值，不参与 migrated 判定；首次真实写入时自然带出。
+  if (task.dependsOn === undefined) task.dependsOn = [];
   return changed;
 }
 

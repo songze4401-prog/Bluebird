@@ -471,6 +471,7 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
           parentSessionId: body.parentSessionId,
           parentMessageId: body.parentMessageId,
           parentUserText: body.parentUserText,
+          dependsOn: body.dependsOn,
         },
         { source: 'api' }
       );
