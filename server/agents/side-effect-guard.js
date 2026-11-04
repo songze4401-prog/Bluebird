@@ -20,6 +20,25 @@ const SIDE_EFFECT_UNKNOWN = 'side_effect_unknown';
 const LEDGER_UNAVAILABLE = 'side_effect_ledger_unavailable';
 const ARGS_INVALID = 'side_effect_args_invalid';
 
+// 逃生阀字段：显式要求「同参也再执行一次」时，带一个不同取值（如调用序号）。
+// 它只参与幂等键，执行前会被剥离，不会进入工具参数或 handler 的语义。
+const OVERRIDE_FIELD = 'dedupeKeyOverride';
+
+function splitOverride(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) {
+    return { args, override: null };
+  }
+  if (!Object.prototype.hasOwnProperty.call(args, OVERRIDE_FIELD)) {
+    return { args, override: null };
+  }
+  const rest = { ...args };
+  delete rest[OVERRIDE_FIELD];
+  const raw = args[OVERRIDE_FIELD];
+  const override =
+    raw === null || raw === undefined || raw === '' ? null : String(raw);
+  return { args: rest, override };
+}
+
 function createSideEffectGuard({ agentId, taskId } = {}) {
   if (typeof agentId !== 'string' || agentId.length === 0) {
     throw new TypeError('[side-effect] agentId 必须是非空字符串');
@@ -45,13 +64,15 @@ function createSideEffectGuard({ agentId, taskId } = {}) {
       return Boolean(blockedCode);
     },
 
+    splitOverride,
+
     /** 返回 {mode:'execute'|'reuse'|'blocked', opKey, result?, resultDigest?} */
-    before({ toolName, args } = {}) {
+    before({ toolName, args, override = null } = {}) {
       if (blockedCode) return { mode: 'blocked', code: blockedCode, opKey: null };
 
       let opKey = null;
       try {
-        const stepId = ledger.deriveStepId({ toolName, args });
+        const stepId = ledger.deriveStepId({ toolName, args, override });
         const begun = ledger.begin({ agentId, taskId, stepId, toolName, args });
         opKey = begun.opKey;
 

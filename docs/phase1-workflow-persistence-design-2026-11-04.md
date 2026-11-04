@@ -66,15 +66,17 @@
 
 ## 四、幂等键设计
 
-- **构造**：`opKey = sha256(agentId | taskId | stepId | toolName | canonicalJSON(args))`。
-  - `stepId` 本轮用 `checkpointVersion + round + toolIndex`（现有 checkpoint 已有 `round`/`toolCalls`，runtime.js L569-L575）；`planVersion` 落地后替换为计划步骤 id。
-  - 刻意**不含** `runId`/`attempts`：同一逻辑操作跨重试必须同键，否则重试会重复执行。
-  - 参数规范化：键排序 + 去掉易变字段（时间戳、随机 id），由工具声明「稳定参数白名单」（推断：需要每个副作用工具补元数据）。
-- **存在哪**：新文件 `DATA_DIR/agents/agent-op-ledger.json`（结构化 ledger，便于按 key 查询），不塞进 `agent-tasks.json`，避免任务文件继续膨胀。
-- **记录形状**：`{ opKey, taskId, toolName, status: started|succeeded|failed|unknown, attempt, startedAt, finishedAt, resultDigest, errorCode }`。
-- **保留多久**：终态条目保留 7 天（与 orphan TTL 同口径，A 类待校准）；上限 5000 条，先按时间淘汰（B 类，未压测）。条数与任务终态绑定：任务被 `pruneDeliveredTerminalTasks` 裁剪后，其 ledger 条目才可删。
-- **清理**：启动恢复时 + 每小时（推断：需要新增轻量定时器）扫描；只删 `succeeded/failed` 且超期、且任务已终态的条目；`started/unknown` 永不自动删除。
-- **命中判定**：执行前查 `opKey`：`succeeded` → 直接复用结果，不再执行；`started`（同进程已崩）→ 视为 `unknown`，任务转 `recovery` 并写事件；`failed` 且可重试 → 允许重试（沿用现有 retry 判定）；无记录 → 写 `started`（fsync）后执行。
+- **构造（P2 实际实现，已取代原稿）**：`opKey = sha256(JSON.stringify([agentId, taskId, stepId, toolName, canonicalArgs]))`，`stepId = sha256(JSON.stringify([toolName, canonicalArgs, dedupeKeyOverride || '']))`——**内容寻址**。
+  - **为什么否掉 `checkpointVersion + round + toolIndex`**：这三个都是位置量，会在重试和重启后漂移（`checkpointVersion` 随运行推进、`round` 从 1 重新计数）。同一笔副作用在崩溃重启后会算出不同的键，幂等直接失效——这是比「多执行一次」更隐蔽的错误。内容寻址下，同一任务同一工具同一参数，无论跑在第几轮、第几次重试，键都一样。
+  - **已知代价**：同一任务里两次**参数完全相同**的合法副作用调用会被合并成一次。
+  - **逃生阀**：确实需要同参执行两次时，在参数里带 `dedupeKeyOverride`（如调用序号，`1`/`2`）；该字段只参与幂等键，执行前被剥离，不会进入 handler 参数或业务语义。相同覆盖值仍命中同一个键（见 `tests/agent-side-effect-ledger.test.js` 的 a2 用例）。
+  - 刻意**不含** `runId`/`attempt`：同一逻辑操作跨重试必须同键，否则重试会重复执行。
+  - 参数规范化（`server/agents/op-ledger.js`）：对象键递归排序；`undefined` 键视为可选字段缺省丢弃、显式 `null` 保留；数字字符串与数字**不互相转换**（`"01"` 与 `1` 若强转会撞键）；数组顺序敏感；拒绝 NaN/Infinity/循环引用/Date（JSON 会把 NaN 变成 null 造成静默撞键）。易变参数白名单仍属工具元数据，尚未实现（P2 未做）。
+- **存在哪**：`DATA_DIR/agents/agent-op-ledger.json`（结构化 ledger，按 key 查询），不塞进 `agent-tasks.json`。
+- **记录形状**：`{ opKey, taskId, toolName, status: started|succeeded|failed|unknown, attempt, startedAt, finishedAt, resultDigest, errorCode, result, resultOmitted }`。`succeeded` 时结果原文 ≤4096 字节随账本落盘，供重复调用真正复用；超限只存 `resultDigest` 并标 `resultOmitted`。
+- **保留多久**：终态条目保留 7 天（与 orphan TTL 同口径，A 类待校准）；上限 5000 条；只淘汰 `succeeded/failed` 且所属任务已终态的条目。
+- **清理**：`cleanup()` 由恢复流程/定时任务调用（P2 尚未挂定时器）；`started/unknown` 永不自动删除。容量耗尽时只报告 `overCap`，不误删。
+- **命中判定**：执行前查 `opKey`：`succeeded` → 复用结果（带回 `resultDigest`/`opKey`），不再执行；`started` → 先收敛为 `unknown`，任务转 `recovery`，**绝不自动重试**；`unknown` → 同样进 `recovery`；`failed` 且允许重试 → 原地 `attempt+1` 重新置 `started`（同键仍只有一行）；无记录 → 写 `started`（fsync）后执行。账本写不下去 = 不执行（fail-closed）。
 - 投递侧已有幂等键，不重复设计：`messageIdFor(taskId)` 确定式（result-delivery.js L20-L22）。
 
 ## 五、恢复流程时序

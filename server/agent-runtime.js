@@ -431,8 +431,21 @@ async function executeToolCall(name, rawArgs, context) {
     return { ok: false, code: 'invalid_params', error: validated.error };
   }
 
-  // 同请求去重：同工具 + 同规范化参数直接复用上次结果
-  const dedupeKey = `${def.name}|${stableStringify(validated.args)}`;
+  // P2：副作用工具的幂等闸门。只有任务执行器（有 taskId）会注入 context.sideEffect，
+  // 且只对 readOnly === false 的工具生效；无副作用工具不会多出账本行。
+  const sideEffect = context.sideEffect && def.readOnly === false ? context.sideEffect : null;
+  // 逃生阀：显式 dedupeKeyOverride 只参与幂等键，不进入工具参数与业务语义。
+  const split = sideEffect
+    ? sideEffect.splitOverride(validated.args)
+    : { args: validated.args, override: null };
+  const toolArgs = split.args;
+  let ledgerOpKey = null;
+
+  // 同请求去重：同工具 + 同规范化参数直接复用上次结果；
+  // 带显式覆盖时按覆盖值区分，允许同一请求内真正执行两次相同参数。
+  const dedupeKey = `${def.name}|${stableStringify(toolArgs)}${
+    split.override ? `|#${split.override}` : ''
+  }`;
   if (context.cache.has(dedupeKey)) {
     const cached = { ...context.cache.get(dedupeKey), deduped: true };
     const serializedCached = JSON.stringify(cached);
@@ -448,14 +461,12 @@ async function executeToolCall(name, rawArgs, context) {
     return cached;
   }
 
-  // P2：副作用工具的幂等闸门。只有任务执行器（有 taskId）会注入 context.sideEffect，
-  // 且只对 readOnly === false 的工具生效；无副作用工具不会多出账本行。
-  // 顺序刻意放在同请求缓存之后：真正的重复调用应先命中缓存，账本只在跨运行/跨进程时兜底。
-  const sideEffect = context.sideEffect && def.readOnly === false ? context.sideEffect : null;
-  let ledgerOpKey = null;
-
   if (sideEffect) {
-    const verdict = sideEffect.before({ toolName: def.name, args: validated.args });
+    const verdict = sideEffect.before({
+      toolName: def.name,
+      args: toolArgs,
+      override: split.override,
+    });
 
     if (verdict.mode === 'reuse') {
       const reused = {
@@ -534,7 +545,7 @@ async function executeToolCall(name, rawArgs, context) {
   //    这里的作用是语义清晰 + 告警静默，不是"防崩进程"。
   const handlerPromise = Promise.resolve()
     .then(() =>
-      def.handler(validated.args, {
+      def.handler(toolArgs, {
         sessionId: context.sessionId,
         memoryScopeSessionId: context.memoryScopeSessionId || context.sessionId,
         userId: context.userId || null,

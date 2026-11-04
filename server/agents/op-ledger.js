@@ -179,12 +179,13 @@ function buildOpKey({ agentId, taskId, stepId, toolName, args } = {}) {
  * 幂等直接失效。按「工具 + 参数」内容寻址则天然稳定：
  * 同一次逻辑操作，无论跑在第几轮、第几次重试，键都一样。
  * 代价是同一任务里两次完全相同参数的调用会被判为一次（这正是幂等要的语义）。
+ * 确实需要重复执行两次时，用显式的 dedupeKeyOverride（调用序号）作为第三个分量。
  */
-function deriveStepId({ toolName, args } = {}) {
+function deriveStepId({ toolName, args, override = null } = {}) {
   if (typeof toolName !== 'string' || toolName.length === 0) {
     throw new AgentError('agent_op_key_invalid', 'toolName 必须是非空字符串', 400);
   }
-  const payload = JSON.stringify([toolName, canonicalizeArgs(args)]);
+  const payload = JSON.stringify([toolName, canonicalizeArgs(args), override || '']);
   return crypto.createHash('sha256').update(payload).digest('hex');
 }
 

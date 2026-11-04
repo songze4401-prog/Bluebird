@@ -198,7 +198,7 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-76 files, 2100 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
+76 files, 2102 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
 node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js tests/monitoring.test.js   # node:test suites (222)
@@ -256,7 +256,7 @@ node tests/agent-recovery.test.js          # 29 — state machine transitions, t
 node tests/agent-artifact-commit.test.js   # 7
 node tests/agent-approval-policy.test.js   # 7
 node tests/agent-op-ledger.test.js         # 19 — idempotency ledger storage (P1): strict canonicalArgs (key order, nested, optional/undefined vs null, string-vs-number, Chinese/space, delimiter ambiguity, NaN/cycle rejection), opKey hashing, begin/finish/markUnknown, 7-day retention and 5000-entry cleanup that never drops started/unknown
-node tests/agent-side-effect-ledger.test.js # 6 — runtime idempotency wiring (P2): begin-before-execute, succeeded reuse without re-execution, started residue routes the task to recovery, failed retries in place with one row per opKey, read-only tools write no ledger rows
+node tests/agent-side-effect-ledger.test.js # 8 — runtime idempotency wiring (P2): begin-before-execute, succeeded reuse without re-execution, started residue routes the task to recovery, timeout becomes unknown and blocks retry, failed retries in place with one row per opKey, dedupeKeyOverride escape hatch for intentional repeats, read-only tools write no ledger rows
 node tests/agent-watchdog.test.js          # 26 — watchdog health classification, action planning with whitelist/cooldown/breaker, intake pause and resume, offline recovery, escalation, audit fields, dry-run, external supervisor restart drill
 node tests/monitoring-api.test.js          # 38 — monitoring API + real HTTP/context/agent/SSE/persistence instrumentation (model SDK stubbed)
 node tests/agent-runtime-guards.test.js    # 4 — agent runtime guards: cross-session MERGE dedupe scope, task deadlineMs, policy maxRounds, abort-listener cleanup

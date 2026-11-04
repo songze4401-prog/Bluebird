@@ -113,6 +113,98 @@ test('a. 同任务同工具同参数：第二次命中 succeeded 复用结果，
   assert.strictEqual(r2.resultDigest, rows[0].resultDigest, '复用方必须能回答复用的是哪次结果');
 });
 
+// ---- a2) 逃生阀：显式覆盖允许同参执行两次 ----
+
+test('a2. 默认同参两次只执行 1 次（已记录语义）；带 dedupeKeyOverride 后执行 2 次', async () => {
+  resetAll();
+  let calls = 0;
+  const seen = [];
+  register('p2_write', async args => {
+    calls += 1;
+    seen.push(args);
+    return { ok: true, summary: 'done', n: calls };
+  });
+
+  const guard = createSideEffectGuard({ agentId: 'memory', taskId: 'task_p2_a2' });
+  await agent.executeToolCall('p2_write', { x: 5 }, contextFor(guard));
+  const plain2 = await agent.executeToolCall('p2_write', { x: 5 }, contextFor(guard));
+  assert.strictEqual(calls, 1);
+  assert.strictEqual(plain2.reused, true);
+  assert.strictEqual(rowsFor('task_p2_a2').length, 1);
+  assert.deepStrictEqual(seen[0], { x: 5 }, '覆盖字段不得进入 handler 参数');
+
+  const first = await agent.executeToolCall(
+    'p2_write',
+    { x: 5, dedupeKeyOverride: 1 },
+    contextFor(guard)
+  );
+  const second = await agent.executeToolCall(
+    'p2_write',
+    { x: 5, dedupeKeyOverride: 2 },
+    contextFor(guard)
+  );
+
+  console.log(
+    `[p2-a2] default2Calls=1 withOverrideCalls=${calls} rows=${rowsFor('task_p2_a2').length}`
+  );
+  assert.strictEqual(first.reused, undefined);
+  assert.strictEqual(second.reused, undefined);
+  assert.strictEqual(calls, 3, '带不同覆盖值的两次都真实执行');
+  assert.strictEqual(rowsFor('task_p2_a2').length, 3, '覆盖值不同 → 三个不同的 opKey');
+  assert.deepStrictEqual(seen[1], { x: 5 }, '覆盖字段被剥离后再进入 handler');
+  // 相同的覆盖值仍会命中同一个键（覆盖值是幂等键的一部分）。
+  const replay = await agent.executeToolCall(
+    'p2_write',
+    { x: 5, dedupeKeyOverride: 1 },
+    contextFor(guard)
+  );
+  assert.strictEqual(replay.reused, true);
+  assert.strictEqual(calls, 3);
+});
+
+// ---- g) 超时 → unknown → blocked（runtime 据此判 recovery） ----
+
+test('g. 工具超时：账本写 unknown（不是 failed），闸门 blocked，handler 计数 1', async () => {
+  resetAll();
+  let calls = 0;
+  agent.registerTool({
+    name: 'p2_slow',
+    description: 'P2 超时工具',
+    parameters: { type: 'object', properties: { x: { type: 'number' } }, required: ['x'] },
+    readOnly: false,
+    timeoutMs: 120,
+    validate: args => ({ ok: true, args }),
+    handler: () => {
+      calls += 1;
+      return new Promise(() => {}); // 永不完成，等待被超时中止
+    },
+  });
+
+  try {
+    const guard = createSideEffectGuard({ agentId: 'memory', taskId: 'task_p2_g' });
+    const result = await agent.executeToolCall('p2_slow', { x: 9 }, contextFor(guard));
+
+    const rows = rowsFor('task_p2_g');
+    console.log(
+      `[p2-g] code=${result.code} handlerCalls=${calls} ledgerStatus=${rows[0] && rows[0].status}` +
+        ` blocked=${guard.blocked()}`
+    );
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.code, 'tool_timeout');
+    assert.strictEqual(calls, 1);
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].status, 'unknown', '超时不能写 failed（副作用可能已发生）');
+    assert.strictEqual(guard.blocked(), true);
+    assert.strictEqual(guard.status, 'side_effect_unknown');
+
+    const again = await agent.executeToolCall('p2_slow', { x: 9 }, contextFor(guard));
+    assert.strictEqual(again.code, 'side_effect_unknown');
+    assert.strictEqual(calls, 1, 'unknown 绝不自动重试');
+  } finally {
+    agent.unregisterTool('p2_slow');
+  }
+});
+
 // ---- f) begin 先于执行 ----
 
 test('f. begin 的落盘发生在 handler 执行之前', async () => {
