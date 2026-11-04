@@ -115,12 +115,12 @@ function getAgent(botId) {
 function assertRunnable(botId) {
   const agent = buildAgent(botId);
   if (agent.status === 'disabled') {
-    throw new AgentError('bot_disabled', 'Memory Bot 已停用', 409);
+    throw new AgentError('bot_disabled', 'Agent 已停用', 409);
   }
   if (agent.status !== 'enabled') {
     throw new AgentError(
       'bot_not_ready',
-      `Memory Bot 尚未就绪（${agent.statusReason || 'configuration_incomplete'}）`,
+      `Agent 尚未就绪（${agent.statusReason || 'configuration_incomplete'}）`,
       409
     );
   }

@@ -10,8 +10,6 @@ const path = require('path');
 const { writeFileAtomicSync } = require('../atomic-write');
 const { findProvider } = require('../api-configs');
 const {
-  MEMORY_BOT_ID,
-  MEMORY_BOT_PROMPT,
   getManifest,
   listManifests,
   isKnownBot,
@@ -56,7 +54,7 @@ function defaultBotConfig(botId) {
       timeoutMs: 60000,
     },
     prompt: {
-      systemPrompt: botId === MEMORY_BOT_ID ? MEMORY_BOT_PROMPT : '',
+      systemPrompt: manifest && typeof manifest.systemPrompt === 'string' ? manifest.systemPrompt : '',
       version: 'v1',
     },
     toolAllowlist: manifest ? [...manifest.toolAllowlist] : [],

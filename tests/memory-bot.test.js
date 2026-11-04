@@ -326,9 +326,10 @@ async function waitForTask(taskId, timeoutMs = 5000) {
   return tasks.getTask(taskId);
 }
 
-test('Registry：只注册 Memory Bot，状态由真实配置与凭证计算', async () => {
+test('Registry：注册 Memory Bot 与三个专业角色，状态由真实配置与凭证计算', async () => {
   const agents = registry.listAgents();
-  assert.equal(agents.length, 1);
+  assert.equal(agents.length, 4);
+  assert.deepEqual(agents.map(item => item.botId), ['memory', 'researcher', 'executor', 'reviewer']);
   assert.equal(agents[0].botId, 'memory');
   assert.equal(agents[0].status, 'enabled');
   assert.equal(agents[0].entrypoints.includes('direct_chat'), true);
@@ -712,7 +713,7 @@ test('持久任务队列：并发限制、失败隔离与重启恢复', async ()
 test('HTTP API：鉴权由外层注入，配置/凭证/会话/任务均走真实接口', async () => {
   const agents = await api('/agents');
   assert.equal(agents.status, 200);
-  assert.equal(agents.json.agents.length, 1);
+  assert.equal(agents.json.agents.length, 4);
   assert.equal(agents.json.agents[0].botId, 'memory');
 
   const configResponse = await api('/agents/memory/config');
