@@ -24,7 +24,7 @@
 | Phase 0：基线与契约收敛 | “对照当前 HEAD 和已合并实现，确认 Registry、任务队列、Session、Memory、事件、审计和通知链路的真实状态”“统一 Agent Manifest、Task Contract、Result Contract、状态机和权限模型”“输出 ADR” | “没有第二套平行任务协议；关键状态和权限边界可测试” | 0.5 | `docs/phase0-baseline-audit-2026-11-03.md`（判定整体不通过）；ADR 入库 `31a7a9b`；协议收敛 `e08b168`、`7c28a2b`；状态机用例 `tests/agent-recovery.test.js:58`、`:85` | 「权限边界可测试」**Owner 已裁决暂缓（2026-11-04）**：当前按单用户 `local-owner` 口径记录为已知限定，不计入未完成缺口、不安排下一步动作。“没有第二套平行协议”仅完成收敛声明，仍是缺口。 |
 | Phase 1：单主控 + 动态 Worker Pool | “在现有 Runtime 内建立统一 Planner / Orchestrator 接口”“支持少量 Agent 的能力匹配、动态分配、并行和依赖管理”“保留单 Agent 快速路径；先选 2—3 个真实专业 Agent 验证” | “任务路由可追踪、Worker Session 隔离、并发结果不串线、预算硬限制有效” | 1.0 | `server/agents/orchestrator.js` + `tests/agent-orchestrator.test.js` 12 条（交付物 1 的 4 条，`93c5b51`；交付物 2 的 7 条 2a–2g，`6a3cc84`；真实注册表路由 1 条，本轮 `agent-orchestrator` 11→12）；`server/agents/planner.js` + `tests/agent-planner.test.js` 4 条（Planner 侧 a–d，计划只落 workflow-store）；`server/agents/dependencies.js`（唯一 `isReady` + `validateGraph`）+ `server/agents/tasks.js`（`dependsOn`/`settleDependencies`）+ `server/agents/runtime.js`（取队前 settle + runTask 前置校验）+ `tests/agent-worker.test.js` 44 条（依赖 5 条 + 并发上限 1 条 + 令牌/HTTP 5 条 + 5 条混合角色并发 1 条，`agent-worker` 37→44）；`server/agents/worker-scope.js` + 服务端作用域令牌（`issueScopeToken`/`revokeScopeToken`，sha256 映射 + allowlist + TTL；HTTP 读端点只认 `x-worker-scope-token`）；`server/agents/manifest.js` 新增 researcher/executor/reviewer 三个真实 Manifest + 真实 LongCat-2.5 一轮验证（证据见「交付物 3 真实模型验证证据」）；B-06 `tests/agent-budget-atomic.test.js` 7 条（`27b99ec`）+ 真实 usage 结算 | 交付物 1 = **1.0**（Orchestrator 唯一入口 + Planner 规则拆解 + 计划只落既有 workflow-store + 批量多步任务共用同一 planId/planVersion），交付物 2 = **1.0**（四项逐条证据见“交付物 2 四项验收证据”），交付物 3 = **1.0**（三个能力标签可扩展的 Manifest + 真实 LongCat 模型一轮：能力匹配/并行重叠/依赖时序/token usage；见“交付物 3 真实模型验证证据”）；合计 **3.0/3**；4 条验收 **4/4**（路由/隔离/并发/预算，逐条证据见 4–7）。**限定**：三个角色共用同一 LongCat-2.5 模型，只是提示词/能力标签分工，不是异构多模型协作；本轮依赖链下游任务因 `maxTokens=320` 触发 `empty_reply`（依赖时序正确，内容未产出）；**真实模型下的拆解/角色分工质量仍未经评测**；**跨进程并发超出 Notion Phase 1 范围，未做（需跨进程锁），不列为缺口**。下一步＝Phase 2 立项拍板。 |
 | Phase 2：Blackboard + Context Broker | “建立任务级共享产物、证据引用、版本和访问控制”“Worker 私有上下文与共享工作区分离”“支持按需上下文投影和来源追踪” | “跨 Agent 可协作但不能越权读取私有 Session；每个共享结论可追溯来源” | 第 1 项 **1.0**；第 2 项 **1.0**；第 3 项 **1.0**（合计 **3/3**） | 第 1 项（2026-11-05，`c60a1bb` + `4573bc6`）：`share()`/`sharedAccess()`/`readSharedArtifact()` + 令牌第二道门 + `publishSharedConclusion()` 证据门禁。第 2 项（2026-11-05，`db4d3cf`）：`worker-scope.projectSharedContext()` 只放行已共享且版本钉住的引用，`artifact-store.resolveProvenance()` 沿 `{kind,id,version}` 链 fail-closed，投影结果仅含产物引用、不带私有 session/messages。第 3 项（2026-11-05，`59b09cb`）：researcher/executor/reviewer 三个真实注册 Agent 的真实任务一次跑通 A→B→复核，executor 自己的 `wst_` 令牌读 reviewer 私有会话在库层与 HTTP 层均 401 且留痕，A 标 invalidated 后 B 的链 `artifact_chain_broken`（reason=invalidated）。用例：`agent-worker` +1（端到端 1 条，含 4+ 证据采集点与事件/审计时间线）；全量 2199/2199 通过。详见「Phase 2 第 1 项验收证据」「Phase 2 第 2 项验收证据」「Phase 2 第 3 项验收证据」 | 三项完成，但**未新增 HTTP 路由**（库级 API + 复用既有会话读端点）；runtime 不自动投影/自动发布；**尚无撤销共享/逐产物吊销入口**；证据均为同进程 + stub Provider，真实模型协作质量未验证。下一步＝Phase 3 立项拍板（待 Owner）。 |
-| Phase 3：验证闭环 + 事件化工作流 | “引入确定性验证、独立 Reviewer、冲突处理和人工审批节点”“事件、状态、结果投递采用幂等与可恢复设计”“建立失败重试、取消、Checkpoint、死信和成本追踪” | “失败注入、重复事件、Reviewer 检出率和结果投递恢复均有测试证据” | 第 1 项 **1.0**；第 2 项 **0.5**；第 3 项未开工 | 第 1 项（2026-11-05，`phase3/verification-loop-2026-11-05`，`3370441` + `a9e500a`）：`server/agents/verification-loop.js`（确定性校验/独立审校/冲突裁决/审批门）+ `runtime.js` 完成前门禁 + `approvals.js` 门禁操作 + `tests/agent-verification-loop.test.js` 7 条。已有局部复用：审批 `approvals.js`、幂等账本 `op-ledger.js`（`a6d3455`）、崩溃注入 `tests/agent-crash-injection.test.js`。验收证据见「Phase 3 第 1 项验收证据」 | 第 1 项完成：三处失败注入 + 10 条构造样本混淆矩阵（TP 7/FN 0/TN 2/FP 1）+ 超时不通过。**未验证**：真实模型审校能力；第 2 项（投递幂等可恢复）与第 3 项（死信/成本追踪）未开工。下一步＝第 2 项先做现状对账（P1–P5 账本/崩溃注入已覆盖部分）。 |
+| Phase 3：验证闭环 + 事件化工作流 | “引入确定性验证、独立 Reviewer、冲突处理和人工审批节点”“事件、状态、结果投递采用幂等与可恢复设计”“建立失败重试、取消、Checkpoint、死信和成本追踪” | “失败注入、重复事件、Reviewer 检出率和结果投递恢复均有测试证据” | 第 1/2/3 项均 **1.0**（Phase 3 完成） | 第 1 项（2026-11-05，`phase3/verification-loop-2026-11-05`，`3370441` + `a9e500a`）：`server/agents/verification-loop.js`（确定性校验/独立审校/冲突裁决/审批门）+ `runtime.js` 完成前门禁 + `approvals.js` 门禁操作 + `tests/agent-verification-loop.test.js` 7 条。已有局部复用：审批 `approvals.js`、幂等账本 `op-ledger.js`（`a6d3455`）、崩溃注入 `tests/agent-crash-injection.test.js`。验收证据见「Phase 3 第 1 项验收证据」 | 第 1 项完成：三处失败注入 + 10 条构造样本混淆矩阵（TP 7/FN 0/TN 2/FP 1）+ 超时不通过。第 2 项完成（重复事件去重 + 投递崩溃恢复，真实探针见「Phase 3 第 2 项」）。**未验证**：真实模型审校能力；第 3 项（死信/成本追踪）完成，见「Phase 3 第 3 项」。下一步＝Phase 4 入口。 |
 | Phase 4：受控自治与自我改进 | “根据真实运行数据动态组队、重规划和选择验证强度”“建立离线评测集、策略版本、灰度发布和回滚”“在权限、预算和审批边界不变的前提下，逐步开放低风险自动化” | “相对基线在成功率、返工率、成本或延迟上有可重复改善，且安全指标不退化” | 0 | 全仓 `.js` grep `benchmark\|holdout` 零命中；无评测集、无灰度/回滚机制 | 未开始；且验收句要求“相对基线可重复改善”，**必须先有真实模型环境与压测数据**。 |
 
 ---
@@ -525,11 +525,58 @@ enabled = ["executor","researcher","reviewer"]；registeredAgents = 4
 [EVIDENCE] crash-recovery {"atKill":{"events":0,"outbox":1},"afterRestart1":{"rows":1,"outboxRows":0,"dedupeCount":1,"replayDeduped":true},"afterRestart2":{"rows":1,"outboxRows":0,"dedupeCount":2},"eventId":"evt_878b5256f756effe…"}
 ```
 
-**判定 0.5**：重复事件去重与中断恢复两项验收均有真实证据（去重：父会话消息 1 条、`task.delivery` 1 行、`dedupeCount=1`、任务状态不变；恢复：SIGKILL 时 `events=0/outbox=1`，重启后 1 行、outbox 清空，二次重启仍 1 行只累加计数）。仍未达 1.0 的原因：**事件面向消费方的重放位点（如 SSE 断线续传 / last-event-id）未做**，断线仍靠 snapshot 兜底；其余 `appendEvent` 调用点未逐一接入幂等键。
+**判定 1.0**（Owner 改判 2026-11-05）：Notion 原文验收句为「失败注入、重复事件、Reviewer 检出率和**结果投递恢复**均有测试证据」，第 2 项只对这半句负责。重复事件去重（父会话消息 1 条、`task.delivery` 1 行、`dedupeCount=1`、任务状态不变）与结果投递恢复（SIGKILL 时 `events=0/outbox=1`，重启后 1 行、outbox 清空，二次重启仍 1 行）均有真实探针，故按 Notion 口径判 1.0。
+
+**超范围未做清单**（自加标准，不计入 Notion 验收、也不作为成果）：
+- 事件面向消费方的重放位点（SSE 断线续传 / last-event-id）未做，断线只靠 snapshot 兜底；
+- 其余 `appendEvent` 调用点未逐一接入幂等键（仅 `task.delivery` 与显式传入 `dedupeKey` 的调用生效）。
 
 **限定与未验证**：未新增 HTTP 路由、未改 `state-machine.js`/状态词表、未新建第二套存储；幂等键为调用方显式传入（未做全站强制）；跨进程并发与真实多实例投递未验证。
 
 **计数与门禁（实测）**：`agent-event-delivery` 新增 4 条 → `backend=2210/2210 nodeSuite=222/222 runner=1988/1988 frontend=188/188 suites=22/22 文件 89/89 failed=0`；`tsc --noEmit` EXIT=0；`eslint`（改动文件）0 error；`sync-doc-counts --check` EXIT=0。
+
+---
+
+## Phase 3 第 3 项 · 死信与成本追踪（2026-11-05，`5a39821` + `c5d7e9f`）
+
+对应 Notion 原文：「建立失败重试、取消、Checkpoint、**死信和成本追踪**」。两项均复用既有存储与既有语义，未新增 HTTP 路由、未改 `state-machine.js`/状态词表、未建第二套存储。
+
+**实现（复用既有链路）**
+
+| 要求 | 实现（file:line） | 复用点 |
+|---|---|---|
+| 连续失败超上限入死信 | `runtime.js:1259` 失败路径 `status==='failed' && attempts>=maxAttempts` → `deadLetter.mark(...)`；`dead-letter.js:14` `mark` | 复用既有 `maxAttempts`/`attempts` 与 `transitionTask`，**未另造计数** |
+| 死信可查 | `tasks.js:2086` `listDeadLetters({status,limit})`、`dead-letter.js:53` `list`、`:57` `describe`；返回 `taskId/botId/taskType/goal/status/errorCode/attempts/deadLetter/artifacts` | 读既有 `tasks.json`，按既有 `createdAt` 倒序 |
+| 人工重投恰好一次 | `dead-letter.js:67` `redeliver` → `createTask` 带 `idempotencyKey: '<taskId>:redeliver'`；原记录改 `redelivered` + `redeliveredTaskId/redeliveredAt/redeliveryCount` | 复用既有 `createTask` 幂等键，不双写 |
+| 不占正常队列容量 | 死信任务仍是既有 `failed` 终态（`deadLetter` 仅是标记字段，`tasks.js:1318`），调度器只取 `queued`/`retrying` | 未新增状态词、未新增队列 |
+| 按任务/Run 聚合真实 usage | `tasks.js:1652` `recordRunFinish` + `:1640` `normalizeRunUsage` 落 attempt 级 `run.usage`；`cost-tracker.js:32` `aggregate`、`:100` `taskCost`、`:117` `runCost` | 复用既有 usage 结算路径，**无字符数估算**；缺失即 `null` |
+| 与预算结算对得上 | `cost-tracker.js:117` `runCost` 同时读 `tasks.js:2125` `getRunUsage`（`tokenRuns` 账），返回 `budgetUsed` + `consistentWithBudget` | 同一份 `run.usage` 只按 attempt 求和，不读 `tokenUsage.used`（避免父链双计） |
+| 时间窗口查询 | `cost-tracker.js:32` `aggregate({from,to,groupBy})`，`GROUP_BY=['task','run']` | 读接口（无 HTTP 路由） |
+| 无 usage 标未知 | `aggregate` 返回 `unknown:{attempts,tasks,tokens:null}`、`complete=false`；`taskCost.known=false`；`runCost.consistentWithBudget=null` | 缺 usage 不进 0 成本 |
+
+**真实探针（`node --test tests/agent-dead-letter.test.js tests/agent-cost-tracking.test.js`，tests 7 / fail 0）**
+
+```
+[EVIDENCE] dead-letter-threshold {"belowLimit":{"marked":false},"atLimit":{"taskStatus":"failed","deadLetterStatus":"open","attempts":3,"maxAttempts":3,"lastErrorCode":"model_timeout","events":1}}
+[EVIDENCE] dead-letter-query {"rows":1,"taskStatus":"failed","errorCode":"model_timeout","lastErrorCode":"model_timeout","attempts":3,"artifactsField":true}
+[EVIDENCE] dead-letter-redeliver {"clones":1,"secondCall":"already_redelivered","cloneStatus":"completed"}
+[EVIDENCE] dead-letter-state {"deadLetterStatus":"redelivered","redeliveryCount":1,"openDeadLetters":0,"queuedTasks":1,"deadLetterInQueue":false,"finalTaskStatus":"failed"}
+[EVIDENCE] cost-single-task {"costTokens":200,"attempts":2,"budgetUsed":200,"runTokens":200,"runBudgetUsed":200,"consistent":true}
+[EVIDENCE] cost-run-no-double-count {"parentBudgetUsed":150,"parentCostTokens":50,"childCostTokens":100,"byTaskTotal":150,"byRunTotal":150,"runBudgetUsed":150,"consistent":true,"windowTokens":100}
+[EVIDENCE] cost-unknown-bucket {"totalTokens":0,"unknownAttempts":1,"unknownTokens":null,"unknownTasks":1,"complete":false,"taskKnown":false,"runConsistent":null}
+```
+
+用例覆盖：死信 4 条（达上限入死信 / 可列且字段完整 / 重投成功一次不双写 / 重投后原记录状态 `redelivered` 且 `open` 计数归零）；成本 3 条（单任务聚合正确 / 多任务与 Run 汇总不双计 / 无 usage 进 `unknown` 桶且 `tokens=null`）。
+
+**判定 1.0**：Notion 原文「死信和成本追踪」要求均有可复跑证据。死信四要素（超上限不无限重试、可查含失败原因与最后错误码及原任务/产物引用、可人工重投且 `clones=1`/`already_redelivered`、不占队列 `deadLetterInQueue=false`）全部成立，未出现判分纪律所指的「能查不能重投」；成本按真实 `run.usage` 聚合且与预算账对齐（`byTaskTotal=byRunTotal=runBudgetUsed`），无字符数估算，缺 usage 走未知桶而非 0 成本。
+
+**限定与未验证**
+- 死信打标只在 `status==='failed' && attempts>=maxAttempts` 这一条路径；`task_lease_lost` 等异常退出不打标；
+- 成本仅为 **token 计数**，不是货币金额；真实模型下的 usage 分布与 `cached`/reasoning token 细分未验证；
+- 重投为同进程调用（`start=true` 时延迟取 `runtime.startTask`），跨进程并发重投未验证（按边界不建跨进程锁）；
+- 死信记录复用 `tasks.json` 与任务事件文件，无独立死信表；死信长期堆积的清理策略未做（超出原文要求）。
+
+**门禁与全量（实测）**：`tsc --noEmit` EXIT=0；`eslint`（改动文件）0 error（余为既存 warning）；`verify-test-coverage` → `backend=2217/2217 nodeSuite=222/222 runner=1995/1995 frontend=188/188 suites=22/22 failed=0`、CI runner 91/91；`sync-doc-counts --check` → `backend 2217、nodeSuite 222、runner 1995、frontend 188、文件 91` EXIT=0；`verify-api-capabilities`（95 路由 / 20 族 / 仅 API 9）EXIT=0；全量 `node scripts/run-tests.js` → 首跑出现 1 个 `memory-bot` 偶发失败，该文件隔离复跑通过（exit 0），第二次全量 `91 个测试文件，全部通过`、`FULL_EXIT=0`。
 
 ---
 
