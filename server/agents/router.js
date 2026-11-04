@@ -15,6 +15,7 @@ const { AgentError } = require('./errors');
 const intakeControl = require('./intake-control');
 const { getInstanceUserId } = require('../user-scope');
 const { CONTRACT_VERSION } = require('./contract');
+const orchestrator = require('../context/orchestrator');
 const PRIORITY_VALUES = Object.freeze(['high', 'normal', 'low']);
 const STATUS_BY_CODE = Object.freeze({
   invalid_task: 400,
@@ -403,10 +404,36 @@ function writeRouteEvent(appendEvent, agentId, eventType, decision, extra = {}) 
   }
 }
 
+/**
+ * 冻结本次请求的上下文加载计划（可持久化事实，不是执行中间态）。
+ * 只存决策所需字段：intent / 层开关 / 预算 / 阈值 / 理由 / 冻结的工具白名单。
+ * 检索结果、token 级中间态、会话正文一律不进计划——它们不是「当时怎么决定」的事实。
+ */
+function buildWorkflowPlan(normalized, decision) {
+  const base = orchestrator.planContext({ task: normalized.goal });
+  return {
+    intent: base.intent,
+    enabled: base.enabled,
+    layers: base.layers,
+    budgets: base.budgets,
+    noAnswerThreshold: base.noAnswerThreshold,
+    reasons: base.reasons,
+    // 本段不生成执行步骤；steps 留空，等重规划接入后由 Workflow Engine 填充。
+    steps: [],
+    allowedTools: Array.isArray(normalized.allowedTools) ? normalized.allowedTools : [],
+    budget: decision.budget || null,
+    goalDigest: `sha256:${crypto
+      .createHash('sha256')
+      .update(String(normalized.goal || ''))
+      .digest('hex')}`,
+  };
+}
+
 function createRouter(overrides = {}) {
   const getAgents = overrides.getAgents || (() => require('./registry').listAgents());
   const getConfig = overrides.getConfig || (() => require('./routing-config').getRoutingConfig());
   const taskStore = overrides.tasks || require('./tasks');
+  const workflowStore = overrides.workflowStore || require('./workflow-store');
   const sessionStore = overrides.sessions || require('./sessions');
   const appendEvent = overrides.appendEvent || (args => require('./tasks').appendEvent(args));
   const startTask = overrides.startTask || (taskId => require('./runtime').startTask(taskId));
@@ -479,9 +506,20 @@ function createRouter(overrides = {}) {
       workerSessionId = session.id;
     }
 
+    // 写序（硬要求）：计划先落盘并 fsync，任务才带着指针创建。
+    // appendVersion 内部是 writeFileAtomicSync（fsync + rename + 目录 fsync），
+    // 返回时计划已经可读；因此不存在「任务引用了不存在的计划」的持久态。
+    // 若 createTask 随后失败（如任务总数上限），计划会留成孤儿，24h 后由 Store 清理，
+    // 但磁盘上绝不会出现指向不存在计划的任务。
+    const workflowPlan = workflowStore.appendVersion({
+      plan: buildWorkflowPlan(normalized, decision),
+    });
+
     const task = taskStore.createTask({
       agentId,
       workerSessionId,
+      planId: workflowPlan.planId,
+      planVersion: workflowPlan.planVersion,
       taskType: decision.taskType,
       goal: normalized.goal,
       context: normalized.context || '',
@@ -512,6 +550,22 @@ function createRouter(overrides = {}) {
         idempotent: true,
       });
       return { task, decision: { ...decision, idempotent: true }, idempotent: true };
+    }
+
+    // 反向引用只是裁剪保护，不是事实源：写失败不阻塞任务（任务文件里的指针
+    // 才是唯一事实，启动时按它解析并补写引用）。
+    try {
+      workflowStore.pinRef({
+        taskId: task.taskId,
+        planId: workflowPlan.planId,
+        planVersion: workflowPlan.planVersion,
+      });
+    } catch (error) {
+      console.warn(
+        `[agent-route] plan pin failed task=${task.taskId} code=${
+          (error && error.code) || 'plan_pin_failed'
+        }`
+      );
     }
 
     // 任务创建后把 Worker 会话绑定到该任务；绑定失败不阻塞任务本身，

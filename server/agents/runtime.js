@@ -23,6 +23,7 @@ const artifactCommit = require('./artifact-commit');
 const { createSideEffectGuard } = require('./side-effect-guard');
 const crashHook = require('./crash-hook');
 const opLedger = require('./op-ledger');
+const workflowStore = require('./workflow-store');
 
 const MAX_USER_MESSAGE = 4000;
 const HISTORY_MESSAGES = 24;
@@ -1061,11 +1062,144 @@ function startTask(taskId) {
   });
 }
 
+// 计划解析失败的三种码（与 Workflow Store 抛出的错误一一对应）。
+const PLAN_FAILURE_CODES = new Set([
+  'plan_missing',
+  'plan_version_mismatch',
+  'plan_corrupt',
+  'plan_store_corrupted',
+  'plan_unavailable',
+]);
+
+/**
+ * 启动时按 (planId, planVersion) 解析每个已绑定任务。
+ *
+ * 收敛规则（fail-closed）：
+ * - 计划中存在且 digest 自洽 → 照常调度，并补写 pin（上次可能死在 pin 之前）；
+ * - 计划缺失 / 版本不符 / 内容损坏 → 任务一律 recovery + 对应 errorCode，不续跑；
+ * - Store 文件整体损坏 → 所有绑定任务一律 recovery + plan_store_corrupted。
+ *
+ * 已终态任务不反转：状态机的终态没有出边，把 completed 改回 recovery 既非法也会
+ * 改写历史结论。它们仍占用 pin（裁剪不会删），只计入 skippedTerminal。
+ *
+ * 与「任务文件损坏直接退出」的区别：任务文件是整个 Agent 子系统的事实源，
+ * 读不出来就无法判断该投递/取消什么，只能退出；计划文件是附加层，损坏只影响
+ * 引用它的任务，把它们收敛到 recovery 之后，其余任务仍可正常处理——
+ * 服务继续启动是「把损坏局部化」，而不是「假装没有计划」。
+ */
+function convergeWorkflowPlans({ now = Date.now() } = {}) {
+  const summary = {
+    checked: 0,
+    resolved: 0,
+    failed: 0,
+    failedTaskIds: [],
+    errorCodes: {},
+    skippedTerminal: 0,
+    skippedUnbound: 0,
+    storeCorrupted: false,
+    pinned: 0,
+  };
+  const all = tasks.allTasks();
+  const bound = all.filter(task => task && task.planId !== null && task.planId !== undefined);
+  summary.skippedUnbound = all.length - bound.length;
+  if (bound.length === 0) return summary;
+
+  let storeError = null;
+  try {
+    workflowStore.read();
+  } catch (error) {
+    storeError = error;
+  }
+
+  if (storeError) {
+    summary.storeCorrupted = true;
+    for (const task of bound) {
+      summary.checked += 1;
+      if (tasks.isTerminalStatus(task.status)) {
+        summary.skippedTerminal += 1;
+        continue;
+      }
+      const result = tasks.forcePlanRecovery(task.taskId, {
+        errorCode: 'plan_store_corrupted',
+        now,
+      });
+      if (result.changed) {
+        summary.failed += 1;
+        summary.failedTaskIds.push(task.taskId);
+        summary.errorCodes.plan_store_corrupted =
+          (summary.errorCodes.plan_store_corrupted || 0) + 1;
+        safeEvent(
+          task.botId,
+          'task.uncertain',
+          { status: 'recovery', errorCode: 'plan_store_corrupted', phase: 'workflow_plan' },
+          { taskId: task.taskId }
+        );
+      }
+    }
+    return summary;
+  }
+
+  for (const task of bound) {
+    summary.checked += 1;
+    let errorCode = null;
+    try {
+      if (typeof task.planId !== 'string' || !Number.isInteger(task.planVersion)) {
+        throw new AgentError('plan_version_mismatch', '任务计划指针不完整', 409);
+      }
+      workflowStore.getVersion(task.planId, task.planVersion);
+    } catch (error) {
+      errorCode = PLAN_FAILURE_CODES.has(error && error.code) ? error.code : 'plan_corrupt';
+    }
+
+    if (errorCode === null) {
+      summary.resolved += 1;
+      try {
+        workflowStore.pinRef({
+          taskId: task.taskId,
+          planId: task.planId,
+          planVersion: task.planVersion,
+          now,
+        });
+        summary.pinned += 1;
+      } catch (_) {
+        // 补写 pin 失败只影响裁剪保护；任务文件里的指针仍可解析。
+      }
+      continue;
+    }
+
+    if (tasks.isTerminalStatus(task.status)) {
+      summary.skippedTerminal += 1;
+      continue;
+    }
+    const result = tasks.forcePlanRecovery(task.taskId, { errorCode, now });
+    if (result.changed) {
+      summary.failed += 1;
+      summary.failedTaskIds.push(task.taskId);
+      summary.errorCodes[errorCode] = (summary.errorCodes[errorCode] || 0) + 1;
+      safeEvent(
+        task.botId,
+        'task.uncertain',
+        { status: 'recovery', errorCode, phase: 'workflow_plan' },
+        { taskId: task.taskId }
+      );
+    }
+  }
+  return summary;
+}
+
 function initializeTaskQueue() {
   try {
     tasks.flushEventOutbox();
   } catch (_) {
     // 事件主文件不可写时 outbox 仍在磁盘，下一次读取会继续重试。
+  }
+  // 计划解析必须早于中断恢复：计划不可用是更上游的失败原因，先把这些任务
+  // fail-closed 掉，再让 recoverInterrupted 处理剩下的中间态任务。
+  let planSummary = null;
+  try {
+    planSummary = convergeWorkflowPlans();
+  } catch (_) {
+    planSummary = null;
   }
   // 单进程部署：启动时不存在仍存活的其他 Worker，旧租约一律视为过期。
   // 多 Worker 场景由调用方传入存活 owner 集合，未过期的租约保持 running。
@@ -1136,6 +1270,7 @@ function initializeTaskQueue() {
     queued: tasks.queuedCount(),
     concurrency: TASK_CONCURRENCY,
     sealedOps: sealedOps.length,
+    plans: planSummary,
     artifactScan: artifactScan
       ? {
           scanned: artifactScan.scanned,
@@ -1202,6 +1337,7 @@ module.exports = {
   cancelTask,
   runTask,
   initializeTaskQueue,
+  convergeWorkflowPlans,
   getQueueStats,
   allowedToolsFor,
   buildPolicy,

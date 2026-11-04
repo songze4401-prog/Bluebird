@@ -533,6 +533,8 @@ function createTask({
   parentMessageId = null,
   parentUserText = null,
   parentUserId = null,
+  planId = null,
+  planVersion = null,
 } = {}) {
   const resolvedAgentId = String(agentId || botId || '');
   assertBot(resolvedAgentId);
@@ -614,6 +616,24 @@ function createTask({
   const cleanRoute = normalizeRoute(route);
   const cleanBudget = normalizeBudget(budget);
 
+  // 计划指针只接受「两个都在」或「两个都不在」：单边取值无法表达冻结版本，
+  // 写入后只会变成无法解析的悬空引用（启动时会被收敛为 recovery）。
+  const cleanPlanId = planId === null || planId === undefined ? null : planId;
+  const cleanPlanVersion =
+    planVersion === null || planVersion === undefined ? null : planVersion;
+  if (cleanPlanId !== null || cleanPlanVersion !== null) {
+    if (
+      typeof cleanPlanId !== 'string' ||
+      cleanPlanId.trim().length === 0 ||
+      cleanPlanId.length > 80
+    ) {
+      throw new AgentError('invalid_task', 'planId 必须是 1 到 80 字的非空字符串');
+    }
+    if (!Number.isInteger(cleanPlanVersion) || cleanPlanVersion <= 0) {
+      throw new AgentError('invalid_task', 'planVersion 必须是正整数');
+    }
+  }
+
   // 同一 Agent 的相同幂等键返回既有任务，不重复创建、不重复入队。
   // Router 在建立 Worker 会话之前也会先查一次，避免产生空会话。
   const existing = findByIdempotencyKey(resolvedAgentId, cleanIdempotencyKey);
@@ -649,11 +669,11 @@ function createTask({
     idempotencyKey: cleanIdempotencyKey,
     route: cleanRoute,
     budget: cleanBudget,
-    // S8：计划版本指针（Task Contract 新增可空字段）。只在 Workflow Engine
-    // 创建/重规划计划时写入；Workflow Store 落地前恒为 null，严禁写
-    // 'v1' / 0 / '' 等占位值，否则会制造无法追溯的假版本。
-    planId: null,
-    planVersion: null,
+    // S8：计划版本指针（Task Contract 新增可空字段）。由 Workflow Store 在任务
+    // 创建之前落盘，router 在**同一次任务写入**里带上 planId + planVersion，
+    // 因此不存在「任务先引用、计划后落盘」的窗口。null 表示该任务没有冻结计划。
+    planId: cleanPlanId,
+    planVersion: cleanPlanVersion,
     runId: null,
     runStartedAt: null,
     heartbeatAt: null,
@@ -1329,6 +1349,52 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
   };
 }
 
+// 计划不可用时的收敛：非终态任务一律落 recovery（fail-closed）。
+// 只用状态机已声明的边：queued → accepted → recovery、retrying → running → recovery，
+// 不新增状态、不改迁移表。已终态任务不反转（终态没有出边），只计入 skippedTerminal。
+function forcePlanRecovery(taskId, { errorCode, now = Date.now() } = {}) {
+  const state = loadTasks();
+  const task = state.tasks[String(taskId || '')];
+  if (!task) return { changed: false, status: null, skipped: 'not_found' };
+  if (stateMachine.isTerminal(task.status)) {
+    return { changed: false, status: task.status, skipped: 'terminal' };
+  }
+  const path = recoveryPath(task.status);
+  if (!path) return { changed: false, status: task.status, skipped: 'no_path' };
+
+  for (const step of path) applyTransition(task, step);
+  const at = new Date(now).toISOString();
+  bumpStateVersion(task);
+  task.updatedAt = at;
+  task.completedAt = at;
+  task.lease = null;
+  task.retryAt = null;
+  task.heartbeatAt = null;
+  task.errorCode = errorCode;
+  task.lastErrorCode = errorCode;
+  task.requiresReview = true;
+  task.result = normalizeWorkerResult({
+    status: 'recovery',
+    summary: '',
+    errorCode,
+    runId: task.runId || null,
+    finishedAt: at,
+  });
+  saveTasks();
+  return { changed: true, status: 'recovery', errorCode };
+}
+
+function recoveryPath(from) {
+  if (from === 'recovery') return null;
+  if (stateMachine.canTransition(from, 'recovery')) return ['recovery'];
+  const next = stateMachine.TRANSITIONS[from] || [];
+  for (const mid of next) {
+    if (mid === from) continue;
+    if (stateMachine.canTransition(mid, 'recovery')) return [mid, 'recovery'];
+  }
+  return null;
+}
+
 // 给 Watchdog / 运维读取的稳定健康快照：只有计数与时间点，不含任务正文。
 function healthSnapshot(now = Date.now()) {
   const state = loadTasks();
@@ -1436,6 +1502,7 @@ module.exports = {
   nextQueuedTask,
   queuedCount,
   recoverInterrupted,
+  forcePlanRecovery,
   getTaskDeadlineAt,
   convergeWaitingApprovalDeadline,
   findByIdempotencyKey,
