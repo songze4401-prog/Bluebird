@@ -108,6 +108,8 @@ test('契约校验：合法输入被选中并带上默认值', () => {
     maxToolCalls: 6,
     maxReadOnlyRetries: 1,
     generatePlan: false,
+    // B-06：路由冻结的 Task Token 硬上限（fast=12000）。
+    tokenBudget: 12000,
   });
   assert.equal(decision.degraded, false);
 });
@@ -344,7 +346,9 @@ test('任务契约：createTask 同时写入规范字段与兼容别名', () => 
   assert.equal(task.contextRef, null);
   assert.equal(task.idempotencyKey, null);
   assert.equal(task.route, null);
-  assert.equal(task.budget, null);
+  // B-06：未显式给 budget 时由服务端补默认硬上限，任务不再存在“无上限”状态。
+  assert.equal(task.budget.tokenBudget, tasks.DEFAULT_TASK_TOKEN_BUDGET);
+  assert.deepEqual(task.tokenUsage, { reserved: 0, used: 0 });
 });
 
 test('任务契约：route 与 budget 快照随任务落库', () => {
@@ -359,7 +363,13 @@ test('任务契约：route 与 budget 快照随任务落库', () => {
       policyDigest: 'abcd1234',
       decidedAt: '2026-11-01T00:00:00.000Z',
     },
-    budget: { maxRounds: 4, maxToolCalls: 6, maxReadOnlyRetries: 1, generatePlan: true },
+    budget: {
+      maxRounds: 4,
+      maxToolCalls: 6,
+      maxReadOnlyRetries: 1,
+      generatePlan: true,
+      tokenBudget: 12000,
+    },
   });
   assert.equal(task.priority, 'high');
   assert.equal(task.contextRef, 'session:s1#message:m1');

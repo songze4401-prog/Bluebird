@@ -17,7 +17,7 @@ const resultDelivery = require('./result-delivery');
 const { projectWorkerContext } = require('./context-projection');
 const { normalizeWorkerResult } = require('./worker-result');
 const { createToolAuthorizer } = require('./tool-gateway');
-const { AgentError } = require('./errors');
+const { AgentError, budgetExceededError } = require('./errors');
 const approvalDeadline = require('./approval-deadline');
 const artifactCommit = require('./artifact-commit');
 const { createSideEffectGuard } = require('./side-effect-guard');
@@ -447,6 +447,8 @@ async function execute({
       providerId: config.modelProfile.providerId,
       modelId: config.modelProfile.modelId,
     },
+    // B-06：供应商真实 usage（多轮累计）；缺失时为 null，绝不估算。
+    usage: outcome.usage || null,
     runId,
   };
 }
@@ -622,6 +624,31 @@ async function runTask(taskId) {
   // 不再经 queued/accepted 中转。
   const retryAttempt = task.status === 'retrying';
 
+  // B-06：本次 attempt 的 Token 预留。reserve 在 execute 之前一次性占用剩余额度，
+  // 结束后按真实 usage 结算并回冲差额；失败/取消/未拿到 usage 时释放。
+  let reservation = null;
+  const settleReservation = usage => {
+    if (!reservation || reservation.settled) return;
+    const total =
+      usage && Number.isFinite(usage.total_tokens) && usage.total_tokens > 0
+        ? Math.floor(usage.total_tokens)
+        : 0;
+    reservation.settled = true;
+    tasks.settleTaskBudget(task.taskId, {
+      reserved: reservation.amount,
+      actual: total,
+    });
+  };
+  const releaseReservation = () => {
+    if (!reservation || reservation.settled) return;
+    reservation.settled = true;
+    try {
+      tasks.releaseTaskBudget(task.taskId, { amount: reservation.amount });
+    } catch (_) {
+      // 释放失败由下一次 reserve 的账本校验兜底，不能影响任务终态。
+    }
+  };
+
   try {
     // ---- accept ----
     // 先拿租约：已有其他存活 Worker 持有时不执行；租约在手才进入 accepted。
@@ -777,6 +804,24 @@ async function runTask(taskId) {
     const authorizer = createToolAuthorizer({ allowedTools: task.allowedTools });
     recordCheckpoint({ round: 0, toolCalls: 0, phase: 'started' });
 
+    // B-06：执行前原子预留。按 Task 剩余上限全额预留（预估不精确，结算时回冲），
+    // 无上限/额度耗尽一律 budget_exceeded 且 retryable=false。
+    const budgetSnapshot = tasks.getTaskBudgetSnapshot(task.taskId);
+    const budgetLimit = budgetSnapshot ? budgetSnapshot.limit : null;
+    const budgetRemaining = budgetSnapshot ? budgetSnapshot.remaining : null;
+    if (budgetLimit === null || budgetRemaining === null || budgetRemaining <= 0) {
+      throw budgetExceededError({
+        taskId: task.taskId,
+        scope: 'task',
+        required: 1,
+        remaining: budgetRemaining === null ? 0 : Math.max(0, budgetRemaining),
+        runId: task.budgetRunId || null,
+        causeRef: budgetLimit === null ? 'budget_not_configured' : 'budget_exhausted',
+      });
+    }
+    tasks.reserveTaskBudget(task.taskId, { amount: budgetRemaining });
+    reservation = { amount: budgetRemaining, settled: false };
+
     const result = await execute({
       botId: task.botId,
       messages: projection.messages,
@@ -817,6 +862,10 @@ async function runTask(taskId) {
       },
       onProgress: recordCheckpoint,
     });
+
+    // B-06：结算本次预留。真实 usage 缺失时按 0 结算（相当于全额回冲），
+    // 不拿字符数估算冒充 token；该限制已在用例注释中如实标注。
+    settleReservation(result && result.usage);
 
     const latest = tasks.getRawTask(task.taskId);
     if (!latest || tasks.isTerminalStatus(latest.status) || latest.cancelRequested) {
@@ -1047,6 +1096,8 @@ async function runTask(taskId) {
     if (deadlineTimer) clearTimeout(deadlineTimer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     activeRuns.delete(task.taskId);
+    // B-06：未经 settle 的预留必须释放（失败/取消/提前返回/抛错的所有路径）。
+    releaseReservation();
     // 租约只在本次运行结束时释放；释放失败由过期机制兜底。
     try {
       const finalTask = tasks.getRawTask(task.taskId);

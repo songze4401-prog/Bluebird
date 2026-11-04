@@ -14,7 +14,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { writeFileAtomicSync } = require('../atomic-write');
 const { getManifest, isKnownBot } = require('./manifest');
-const { AgentError, conflictError } = require('./errors');
+const { AgentError, conflictError, budgetExceededError } = require('./errors');
 const taskStore = require('./task-store');
 const stateMachine = require('./state-machine');
 const artifactStore = require('./artifact-store');
@@ -50,6 +50,14 @@ const CONTEXT_REF_MAX = 200;
 const IDEMPOTENCY_KEY_MAX = 120;
 const PRIORITIES = Object.freeze(['high', 'normal', 'low']);
 const PRIORITY_RANK = Object.freeze({ high: 0, normal: 1, low: 2 });
+// B-06（§25）：Task 级 Token 硬上限的边界与缺省值。
+// A 类常量：12000 是服务端缺省上限，仅用于「调用方未显式给 budget」的内部/旧调用，
+// 不是供应商真实配额，必须随后续真实 usage 数据校准；显式 budget 仍必须自带 tokenBudget。
+const DEFAULT_TASK_TOKEN_BUDGET = 12000;
+const TOKEN_BUDGET_MIN = 1;
+const TOKEN_BUDGET_MAX = 500000;
+// 父链最多回溯 8 层：超过视为异常数据，fail-closed 而不是继续放行。
+const BUDGET_CHAIN_MAX_DEPTH = 8;
 
 const STATUSES = stateMachine.STATUSES;
 const TERMINAL = stateMachine.TERMINAL;
@@ -393,6 +401,12 @@ function publicTask(task, { includeResult = true } = {}) {
     idempotencyKey: task.idempotencyKey || null,
     route: task.route ? clone(task.route) : null,
     budget: task.budget ? clone(task.budget) : null,
+    // B-06：Token 计量的只读视图（limit 在 budget.tokenBudget 内）。
+    tokenUsage: task.tokenUsage
+      ? { reserved: task.tokenUsage.reserved || 0, used: task.tokenUsage.used || 0 }
+      : { reserved: 0, used: 0 },
+    parentTaskId: task.parentTaskId || null,
+    budgetRunId: task.budgetRunId || null,
     // S8：计划版本指针。仅在 Workflow Engine 创建/重规划计划时由引擎写入；
     // 未接入 Workflow Store 时保持 null，绝不返回占位版本（0 也视为未写入）。
     planId: task.planId || null,
@@ -460,13 +474,25 @@ function pruneDeliveredTerminalTasks(tasks) {
 }
 
 function normalizeBudget(budget) {
-  if (budget === null || budget === undefined) return null;
+  if (budget === null || budget === undefined) {
+    // B-06：Token 上限是 Task 的强制字段。调用方完全不给 budget 时，服务端补一份
+    // 默认硬上限（含默认次数上限），落库任务不存在「无上限」状态；
+    // 若显式给了 budget 却缺 tokenBudget，则拒绝创建（validation_failed）。
+    return {
+      maxRounds: 3,
+      maxToolCalls: 6,
+      maxReadOnlyRetries: 1,
+      generatePlan: false,
+      tokenBudget: DEFAULT_TASK_TOKEN_BUDGET,
+    };
+  }
   if (typeof budget !== 'object' || Array.isArray(budget)) {
     throw new AgentError('invalid_task', 'budget 必须是对象或 null');
   }
   const maxRounds = Number(budget.maxRounds);
   const maxToolCalls = Number(budget.maxToolCalls);
   const maxReadOnlyRetries = Number(budget.maxReadOnlyRetries);
+  const tokenBudget = Number(budget.tokenBudget);
   if (!Number.isInteger(maxRounds) || maxRounds < 2 || maxRounds > 5) {
     throw new AgentError('invalid_task', 'budget.maxRounds 必须在 2 到 5 之间');
   }
@@ -480,11 +506,24 @@ function normalizeBudget(budget) {
   ) {
     throw new AgentError('invalid_task', 'budget.maxReadOnlyRetries 必须在 0 到 1 之间');
   }
+  // 显式 budget 必须自带 Token 上限；上限缺失即拒绝创建，不允许“无上限”任务。
+  if (
+    !Number.isInteger(tokenBudget) ||
+    tokenBudget < TOKEN_BUDGET_MIN ||
+    tokenBudget > TOKEN_BUDGET_MAX
+  ) {
+    throw new AgentError(
+      'validation_failed',
+      `budget.tokenBudget 必填，且必须是 ${TOKEN_BUDGET_MIN} 到 ${TOKEN_BUDGET_MAX} 的整数`,
+      400
+    );
+  }
   return {
     maxRounds,
     maxToolCalls,
     maxReadOnlyRetries,
     generatePlan: budget.generatePlan === true,
+    tokenBudget,
   };
 }
 
@@ -500,6 +539,196 @@ function normalizeRoute(route) {
     policyDigest: String(route.policyDigest || '').slice(0, 32),
     decidedAt: typeof route.decidedAt === 'string' ? route.decidedAt : null,
   };
+}
+
+// ---- B-06：Token 预算账本（Task / 父链 / Run） ----
+// 所有读写都复用 task-store 的单写者与 task.stateVersion；预留在一次同步调用内
+// 完成「全部闸门校验 → 改内存 → write()」，不存在 check 与 write 之间的 await 缝隙。
+
+function ensureTokenRuns(store) {
+  if (
+    !store.tokenRuns ||
+    typeof store.tokenRuns !== 'object' ||
+    Array.isArray(store.tokenRuns)
+  ) {
+    store.tokenRuns = {};
+  }
+  return store.tokenRuns;
+}
+
+function tokenLimitOf(task) {
+  const limit = task && task.budget ? Number(task.budget.tokenBudget) : NaN;
+  return Number.isInteger(limit) && limit >= TOKEN_BUDGET_MIN ? limit : null;
+}
+
+function usageOf(task) {
+  if (!task.tokenUsage || typeof task.tokenUsage !== 'object') {
+    task.tokenUsage = { reserved: 0, used: 0 };
+  }
+  const usage = task.tokenUsage;
+  if (!Number.isInteger(usage.reserved) || usage.reserved < 0) usage.reserved = 0;
+  if (!Number.isInteger(usage.used) || usage.used < 0) usage.used = 0;
+  return usage;
+}
+
+// 父链：自己 + 所有祖先。父任务余额是子任务上限的硬上界；缺口径一律 fail-closed。
+function budgetChain(tasks, task) {
+  const chain = [task];
+  const seen = new Set([task.taskId]);
+  let cursor = task;
+  for (let depth = 0; depth < BUDGET_CHAIN_MAX_DEPTH; depth += 1) {
+    const parentId = cursor.parentTaskId;
+    if (!parentId) return chain;
+    if (seen.has(parentId)) {
+      throw new AgentError('budget_chain_cycle', 'Token 预算父链存在环', 500);
+    }
+    const parent = tasks.tasks[parentId];
+    if (!parent) {
+      throw new AgentError('budget_parent_missing', 'Token 预算父任务不存在', 409);
+    }
+    seen.add(parentId);
+    chain.push(parent);
+    cursor = parent;
+  }
+  if (cursor.parentTaskId) {
+    throw new AgentError('budget_chain_too_deep', 'Token 预算父链超过 8 层', 409);
+  }
+  return chain;
+}
+
+function budgetSnapshot(task) {
+  const limit = tokenLimitOf(task);
+  const usage = usageOf(task);
+  return {
+    taskId: task.taskId,
+    limit,
+    used: usage.used,
+    reserved: usage.reserved,
+    remaining: limit === null ? null : limit - usage.used - usage.reserved,
+    runId: task.budgetRunId || null,
+  };
+}
+
+function getTaskBudgetSnapshot(taskId) {
+  const tasks = loadTasks();
+  const task = tasks.tasks[String(taskId || '')];
+  if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+  return budgetSnapshot(task);
+}
+
+function requireTokenAmount(amount, label) {
+  const value = Number(amount);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new AgentError('validation_failed', `${label} 必须是正整数`, 400);
+  }
+  return value;
+}
+
+/**
+ * 原子预留：Task 自身、全部祖先、所属 Run 三处同时校验并同时占用额度。
+ * 任一闸门不足 → budget_exceeded（retryable=false），且**不修改任何内存/磁盘状态**。
+ */
+function reserveTaskBudget(taskId, { amount } = {}) {
+  const tasks = loadTasks();
+  const task = tasks.tasks[String(taskId || '')];
+  if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+  const cleanAmount = requireTokenAmount(amount, '预留 token');
+  const chain = budgetChain(tasks, task);
+  const runId = task.budgetRunId || null;
+
+  for (const item of chain) {
+    const limit = tokenLimitOf(item);
+    if (limit === null) {
+      throw budgetExceededError({
+        taskId: task.taskId,
+        scope: item === task ? 'task' : `parent:${item.taskId}`,
+        required: cleanAmount,
+        remaining: 0,
+        runId,
+        causeRef: 'budget_not_configured',
+      });
+    }
+    const usage = usageOf(item);
+    const remaining = limit - usage.used - usage.reserved;
+    if (remaining < cleanAmount) {
+      throw budgetExceededError({
+        taskId: task.taskId,
+        scope: item === task ? 'task' : `parent:${item.taskId}`,
+        required: cleanAmount,
+        remaining: Math.max(0, remaining),
+        runId,
+      });
+    }
+  }
+
+  const run = runId ? ensureTokenRuns(tasks)[runId] || null : null;
+  if (run) {
+    const remaining = run.budget - run.used - run.reserved;
+    if (remaining < cleanAmount) {
+      throw budgetExceededError({
+        taskId: task.taskId,
+        scope: `run:${runId}`,
+        required: cleanAmount,
+        remaining: Math.max(0, remaining),
+        runId,
+      });
+    }
+  }
+
+  const stamp = nowIso();
+  for (const item of chain) {
+    usageOf(item).reserved += cleanAmount;
+    bumpStateVersion(item);
+    item.updatedAt = stamp;
+  }
+  if (run) {
+    run.reserved += cleanAmount;
+    run.updatedAt = stamp;
+  }
+  saveTasks();
+  return budgetSnapshot(task);
+}
+
+/**
+ * 结算：按真实用量扣减，并释放本次预留；差额（预留多、实际少）自动回冲。
+ * reserved 必须是本次 reserve 的金额；actual 可为 0（失败/取消时由 release 调用）。
+ */
+function settleTaskBudget(taskId, { reserved = 0, actual = 0 } = {}) {
+  const tasks = loadTasks();
+  const task = tasks.tasks[String(taskId || '')];
+  if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+  const cleanReserved = Number(reserved);
+  const cleanActual = Number(actual);
+  if (!Number.isInteger(cleanReserved) || cleanReserved < 0) {
+    throw new AgentError('validation_failed', 'reserved 必须是非负整数', 400);
+  }
+  if (!Number.isInteger(cleanActual) || cleanActual < 0) {
+    throw new AgentError('validation_failed', 'actual 必须是非负整数', 400);
+  }
+  const chain = budgetChain(tasks, task);
+  const runId = task.budgetRunId || null;
+  const run = runId ? ensureTokenRuns(tasks)[runId] || null : null;
+
+  const stamp = nowIso();
+  for (const item of chain) {
+    const usage = usageOf(item);
+    usage.reserved = Math.max(0, usage.reserved - cleanReserved);
+    usage.used += cleanActual;
+    bumpStateVersion(item);
+    item.updatedAt = stamp;
+  }
+  if (run) {
+    run.reserved = Math.max(0, run.reserved - cleanReserved);
+    run.used += cleanActual;
+    run.updatedAt = stamp;
+  }
+  saveTasks();
+  return budgetSnapshot(task);
+}
+
+/** 释放未结算的预留（失败/取消/未产生 usage）。 */
+function releaseTaskBudget(taskId, { amount } = {}) {
+  return settleTaskBudget(taskId, { reserved: requireTokenAmount(amount, '释放 token'), actual: 0 });
 }
 
 function findByIdempotencyKey(agentId, idempotencyKey) {
@@ -535,6 +764,11 @@ function createTask({
   parentUserId = null,
   planId = null,
   planVersion = null,
+  // B-06：父子覆盖与 Run 总闸门。runId 是「预算归属 Run」，与执行期每次 attempt
+  // 重写的 task.runId 不同口径，因此单独落 budgetRunId。
+  parentTaskId = null,
+  runId = null,
+  runBudget = null,
 } = {}) {
   const resolvedAgentId = String(agentId || botId || '');
   assertBot(resolvedAgentId);
@@ -615,6 +849,25 @@ function createTask({
   }
   const cleanRoute = normalizeRoute(route);
   const cleanBudget = normalizeBudget(budget);
+  const cleanParentTaskId =
+    typeof parentTaskId === 'string' && parentTaskId.trim()
+      ? parentTaskId.trim().slice(0, 120)
+      : null;
+  const cleanRunId =
+    typeof runId === 'string' && runId.trim() ? runId.trim().slice(0, 80) : null;
+  const cleanRunBudget = runBudget === null || runBudget === undefined ? null : Number(runBudget);
+  if (
+    cleanRunBudget !== null &&
+    (!Number.isInteger(cleanRunBudget) ||
+      cleanRunBudget < TOKEN_BUDGET_MIN ||
+      cleanRunBudget > TOKEN_BUDGET_MAX)
+  ) {
+    throw new AgentError(
+      'validation_failed',
+      `runBudget 必须是 ${TOKEN_BUDGET_MIN} 到 ${TOKEN_BUDGET_MAX} 的整数`,
+      400
+    );
+  }
 
   // 计划指针只接受「两个都在」或「两个都不在」：单边取值无法表达冻结版本，
   // 写入后只会变成无法解析的悬空引用（启动时会被收敛为 recovery）。
@@ -652,6 +905,58 @@ function createTask({
     );
   }
 
+  // B-06 父子覆盖：父任务余额是子任务上限的硬上界；不够就拒绝创建。
+  const parentTask = cleanParentTaskId ? tasks.tasks[cleanParentTaskId] : null;
+  if (cleanParentTaskId && !parentTask) {
+    throw new AgentError('validation_failed', 'parentTaskId 指向的任务不存在', 400);
+  }
+  const effectiveRunId =
+    cleanRunId || (parentTask && parentTask.budgetRunId ? parentTask.budgetRunId : null);
+  if (parentTask) {
+    const parentLimit = tokenLimitOf(parentTask);
+    if (parentLimit === null) {
+      throw new AgentError('validation_failed', '父任务未配置 token 上限，不能接收子任务', 400);
+    }
+    const parentUsage = usageOf(parentTask);
+    const parentRemaining = parentLimit - parentUsage.used - parentUsage.reserved;
+    if (parentRemaining < cleanBudget.tokenBudget) {
+      throw budgetExceededError({
+        taskId: '',
+        scope: `parent:${parentTask.taskId}`,
+        required: cleanBudget.tokenBudget,
+        remaining: Math.max(0, parentRemaining),
+        runId: effectiveRunId,
+      });
+    }
+  }
+
+  // B-06 Run 级总闸门：同 Run 的预算只由首个任务建立；后续任务不能改写，
+  // 且每个任务的 tokenBudget 在 reserve/settle 时都会累加到同一本账。
+  if (effectiveRunId) {
+    const runs = ensureTokenRuns(tasks);
+    const existingRun = runs[effectiveRunId];
+    if (!existingRun) {
+      if (cleanRunBudget === null) {
+        throw new AgentError(
+          'validation_failed',
+          'Run 首次创建必须提供 runBudget（Run 总预算）',
+          400
+        );
+      }
+      const stamp = nowIso();
+      runs[effectiveRunId] = {
+        runId: effectiveRunId,
+        budget: cleanRunBudget,
+        used: 0,
+        reserved: 0,
+        createdAt: stamp,
+        updatedAt: stamp,
+      };
+    } else if (cleanRunBudget !== null && cleanRunBudget !== existingRun.budget) {
+      throw new AgentError('validation_failed', 'runBudget 与既有 Run 预算不一致', 400);
+    }
+  }
+
   const t = nowIso();
   const task = {
     taskId: `task_${crypto.randomUUID()}`,
@@ -674,6 +979,10 @@ function createTask({
     // 因此不存在「任务先引用、计划后落盘」的窗口。null 表示该任务没有冻结计划。
     planId: cleanPlanId,
     planVersion: cleanPlanVersion,
+    // B-06：预算归属与计量初值。reserved/used 只由 reserve/settle/release 改写。
+    parentTaskId: cleanParentTaskId,
+    budgetRunId: effectiveRunId,
+    tokenUsage: { reserved: 0, used: 0 },
     runId: null,
     runStartedAt: null,
     heartbeatAt: null,
@@ -1486,6 +1795,7 @@ module.exports = {
   CONTRACT_VERSION,
   PRIORITIES,
   SIDE_EFFECT_TOOLS,
+  DEFAULT_TASK_TOKEN_BUDGET,
   TASK_SCHEMA_VERSION,
   createTask,
   getTask,
@@ -1517,4 +1827,8 @@ module.exports = {
   setRetry,
   healthSnapshot,
   reloadForTests,
+  getTaskBudgetSnapshot,
+  reserveTaskBudget,
+  settleTaskBudget,
+  releaseTaskBudget,
 };

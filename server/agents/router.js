@@ -17,6 +17,10 @@ const { getInstanceUserId } = require('../user-scope');
 const { CONTRACT_VERSION } = require('./contract');
 const orchestrator = require('../context/orchestrator');
 const PRIORITY_VALUES = Object.freeze(['high', 'normal', 'low']);
+// B-06（§25）：路由冻结的 Task Token 硬上限。
+// A 类常量：与路由 profile 的轮次/工具上限一同冻结进任务，不代表供应商真实配额，
+// 需随后续真实 usage 数据校准；显式调用方仍可通过 budget.tokenBudget 覆盖。
+const TOKEN_BUDGET_BY_PATH = Object.freeze({ fast: 12000, slow: 20000 });
 const STATUS_BY_CODE = Object.freeze({
   invalid_task: 400,
   tool_not_allowed: 403,
@@ -198,6 +202,7 @@ function decideInternal(input, options = {}) {
     maxToolCalls: profile.maxToolCalls,
     maxReadOnlyRetries: profile.maxReadOnlyRetries,
     generatePlan: profile.generatePlan === true,
+    tokenBudget: TOKEN_BUDGET_BY_PATH[path],
   };
   const decision = {
     ok: true,
@@ -541,6 +546,11 @@ function createRouter(overrides = {}) {
       parentUserText: typeof input.parentUserText === 'string' ? input.parentUserText : '',
       // 记忆归属用户：调用方给可信身份就用它，否则落回实例用户（服务端身份）。
       parentUserId: normalizeString(input.parentUserId) || getInstanceUserId(),
+      // B-06：父子覆盖与 Run 总闸门由调用方显式声明；缺省时任务只受自身 tokenBudget 约束。
+      parentTaskId: normalizeString(input.parentTaskId) || null,
+      runId: normalizeString(input.runId) || null,
+      runBudget:
+        Number.isInteger(input.runBudget) && input.runBudget > 0 ? input.runBudget : null,
     });
 
     if (task.idempotent === true) {
