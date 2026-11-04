@@ -1,6 +1,6 @@
 # Notion 交付台账（2026-11-04）
 
-> **结论**：按 Notion 原文口径，**Phase 0 未完成（0.5，其中“权限边界”已由 Owner 裁决暂缓）**，**Phase 1 交付物 3.0/3（第 1 项 1.0；第 2 项 1.0；第 3 项 1.0，真实 LongCat 模型一轮验证；按 §5 原句逐句拆为 3 项，Planner 与 Orchestrator 合算 1 项）**；4 条验收要求 **4/4 已满足（2026-11-04）**：预算硬限制（B-06=1，真实供应商 usage 结算）、任务路由可追踪（真实注册的 researcher/executor/reviewer 分派 + 候选集/依据落盘）、Worker Session 隔离（服务端签发令牌，含过期与吊销路径）、并发结果不串线（5 条混合角色 + `TASK_CONCURRENCY=2`）。**跨进程并发超出 Notion Phase 1 范围，未做；需跨进程锁，不计为未闭合缺口。**
+> **结论**：按 Notion 原文口径，**Phase 0 未完成（0.5，其中“权限边界”已由 Owner 裁决暂缓）**，**Phase 1 交付物 3.0/3（第 1 项 1.0；第 2 项 1.0；第 3 项 1.0，真实 LongCat 模型一轮验证；按 §5 原句逐句拆为 3 项，Planner 与 Orchestrator 合算 1 项）**；4 条验收要求 **4/4 已满足（2026-11-04）**：预算硬限制（B-06=1，真实供应商 usage 结算）、任务路由可追踪（真实注册的 researcher/executor/reviewer 分派 + 候选集/依据落盘）、Worker Session 隔离（服务端签发令牌，含过期与吊销路径）、并发结果不串线（5 条混合角色 + `TASK_CONCURRENCY=2`）。**跨进程并发超出 Notion Phase 1 范围，未做；需跨进程锁，不计为未闭合缺口。** **Phase 2：第 1 项（共享产物/证据引用/版本/访问控制）= 1.0（2026-11-05，本地分支 `phase2/blackboard-2026-11-05`，未 push）；第 2、3 项未开工。**
 >
 > 唯一依据：《Bluebird Agent Runtime｜混合式多 Agent 目标架构 v1.0》
 > https://app.notion.com/p/Bluebird-Agent-Runtime-Agent-v1-0-40da957523c281359607e23f6a3c784f
@@ -23,7 +23,7 @@
 |---|---|---|---|---|---|
 | Phase 0：基线与契约收敛 | “对照当前 HEAD 和已合并实现，确认 Registry、任务队列、Session、Memory、事件、审计和通知链路的真实状态”“统一 Agent Manifest、Task Contract、Result Contract、状态机和权限模型”“输出 ADR” | “没有第二套平行任务协议；关键状态和权限边界可测试” | 0.5 | `docs/phase0-baseline-audit-2026-11-03.md`（判定整体不通过）；ADR 入库 `31a7a9b`；协议收敛 `e08b168`、`7c28a2b`；状态机用例 `tests/agent-recovery.test.js:58`、`:85` | 「权限边界可测试」**Owner 已裁决暂缓（2026-11-04）**：当前按单用户 `local-owner` 口径记录为已知限定，不计入未完成缺口、不安排下一步动作。“没有第二套平行协议”仅完成收敛声明，仍是缺口。 |
 | Phase 1：单主控 + 动态 Worker Pool | “在现有 Runtime 内建立统一 Planner / Orchestrator 接口”“支持少量 Agent 的能力匹配、动态分配、并行和依赖管理”“保留单 Agent 快速路径；先选 2—3 个真实专业 Agent 验证” | “任务路由可追踪、Worker Session 隔离、并发结果不串线、预算硬限制有效” | 1.0 | `server/agents/orchestrator.js` + `tests/agent-orchestrator.test.js` 12 条（交付物 1 的 4 条，`93c5b51`；交付物 2 的 7 条 2a–2g，`6a3cc84`；真实注册表路由 1 条，本轮 `agent-orchestrator` 11→12）；`server/agents/planner.js` + `tests/agent-planner.test.js` 4 条（Planner 侧 a–d，计划只落 workflow-store）；`server/agents/dependencies.js`（唯一 `isReady` + `validateGraph`）+ `server/agents/tasks.js`（`dependsOn`/`settleDependencies`）+ `server/agents/runtime.js`（取队前 settle + runTask 前置校验）+ `tests/agent-worker.test.js` 44 条（依赖 5 条 + 并发上限 1 条 + 令牌/HTTP 5 条 + 5 条混合角色并发 1 条，`agent-worker` 37→44）；`server/agents/worker-scope.js` + 服务端作用域令牌（`issueScopeToken`/`revokeScopeToken`，sha256 映射 + allowlist + TTL；HTTP 读端点只认 `x-worker-scope-token`）；`server/agents/manifest.js` 新增 researcher/executor/reviewer 三个真实 Manifest + 真实 LongCat-2.5 一轮验证（证据见「交付物 3 真实模型验证证据」）；B-06 `tests/agent-budget-atomic.test.js` 7 条（`27b99ec`）+ 真实 usage 结算 | 交付物 1 = **1.0**（Orchestrator 唯一入口 + Planner 规则拆解 + 计划只落既有 workflow-store + 批量多步任务共用同一 planId/planVersion），交付物 2 = **1.0**（四项逐条证据见“交付物 2 四项验收证据”），交付物 3 = **1.0**（三个能力标签可扩展的 Manifest + 真实 LongCat 模型一轮：能力匹配/并行重叠/依赖时序/token usage；见“交付物 3 真实模型验证证据”）；合计 **3.0/3**；4 条验收 **4/4**（路由/隔离/并发/预算，逐条证据见 4–7）。**限定**：三个角色共用同一 LongCat-2.5 模型，只是提示词/能力标签分工，不是异构多模型协作；本轮依赖链下游任务因 `maxTokens=320` 触发 `empty_reply`（依赖时序正确，内容未产出）；**真实模型下的拆解/角色分工质量仍未经评测**；**跨进程并发超出 Notion Phase 1 范围，未做（需跨进程锁），不列为缺口**。下一步＝Phase 2 立项拍板。 |
-| Phase 2：Blackboard + Context Broker | “建立任务级共享产物、证据引用、版本和访问控制”“Worker 私有上下文与共享工作区分离”“支持按需上下文投影和来源追踪” | “跨 Agent 可协作但不能越权读取私有 Session；每个共享结论可追溯来源” | 0 | 全 `server/` grep `blackboard` 仅 1 处注释（`server/agents/artifact-store.js:8`，明确“不承担 Blackboard 的…”）；无 Context Broker 模块 | 未开始。仓库只做了 `artifact-store.js` 的产物版本/正文复读，不等于 Blackboard。下一步＝待拍板 Phase 2 是否按原文整体立项。 |
+| Phase 2：Blackboard + Context Broker | “建立任务级共享产物、证据引用、版本和访问控制”“Worker 私有上下文与共享工作区分离”“支持按需上下文投影和来源追踪” | “跨 Agent 可协作但不能越权读取私有 Session；每个共享结论可追溯来源” | 第 1 项 **1.0**；第 2、3 项 **0** | 第 1 项（2026-11-05，`c60a1bb` + `4573bc6`）：`artifact-store.js` 新增 `share()`（登记接收任务 + 钉住版本）/`sharedAccess()`/`readSharedArtifact()`；`worker-scope.js` 新增 `readSharedArtifact()`（**令牌 + 共享登记两道门**，拒绝写 `worker.scope_denied`、不回显正文）；`artifact-commit.js` 新增 `publishSharedConclusion()`（证据 `{kind,id,version}` 缺失/未钉版本/读不回来一律 fail-closed）。用例：`agent-worker` 新增 2 条（未登记拒绝+留痕、登记后按版本可读/无令牌与版本不符拒绝）、`agent-artifact-commit` 新增 2 条（证据门禁、版本不可变），共 2194/2194 通过。详见「Phase 2 第 1 项验收证据」 | 第 1 项完成，但**未新增 HTTP 路由**（库级 API + 用例验证；Owner 限定确需才加）；runtime 不自动发布共享结论，需显式调用；**尚无撤销共享/逐产物吊销入口**。第 2 项（私有上下文与共享工作区分离、上下文投影与来源追踪）未开工；第 3 项（验收句端到端）未开工。下一步＝第 2 项入口。 |
 | Phase 3：验证闭环 + 事件化工作流 | “引入确定性验证、独立 Reviewer、冲突处理和人工审批节点”“事件、状态、结果投递采用幂等与可恢复设计”“建立失败重试、取消、Checkpoint、死信和成本追踪” | “失败注入、重复事件、Reviewer 检出率和结果投递恢复均有测试证据” | 0 | 已有局部：审批节点 `server/agents/approvals.js`、幂等账本 `server/agents/op-ledger.js`（`a6d3455`）、崩溃注入 `tests/agent-crash-injection.test.js` | 缺确定性验证器、独立 Reviewer、冲突处理、死信与成本追踪；Reviewer 检出率无任何测试。下一步＝待拍板是否单独立项。 |
 | Phase 4：受控自治与自我改进 | “根据真实运行数据动态组队、重规划和选择验证强度”“建立离线评测集、策略版本、灰度发布和回滚”“在权限、预算和审批边界不变的前提下，逐步开放低风险自动化” | “相对基线在成功率、返工率、成本或延迟上有可重复改善，且安全指标不退化” | 0 | 全仓 `.js` grep `benchmark\|holdout` 零命中；无评测集、无灰度/回滚机制 | 未开始；且验收句要求“相对基线可重复改善”，**必须先有真实模型环境与压测数据**。 |
 
@@ -279,6 +279,51 @@ enabled = ["executor","researcher","reviewer"]；registeredAgents = 4
 5. **验收“Worker Session 隔离”** —— **已满足（1.0，2026-11-04）**：`server/agents/worker-scope.js` 是唯一读边界；本轮补齐**服务端签发的最小身份令牌**：`issueScopeToken()` 生成 `wst_` + 24 字节随机值，服务端以 sha256 保存映射（不存原文），令牌显式声明 `allowedTaskIds`/`allowedSessionIds`、带 TTL；`revokeScopeToken()` 吊销后立即失效。HTTP `GET /agents/:botId/sessions/:sessionId` **只认 `x-worker-scope-token`**，删除 `requesterTaskId/grantedBy/reason` 自报路径；非法令牌 401 `worker_scope_token_invalid`、有效但越界 409 `worker_session_owner_mismatch`，均写 `worker.scope_denied`，错误体不回显对方正文，审计不落令牌原文。用例 `tests/agent-worker.test.js` 共 44 条，其中隔离/令牌：无令牌与伪造被拒并留痕、服务端授权令牌放行、HTTP 跨作用域 409、无令牌 401、本 Worker 令牌 200、授权令牌 200 且留痕、**伪造/过期/吊销均 401**、direct 会话与缺失会话 404 行为不变。**限定**：这是 **worker 级授权令牌**，不是用户体系/多用户模型（Owner 划定范围）；**跨进程隔离超出 Notion Phase 1 范围，未做；需跨进程锁**。
 6. **验收“并发结果不串线”** —— **已满足（1.0，同一进程证据，2026-11-04）**：用例 `tests/agent-worker.test.js`「并发：5 条混合角色受 `TASK_CONCURRENCY=2` 约束…」同时启动 **5 条**任务（researcher ×2、executor、reviewer、memory），实测 `peakActive=2`，5 条均在约 2.1s 内完成，时间线各条独立（`runStartedAt` 02.246/02.446/03.017/03.145/03.722，`completedAt` 02.982/03.113/03.688/03.811/04.301）。断言：每条结果只含自己的标记，不含其他任务的标记/taskId/sessionId；产物 `taskId` 各归各且 id 无交集；会话 owner 各自指向本任务；每条 `tokenUsage.used=2`、`remaining=12000-used`、总用量=各任务自身用量之和，无共享账本；超发申请 `remaining+1` 被 `budget_exceeded` 拒绝且账本不变。**限定**：同一进程、确定性 stub Provider；**跨进程并发超出 Notion Phase 1 范围，未做；需跨进程锁**。
 7. **验收“预算硬限制有效”** —— **已满足（B-06 = 1，2026-11-04）**：原子 reserve/settle/release、父子覆盖、Run 闸门有 7 条可复跑用例（`27b99ec`）；本轮真实 LongCat 调用的供应商 `usage` 已进入任务预算结算（5 个任务 `used` 分别 2849/4156/4191/4337/1296，均为真实值而非估算）；并发用例另证每任务预算独立账本、超发被拒。**限定**：跨进程并发超出 Notion Phase 1 范围，未做；需跨进程锁。
+
+---
+
+## Phase 2 第 1 项验收证据（2026-11-05，分支 `phase2/blackboard-2026-11-05`）
+
+> 原文第 1 项：「建立**任务级共享产物、证据引用、版本和访问控制**」。
+> 口径：四项要素各自有可复跑用例与探针输出才记 1；本轮**只做第 1 项**，第 2/3 项未开工。
+> 证据边界：同一进程 + 库级 API；**未新增 HTTP 路由**（新增路由非验证必需，按 Owner 限定先不加）；无跨进程锁（超出 Notion 范围）。
+
+**开工前盘点（HEAD `46393c2`）**：
+
+| 要素 | 状态 | file:line 证据 |
+|---|---|---|
+| 任务级产物 | 有 | `server/agents/artifact-store.js` `persist()`（`taskId` 归属、`version` 单调、`contentHash`、`refCount`、`status`）；`server/agents/artifact-commit.js` `persistTaskArtifacts()` |
+| 共享给同批次其它任务 | 没有 | 全 `server/` grep `share\|audience\|sharedWith` 零命中；`worker-scope.js` 的 `allowedTaskIds` 只表达令牌授权，产物记录本身无接收方登记 |
+| 证据引用 | 半有 | `worker-result.js` 的 `evidence` 仅作为任务结果字段归一化，未与产物版本绑定、无 fail-closed 校验 |
+| 版本 | 有（不可变底座） | `artifact-store.js` `versionsOf()`/`readContent({version})`；同 kind 新内容追加新 `artifactId`，旧版 `superseded` |
+| 访问控制 | 半有 | `worker-scope.js` `issueScopeToken`/`revokeScopeToken`/`authorizeCross` 已做到令牌级；跨 worker 读产物只校验令牌，无产物级授权，拒绝只记 `worker.scope_denied`（无共享语义） |
+
+**实现（全部复用，无第二套）**：
+
+| 文件 | 变更 | 复用点 |
+|---|---|---|
+| `server/agents/artifact-store.js` | +约 150 行：`share()` / `sharedAccess()` / `readSharedArtifact()`；产物记录新增**唯一字段** `share` | 复用 `persist`/`readContent`/`get`/审计，沿用 `{kind,id,version}` |
+| `server/agents/worker-scope.js` | +约 55 行：`readSharedArtifact()`（令牌 + 共享登记两道门、拒绝审计、不回显） | 复用 `authorizeCross`（`wst_` 令牌/allowlist/TTL/吊销） |
+| `server/agents/artifact-commit.js` | +约 70 行：`normalizeEvidence()` / `publishSharedConclusion()` | 复用 `artifactStore.persist` + `share`，引用 schema 不扩字段 |
+
+新增错误码（均落在既有六类语义内，`errors.js` 未改）：`artifact_share_invalid`（400，validation_failed）、`artifact_not_shared`（409，not_authorized/conflict 语义）、`artifact_evidence_missing`（409）、`artifact_evidence_invalid`（400）；复用 `artifact_not_found` / `artifact_version_mismatch` / `artifact_not_active`。
+
+**四条可复跑用例（`node --test` 单文件即可复现）**：
+
+| 用例（文件） | 实测探针 | 能证明 | 不能证明 |
+|---|---|---|---|
+| `tests/agent-worker.test.js`「共享产物：未登记共享时，令牌允许任务也拒绝读取，留痕且不回显正文」 | `[共享-未登记] {"artifactId":"art_…","code":"artifact_not_shared","reason":"not_shared","errorCode":"artifact_not_shared","bodyEchoed":false}` | 令牌合法但未登记 → 拒绝；`worker.scope_denied` 留痕；错误体不含正文 | 不证明 HTTP 层行为（本轮无新路由） |
+| `tests/agent-worker.test.js`「共享产物：登记共享后持有效令牌按登记版本可读；无令牌或版本不符被拒」 | `[共享-登记读取] {"sharedVersion":1,"sharedTargets":1,"readVersion":1,"noTokenCode":"worker_scope_token_invalid","wrongVersionCode":"artifact_version_mismatch","grantedAudit":true}` | 登记后可读且版本钉住；无令牌 401；版本不符 409；授权读取留痕 | 不证明登记撤销（无 unshare 入口） |
+| `tests/agent-artifact-commit.test.js` `h.` 共享结论证据门禁 | `[共享结论-证据门禁] {"missing":"artifact_evidence_missing","noVersion":"artifact_evidence_invalid","unreadable":"artifact_not_found","evidencePinned":["art_ad3d0d75@v1"],"foreignCode":"artifact_not_shared","bodyEchoed":false}` | 缺证据/未钉版本/读不回来一律拒绝且零落盘；带证据的结论含 `{kind,id,version}` 引用；未共享任务读不到 | 不证明 runtime 自动发布（需显式调用） |
+| `tests/agent-artifact-commit.test.js` `i.` 版本不可变 | `[版本不可变] {"v1":{"version":1,"status":"superseded"},"v2":{"version":2},"hashUnchanged":true,"evidenceStillReadable":true,"staleCommitCode":"artifact_not_active"}` | 追加新版本只 supersede 旧版；旧版 `contentHash`/正文不变；旧版证据引用仍可复读；新提交拒绝 superseded 引用 | 不证明跨进程并发写（未做） |
+
+**计数**：`agent-worker` 44→46、`agent-artifact-commit` 7→9；全量 `node scripts/verify-test-coverage.js` → `backend=2194/2194 nodeSuite=222/222 runner=1972/1972 frontend=188/188 suites=22/22 failed=0`，EXIT=0。
+
+**限定（不得当作 1 之外的完成）**：
+- 共享是**显式登记**：runtime 不会自动把任务产物登记为共享，需调用 `artifactStore.share()` 或 `artifactCommit.publishSharedConclusion()`。
+- **无撤销共享 / 逐产物吊销入口**（令牌吊销可整体失效，但共享登记只增不减）。
+- 未新增 HTTP 路由；`GET /agents/:botId/sessions/:sessionId` 行为不变。
+- 第 2 项「私有上下文与共享工作区分离 + 按需上下文投影 + 来源追踪」未开工；第 3 项验收句端到端未开工。
 
 ---
 
