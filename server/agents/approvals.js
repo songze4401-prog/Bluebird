@@ -19,6 +19,7 @@ const { normalizeWorkerResult } = require('./worker-result');
 const { isKnownBot } = require('./manifest');
 const { AgentError } = require('./errors');
 const artifactCommit = require('./artifact-commit');
+const failOpenPolicy = require('./failopen-policy');
 const { getInstanceUserId } = require('../user-scope');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
@@ -39,10 +40,28 @@ const STATUSES = Object.freeze([
 ]);
 const TERMINAL = new Set(['rejected', 'completed', 'failed']);
 
-let cache = null;
+// A 类：R2 审批 SLA 初始默认硬阈值 30 分钟（v1.3 §36.2，用户 2026-11-03 裁决）。
+// 到期只转人工（overdue 标记 + 升级事件 + 保持 pending），绝不解释为批准，也不改写 Task。
+// 调整必须按 §31.2 留版本记录，不得静默调参。
+const R2_SLA_MS = 30 * 60 * 1000;
+// A 类：§32.3 建议 escalationAt 由 SLA 派生（取 50%），待实测校准并留痕。
+const R2_ESCALATION_RATIO = 0.5;
+// 风险等级映射：medium → R2（人工审批 + 30 分钟 SLA）；high → R3（无自动批准超时）。
+// 未知风险一律按 R3 处理（fail-closed，不降级）。
+const RISK_LEVEL_BY_RISK = Object.freeze({ medium: 'R2', high: 'R3' });
+const APPROVAL_POLICY_FIELDS = Object.freeze([
+  'riskLevel',
+  'expiresAt',
+  'escalationAt',
+  'policyVersion',
+]);
 
-function nowIso() {
-  return new Date().toISOString();
+let cache = null;
+// R2 的 escalation/overdue 计时器：只做标记与事件，不推进任何批准流程。
+const deadlineTimers = new Map();
+
+function nowIso(ms = Date.now()) {
+  return new Date(ms).toISOString();
 }
 
 function ensureDir() {
@@ -136,6 +155,14 @@ function publicApproval(record) {
     operation: record.operation,
     payload: clone(record.payload || {}),
     risk: record.risk,
+    // ④ 四字段：新增审批记录带全量；老记录保持 null，由 execute 做 fail-closed。
+    riskLevel: typeof record.riskLevel === 'string' ? record.riskLevel : null,
+    expiresAt: typeof record.expiresAt === 'string' ? record.expiresAt : null,
+    escalationAt: typeof record.escalationAt === 'string' ? record.escalationAt : null,
+    policyVersion: Number.isInteger(record.policyVersion) ? record.policyVersion : null,
+    overdue: record.overdue === true,
+    overdueAt: record.overdueAt || null,
+    escalatedAt: record.escalatedAt || null,
     status: record.status,
     requestedBy: record.requestedBy,
     requestedAt: record.requestedAt,
@@ -208,6 +235,122 @@ function moveTaskToApproval(task) {
   }
 }
 
+// ④ 老记录缺四字段一律 fail-closed：不做“缺省即低风险”的兜底。
+// R3 的 expiresAt / escalationAt 允许为 null（表示不设自动批准超时），但键必须存在。
+function approvalPolicyState(record) {
+  if (!record || typeof record !== 'object') {
+    return { ok: false, problems: ['record'] };
+  }
+  const problems = [];
+  for (const field of APPROVAL_POLICY_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(record, field)) problems.push(field);
+  }
+  if (typeof record.riskLevel !== 'string' || !['R0', 'R1', 'R2', 'R3'].includes(record.riskLevel)) {
+    problems.push('riskLevel');
+  }
+  for (const field of ['expiresAt', 'escalationAt']) {
+    const value = record[field];
+    if (value === null) continue;
+    if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) {
+      problems.push(field);
+    }
+  }
+  if (!Number.isInteger(record.policyVersion) || record.policyVersion < 0) {
+    problems.push('policyVersion');
+  }
+  return { ok: problems.length === 0, problems: [...new Set(problems)] };
+}
+
+function nextDueAt(record) {
+  const candidates = [];
+  if (record.escalationAt && !record.escalatedAt) candidates.push(Date.parse(record.escalationAt));
+  if (record.expiresAt && !record.overdueAt) candidates.push(Date.parse(record.expiresAt));
+  const valid = candidates.filter(value => Number.isFinite(value));
+  return valid.length ? Math.min(...valid) : null;
+}
+
+function disarmDeadline(approvalId) {
+  const key = String(approvalId || '');
+  const timer = deadlineTimers.get(key);
+  if (timer) clearTimeout(timer);
+  deadlineTimers.delete(key);
+}
+
+function scheduleDeadline(record) {
+  const key = String(record.approvalId || '');
+  if (!key) return;
+  disarmDeadline(key);
+  if (record.status !== 'pending') return;
+  const dueAt = nextDueAt(record);
+  if (dueAt === null) return;
+  const timer = setTimeout(() => {
+    deadlineTimers.delete(key);
+    markOverdue(key);
+    const latest = getRawApproval(key);
+    if (latest && latest.status === 'pending') scheduleDeadline(latest);
+  }, Math.max(0, dueAt - Date.now()));
+  if (typeof timer.unref === 'function') timer.unref();
+  deadlineTimers.set(key, timer);
+}
+
+/**
+ * R2 到期只转人工：标记 escalation/overdue 并写事件，状态保持 pending，
+ * 不改 Task 状态，更不产生批准效果（§32.1 第 4 条、§32.3）。
+ */
+function markOverdue(approvalId, { now = Date.now() } = {}) {
+  const current = load();
+  const record = current.approvals[String(approvalId || '')];
+  if (!record || record.status !== 'pending') return null;
+  const at = nowIso(now);
+  const events = [];
+  if (record.escalationAt && !record.escalatedAt && Date.parse(record.escalationAt) <= now) {
+    record.escalatedAt = at;
+    events.push('approval.escalated');
+  }
+  if (record.expiresAt && !record.overdueAt && Date.parse(record.expiresAt) <= now) {
+    record.overdue = true;
+    record.overdueAt = at;
+    events.push('approval.overdue');
+  }
+  if (!events.length) return publicApproval(record);
+  save();
+  for (const eventType of events) {
+    recordEvent(
+      record.botId,
+      eventType,
+      {
+        status: 'pending',
+        taskType: record.operation,
+        mode: 'approval',
+        decision: eventType === 'approval.overdue' ? 'overdue' : 'escalated',
+      },
+      { approvalId: record.approvalId, taskId: record.taskId, sessionId: record.sessionId }
+    );
+  }
+  return publicApproval(record);
+}
+
+/**
+ * 启动恢复 / 定时检查：把已到期的 R2 标记为 overdue，并给未来的到期点挂计时器。
+ * R3（无 expiresAt/escalationAt）永不在这里被“超时处理”，可长期 pending。
+ */
+function expireDueApprovals({ now = Date.now() } = {}) {
+  const current = load();
+  const result = { checked: 0, escalated: [], overdue: [] };
+  for (const record of Object.values(current.approvals)) {
+    if (record.status !== 'pending') continue;
+    result.checked += 1;
+    if (!record.expiresAt && !record.escalationAt) continue;
+    const beforeEscalated = record.escalatedAt || null;
+    const beforeOverdue = record.overdueAt || null;
+    markOverdue(record.approvalId, { now });
+    if (!beforeEscalated && record.escalatedAt) result.escalated.push(record.approvalId);
+    if (!beforeOverdue && record.overdueAt) result.overdue.push(record.approvalId);
+    scheduleDeadline(record);
+  }
+  return result;
+}
+
 function createApproval({
   botId,
   operation,
@@ -263,6 +406,18 @@ function createApproval({
   }
 
   const now = nowIso();
+  const risk = memoryService.RISK[operation] || 'high';
+  const riskLevel = RISK_LEVEL_BY_RISK[risk] || 'R3';
+  const createdAt = Date.parse(now);
+  // R2 有 30 分钟审批 SLA 与升级点；R3 两者为 null，表示不设自动批准超时。
+  const expiresAt =
+    riskLevel === 'R2' ? new Date(createdAt + R2_SLA_MS).toISOString() : null;
+  const escalationAt =
+    riskLevel === 'R2'
+      ? new Date(createdAt + R2_SLA_MS * R2_ESCALATION_RATIO).toISOString()
+      : null;
+  // 冻结审批当时的策略版本；策略表不可读时为 null，执行侧按 fail-closed 拒绝。
+  const policyVersion = failOpenPolicy.currentPolicyVersion();
   const record = {
     approvalId: `appr_${crypto.randomUUID()}`,
     botId,
@@ -270,7 +425,14 @@ function createApproval({
     sessionId: requestSessionId,
     operation,
     payload: checked.value,
-    risk: memoryService.RISK[operation] || 'high',
+    risk,
+    riskLevel,
+    expiresAt,
+    escalationAt,
+    policyVersion,
+    overdue: false,
+    overdueAt: null,
+    escalatedAt: null,
     status: 'pending',
     requestedBy:
       requestedBy === 'user' || requestedBy === 'agent' ? requestedBy : 'agent',
@@ -285,6 +447,8 @@ function createApproval({
   };
   current.approvals[record.approvalId] = record;
   save();
+  // R2 的升级/到期只挂计时器做标记；R3 没有自动批准超时，不挂计时。
+  scheduleDeadline(record);
 
   recordEvent(
     botId,
@@ -318,6 +482,8 @@ function decide(approvalId, decision, { actor = permissions.SINGLE_USER_ACTOR, r
   record.decidedBy = String(actor || permissions.SINGLE_USER_ACTOR).slice(0, 80);
   record.decidedAt = now;
   record.reason = typeof reason === 'string' ? reason.slice(0, 200) : null;
+  // 离开 pending 后不再需要 escalation/overdue 计时。
+  disarmDeadline(record.approvalId);
   save();
 
   if (decision === 'reject' && record.taskId) {
@@ -388,6 +554,16 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
   if (!record) throw new AgentError('approval_not_found', '审批不存在', 404);
   if (record.status !== 'approved') {
     throw new AgentError('approval_not_approved', '审批尚未批准，不能执行', 409);
+  }
+  // ④ 老记录缺 riskLevel/expiresAt/escalationAt/policyVersion 时 fail-closed：
+  // 不执行、不推进任务、不把“缺字段”当作低风险。
+  const policyState = approvalPolicyState(record);
+  if (!policyState.ok) {
+    throw new AgentError(
+      'approval_policy_missing',
+      `审批记录缺少必需字段（${policyState.problems.join('、')}），按 fail-closed 拒绝执行`,
+      409
+    );
   }
 
   const permission = permissions.checkOperation({
@@ -607,17 +783,26 @@ function recoverInterrupted() {
       }
     }
   }
+  // ④ 重启后同样要补齐 R2 的 overdue 标记；R3 不会被“超时处理”。
+  const deadlines = expireDueApprovals();
   if (recovered) save();
-  return { recovered };
+  return {
+    recovered,
+    escalated: deadlines.escalated.length,
+    overdue: deadlines.overdue.length,
+  };
 }
 
 function reloadForTests() {
+  for (const approvalId of [...deadlineTimers.keys()]) disarmDeadline(approvalId);
   cache = null;
 }
 
 module.exports = {
   APPROVALS_FILE,
   STATUSES,
+  R2_SLA_MS,
+  R2_ESCALATION_RATIO,
   createApproval,
   listApprovals,
   getApproval,
@@ -625,6 +810,9 @@ module.exports = {
   approve,
   reject,
   execute,
+  expireDueApprovals,
+  markOverdue,
+  approvalPolicyState,
   recoverInterrupted,
   reloadForTests,
 };

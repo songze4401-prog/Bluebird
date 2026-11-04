@@ -74,6 +74,8 @@ const EVENT_TYPES = Object.freeze([
   'memory.write_proposed',
   'memory.changed',
   'approval.requested',
+  'approval.escalated',
+  'approval.overdue',
   'approval.resolved',
   'task.completed',
   'task.delivery',

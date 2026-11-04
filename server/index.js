@@ -4025,7 +4025,8 @@ const approvalRecovery = agentApprovals.recoverInterrupted();
 const agentQueue = agentRuntime.initializeTaskQueue();
 console.log(
   `[agents] task queue concurrency=${agentQueue.concurrency} recovered=${agentQueue.recovered} ` +
-    `approvalsInterrupted=${approvalRecovery.recovered}`
+    `approvalsInterrupted=${approvalRecovery.recovered} ` +
+    `approvalsOverdue=${approvalRecovery.overdue}`
 );
 
 const server = app.listen(PORT, '0.0.0.0', () => {
