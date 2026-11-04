@@ -1931,3 +1931,335 @@ test('并发：5 条混合角色受 TASK_CONCURRENCY=2 约束，结果/产物/�
     },
   }));
 });
+
+// ---- J. Phase 2 第 3 项：端到端验收句 ----
+// 验收句：跨 Agent 可协作但不能越权读取私有 Session；每个共享结论可追溯来源。
+// 能证明：三个真实注册 Agent（researcher / executor / reviewer）的**真实任务**在同一进程里
+// 通过共享产物 + 按需投影 + 来源链协作；executor 用自己令牌读 reviewer 私有 Worker 会话
+// 在库层与 HTTP 层都被拒、留痕、响应体不含对方字段；B 的来源链可逐环回溯，上游 A 标
+// invalidated 后 fail-closed。
+// 不能证明：跨进程隔离；真实模型下的协作质量（本轮模型为确定性 stub，无外部 API key）。
+
+async function runAgentTask(agentId, taskType, goal, allowedTools) {
+  const task = tasks.createTask({
+    agentId,
+    taskType,
+    goal,
+    allowedTools,
+    deadlineMs: 20000,
+    budget: { maxRounds: 3, maxToolCalls: 6, maxReadOnlyRetries: 1, tokenBudget: 4000 },
+  });
+  runtime.startTask(task.taskId);
+  return waitForTask(task.taskId, 20000);
+}
+
+async function sessionHttp(botId, sessionId, token) {
+  const headers = token ? { 'x-worker-scope-token': token } : {};
+  const response = await fetch(
+    `${agentApiBase}/agents/${encodeURIComponent(botId)}/sessions/${encodeURIComponent(sessionId)}`,
+    { headers }
+  );
+  const json = await response.json();
+  return { status: response.status, json };
+}
+
+function scopeFor(finished, allowedTaskIds, reason) {
+  return workerScope.openWorkerScope({
+    botId: finished.agentId,
+    taskId: finished.taskId,
+    sessionId: finished.sessionId,
+    runId: finished.runId,
+    allowedTaskIds,
+    grantedBy: 'owner',
+    reason,
+  });
+}
+
+test('端到端：researcher→executor→reviewer 共享结论可追溯；executor 越权读 reviewer 私有会话被拒', async () => {
+  await drainPendingTasks();
+
+  // 1. 真实任务：三个真实注册 Agent 各跑一条，第三方（另一任务）用于按版本复核。
+  const researcher = await runAgentTask(
+    'researcher',
+    'memory.recall',
+    'E2E_RESEARCH 产出结论 A 的事实依据',
+    ['memory_search']
+  );
+  const executor = await runAgentTask(
+    'executor',
+    'memory.write',
+    'E2E_EXECUTE 复用 A 产出结论 B',
+    ['memory_remember']
+  );
+  const reviewer = await runAgentTask(
+    'reviewer',
+    'review.verify',
+    'E2E_REVIEW 复核 B 的来源链',
+    ['knowledge_search']
+  );
+  const thirdParty = await runAgentTask(
+    'memory',
+    'memory.search',
+    'E2E_THIRD 第三方按版本读 B',
+    ['memory_search']
+  );
+
+  // 证据点 1：任务状态（真实任务完成 + 状态版本推进 + 会话归属自己的任务）。
+  for (const item of [researcher, executor, reviewer, thirdParty]) {
+    assert.equal(item.status, 'completed', `${item.agentId} 任务应完成`);
+    assert.ok(tasks.getRawTask(item.taskId).stateVersion > 0, '任务状态版本应推进');
+    assert.equal(
+      sessions.getSession(item.agentId, item.sessionId).owner.taskId,
+      item.taskId,
+      'Worker 会话归属自己的任务'
+    );
+  }
+  const researchRef = researcher.result.artifacts[0];
+  assert.ok(researchRef && researchRef.id && Number.isInteger(researchRef.version));
+
+  // 2. researcher 的结果登记为共享结论 A（版本在登记时钉住）。
+  const conclusionA = artifactCommit.publishSharedConclusion({
+    taskId: researcher.taskId,
+    runId: researcher.runId,
+    subject: '结论 A：跨 Agent 协作的事实依据',
+    evidence: [{ kind: researchRef.kind, id: researchRef.id, version: researchRef.version }],
+    withTaskIds: [executor.taskId, reviewer.taskId],
+  });
+
+  // 3. executor 通过投影读 A，并产出结论 B；B 的证据引用指向 A。
+  const scopeExecutor = scopeFor(executor, [researcher.taskId], '跨 Agent 读取共享结论 A');
+  const projectedA = scopeExecutor.projectSharedContext({
+    refs: [{ id: conclusionA.artifact.id, version: conclusionA.artifact.version }],
+    token: scopeExecutor.token,
+  });
+  // 证据点 2：投影输出键集合（只暴露共享工作区字段，不带对方的 session/messages）。
+  assert.deepEqual(Object.keys(projectedA).sort(), ['refs', 'requesterTaskId', 'source']);
+  assert.deepEqual(Object.keys(projectedA.refs[0]).sort(), [
+    'content',
+    'id',
+    'kind',
+    'provenance',
+    'version',
+  ]);
+  assert.equal(projectedA.refs[0].content.subject, '结论 A：跨 Agent 协作的事实依据');
+  assert.deepEqual(projectedA.refs[0].provenance, [
+    { kind: conclusionA.ref.kind, id: conclusionA.ref.id, version: conclusionA.ref.version },
+    { kind: researchRef.kind, id: researchRef.id, version: researchRef.version },
+  ]);
+  assert.ok(!JSON.stringify(projectedA).includes(researcher.sessionId), '投影不带对方会话');
+
+  const conclusionB = artifactCommit.publishSharedConclusion({
+    taskId: executor.taskId,
+    runId: executor.runId,
+    subject: '结论 B：在 A 之上推进的执行结论',
+    evidence: [
+      { kind: conclusionA.ref.kind, id: conclusionA.ref.id, version: conclusionA.ref.version },
+    ],
+    withTaskIds: [reviewer.taskId, thirdParty.taskId],
+  });
+
+  // 4. reviewer 任务校验 B 的来源链（A→B 可回溯）。
+  const scopeReviewer = scopeFor(reviewer, [executor.taskId], '复核 B 的来源链');
+  const reviewOfB = scopeReviewer.projectSharedContext({
+    refs: [{ id: conclusionB.artifact.id, version: conclusionB.artifact.version }],
+    token: scopeReviewer.token,
+  });
+  // 证据点 4：来源链回溯结果（B → A → researcher 产物）。
+  assert.deepEqual(reviewOfB.refs[0].provenance, [
+    { kind: conclusionB.ref.kind, id: conclusionB.ref.id, version: conclusionB.ref.version },
+    { kind: conclusionA.ref.kind, id: conclusionA.ref.id, version: conclusionA.ref.version },
+    { kind: researchRef.kind, id: researchRef.id, version: researchRef.version },
+  ]);
+
+  // 5a. 第三方（另一任务）按钉住版本读到 B。
+  const scopeThird = scopeFor(thirdParty, [executor.taskId], '第三方按版本复核 B');
+  const thirdRead = scopeThird.projectSharedContext({
+    refs: [{ id: conclusionB.artifact.id, version: conclusionB.artifact.version }],
+    token: scopeThird.token,
+  });
+  assert.equal(thirdRead.refs[0].version, conclusionB.ref.version);
+  assert.equal(thirdRead.refs[0].content.subject, '结论 B：在 A 之上推进的执行结论');
+  assert.deepEqual(thirdRead.refs[0].provenance, reviewOfB.refs[0].provenance);
+
+  // 5b. 越权尝试：executor 用自己的 wst_ 令牌读 reviewer 的私有 Worker 会话。
+  sessions.appendMessages(reviewer.agentId, reviewer.sessionId, [
+    { role: 'user', content: 'REVIEWER_PRIVATE_MARKER reviewer 私有正文' },
+  ]);
+
+  // 库层（与 HTTP 端点同一个校验函数）。
+  const libDenied = captureError(() =>
+    workerScope.authorizeSessionRead({
+      botId: reviewer.agentId,
+      sessionId: reviewer.sessionId,
+      token: scopeExecutor.token,
+    })
+  );
+  assert.equal(libDenied && libDenied.code, 'worker_scope_token_invalid');
+  assert.equal(libDenied.status, 401);
+  assert.ok(!JSON.stringify(libDenied).includes('REVIEWER_PRIVATE_MARKER'));
+  assert.equal(libDenied.details && libDenied.details.targetId, reviewer.sessionId);
+
+  // HTTP 层：复用已有的会话读取端点（未新增路由）。
+  const httpDenied = await sessionHttp(
+    reviewer.agentId,
+    reviewer.sessionId,
+    scopeExecutor.token
+  );
+  assert.equal(httpDenied.status, 401);
+  assert.equal(httpDenied.json.code, 'worker_scope_token_invalid');
+  assert.ok(!('session' in httpDenied.json) && !('messages' in httpDenied.json));
+  assert.ok(!JSON.stringify(httpDenied.json).includes('REVIEWER_PRIVATE_MARKER'));
+  assert.ok(!JSON.stringify(httpDenied.json).includes(reviewer.taskId));
+  // 回显的只有调用方自己请求的 targetId，不含对方任何会话字段。
+  assert.equal(httpDenied.json.targetId, reviewer.sessionId);
+
+  // 证据点 3：拒绝审计行（库层 + HTTP 层各一条，落在 reviewer 的审计里）。
+  const reviewerDenied = tasks
+    .listEvents(reviewer.agentId, { limit: 200 })
+    .filter(
+      event =>
+        event.eventType === 'worker.scope_denied' &&
+        event.payload.targetType === 'session' &&
+        event.payload.targetId === reviewer.sessionId
+    );
+  assert.equal(reviewerDenied.length, 2, '库层与 HTTP 层各留一条拒绝审计');
+  for (const event of reviewerDenied) {
+    assert.equal(event.payload.access, 'denied');
+    assert.equal(event.payload.reason, 'token_bot_mismatch');
+    assert.equal(event.payload.errorCode, 'worker_scope_token_invalid');
+    assert.equal(event.payload.requesterTaskId, null);
+  }
+  assert.ok(!JSON.stringify(reviewerDenied).includes('REVIEWER_PRIVATE_MARKER'));
+
+  // 6. 复核：A 标 invalidated 后，B 的来源链断裂（fail-closed，错误码确定）。
+  artifactStore.markStatus(conclusionA.artifact.id, 'invalidated', {
+    by: 'owner',
+    reason: '端到端：上游证据失效',
+  });
+  const broken = captureError(() =>
+    scopeReviewer.projectSharedContext({
+      refs: [{ id: conclusionB.artifact.id, version: conclusionB.artifact.version }],
+      token: scopeReviewer.token,
+    })
+  );
+  assert.equal(broken && broken.code, 'artifact_chain_broken');
+  assert.equal(broken.status, 409);
+  assert.equal(broken.details.reason, 'invalidated');
+  assert.equal(broken.details.artifactId, conclusionA.artifact.id);
+  assert.ok(!JSON.stringify(broken).includes('结论 A'));
+  const chainDenied = tasks
+    .listEvents(reviewer.agentId, { limit: 200 })
+    .filter(
+      event =>
+        event.eventType === 'worker.scope_denied' &&
+        event.payload.targetType === 'projection' &&
+        event.payload.targetId === conclusionB.artifact.id
+    );
+  assert.equal(chainDenied.length, 1);
+  assert.equal(chainDenied[0].payload.reason, 'chain_broken');
+  assert.equal(chainDenied[0].payload.errorCode, 'artifact_chain_broken');
+
+  // 事件 / 审计时间线：任务事件 + 作用域审计 + 产物共享审计，按时间合并。
+  const focusTaskIds = [researcher.taskId, executor.taskId, reviewer.taskId, thirdParty.taskId];
+  const focusTargetIds = new Set([
+    conclusionA.artifact.id,
+    conclusionB.artifact.id,
+    reviewer.sessionId,
+  ]);
+  const taskTimeline = ['researcher', 'executor', 'reviewer', 'memory'].flatMap(botId =>
+    tasks
+      .listEvents(botId, { limit: 200 })
+      .filter(
+        event =>
+          (['task.created', 'task.started', 'task.completed'].includes(event.eventType) &&
+            focusTaskIds.includes(event.taskId)) ||
+          (['worker.scope_read', 'worker.scope_denied'].includes(event.eventType) &&
+            focusTargetIds.has(event.payload.targetId))
+      )
+      .map(event => ({
+        at: event.timestamp,
+        actor: event.botId,
+        taskId: event.taskId,
+        event: event.eventType,
+        targetType: event.payload.targetType || null,
+        targetId: event.payload.targetId || null,
+        access: event.payload.access || null,
+        reason: event.payload.reason || null,
+        errorCode: event.payload.errorCode || null,
+      }))
+  );
+  const artifactTimeline = artifactStore
+    .auditEntries()
+    .filter(entry =>
+      [conclusionA.artifact.id, conclusionB.artifact.id].includes(entry.artifactId)
+    )
+    .map(entry => ({
+      at: entry.at,
+      actor: 'artifact-store',
+      taskId: entry.taskId,
+      event: entry.action,
+      targetType: 'artifact',
+      targetId: entry.artifactId,
+      access: null,
+      reason: entry.reason,
+      errorCode: null,
+    }));
+  const timeline = [...taskTimeline, ...artifactTimeline].sort(
+    (a, b) => Date.parse(a.at) - Date.parse(b.at)
+  );
+
+  console.log(
+    '[端到端-协作时间线]',
+    JSON.stringify({
+      tasks: [researcher, executor, reviewer, thirdParty].map(item => ({
+        agentId: item.agentId,
+        taskId: item.taskId,
+        status: item.status,
+        stateVersion: tasks.getRawTask(item.taskId).stateVersion,
+        sessionId: item.sessionId,
+      })),
+      conclusionA: {
+        id: conclusionA.artifact.id,
+        version: conclusionA.artifact.version,
+        sharedWith: artifactStore.get(conclusionA.artifact.id).share.taskIds.length,
+        evidence: conclusionA.evidence,
+      },
+      conclusionB: {
+        id: conclusionB.artifact.id,
+        version: conclusionB.artifact.version,
+        sharedWith: artifactStore.get(conclusionB.artifact.id).share.taskIds.length,
+        evidence: conclusionB.evidence,
+      },
+      projectionKeys: {
+        top: Object.keys(projectedA).sort(),
+        ref: Object.keys(projectedA.refs[0]).sort(),
+      },
+      provenance: {
+        A: projectedA.refs[0].provenance.map(item => `${item.kind}@v${item.version}`),
+        B: reviewOfB.refs[0].provenance.map(item => `${item.kind}@v${item.version}`),
+        thirdPartyReadVersion: thirdRead.refs[0].version,
+      },
+      denied: {
+        libCode: libDenied.code,
+        libStatus: libDenied.status,
+        httpStatus: httpDenied.status,
+        httpCode: httpDenied.json.code,
+        httpBodyKeys: Object.keys(httpDenied.json).sort(),
+        privateLeak: JSON.stringify(httpDenied.json).includes('REVIEWER_PRIVATE_MARKER'),
+        auditRows: reviewerDenied.map(event => ({
+          reason: event.payload.reason,
+          errorCode: event.payload.errorCode,
+          targetType: event.payload.targetType,
+        })),
+      },
+      chainBreak: {
+        code: broken.code,
+        status: broken.status,
+        reason: broken.details.reason,
+        artifactId: broken.details.artifactId,
+        audit: chainDenied.map(event => event.payload.errorCode),
+      },
+      timeline,
+    })
+  );
+});
