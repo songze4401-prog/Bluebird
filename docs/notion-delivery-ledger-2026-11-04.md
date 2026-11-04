@@ -1,6 +1,6 @@
 # Notion 交付台账（2026-11-04）
 
-> **结论**：按 Notion 原文口径，**Phase 0 未完成（0.5，其中“权限边界”已由 Owner 裁决暂缓）**，**Phase 1 交付物 3.0/3（第 1 项 1.0；第 2 项 1.0；第 3 项 1.0，真实 LongCat 模型一轮验证；按 §5 原句逐句拆为 3 项，Planner 与 Orchestrator 合算 1 项）**；4 条验收要求 **4/4 已满足（2026-11-04）**：预算硬限制（B-06=1，真实供应商 usage 结算）、任务路由可追踪（真实注册的 researcher/executor/reviewer 分派 + 候选集/依据落盘）、Worker Session 隔离（服务端签发令牌，含过期与吊销路径）、并发结果不串线（5 条混合角色 + `TASK_CONCURRENCY=2`）。**跨进程并发超出 Notion Phase 1 范围，未做；需跨进程锁，不计为未闭合缺口。** **Phase 2：第 1 项（共享产物/证据引用/版本/访问控制）= 1.0、第 2 项（私有上下文分离/按需投影/来源追踪）= 1.0（2026-11-05，本地分支 `phase2/blackboard-2026-11-05`，未 push）；第 3 项（验收句端到端）未开工。**
+> **结论**：按 Notion 原文口径，**Phase 0 未完成（0.5，其中“权限边界”已由 Owner 裁决暂缓）**，**Phase 1 交付物 3.0/3（第 1 项 1.0；第 2 项 1.0；第 3 项 1.0，真实 LongCat 模型一轮验证；按 §5 原句逐句拆为 3 项，Planner 与 Orchestrator 合算 1 项）**；4 条验收要求 **4/4 已满足（2026-11-04）**：预算硬限制（B-06=1，真实供应商 usage 结算）、任务路由可追踪（真实注册的 researcher/executor/reviewer 分派 + 候选集/依据落盘）、Worker Session 隔离（服务端签发令牌，含过期与吊销路径）、并发结果不串线（5 条混合角色 + `TASK_CONCURRENCY=2`）。**跨进程并发超出 Notion Phase 1 范围，未做；需跨进程锁，不计为未闭合缺口。** **Phase 2：第 1 项（共享产物/证据引用/版本/访问控制）= 1.0、第 2 项（私有上下文分离/按需投影/来源追踪）= 1.0（2026-11-05，本地分支 `phase2/blackboard-2026-11-05`，未 push）；第 3 项（验收句端到端）= 1.0（`59b09cb`），**Phase 2 三句合计 3/3**。**
 >
 > 唯一依据：《Bluebird Agent Runtime｜混合式多 Agent 目标架构 v1.0》
 > https://app.notion.com/p/Bluebird-Agent-Runtime-Agent-v1-0-40da957523c281359607e23f6a3c784f
@@ -23,7 +23,7 @@
 |---|---|---|---|---|---|
 | Phase 0：基线与契约收敛 | “对照当前 HEAD 和已合并实现，确认 Registry、任务队列、Session、Memory、事件、审计和通知链路的真实状态”“统一 Agent Manifest、Task Contract、Result Contract、状态机和权限模型”“输出 ADR” | “没有第二套平行任务协议；关键状态和权限边界可测试” | 0.5 | `docs/phase0-baseline-audit-2026-11-03.md`（判定整体不通过）；ADR 入库 `31a7a9b`；协议收敛 `e08b168`、`7c28a2b`；状态机用例 `tests/agent-recovery.test.js:58`、`:85` | 「权限边界可测试」**Owner 已裁决暂缓（2026-11-04）**：当前按单用户 `local-owner` 口径记录为已知限定，不计入未完成缺口、不安排下一步动作。“没有第二套平行协议”仅完成收敛声明，仍是缺口。 |
 | Phase 1：单主控 + 动态 Worker Pool | “在现有 Runtime 内建立统一 Planner / Orchestrator 接口”“支持少量 Agent 的能力匹配、动态分配、并行和依赖管理”“保留单 Agent 快速路径；先选 2—3 个真实专业 Agent 验证” | “任务路由可追踪、Worker Session 隔离、并发结果不串线、预算硬限制有效” | 1.0 | `server/agents/orchestrator.js` + `tests/agent-orchestrator.test.js` 12 条（交付物 1 的 4 条，`93c5b51`；交付物 2 的 7 条 2a–2g，`6a3cc84`；真实注册表路由 1 条，本轮 `agent-orchestrator` 11→12）；`server/agents/planner.js` + `tests/agent-planner.test.js` 4 条（Planner 侧 a–d，计划只落 workflow-store）；`server/agents/dependencies.js`（唯一 `isReady` + `validateGraph`）+ `server/agents/tasks.js`（`dependsOn`/`settleDependencies`）+ `server/agents/runtime.js`（取队前 settle + runTask 前置校验）+ `tests/agent-worker.test.js` 44 条（依赖 5 条 + 并发上限 1 条 + 令牌/HTTP 5 条 + 5 条混合角色并发 1 条，`agent-worker` 37→44）；`server/agents/worker-scope.js` + 服务端作用域令牌（`issueScopeToken`/`revokeScopeToken`，sha256 映射 + allowlist + TTL；HTTP 读端点只认 `x-worker-scope-token`）；`server/agents/manifest.js` 新增 researcher/executor/reviewer 三个真实 Manifest + 真实 LongCat-2.5 一轮验证（证据见「交付物 3 真实模型验证证据」）；B-06 `tests/agent-budget-atomic.test.js` 7 条（`27b99ec`）+ 真实 usage 结算 | 交付物 1 = **1.0**（Orchestrator 唯一入口 + Planner 规则拆解 + 计划只落既有 workflow-store + 批量多步任务共用同一 planId/planVersion），交付物 2 = **1.0**（四项逐条证据见“交付物 2 四项验收证据”），交付物 3 = **1.0**（三个能力标签可扩展的 Manifest + 真实 LongCat 模型一轮：能力匹配/并行重叠/依赖时序/token usage；见“交付物 3 真实模型验证证据”）；合计 **3.0/3**；4 条验收 **4/4**（路由/隔离/并发/预算，逐条证据见 4–7）。**限定**：三个角色共用同一 LongCat-2.5 模型，只是提示词/能力标签分工，不是异构多模型协作；本轮依赖链下游任务因 `maxTokens=320` 触发 `empty_reply`（依赖时序正确，内容未产出）；**真实模型下的拆解/角色分工质量仍未经评测**；**跨进程并发超出 Notion Phase 1 范围，未做（需跨进程锁），不列为缺口**。下一步＝Phase 2 立项拍板。 |
-| Phase 2：Blackboard + Context Broker | “建立任务级共享产物、证据引用、版本和访问控制”“Worker 私有上下文与共享工作区分离”“支持按需上下文投影和来源追踪” | “跨 Agent 可协作但不能越权读取私有 Session；每个共享结论可追溯来源” | 第 1 项 **1.0**；第 2 项 **1.0**；第 3 项 **0** | 第 1 项（2026-11-05，`c60a1bb` + `4573bc6`）：`share()`/`sharedAccess()`/`readSharedArtifact()` + 令牌第二道门 + `publishSharedConclusion()` 证据门禁。第 2 项（2026-11-05，`db4d3cf`）：`worker-scope.projectSharedContext()` 只放行已共享且版本钉住的引用，`artifact-store.resolveProvenance()` 沿 `{kind,id,version}` 链 fail-closed，投影结果仅含产物引用、不带私有 session/messages。用例：`agent-worker` +4（未授权投影、版本钉住、私有隔离、来源链断裂），全量 2198/2198 通过。详见「Phase 2 第 1 项验收证据」「Phase 2 第 2 项验收证据」 | 第 1、2 项完成，但**未新增 HTTP 路由**（库级 API + 用例验证）；runtime 不自动投影/自动发布；**尚无撤销共享/逐产物吊销入口**；证据均为同进程 + stub Provider。第 3 项（验收句端到端：跨 Agent 协作但不可越权读私有 Session + 每个共享结论可追溯）未开工。下一步＝第 3 项入口。 |
+| Phase 2：Blackboard + Context Broker | “建立任务级共享产物、证据引用、版本和访问控制”“Worker 私有上下文与共享工作区分离”“支持按需上下文投影和来源追踪” | “跨 Agent 可协作但不能越权读取私有 Session；每个共享结论可追溯来源” | 第 1 项 **1.0**；第 2 项 **1.0**；第 3 项 **1.0**（合计 **3/3**） | 第 1 项（2026-11-05，`c60a1bb` + `4573bc6`）：`share()`/`sharedAccess()`/`readSharedArtifact()` + 令牌第二道门 + `publishSharedConclusion()` 证据门禁。第 2 项（2026-11-05，`db4d3cf`）：`worker-scope.projectSharedContext()` 只放行已共享且版本钉住的引用，`artifact-store.resolveProvenance()` 沿 `{kind,id,version}` 链 fail-closed，投影结果仅含产物引用、不带私有 session/messages。第 3 项（2026-11-05，`59b09cb`）：researcher/executor/reviewer 三个真实注册 Agent 的真实任务一次跑通 A→B→复核，executor 自己的 `wst_` 令牌读 reviewer 私有会话在库层与 HTTP 层均 401 且留痕，A 标 invalidated 后 B 的链 `artifact_chain_broken`（reason=invalidated）。用例：`agent-worker` +1（端到端 1 条，含 4+ 证据采集点与事件/审计时间线）；全量 2199/2199 通过。详见「Phase 2 第 1 项验收证据」「Phase 2 第 2 项验收证据」「Phase 2 第 3 项验收证据」 | 三项完成，但**未新增 HTTP 路由**（库级 API + 复用既有会话读端点）；runtime 不自动投影/自动发布；**尚无撤销共享/逐产物吊销入口**；证据均为同进程 + stub Provider，真实模型协作质量未验证。下一步＝Phase 3 立项拍板（待 Owner）。 |
 | Phase 3：验证闭环 + 事件化工作流 | “引入确定性验证、独立 Reviewer、冲突处理和人工审批节点”“事件、状态、结果投递采用幂等与可恢复设计”“建立失败重试、取消、Checkpoint、死信和成本追踪” | “失败注入、重复事件、Reviewer 检出率和结果投递恢复均有测试证据” | 0 | 已有局部：审批节点 `server/agents/approvals.js`、幂等账本 `server/agents/op-ledger.js`（`a6d3455`）、崩溃注入 `tests/agent-crash-injection.test.js` | 缺确定性验证器、独立 Reviewer、冲突处理、死信与成本追踪；Reviewer 检出率无任何测试。下一步＝待拍板是否单独立项。 |
 | Phase 4：受控自治与自我改进 | “根据真实运行数据动态组队、重规划和选择验证强度”“建立离线评测集、策略版本、灰度发布和回滚”“在权限、预算和审批边界不变的前提下，逐步开放低风险自动化” | “相对基线在成功率、返工率、成本或延迟上有可重复改善，且安全指标不退化” | 0 | 全仓 `.js` grep `benchmark\|holdout` 零命中；无评测集、无灰度/回滚机制 | 未开始；且验收句要求“相对基线可重复改善”，**必须先有真实模型环境与压测数据**。 |
 
@@ -323,7 +323,7 @@ enabled = ["executor","researcher","reviewer"]；registeredAgents = 4
 - 共享是**显式登记**：runtime 不会自动把任务产物登记为共享，需调用 `artifactStore.share()` 或 `artifactCommit.publishSharedConclusion()`。
 - **无撤销共享 / 逐产物吊销入口**（令牌吊销可整体失效，但共享登记只增不减）。
 - 未新增 HTTP 路由；`GET /agents/:botId/sessions/:sessionId` 行为不变。
-- 第 2 项见下节（已完成，1.0）；第 3 项验收句端到端未开工。
+- 第 2 项见下节（已完成，1.0）；第 3 项验收句端到端见「Phase 2 第 3 项验收证据」（已完成，1.0）。
 
 ---
 
@@ -359,7 +359,62 @@ enabled = ["executor","researcher","reviewer"]；registeredAgents = 4
 - 投影只做**单跳根引用 + 证据链复读**，不做检索/向量化/排序/裁剪（Owner 限定）。
 - runtime 不自动调用 `projectSharedContext`；投影需显式请求。
 - 无撤销共享；无 HTTP 路由；无跨进程锁。
-- 第 3 项（验收句端到端：跨 Agent 协作且不可越权读私有 Session + 每个共享结论可追溯）未开工。
+- 第 3 项（验收句端到端：跨 Agent 协作且不可越权读私有 Session + 每个共享结论可追溯）已完成 1.0，见下节。
+
+---
+
+## Phase 2 第 3 项验收证据（2026-11-05，分支 `phase2/blackboard-2026-11-05`，`59b09cb`）
+
+> 验收句（**逐句判**）：① 「跨 Agent 可协作但不能越权读取私有 Session」；② 「每个共享结论可追溯来源」。
+> 口径：两句都用**真实服务端对象**（真实任务、真实 `wst_` 令牌、真实产物存储）在设计上**一次跑通**，模型为确定性 stub（**无外部 API key、未新建 Provider**），单文件可复跑。
+> 证据边界：同一进程；不含跨进程；**真实模型下的协作质量未验证**（见文末）。
+
+**场景用例**：`tests/agent-worker.test.js`「端到端：researcher→executor→reviewer 共享结论可追溯；executor 越权读 reviewer 私有会话被拒」（复跑：`node --test tests/agent-worker.test.js`）。
+
+**事件 / 审计时间线（实测，UTC，取自 `[端到端-协作时间线]` 探针）**：
+
+| 时刻（Z） | 主体 | 事件 | 目标 | 结果 / 说明 |
+|---|---|---|---|---|
+| 20.884 → 21.012 | researcher | `task.created` → `started` → `completed` | `task_c567…`（`stateVersion=12`） | 真实任务完成，产出私有证据产物 |
+| 21.027 → 21.169 | executor | `task.created` → `started` → `completed` | `task_366e…`（`stateVersion=12`） | 真实任务完成（自己的会话） |
+| 21.185 → 21.334 | reviewer | `task.created` → `started` → `completed` | `task_f131…`（`stateVersion=14`） | 真实任务完成；私有会话 `bs_9318…` |
+| 21.349 → 21.477 | memory（第三方任务） | `task.created` → `started` → `completed` | `task_68ce…` | 另一任务就绪，用于按版本复核 |
+| 21.489 | artifact-store | `artifact.persisted` + `artifact.shared`（`share_targets:2`） | A `art_409ee0…` | researcher 登记共享结论 A，钉 v1 |
+| 21.504 / .513 / .524 | executor | `worker.scope_read` ×3（artifact → shared_artifact → projection） | A | **executor 通过投影读到 A** |
+| 21.533 | artifact-store | `artifact.persisted` + `artifact.shared`（`share_targets:2`） | B `art_cb00ef…` | executor 发布 B，证据引用指向 A@v1 |
+| 21.617 / .631 / .642 | reviewer | `worker.scope_read` ×3 | B | **reviewer 复核 B 的来源链** |
+| 21.654 / .667 / .689 | memory（第三方） | `worker.scope_read` ×3 | B | **第三方另一任务按 v1 读到 B** |
+| 21.700 / .711 | reviewer（目标 bot） | **`worker.scope_denied` ×2** | reviewer 私有会话 `bs_9318…` | 库层 + HTTP 层各 1 条：`denied` / `token_bot_mismatch` / `worker_scope_token_invalid` |
+| 21.720 | artifact-store | `artifact.invalidated` | A | Owner 将 A 标失效（`端到端：上游证据失效`） |
+| 21.727 / .737 | reviewer | `worker.scope_read` ×2 | B | B 本体仍可读，开始复读证据链 |
+| 21.747 | reviewer | **`worker.scope_denied`** | B（投影） | **链断裂**：`chain_broken` / `artifact_chain_broken` |
+
+（同一目标的多条 `scope_read` 依次对应「令牌门 → 共享登记门 → 投影审计」三层，属第 1/2 项既有语义。）
+
+**证据采集点（实测值，≥4）**：
+
+| # | 采集点 | 实测 | 证明什么 |
+|---|---|---|---|
+| 1 | 任务状态 | 4 条真实任务 `completed`；`stateVersion` = 12/12/14/12；每条会话 `owner.taskId` = 自身任务 | 是真实任务而非构造态 |
+| 2 | 投影输出键集合 | 顶层 `["refs","requesterTaskId","source"]`；引用 `["content","id","kind","provenance","version"]`；投影文本不含 researcher 会话 id | 共享工作区口径固定，不夹带私有字段 |
+| 3 | 拒绝审计行 | reviewer 审计 2 条 `worker.scope_denied`（`targetType=session`、`access=denied`、`reason=token_bot_mismatch`、`errorCode=worker_scope_token_invalid`、`requesterTaskId=null`） | 越权被拒且留痕；库层 + HTTP 层各一条 |
+| 4 | 来源链回溯 | A：`conclusion@v1 → message@v1`；B：`conclusion@v1 → conclusion@v1(A) → message@v1`；第三方按 v1 读到 B（`thirdPartyReadVersion=1`）；A 失效后 `artifact_chain_broken` / 409 / `reason=invalidated` / `artifactId=A` | 每个共享结论可逐环回溯；上游失效 fail-closed |
+| 5 | 越权响应体 | 库层 401；HTTP 401；body 键 `["code","error","targetId","targetType"]`；`privateLeak=false`（无 `REVIEWER_PRIVATE_MARKER`、无 `session`/`messages`、无对方 `taskId`） | 「响应体不含对方任何字段」；`targetId` 仅是调用方自带的请求标识回显 |
+
+**逐句判定**：
+
+- ① 前半「跨 Agent 可协作」：**成立**。executor 的真实任务通过投影读到 researcher 的共享结论 A，并据此发布 B（B 的证据引用指向 A@v1）；reviewer 的真实任务投影复核 B；第三方另一任务按 v1 读到 B。
+- ① 后半「不能越权读取私有 Session」：**成立**。executor 用自己的 `wst_` 令牌读 reviewer 私有 Worker 会话，**库层 `authorizeSessionRead` 与既有 HTTP `GET /agents/:botId/sessions/:sessionId` 均 401**（未新增路由），两条审计落盘，响应体不含对方内容。
+- ② 「每个共享结论可追溯来源」：**成立**。A、B 的 `provenance` 均回指到具体产物与版本；A 标 `invalidated` 后 B 的链判定为断裂（`artifact_chain_broken`，409，`details.reason=invalidated`，`details.artifactId=A`），不降级为「静默取最新版」。
+- **结论：Phase 2 第 3 项 = 1.0；Phase 2 三句合计 3/3。**
+- **未验证（不计入验收）**：真实模型下的协作质量（本轮模型为确定性 stub，仅验证协议与链路）。
+
+**计数与门禁（实测）**：`agent-worker` 50→51；`verify-test-coverage` → `backend=2199/2199 nodeSuite=222/222 runner=1977/1977 frontend=188/188 suites=22/22 文件 87/87 failed=0`；`tsc --noEmit`、`npm run lint`、`verify-api-capabilities`（95 路由 / 20 族 / 仅 API 9）、`sync-doc-counts --check` 全部 EXIT=0；全量 `node scripts/run-tests.js` → `87 个测试文件，全部通过`，`FULL_EXIT=0`。
+
+**限定**：
+- 协作是**显式**的：任务完成后需显式调用 `publishSharedConclusion` / `projectSharedContext`；runtime 不自动发布、不自动投影。
+- 越权拒绝的审计落在**目标 bot** 的事件流（`taskId=null`，不含令牌与正文）。
+- 无撤销共享、无跨进程锁；不做检索/UI/多用户；`state-machine.js` 与状态词表未改。
 
 ---
 
