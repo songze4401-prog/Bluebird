@@ -12,6 +12,7 @@ const path = require('path');
 const http = require('http');
 const test = require('node:test');
 const assert = require('node:assert');
+const express = require('express');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-agent-worker-'));
 process.env.BLUEBIRD_DATA_DIR = TMP;
@@ -28,11 +29,14 @@ const sessions = require('../server/agents/sessions');
 const tasks = require('../server/agents/tasks');
 const artifactStore = require('../server/agents/artifact-store');
 const workerScope = require('../server/agents/worker-scope');
+const { createAgentRouter } = require('../server/agents/routes');
 const runtime = require('../server/agents/runtime');
 
 let providerServer;
 let providerBase;
 let providerId;
+let agentApiServer;
+let agentApiBase;
 let pendingTimers = [];
 // S7：同一 goal 首次请求返回 429，用于验证 retrying 退避与重试上限。
 const rateLimitedGoals = new Set();
@@ -192,6 +196,15 @@ test.before(async () => {
     apiKey: 'worker-bot-key',
   });
   config.setCredentialId('memory', credential.credentialId);
+
+  // HTTP 层隔离回归：直接挂载 createAgentRouter，requireAuth 放行（不改生产认证模型）。
+  const app = express();
+  app.use(express.json());
+  app.use(createAgentRouter({ requireAuth: (req, res, next) => next() }));
+  agentApiServer = await new Promise(resolve => {
+    const server = app.listen(0, '127.0.0.1', () => resolve(server));
+  });
+  agentApiBase = `http://127.0.0.1:${agentApiServer.address().port}`;
 });
 
 test.after(async () => {
@@ -202,6 +215,12 @@ test.after(async () => {
       providerServer.closeAllConnections();
     }
     await new Promise(resolve => providerServer.close(resolve));
+  }
+  if (agentApiServer) {
+    if (typeof agentApiServer.closeAllConnections === 'function') {
+      agentApiServer.closeAllConnections();
+    }
+    await new Promise(resolve => agentApiServer.close(resolve));
   }
   try {
     fs.rmSync(TMP, { recursive: true, force: true });
@@ -877,4 +896,162 @@ test('回归：隔离接入后既有会话投影/关闭语义与投影字段不�
     sessions.closeSession('memory', session.id, { status: 'active' })
   );
   assert.equal(rejected && rejected.code, 'invalid_lifecycle_status');
+});
+
+// ---- G. HTTP 读端点：Worker 作用域对外生效 ----
+// 说明：通过 createAgentRouter 直接挂载（requireAuth 放行），验证的是真实路由处理器；
+// 调用方身份 requesterTaskId 是自报值（生产仍是单用户 local-owner，无调用者认证）。
+
+async function getSessionHttp(sessionId, query = '') {
+  const response = await fetch(
+    `${agentApiBase}/agents/memory/sessions/${encodeURIComponent(sessionId)}${query}`
+  );
+  const json = await response.json();
+  return { status: response.status, json };
+}
+
+function httpScopeFixture() {
+  const taskA = makeTask({ goal: 'HTTP 隔离甲' });
+  const taskB = makeTask({ goal: 'HTTP 隔离乙' });
+  const sessionA = sessions.createSession('memory', { title: 'HTTP 甲', scope: 'worker' });
+  const sessionB = sessions.createSession('memory', { title: 'HTTP 乙', scope: 'worker' });
+  sessions.appendMessages('memory', sessionA.id, [{ role: 'user', content: '甲的 HTTP 正文' }]);
+  sessions.appendMessages('memory', sessionB.id, [{ role: 'user', content: '乙的 HTTP 正文' }]);
+  openScope(taskA.taskId, sessionA.id, 'run_http_a');
+  openScope(taskB.taskId, sessionB.id, 'run_http_b');
+  return { taskA, taskB, sessionA, sessionB };
+}
+
+test('HTTP 隔离：跨 Worker 读会话消息被拒（409 + 既有错误码）', async () => {
+  const { taskA, sessionB } = httpScopeFixture();
+  const denied = await getSessionHttp(sessionB.id, `?requesterTaskId=${taskA.taskId}`);
+  assert.equal(denied.status, 409);
+  assert.equal(denied.json.code, 'worker_session_owner_mismatch');
+  assert.ok(!JSON.stringify(denied.json).includes('乙的 HTTP 正文'));
+
+  const anonymous = await getSessionHttp(sessionB.id);
+  assert.equal(anonymous.status, 409);
+  assert.equal(anonymous.json.code, 'worker_session_owner_mismatch');
+
+  const events = tasks
+    .listEvents('memory', { limit: 200 })
+    .filter(
+      event =>
+        event.eventType === 'worker.scope_denied' && event.payload.targetId === sessionB.id
+    );
+  assert.ok(events.length >= 2);
+  assert.ok(events.every(event => event.payload.access === 'denied'));
+  assert.ok(events.some(event => event.payload.requesterTaskId === taskA.taskId));
+  assert.ok(events.some(event => event.payload.requesterTaskId === null));
+});
+
+test('HTTP 隔离：本 Worker 读自己的会话 → 200 且只返回自己消息', async () => {
+  const { taskA, sessionA } = httpScopeFixture();
+  const own = await getSessionHttp(sessionA.id, `?requesterTaskId=${taskA.taskId}`);
+  assert.equal(own.status, 200);
+  assert.deepEqual(
+    own.json.messages.map(item => item.content),
+    ['甲的 HTTP 正文']
+  );
+  assert.equal(own.json.session.owner.taskId, taskA.taskId);
+});
+
+test('HTTP 隔离：显式授权读他人 Worker 会话 → 200 且写 worker.scope_read', async () => {
+  const { taskA, sessionB } = httpScopeFixture();
+  const granted = await getSessionHttp(
+    sessionB.id,
+    `?requesterTaskId=${taskA.taskId}&grantedBy=owner&reason=${encodeURIComponent('事故复盘')}`
+  );
+  assert.equal(granted.status, 200);
+  assert.deepEqual(
+    granted.json.messages.map(item => item.content),
+    ['乙的 HTTP 正文']
+  );
+  const events = tasks
+    .listEvents('memory', { limit: 200 })
+    .filter(
+      event =>
+        event.eventType === 'worker.scope_read' && event.payload.targetId === sessionB.id
+    );
+  assert.ok(events.length >= 1);
+  assert.equal(events[0].payload.grantedBy, 'owner');
+  assert.equal(events[0].payload.reason, '事故复盘');
+  assert.equal(events[0].payload.access, 'granted');
+});
+
+test('HTTP 回归：direct 会话与缺失会话的既有行为不变', async () => {
+  const direct = sessions.createSession('memory', { title: '普通会话' });
+  sessions.appendMessages('memory', direct.id, [{ role: 'user', content: 'direct 正文' }]);
+  const read = await getSessionHttp(direct.id);
+  assert.equal(read.status, 200);
+  assert.deepEqual(read.json.messages.map(item => item.content), ['direct 正文']);
+  assert.equal(read.json.session.owner, null);
+
+  const missing = await getSessionHttp('bs_missing_http');
+  assert.equal(missing.status, 404);
+  assert.deepEqual(Object.keys(missing.json).sort(), ['code', 'error']);
+  assert.equal(missing.json.code, 'agent_session_not_found');
+  assert.equal(missing.json.error, 'Bot 会话不存在');
+
+  const list = await fetch(`${agentApiBase}/agents/memory/sessions`);
+  assert.equal(list.status, 200);
+  const listJson = await list.json();
+  assert.ok(Array.isArray(listJson.sessions));
+});
+
+// ---- H. 真并发：同一进程内两条任务同时执行，结果不串线 ----
+// 能证明：同一进程内 Promise 级并发下，结果/产物/会话归属互不混入。
+// 不能证明：跨进程隔离、真实模型并发（stub provider 仍是确定性回显）。
+
+test('并发：两条任务同时跑，结果、产物引用与会话各归各且不串线', async () => {
+  const taskA = makeTask({ goal: 'SLOW_TASK CONCURRENT_ALPHA 并发甲' });
+  const taskB = makeTask({ goal: 'SLOW_TASK CONCURRENT_BETA 并发乙' });
+  const [settledA, settledB] = await Promise.allSettled([
+    (async () => {
+      runtime.startTask(taskA.taskId);
+      return waitForTask(taskA.taskId);
+    })(),
+    (async () => {
+      runtime.startTask(taskB.taskId);
+      return waitForTask(taskB.taskId);
+    })(),
+  ]);
+  assert.equal(settledA.status, 'fulfilled');
+  assert.equal(settledB.status, 'fulfilled');
+  const a = settledA.value;
+  const b = settledB.value;
+  assert.equal(a.status, 'completed');
+  assert.equal(b.status, 'completed');
+
+  // 时序重叠即真有并发：串行执行时后一条的 runStartedAt 不会早于前一条的 completedAt。
+  const overlap =
+    Math.min(Date.parse(a.completedAt), Date.parse(b.completedAt)) -
+    Math.max(Date.parse(a.runStartedAt), Date.parse(b.runStartedAt));
+  assert.ok(overlap > 200, `两条任务执行区间重叠 ${overlap}ms（应远大于 0）`);
+
+  assert.notEqual(a.runId, b.runId);
+  assert.notEqual(a.sessionId, b.sessionId);
+  assert.ok(a.result.summary.includes('CONCURRENT_ALPHA'));
+  assert.ok(!JSON.stringify(a).includes('CONCURRENT_BETA'));
+  assert.ok(!JSON.stringify(a).includes(taskB.taskId));
+  assert.ok(!JSON.stringify(a).includes(b.sessionId));
+  assert.ok(b.result.summary.includes('CONCURRENT_BETA'));
+  assert.ok(!JSON.stringify(b).includes('CONCURRENT_ALPHA'));
+  assert.ok(!JSON.stringify(b).includes(taskA.taskId));
+  assert.ok(!JSON.stringify(b).includes(a.sessionId));
+
+  const idsA = a.result.artifacts.map(ref => ref.id);
+  const idsB = b.result.artifacts.map(ref => ref.id);
+  assert.ok(idsA.length > 0 && idsB.length > 0);
+  assert.deepEqual(idsA.filter(id => idsB.includes(id)), []);
+  for (const id of idsA) assert.equal(artifactStore.get(id).taskId, taskA.taskId);
+  for (const id of idsB) assert.equal(artifactStore.get(id).taskId, taskB.taskId);
+
+  const rawA = tasks.getRawTask(taskA.taskId);
+  const rawB = tasks.getRawTask(taskB.taskId);
+  assert.ok(rawA.stateVersion > 0 && rawB.stateVersion > 0);
+  assert.equal(rawA.status, 'completed');
+  assert.equal(rawB.status, 'completed');
+  assert.equal(sessions.getSession('memory', a.sessionId).owner.taskId, taskA.taskId);
+  assert.equal(sessions.getSession('memory', b.sessionId).owner.taskId, taskB.taskId);
 });

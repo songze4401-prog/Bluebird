@@ -224,6 +224,58 @@ function openWorkerScope({
   };
 }
 
+/**
+ * HTTP 读端点的作用域校验（只读，不绑定 owner、不修改会话）。
+ * - direct 会话不参与 Worker 隔离，保持既有可见性（旧调用零回归）；
+ * - worker 会话：owner.taskId === requesterTaskId 放行（本任务读自己）；
+ * - 其余一律默认拒绝（worker_session_owner_mismatch 409），
+ *   显式 {grantedBy, reason} 授权才放行；拒绝与放行都写 worker.scope_* 审计。
+ *
+ * 边界说明：requesterTaskId 是调用方自报的上下文标识（当前单用户 local-owner
+ * 模型没有可验证的调用者身份），因此这里挡的是"误读/越界读"，不是抗恶意伪造。
+ */
+function authorizeSessionRead({
+  botId,
+  sessionId,
+  requesterTaskId = null,
+  authorization = null,
+} = {}) {
+  const targetId = truncate(sessionId);
+  const session = sessions.getSession(botId, targetId);
+  if (!session) {
+    throw new AgentError('agent_session_not_found', 'Bot 会话不存在', 404);
+  }
+  if (!session.owner) return session;
+  const requester = truncate(requesterTaskId) || null;
+  if (requester && session.owner.taskId === requester) return session;
+  if (!isGranted(authorization)) {
+    auditRead(botId, requester, targetId, null, 'worker.scope_denied', {
+      targetType: 'session',
+      targetId,
+      requesterTaskId: requester,
+      access: 'denied',
+      reason: 'no_authorization',
+      errorCode: OWNER_MISMATCH,
+    });
+    throw new AgentError(
+      OWNER_MISMATCH,
+      'Worker 会话属于其他任务，读取被拒绝',
+      409,
+      { targetType: 'session', targetId, requesterTaskId: requester }
+    );
+  }
+  auditRead(botId, requester, targetId, null, 'worker.scope_read', {
+    targetType: 'session',
+    targetId,
+    requesterTaskId: requester,
+    access: 'granted',
+    grantedBy: authorization.grantedBy,
+    reason: authorization.reason,
+  });
+  return session;
+}
+
 module.exports = {
   openWorkerScope,
+  authorizeSessionRead,
 };
