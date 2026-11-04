@@ -23,6 +23,10 @@ const tasks = require('../../server/agents/tasks');
 const approvals = require('../../server/agents/approvals');
 const opLedger = require('../../server/agents/op-ledger');
 const artifactStore = require('../../server/agents/artifact-store');
+const workflowStore = require('../../server/agents/workflow-store');
+const routerModule = require('../../server/agents/router');
+const routingModule = require('../../server/agents/routing-config');
+const manifest = require('../../server/agents/manifest');
 const runtime = require('../../server/agents/runtime');
 const memory = require('../../server/memory');
 const { createSideEffectGuard } = require('../../server/agents/side-effect-guard');
@@ -100,6 +104,57 @@ function snapshotTask(taskId) {
 function approvalRecords() {
   const store = JSON.parse(fs.readFileSync(approvals.APPROVALS_FILE, 'utf8'));
   return Object.values(store.approvals);
+}
+
+// 与 tests/agent-workflow-binding.test.js 相同的接线：只替换外部副作用，任务/计划用真实存储。
+function makeChildRouter() {
+  const agents = [
+    {
+      botId: manifest.MEMORY_BOT_MANIFEST.botId,
+      status: 'enabled',
+      statusReason: null,
+      capabilities: [...manifest.MEMORY_BOT_MANIFEST.capabilities],
+      acceptedTaskTypes: [...manifest.MEMORY_BOT_MANIFEST.acceptedTaskTypes],
+      taskContracts: JSON.parse(JSON.stringify(manifest.MEMORY_BOT_MANIFEST.taskContracts)),
+      toolAllowlist: [...manifest.MEMORY_BOT_MANIFEST.toolAllowlist],
+      concurrencyLimit: manifest.MEMORY_BOT_MANIFEST.concurrencyLimit,
+      routingPriority: manifest.MEMORY_BOT_MANIFEST.routingPriority,
+      defaultTimeoutMs: manifest.MEMORY_BOT_MANIFEST.defaultTimeoutMs,
+    },
+  ];
+  return routerModule.createRouter({
+    getAgents: () => agents,
+    getConfig: () => ({
+      config: JSON.parse(JSON.stringify(routingModule.DEFAULT_ROUTING)),
+      digest: 'digest-c3-crash',
+    }),
+    sessions: {
+      createSession: () => ({ id: 'bs_c3_crash' }),
+      getSession: () => ({ id: 'bs_c3_crash' }),
+      attachOwner: () => {},
+    },
+    appendEvent: () => {},
+    startTask: () => {},
+    load: () => ({ queuedTotal: 0, runningByAgent: {} }),
+  });
+}
+
+function planSummary() {
+  try {
+    const store = workflowStore.read();
+    return {
+      ok: true,
+      plans: Object.values(store.plans).map(lineage => ({
+        planId: lineage.planId,
+        headVersion: lineage.headVersion,
+        versions: Object.keys(lineage.versions).map(Number),
+        digests: Object.values(lineage.versions).map(entry => entry.digest),
+      })),
+      refs: Object.keys(store.refs).length,
+    };
+  } catch (error) {
+    return { ok: false, errorCode: (error && error.code) || 'unknown' };
+  }
 }
 
 async function main() {
@@ -250,6 +305,31 @@ async function main() {
         task: snap,
         terminal: snap ? tasks.isTerminalStatus(snap.status) : false,
         ledger: ledgerRows().map(row => ({ status: row.status })),
+      });
+      process.exit(0);
+      return;
+    }
+
+    // 5) 计划已 fsync 落盘、任务引用尚未创建（C3 / S1）
+    case 'plan-after-save': {
+      makeChildRouter().dispatch({
+        agentId: 'memory',
+        taskType: 'memory.search',
+        goal: 'C3 计划落盘窗口',
+        idempotencyKey: 'c3-plan-after-save',
+      });
+      print({ unexpected: '计划落盘后没有被杀' });
+      process.exit(9);
+      return;
+    }
+    case 'plan-after-save-restart': {
+      const queue = runtime.initializeTaskQueue();
+      print({
+        scenario: SCENARIO,
+        tasks: tasks.allTasks().map(task => snapshotTask(task.taskId)),
+        plans: planSummary(),
+        queuePlans: queue.plans,
+        queueRecovery: { recovered: queue.recovered, recovery: queue.recovery },
       });
       process.exit(0);
       return;

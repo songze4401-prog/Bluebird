@@ -456,3 +456,43 @@ P1–P3 已在本分支落地（每步独立提交），**未合并、未开 PR�
 4. **单实例假设**：`BLUEBIRD_ALLOW_MULTI=1` 绕过锁后，plan store 变成多写者，head 可能被覆盖。本段沿用既有假设，不解决，继续标「未验证」。
 
 **本段交付**：仅设计文档这一节，无代码改动。
+
+### 11.14 C1–C3 实施与实跑结果（2026-11-04）
+
+三个提交全部落地：
+
+| 提交 | 内容 | 用例 |
+| --- | --- | --- |
+| C1 | `server/agents/workflow-store.js`（约 800 行）、`tests/agent-workflow-store.test.js` | 13 |
+| C2 | `router.js` 写序 + `tasks.js` 计划指针/`forcePlanRecovery` + `runtime.js` 启动解析、`tests/agent-workflow-binding.test.js` | 8 |
+| C3 | `plan.after-save` 钩子、`tests/helpers/crash-child.js` 两个场景、`tests/agent-workflow-crash.test.js` | 2 |
+
+计数从 78 文件 / 2111 项变为 **81 文件 / 2134 项**（`backendTotal` 2134、`runnerTotal` 1912，`nodeTestSuiteTotal` 与 `frontend` 不变）。五门禁全部 EXIT 0。
+
+#### 六条硬要求 ↔ 证据
+
+1. **写序**：`tests/agent-workflow-binding.test.js` 用例 1 在 `createTask` 里先 `getVersion`，读不到计划就直接失败；用例 3 让 `createTask` 抛 `agent_task_limit`，断言只剩孤儿计划、没有反向悬空引用。
+2. **硬上限**：单计划 >8 KB、steps >32、单 step >1 KB 在写盘前抛 `plan_too_large` / `plan_step_limit` / `plan_step_too_large`；用例 2 断言拒绝后任务数为 0、计划文件不存在、Store 字节不变。
+3. **Store 损坏 fail-closed**：用例 4 把 `agent-workflows.json` 写成非 JSON，绑定任务（queued）与引用不存在血缘的任务全部 `recovery/plan_store_corrupted`，未绑定的存量任务仍 `queued`。已终态任务不反转（状态机终态无出边），计 `skippedTerminal` 且仍占 pin。
+4. **裁剪三重校验**：用例 8/9/10 覆盖版本上限只淘汰未引用最旧版、已终态任务的 pin 不裁、`liveRefs`（任务文件现场扫描）同样防裁；用例 11 用 `auditOnly` 演示「审计已提交、删除未执行」，证明审计先写后删。
+5. **两套版本互不污染**：用例 6 断言追加计划版本不改任务 `stateVersion`、状态迁移不改 `planVersion`/`headVersion`，且拿 `planVersion` 当 `expectedVersion` 必冲突。
+6. **存量兼容**：用例 7 断言 `planId=null` 任务 `checked=0`、状态与 `stateVersion` 一字不动；用例 8 断言单边指针被 `createTask` 拒绝。
+
+#### S1 真 SIGKILL（`plan.after-save`）三次实跑
+
+注入方式与 P5 一致：`BLUEBIRD_TEST_CRASH_HOOK=plan.after-save`，钩子先同步写 marker 再 `Atomics.wait`；父进程只在 marker 出现后发 SIGKILL。计划文件此时已由 `writeFileAtomicSync` fsync 落盘，任务尚未创建。
+
+```
+[c3-c5] atKill task=none plans=1 versions=1 refs=0 | after tasks=0 plans=1 refs=0 checked=0 storeCorrupted=false
+[c3-c6] constructed=true dangling=recovery/plan_missing control=queued refs=1
+ℹ pass 2  ℹ fail 0
+```
+
+三次运行输出逐字一致（pass 2 / fail 0 / EXIT 0）。结论：崩溃点只留下**一份可读的孤儿计划**与**零个任务指针**；重启后没有任何任务引用了不存在的计划，孤儿计划按 24h TTL 清理。
+
+#### 这条能证明什么、不能证明什么
+
+- 能证明：进程内状态丢失后，已 fsync 的计划不会丢、任务不会带悬空指针；构造态下的悬空引用会被 fail-closed。
+- 不能证明（照旧「未验证」）：断电级磁盘一致性（只测进程被杀，没测掉电/写缓存丢失）；多进程并发写（`BLUEBIRD_ALLOW_MULTI=1` 下 Store 仍是单写者 read-modify-write）；8 MB Store 体积上限的拒绝路径（需要 2000 条计划，未做单测）。
+- **偏离说明**：要求原文是「所有引用它的任务一律 recovery」。已终态任务（`completed`/`failed`/`cancelled`/`timed_out`/`recovery`）在现有状态机里没有出边，改回 `recovery` 既非法也会改写历史结论，因此实现为「非终态一律 recovery，终态保持原状并继续占 pin（不裁）」。这一点在用例 4 中显式断言。
+

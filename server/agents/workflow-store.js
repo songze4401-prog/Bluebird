@@ -35,6 +35,7 @@ const crypto = require('crypto');
 const { writeFileAtomicSync } = require('../atomic-write');
 const { AgentError } = require('./errors');
 const opLedger = require('./op-ledger');
+const crashHook = require('./crash-hook');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -673,6 +674,11 @@ function appendVersion({ plan, planId = null, liveRefs = [], now } = {}) {
   }
 
   write(store);
+
+  // P5 式崩溃注入点：计划已 fsync 落盘、任务还没创建。父进程看到 marker 后 SIGKILL。
+  // 未设置 BLUEBIRD_TEST_CRASH_HOOK 时只是一次字符串比较，零副作用。
+  crashHook.hold('plan.after-save');
+
   return {
     planId: resolvedPlanId,
     planVersion: version,
