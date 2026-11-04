@@ -180,6 +180,9 @@ test('g. 工具超时：账本写 unknown（不是 failed），闸门 blocked，
     },
   });
 
+  // 运行时的工具超时定时器是 unref 的（不阻止进程退出）。真实服务里 socket
+  // 托着事件循环；这里没有任何句柄，Node 22 会在超时触发前就退出并判 cancelled。
+  const keepAlive = setInterval(() => {}, 50);
   try {
     const guard = createSideEffectGuard({ agentId: 'memory', taskId: 'task_p2_g' });
     const result = await agent.executeToolCall('p2_slow', { x: 9 }, contextFor(guard));
@@ -201,6 +204,7 @@ test('g. 工具超时：账本写 unknown（不是 failed），闸门 blocked，
     assert.strictEqual(again.code, 'side_effect_unknown');
     assert.strictEqual(calls, 1, 'unknown 绝不自动重试');
   } finally {
+    clearInterval(keepAlive);
     agent.unregisterTool('p2_slow');
   }
 });
