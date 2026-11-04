@@ -44,6 +44,8 @@ const SCHEMA_VERSION = 1;
 const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 // 条目上限 5000：先按时间淘汰最老的终态条目（B 类，未压测）。
 const MAX_ENTRIES = 5000;
+// 成功结果原文的落盘上限：超过则不存原文（只留 digest），复用方拿不到 body。
+const MAX_RESULT_BYTES = 4096;
 
 const STATUSES = Object.freeze(['started', 'succeeded', 'failed', 'unknown']);
 // 只有这些状态可以被自动清理；started/unknown 永不自动删除——
@@ -169,6 +171,30 @@ function buildOpKey({ agentId, taskId, stepId, toolName, args } = {}) {
   return crypto.createHash('sha256').update(payload).digest('hex');
 }
 
+/**
+ * 运行时用 stepId = sha256([toolName, canonicalArgs])。
+ *
+ * 刻意不用 checkpointVersion/round/toolIndex：那三个位置量在重试与重启后会漂移
+ * （checkpoint 版本随运行推进、round 从 1 重新计数），同一次副作用会算出不同的键，
+ * 幂等直接失效。按「工具 + 参数」内容寻址则天然稳定：
+ * 同一次逻辑操作，无论跑在第几轮、第几次重试，键都一样。
+ * 代价是同一任务里两次完全相同参数的调用会被判为一次（这正是幂等要的语义）。
+ */
+function deriveStepId({ toolName, args } = {}) {
+  if (typeof toolName !== 'string' || toolName.length === 0) {
+    throw new AgentError('agent_op_key_invalid', 'toolName 必须是非空字符串', 400);
+  }
+  const payload = JSON.stringify([toolName, canonicalizeArgs(args)]);
+  return crypto.createHash('sha256').update(payload).digest('hex');
+}
+
+/** 结果摘要：对规范化后的 JSON 求 sha256（跨进程一致，仅用于回答「复用的是哪次结果」）。 */
+function digestResult(result) {
+  if (result === undefined) return null;
+  const payload = JSON.stringify(canonicalizeValue(result, new WeakSet()));
+  return `sha256:${crypto.createHash('sha256').update(payload).digest('hex')}`;
+}
+
 function validateEntry(key, entry) {
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
   if (entry.opKey !== key) return false;
@@ -179,6 +205,14 @@ function validateEntry(key, entry) {
   if (entry.finishedAt !== null && typeof entry.finishedAt !== 'string') return false;
   if (entry.errorCode !== null && typeof entry.errorCode !== 'string') return false;
   if (entry.resultDigest !== null && typeof entry.resultDigest !== 'string') return false;
+  if (
+    entry.result !== undefined &&
+    entry.result !== null &&
+    (typeof entry.result !== 'object' || Array.isArray(entry.result))
+  ) {
+    return false;
+  }
+  if (entry.resultOmitted !== undefined && typeof entry.resultOmitted !== 'boolean') return false;
   return true;
 }
 
@@ -254,6 +288,8 @@ function begin({ agentId, taskId, stepId, toolName, args, attempt = 1, now } = {
     finishedAt: null,
     resultDigest: null,
     errorCode: null,
+    result: null,
+    resultOmitted: false,
   };
 
   store.ops[opKey] = entry;
@@ -277,8 +313,12 @@ function requireOpKey(opKey) {
   }
 }
 
-/** 补终态：succeeded / failed。不改 startedAt/attempt。 */
-function finish(opKey, { status, resultDigest = null, errorCode = null, now } = {}) {
+/**
+ * 补终态：succeeded / failed。不改 startedAt/attempt。
+ * succeeded 时把结果原文（≤MAX_RESULT_BYTES）一起落盘，供重复调用真正复用；
+ * 超限只存 digest 并标记 resultOmitted，绝不把截断后的半截结果当成结果复用。
+ */
+function finish(opKey, { status, resultDigest = null, result, errorCode = null, now } = {}) {
   requireOpKey(opKey);
   if (status !== 'succeeded' && status !== 'failed') {
     throw new AgentError('agent_op_status_invalid', '终态只能是 succeeded/failed', 400);
@@ -288,8 +328,46 @@ function finish(opKey, { status, resultDigest = null, errorCode = null, now } = 
   const entry = requireEntry(store, opKey);
   entry.status = status;
   entry.finishedAt = iso(now);
-  entry.resultDigest = resultDigest === null ? null : String(resultDigest);
   entry.errorCode = errorCode === null ? null : String(errorCode);
+
+  if (status === 'succeeded' && result !== undefined) {
+    const serialized = JSON.stringify(result);
+    const tooLarge = !serialized || serialized.length > MAX_RESULT_BYTES;
+    entry.result = tooLarge ? null : JSON.parse(serialized);
+    entry.resultOmitted = tooLarge;
+    entry.resultDigest = resultDigest === null ? digestResult(result) : String(resultDigest);
+  } else {
+    entry.result = null;
+    entry.resultOmitted = false;
+    entry.resultDigest = resultDigest === null ? null : String(resultDigest);
+  }
+
+  write(store);
+
+  return entry;
+}
+
+/**
+ * 失败后重试同一逻辑操作：复用同一 opKey（不新增行），attempt+1 重新置为 started。
+ * 只允许从 failed 重试；started/unknown 必须人工核对，succeeded 直接复用。
+ */
+function retry(opKey, { now } = {}) {
+  requireOpKey(opKey);
+
+  const store = read();
+  const entry = requireEntry(store, opKey);
+  if (entry.status !== 'failed') {
+    throw new AgentError('agent_op_status_invalid', '只有 failed 可以原地重试', 409);
+  }
+
+  entry.status = 'started';
+  entry.attempt = (Number.isInteger(entry.attempt) ? entry.attempt : 1) + 1;
+  entry.startedAt = iso(now);
+  entry.finishedAt = null;
+  entry.resultDigest = null;
+  entry.errorCode = null;
+  entry.result = null;
+  entry.resultOmitted = false;
   write(store);
 
   return entry;
@@ -380,14 +458,18 @@ module.exports = {
   SCHEMA_VERSION,
   RETENTION_MS,
   MAX_ENTRIES,
+  MAX_RESULT_BYTES,
   STATUSES,
   canonicalizeArgs,
+  digestResult,
+  deriveStepId,
   buildOpKey,
   read,
   write,
   get,
   begin,
   finish,
+  retry,
   markUnknown,
   cleanup,
 };

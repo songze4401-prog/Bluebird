@@ -448,6 +448,57 @@ async function executeToolCall(name, rawArgs, context) {
     return cached;
   }
 
+  // P2：副作用工具的幂等闸门。只有任务执行器（有 taskId）会注入 context.sideEffect，
+  // 且只对 readOnly === false 的工具生效；无副作用工具不会多出账本行。
+  // 顺序刻意放在同请求缓存之后：真正的重复调用应先命中缓存，账本只在跨运行/跨进程时兜底。
+  const sideEffect = context.sideEffect && def.readOnly === false ? context.sideEffect : null;
+  let ledgerOpKey = null;
+
+  if (sideEffect) {
+    const verdict = sideEffect.before({ toolName: def.name, args: validated.args });
+
+    if (verdict.mode === 'reuse') {
+      const reused = {
+        ...(verdict.result && typeof verdict.result === 'object' ? verdict.result : {}),
+        ok: true,
+        reused: true,
+        opKey: verdict.opKey,
+        resultDigest: verdict.resultDigest || null,
+      };
+      if (verdict.resultOmitted === true) reused.resultOmitted = true;
+      context.cache.set(dedupeKey, reused);
+      monitor.complete({
+        ok: true,
+        code: null,
+        durationMs: Date.now() - startedAt,
+        deduped: true,
+        executed: false,
+        resultBytes: JSON.stringify(reused).length,
+      });
+      return reused;
+    }
+
+    if (verdict.mode === 'blocked') {
+      const blocked = {
+        ok: false,
+        code: verdict.code,
+        error:
+          verdict.code === 'side_effect_unknown'
+            ? '该副作用可能已执行，已转入 recovery 等待人工核对'
+            : '幂等账本不可用，副作用已阻止执行',
+      };
+      monitor.complete({
+        ok: false,
+        code: blocked.code,
+        durationMs: Date.now() - startedAt,
+        executed: false,
+      });
+      return blocked;
+    }
+
+    ledgerOpKey = verdict.opKey;
+  }
+
   const timeoutMs =
     Number.isFinite(def.timeoutMs) && def.timeoutMs > 0
       ? def.timeoutMs
@@ -519,6 +570,15 @@ async function executeToolCall(name, rawArgs, context) {
 
   try {
     const result = remember(await Promise.race([handlerPromise, timeoutPromise]));
+    // P2：真正执行完才补终态；执行前 begin 已落盘，崩溃时留下 started 会被判 recovery。
+    if (sideEffect && ledgerOpKey) {
+      sideEffect.after({
+        opKey: ledgerOpKey,
+        status: result.ok === true ? 'succeeded' : 'failed',
+        result,
+        errorCode: result.code || null,
+      });
+    }
     const serialized = JSON.stringify(result);
     monitor.complete({
       ok: result.ok === true,
@@ -537,6 +597,14 @@ async function executeToolCall(name, rawArgs, context) {
         code: 'tool_timeout',
         error: `工具执行超时（>${timeoutMs}ms），已中止`,
       });
+      // 超时后 handler 可能仍在后台完成副作用：不能写 failed，只能写 unknown。
+      if (sideEffect && ledgerOpKey) {
+        sideEffect.after({
+          opKey: ledgerOpKey,
+          status: 'unknown',
+          errorCode: result.code,
+        });
+      }
       monitor.complete({
         ok: false,
         code: result.code,
@@ -546,6 +614,9 @@ async function executeToolCall(name, rawArgs, context) {
       return result;
     }
     const result = remember({ ok: false, code: 'tool_error', error: '工具内部错误' });
+    if (sideEffect && ledgerOpKey) {
+      sideEffect.after({ opKey: ledgerOpKey, status: 'failed', errorCode: result.code });
+    }
     monitor.complete({
       ok: false,
       code: result.code,
@@ -624,6 +695,8 @@ async function runAgentTurn({
   onToolResult,
   toolAuthorizer = null,
   onToolDenied = null,
+  // P2：任务执行器的副作用幂等闸门；主控直聊不传，行为完全不变。
+  sideEffect = null,
   credentialKey = null,
   stream = false,
   onDelta = null,
@@ -704,6 +777,7 @@ async function runAgentTurn({
       authorizer: toolAuthorizer,
       onToolDenied,
       round,
+      sideEffect,
     };
     let result = await executeToolCall(toolName, rawArgs, toolContext);
     toolCallCount += 1;

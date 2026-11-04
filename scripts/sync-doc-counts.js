@@ -96,6 +96,8 @@ const NOTES = {
     'watchdog health classification, action planning with whitelist/cooldown/breaker, intake pause and resume, offline recovery, escalation, audit fields, dry-run, external supervisor restart drill',
   'agent-op-ledger':
     'idempotency ledger storage (P1): strict canonicalArgs (key order, nested, optional/undefined vs null, string-vs-number, Chinese/space, delimiter ambiguity, NaN/cycle rejection), opKey hashing, begin/finish/markUnknown, 7-day retention and 5000-entry cleanup that never drops started/unknown',
+  'agent-side-effect-ledger':
+    'runtime idempotency wiring (P2): begin-before-execute, succeeded reuse without re-execution, started residue routes the task to recovery, failed retries in place with one row per opKey, read-only tools write no ledger rows',
   'reply-segmentation':
     'single-message default with a 400-char configurable hard limit, semantic split order (paragraph/newline/sentence), code-block and Markdown-link protection, English word boundaries',
   'monitoring-api':

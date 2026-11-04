@@ -20,6 +20,7 @@ const { createToolAuthorizer } = require('./tool-gateway');
 const { AgentError } = require('./errors');
 const approvalDeadline = require('./approval-deadline');
 const artifactCommit = require('./artifact-commit');
+const { createSideEffectGuard } = require('./side-effect-guard');
 
 const MAX_USER_MESSAGE = 4000;
 const HISTORY_MESSAGES = 24;
@@ -256,6 +257,11 @@ async function execute({
   const artifactInputs = [];
   // Worker 生命周期已经有 runId 时复用它，保证任务、事件与结果指向同一次运行。
   const runId = runIdOverride || `run_${crypto.randomUUID()}`;
+  // P2：只有委派任务接幂等账本；主控直聊没有 taskId，不产生任何账本行。
+  const sideEffectGuard =
+    taskId && mode === 'delegated_task'
+      ? createSideEffectGuard({ agentId: botId, taskId })
+      : null;
   let lastRound = 0;
   let progressToolCalls = 0;
 
@@ -277,11 +283,16 @@ async function execute({
       maxTokens: config.modelProfile.maxTokens,
       timeout: config.modelProfile.timeoutMs,
       policy,
-      isClientGone: signal ? () => signal.aborted : undefined,
+      isClientGone: signal
+        ? () => signal.aborted || Boolean(sideEffectGuard && sideEffectGuard.blocked())
+        : sideEffectGuard
+          ? () => sideEffectGuard.blocked()
+          : undefined,
       abortSignal: signal,
       credentialKey,
       toolAuthorizer,
       onToolDenied,
+      sideEffect: sideEffectGuard,
       stream,
       onDelta,
       onRequest: ({ round }) => {
@@ -389,6 +400,15 @@ async function execute({
       { taskId, runId, sessionId }
     );
     throw new AgentError(code, info.message || '模型调用失败', info.status || 502);
+  }
+
+  // 副作用结果不确定优先于取消/超时：已经发生的写操作不能因为任务超时就当没发生。
+  if (sideEffectGuard && sideEffectGuard.blocked()) {
+    throw new AgentError(
+      sideEffectGuard.status || 'side_effect_unknown',
+      '副作用结果不确定，转入 recovery 等待人工核对',
+      409
+    );
   }
 
   if (signal && signal.aborted) {
@@ -922,8 +942,13 @@ async function runTask(taskId) {
     // 有副作用（已写记忆等）时不能重跑，收口为 recovery 等人工核对。
     const artifactFailure =
       typeof errorCode === 'string' && errorCode.startsWith('artifact_');
+    // P2：副作用结果不确定（账本里 started/unknown，或账本不可用而阻止执行）。
+    // 既不能重试（可能已经写过），也不能当 failed（可能已经成功）→ recovery 人工核对。
+    const sideEffectFailure =
+      typeof errorCode === 'string' && errorCode.startsWith('side_effect_');
     const retryable =
       !cancelled &&
+      !sideEffectFailure &&
       !latest.allowedTools.includes('memory_remember') &&
       (artifactFailure || ['model_connection', 'model_rate_limit', 'model_timeout'].includes(errorCode)) &&
       attempts < maxAttempts;
@@ -953,11 +978,13 @@ async function runTask(taskId) {
 
     const status = cancelled
       ? 'cancelled'
-      : timedOut
-        ? 'timed_out'
-        : artifactFailure
-          ? 'recovery'
-          : 'failed';
+      : sideEffectFailure
+        ? 'recovery'
+        : timedOut
+          ? 'timed_out'
+          : artifactFailure
+            ? 'recovery'
+            : 'failed';
     // 统一结果 schema：失败/取消/超时也落一份结果，而不是 result: null。
     const failureResult = normalizeWorkerResult({
       status,
