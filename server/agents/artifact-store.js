@@ -2,10 +2,12 @@
 /**
  * Artifact Store（Phase 1 前置 ③）。
  *
- * 范围：只负责 `agent-artifacts.json` 这一张产物表的读写与生命周期字段，
- * 以及配套的追加式审计 `agent-artifact-audit.json`。它不拥有任务状态权威
+ * 范围：负责 `agent-artifacts.json` 这张产物索引表的读写与生命周期字段、
+ * 配套的追加式审计 `agent-artifact-audit.json`，以及产物正文文件
+ * `agents/artifact-contents/<id>.json`（一产物一文件）。它不拥有任务状态权威
  * （任务状态仍只由 task-store/transitionTask 写入），也不承担 Blackboard 的
- * 内容存储职责——本阶段只记录产物元数据（含 contentHash），正文留在产出方。
+ * 内容存储职责——这里的正文只服务于"按 {id,version} 复读 + contentHash 校验"，
+ * 不是可检索的内容层。
  *
  * 与 §11 五步的关系：
  *   第 1 步：persist() 先落盘产物，返回 artifactRef（{kind,id} 由调用方组装，
@@ -31,11 +33,18 @@ const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
 const AGENTS_DIR = path.join(DATA_DIR, 'agents');
 const ARTIFACTS_FILE = path.join(AGENTS_DIR, 'agent-artifacts.json');
 const AUDIT_FILE = path.join(AGENTS_DIR, 'agent-artifact-audit.json');
+// 产物正文独立成文件：一个产物一个文件（id 由 (taskId,kind,contentHash) 派生，
+// 内容不可变），避免每次落盘重写整张产物表带来的写放大（同 workflow-store 的选择）。
+const CONTENTS_DIR = path.join(AGENTS_DIR, 'artifact-contents');
 
 const SCHEMA_VERSION = 1;
 const AUDIT_SCHEMA_VERSION = 1;
 const AUDIT_MAX = 500;
 const ARTIFACT_MAX = 5000;
+// A 类：单个产物正文硬上限 256 KB（安全默认值，待实测校准）。
+// 超限显式拒绝（artifact_content_too_large），绝不截断——截断会让 contentHash 失去意义。
+const CONTENT_MAX_BYTES = 256 * 1024;
+const CONTENT_SCHEMA_VERSION = 1;
 
 // 内容有效性（status）与提交生命周期（commit）是两个正交维度：
 // 一个 active 产物可能仍处于 pending-commit，不能用一个枚举混装。
@@ -140,6 +149,114 @@ function normalizeContent(content) {
   }
 }
 
+function contentPathOf(id) {
+  return path.join(CONTENTS_DIR, `${id}.json`);
+}
+
+function byteLength(value) {
+  return Buffer.byteLength(value, 'utf8');
+}
+
+/**
+ * 产物正文落盘（独立文件，先于产物记录写入）。
+ * 顺序理由：先写正文再写索引，最坏结果是留下一个无索引的正文文件（垃圾，
+ * 不影响任何引用）；反过来会得到「索引指向读不回来的正文」，那是审计不可复现的死角。
+ */
+function writeContent(artifact, content, normalized) {
+  const record = {
+    version: CONTENT_SCHEMA_VERSION,
+    id: artifact.id,
+    artifactVersion: artifact.version,
+    kind: artifact.kind,
+    contentHash: artifact.contentHash,
+    bytes: byteLength(normalized),
+    content,
+  };
+  fs.mkdirSync(CONTENTS_DIR, { recursive: true });
+  try {
+    writeFileAtomicSync(contentPathOf(artifact.id), JSON.stringify(record));
+  } catch (error) {
+    throw wrapStoreError(error, 'artifact_content_write_failed');
+  }
+}
+
+/**
+ * 按 {id, version} 复读正文并校验 contentHash。
+ * fail-closed：文件缺失、无法解析、hash 与索引不一致、版本不符，一律抛错，
+ * 绝不返回空内容——"读不回来"必须等价于"失败"，否则消费方会把损坏当成空产物。
+ */
+function readContent(id, { version = null } = {}) {
+  const key = String(id || '').slice(0, ID_MAX);
+  if (!key) {
+    throw new AgentError('artifact_content_missing', '产物 id 无效，无法复读正文', 400);
+  }
+  const artifact = get(key);
+  if (!artifact) {
+    throw new AgentError('artifact_not_found', '产物引用不可读', 409, { artifactId: key });
+  }
+  if (
+    Number.isInteger(version) &&
+    Number.isInteger(artifact.version) &&
+    version !== artifact.version
+  ) {
+    throw new AgentError('artifact_version_mismatch', '产物引用版本与存储不一致', 409, {
+      artifactId: key,
+      expectedVersion: artifact.version,
+      refVersion: version,
+    });
+  }
+  const file = contentPathOf(key);
+  if (!fs.existsSync(file)) {
+    throw new AgentError('artifact_content_missing', '产物正文缺失', 409, { artifactId: key });
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (_) {
+    throw new AgentError('artifact_content_corrupted', '产物正文无法解析', 500, {
+      artifactId: key,
+    });
+  }
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    parsed.id !== key ||
+    typeof parsed.contentHash !== 'string' ||
+    !('content' in parsed)
+  ) {
+    throw new AgentError('artifact_content_corrupted', '产物正文结构无效', 500, {
+      artifactId: key,
+    });
+  }
+  const normalized = normalizeContent(parsed.content);
+  const actualHash = sha256(normalized);
+  if (actualHash !== artifact.contentHash || parsed.contentHash !== artifact.contentHash) {
+    throw new AgentError('artifact_content_corrupted', '产物正文与 contentHash 不一致', 409, {
+      artifactId: key,
+      expectedHash: artifact.contentHash,
+      actualHash,
+    });
+  }
+  return {
+    id: key,
+    version: artifact.version,
+    kind: artifact.kind,
+    status: artifact.status,
+    contentHash: artifact.contentHash,
+    bytes: byteLength(normalized),
+    content: parsed.content,
+  };
+}
+
+/** 同一 lineage（taskId + kind）的全部版本，含 superseded；升序排列（最后一个是最新）。 */
+function versionsOf({ taskId = null, kind } = {}) {
+  const artifactKind = assertKind(kind);
+  const boundTaskId = taskId ? String(taskId).slice(0, ID_MAX) : null;
+  return Object.values(readArtifacts().artifacts)
+    .filter(item => item && item.taskId === boundTaskId && item.kind === artifactKind)
+    .sort((a, b) => (Number(a.version) || 0) - (Number(b.version) || 0));
+}
+
 // identity 由 (taskId, kind, contentHash) 决定：同一任务重试产生同样输出时
 // 拿到同一个 artifactId，从而幂等重试不会产生重复产物（第 5 步）。
 function artifactIdFor(taskId, kind, contentHash) {
@@ -162,7 +279,17 @@ function assertKind(kind) {
  */
 function persist({ kind, content, taskId = null, runId = null, now = Date.now() } = {}) {
   const artifactKind = assertKind(kind);
-  const contentHash = sha256(normalizeContent(content));
+  const normalized = normalizeContent(content);
+  const bytes = byteLength(normalized);
+  // 超限显式拒绝：不截断、不留半截产物记录、不写正文文件。
+  if (bytes > CONTENT_MAX_BYTES) {
+    throw new AgentError('artifact_content_too_large', '产物正文超过上限，拒绝落盘', 400, {
+      kind: artifactKind,
+      bytes,
+      maxBytes: CONTENT_MAX_BYTES,
+    });
+  }
+  const contentHash = sha256(normalized);
   const boundTaskId = taskId ? String(taskId).slice(0, ID_MAX) : null;
   const id = artifactIdFor(boundTaskId, artifactKind, contentHash);
 
@@ -175,6 +302,8 @@ function persist({ kind, content, taskId = null, runId = null, now = Date.now() 
   const existing = store.artifacts[id];
   if (existing) {
     // 幂等：同一产物重复落盘不新增记录、不改 refCount。
+    // 正文按 id 幂等重写一次，兼作"索引在、正文丢"的自愈路径（内容由 hash 决定，写回安全）。
+    writeContent(existing, content, normalized);
     return existing;
   }
 
@@ -215,6 +344,8 @@ function persist({ kind, content, taskId = null, runId = null, now = Date.now() 
     invalidatedReason: null,
   };
 
+  // 正文先落盘，再写索引（见 writeContent 的顺序理由）。
+  writeContent(artifact, content, normalized);
   store.artifacts[id] = artifact;
   const ids = Object.keys(store.artifacts);
   if (ids.length > ARTIFACT_MAX) {
@@ -321,6 +452,9 @@ function assertRefsCommitReady(refs) {
         refVersion: ref.version,
       });
     }
+    // 正文必须复读通过（缺失/损坏/hash 不符一律 fail-closed）：
+    // 只校验索引而不校验正文，等于允许把"审计不可复现"的产物提交为完成。
+    readContent(id, { version: ref.version });
   }
 }
 
@@ -450,6 +584,13 @@ function purge(id, { reason = 'orphan_ttl_expired', now = Date.now(), refScan = 
   } catch (error) {
     throw wrapStoreError(error, 'artifact_store_write_failed');
   }
+  // 索引删除成功后才删正文；反序会留下"正文在、索引没了"的不可引用垃圾。
+  try {
+    const file = contentPathOf(key);
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  } catch (_) {
+    // 正文删除失败只留下孤儿文件，不影响任何引用语义，下次清理可重试。
+  }
   return artifact;
 }
 
@@ -468,6 +609,8 @@ function auditEntries() {
 module.exports = {
   ARTIFACTS_FILE,
   AUDIT_FILE,
+  CONTENTS_DIR,
+  CONTENT_MAX_BYTES,
   SCHEMA_VERSION,
   STATUSES,
   COMMIT_STATES,
@@ -475,6 +618,8 @@ module.exports = {
   persist,
   get,
   all,
+  readContent,
+  versionsOf,
   assertRefsCommitReady,
   confirmRefs,
   markOrphan,

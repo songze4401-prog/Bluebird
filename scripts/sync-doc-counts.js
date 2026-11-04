@@ -108,6 +108,8 @@ const NOTES = {
     'real SIGKILL crash injection (P5): handler-returned-but-unrecorded leaves one unknown ledger row and recovery without re-running the handler, artifacts persisted before state commit stay pending-commit and converge as pending, approval-record-before-state-move self-heals to waiting_approval, an interrupted read-only run leaves no intermediate state',
   'agent-approval-recovery':
     'approval execution idempotency (P3): begin-before-handler, crash-after-execution resumes to recovery without re-running the handler, a succeeded ledger row converges to executed instead of failed, approval-record-before-state-move (W5) leaves no dangling task, orphan waiting_approval tasks converge to recovery',
+  'agent-artifact-content':
+    'artifact content replay (A): durable per-artifact body, restart-time read-back with contentHash verification, corrupted/missing content fail-closed (never empty), version chain keeps superseded versions while old refs stay frozen, terminal-task-referenced versions are never cleaned, >256KB rejected with no half state',
   'reply-segmentation':
     'single-message default with a 400-char configurable hard limit, semantic split order (paragraph/newline/sentence), code-block and Markdown-link protection, English word boundaries',
   'monitoring-api':
