@@ -363,6 +363,27 @@ function computeLoad(taskStore) {
   }
 }
 
+function normalizeOrchestration(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (value.entry !== 'orchestrator') return null;
+  return {
+    entry: 'orchestrator',
+    version: Number.isInteger(value.version) ? value.version : 1,
+    intentDigest: String(value.intentDigest || '').slice(0, 80),
+    capability: String(value.capability || '').slice(0, 80),
+    taskType: String(value.taskType || '').slice(0, 80),
+    basis: String(value.basis || '').slice(0, 40),
+    matchingRule: String(value.matchingRule || '').slice(0, 80),
+    registeredAgents: Number.isInteger(value.registeredAgents) ? value.registeredAgents : 0,
+    matchedAgentIds: Array.isArray(value.matchedAgentIds)
+      ? value.matchedAgentIds.slice(0, 10).map(String)
+      : [],
+    requestedAgentId: value.requestedAgentId
+      ? String(value.requestedAgentId).slice(0, 80)
+      : null,
+  };
+}
+
 function routeEventPayload(decision, extra = {}) {
   const rejected = decision.rejected
     .map(item => `${item.agentId}:${item.code}`)
@@ -387,6 +408,20 @@ function routeEventPayload(decision, extra = {}) {
     priority: extra.priority || 'normal',
     contractVersion: decision.contractVersion,
     policyDigest: decision.policyDigest,
+    // 编排轨迹只在使用统一入口时出现；旧调用路径不新增字段，事件形状保持兼容。
+    // 事件 payload 只接受白名单标量，因此这里把轨迹摊平（与 task.route.orchestration 同源）。
+    ...(decision.orchestration
+      ? {
+          orchestrationEntry: decision.orchestration.entry,
+          orchestrationBasis: decision.orchestration.basis,
+          orchestrationIntentDigest: decision.orchestration.intentDigest,
+          orchestrationCapability: decision.orchestration.capability,
+          orchestrationTaskType: decision.orchestration.taskType,
+          orchestrationMatchingRule: decision.orchestration.matchingRule,
+          orchestrationMatchedAgents: decision.orchestration.matchedAgentIds.join(','),
+          orchestrationRegisteredAgents: decision.orchestration.registeredAgents,
+        }
+      : {}),
     ...(extra.idempotent !== undefined ? { idempotent: extra.idempotent === true } : {}),
   };
 }
@@ -464,6 +499,7 @@ function createRouter(overrides = {}) {
       now,
     });
     const decision = internal.decision;
+    decision.orchestration = normalizeOrchestration(request.orchestration);
     if (!decision.ok) {
       writeRouteEvent(appendEvent, internal.eventAgentId, 'route.rejected', decision, {
         priority: normalizeString(request.priority) || 'normal',
@@ -539,6 +575,7 @@ function createRouter(overrides = {}) {
         capability: decision.capability,
         policyDigest: decision.policyDigest,
         decidedAt: decision.decidedAt,
+        orchestration: decision.orchestration || null,
       },
       budget: decision.budget,
       parentSessionId: normalizeString(input.parentSessionId) || null,

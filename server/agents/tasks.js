@@ -124,6 +124,16 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'contractVersion',
   'idempotent',
   'policyDigest',
+  // Phase 1 交付物 1：编排轨迹以扁平标量写入既有事件（嵌套对象不入白名单），
+  // 与 task.route.orchestration 同源，不新建审计存储。
+  'orchestrationEntry',
+  'orchestrationBasis',
+  'orchestrationIntentDigest',
+  'orchestrationCapability',
+  'orchestrationTaskType',
+  'orchestrationMatchingRule',
+  'orchestrationMatchedAgents',
+  'orchestrationRegisteredAgents',
   'round',
   'phase',
   'attempts',
@@ -538,6 +548,33 @@ function normalizeRoute(route) {
     capability: String(route.capability || '').slice(0, 80),
     policyDigest: String(route.policyDigest || '').slice(0, 32),
     decidedAt: typeof route.decidedAt === 'string' ? route.decidedAt : null,
+    // Phase 1 交付物 1：编排轨迹（候选集 + 匹配依据 + 最终选择）随任务落库，
+    // 不新建第二套审计存储；最终选择的执行主体仍是 task.agentId/botId。
+    orchestration:
+      route.orchestration &&
+      typeof route.orchestration === 'object' &&
+      !Array.isArray(route.orchestration)
+        ? {
+            entry: String(route.orchestration.entry || '').slice(0, 40),
+            version: Number.isInteger(route.orchestration.version)
+              ? route.orchestration.version
+              : 1,
+            intentDigest: String(route.orchestration.intentDigest || '').slice(0, 80),
+            capability: String(route.orchestration.capability || '').slice(0, 80),
+            taskType: String(route.orchestration.taskType || '').slice(0, 80),
+            basis: String(route.orchestration.basis || '').slice(0, 40),
+            matchingRule: String(route.orchestration.matchingRule || '').slice(0, 80),
+            registeredAgents: Number.isInteger(route.orchestration.registeredAgents)
+              ? route.orchestration.registeredAgents
+              : 0,
+            matchedAgentIds: Array.isArray(route.orchestration.matchedAgentIds)
+              ? route.orchestration.matchedAgentIds.slice(0, 10).map(String)
+              : [],
+            requestedAgentId: route.orchestration.requestedAgentId
+              ? String(route.orchestration.requestedAgentId).slice(0, 80)
+              : null,
+          }
+        : null,
   };
 }
 
