@@ -198,7 +198,7 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-86 files, 2162 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
+86 files, 2166 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
 node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js tests/monitoring.test.js   # node:test suites (222)
@@ -256,7 +256,7 @@ node tests/agent-recovery.test.js          # 29 — state machine transitions, t
 node tests/agent-artifact-commit.test.js   # 7
 node tests/agent-artifact-content.test.js  # 5 — artifact content replay (A): durable per-artifact body, restart-time read-back with contentHash verification, corrupted/missing content fail-closed (never empty), version chain keeps superseded versions while old refs stay frozen, terminal-task-referenced versions are never cleaned, >256KB rejected with no half state
 node tests/agent-budget-atomic.test.js     # 7
-node tests/agent-orchestrator.test.js      # 4
+node tests/agent-orchestrator.test.js      # 8
 node tests/agent-orphan-scheduler.test.js  # 6 — orphan cleanup on a production cadence (B): one startup run plus a 6h period driven by injectable fake timers, single-instance re-entry guard, failures logged without crashing or blocking the next run, TTL boundary measured to the millisecond, and no catch-up for periods missed while the process was down
 node tests/agent-failopen-enforcement.test.js # 6 — fail-open decision wired into the real tool path (C): allowlist hit executes the handler with policyVersion in the audit, a miss denies with zero handler calls and a denied audit row, revocation takes effect on the next call, tasks without a frozen planId/planVersion are refused, R2/R3 still require approval even when an allowlist entry exists, and tools not registered as failOpenEligible keep their old behaviour
 node tests/agent-approval-policy.test.js   # 7

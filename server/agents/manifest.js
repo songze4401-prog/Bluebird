@@ -89,12 +89,27 @@ const MANIFESTS = Object.freeze({
   [MEMORY_BOT_ID]: MEMORY_BOT_MANIFEST,
 });
 
+// 测试注入点：Phase 1 交付物 2 的多候选用例需要两个以上「已注册主体」，
+// 而真实注册表当前只有 memory。测试通过本函数临时追加 Manifest，
+// 让 Task Store / Registry 的既有校验路径保持不变；生产代码不调用，默认恒为空。
+let testManifests = Object.create(null);
+
+function setTestManifests(manifests) {
+  testManifests = Object.create(null);
+  if (manifests && typeof manifests === 'object') {
+    for (const [botId, item] of Object.entries(manifests)) {
+      if (item && typeof item === 'object') testManifests[botId] = item;
+    }
+  }
+}
+
 function listManifests() {
-  return Object.values(MANIFESTS);
+  return [...Object.values(MANIFESTS), ...Object.values(testManifests)];
 }
 
 function getManifest(botId) {
-  return MANIFESTS[String(botId || '')] || null;
+  const id = String(botId || '');
+  return MANIFESTS[id] || testManifests[id] || null;
 }
 
 function isKnownBot(botId) {
@@ -109,4 +124,5 @@ module.exports = {
   listManifests,
   getManifest,
   isKnownBot,
+  setTestManifests,
 };

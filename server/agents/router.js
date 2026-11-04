@@ -381,6 +381,22 @@ function normalizeOrchestration(value) {
     requestedAgentId: value.requestedAgentId
       ? String(value.requestedAgentId).slice(0, 80)
       : null,
+    // 交付物 2：容量感知择一的轨迹（容量口径来自 decideInternal，不在这里重算）。
+    capacityRule: value.capacityRule ? String(value.capacityRule).slice(0, 80) : null,
+    priorityRule: value.priorityRule ? String(value.priorityRule).slice(0, 80) : null,
+    candidateOrder: Array.isArray(value.candidateOrder)
+      ? value.candidateOrder.slice(0, 10).map(item => String(item).slice(0, 80))
+      : [],
+    saturatedAgentIds: Array.isArray(value.saturatedAgentIds)
+      ? value.saturatedAgentIds.slice(0, 10).map(item => String(item).slice(0, 80))
+      : [],
+    allocation: value.allocation ? String(value.allocation).slice(0, 40) : null,
+    selectedAgentId: value.selectedAgentId
+      ? String(value.selectedAgentId).slice(0, 80)
+      : null,
+    excludedReasons: value.excludedReasons
+      ? String(value.excludedReasons).slice(0, 200)
+      : '',
   };
 }
 
@@ -420,6 +436,14 @@ function routeEventPayload(decision, extra = {}) {
           orchestrationMatchingRule: decision.orchestration.matchingRule,
           orchestrationMatchedAgents: decision.orchestration.matchedAgentIds.join(','),
           orchestrationRegisteredAgents: decision.orchestration.registeredAgents,
+          // 交付物 2：容量感知择一的轨迹同样摊平进既有事件（嵌套对象不入白名单）。
+          orchestrationCapacityRule: decision.orchestration.capacityRule || '',
+          orchestrationPriorityRule: decision.orchestration.priorityRule || '',
+          orchestrationCandidateOrder: decision.orchestration.candidateOrder.join(',').slice(0, 200),
+          orchestrationSaturated: decision.orchestration.saturatedAgentIds.join(','),
+          orchestrationAllocation: decision.orchestration.allocation || '',
+          orchestrationSelected: decision.orchestration.selectedAgentId || '',
+          orchestrationExcluded: decision.orchestration.excludedReasons || '',
         }
       : {}),
     ...(extra.idempotent !== undefined ? { idempotent: extra.idempotent === true } : {}),

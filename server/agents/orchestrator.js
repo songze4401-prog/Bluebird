@@ -9,7 +9,15 @@
  *   - 本模块只做两件 Router 不该承担的事：①意图 → 能力的最小解析；②把
  *     「候选集 / 匹配依据 / 最终选择」作为编排轨迹交给 Router 落进既有任务字段与事件。
  *
- * 明确不做（属于交付物第 2 项）：Worker Pool、并行执行、依赖管理、动态组队、重规划。
+ * 明确不做（属于交付物第 3 项）：Worker Pool、并行执行、依赖管理、动态组队、重规划。
+ *
+ * Phase 1 交付物第 2 项（本轮最小实现）：容量感知的「择一分配」。
+ *   - 候选的并发余量**只取 Router `decideInternal` 的 atCapacity**（running >= concurrencyLimit），
+ *     本模块不重算 running / limit，也不引入第二套容量口径；
+ *   - 选择顺序沿用 Router 既有规则：routingPriority 升序 → botId；
+ *     先选「有余量」中排序最前的一个，全部饱和时选排序第一并进入既有队列（degraded）；
+ *   - 选择依据与排除原因作为编排轨迹落进既有 task.route.orchestration 与既有事件；
+ *   - 本模块不执行任务、不调度并发：选中主体后仍由 `router.dispatch` 创建任务。
  */
 const crypto = require('crypto');
 const { AgentError } = require('./errors');
@@ -64,9 +72,63 @@ function resolveCapability(request) {
   );
 }
 
+function priorityOf(agent) {
+  const value = Number(agent && agent.routingPriority);
+  return Number.isFinite(value) && value > 0 ? value : 100;
+}
+
+// 把 `decideInternal` 的决策（尤其是 atCapacity / selectedAgentId / degraded）
+// 翻译成交付物 2 的「择一依据」轨迹。这里只做归档，不参与选择：
+// 选哪个主体完全由 Router 的优先级 + 并发余量规则决定，本函数不复制该规则。
+function buildAllocation(probe, agents, matchedAgentIds) {
+  if (!probe || probe.ok !== true) return null;
+  const agentById = new Map(agents.map(agent => [agent.botId, agent]));
+  const candidates = (Array.isArray(probe.candidates) ? probe.candidates : [])
+    .filter(item => matchedAgentIds.includes(item.agentId))
+    .map(item => ({
+      agentId: item.agentId,
+      priority: priorityOf(agentById.get(item.agentId)),
+      atCapacity: item.atCapacity === true,
+      code: item.code || null,
+      selected: item.agentId === probe.selectedAgentId,
+    }))
+    .sort(
+      (a, b) =>
+        a.priority - b.priority || String(a.agentId).localeCompare(String(b.agentId))
+    );
+  if (!candidates.length) return null;
+
+  const excludedReasons = candidates
+    .filter(item => !item.selected)
+    .map(item => `${item.agentId}:${item.code || (item.atCapacity ? 'at_capacity' : 'lower_priority')}`)
+    .join(';')
+    .slice(0, 200);
+
+  return {
+    capacityRule: 'decideInternal.atCapacity (running >= concurrencyLimit)',
+    priorityRule: 'routingPriority asc → botId asc',
+    candidateOrder: candidates.map(item => item.agentId),
+    saturatedAgentIds: candidates.filter(item => item.atCapacity).map(item => item.agentId),
+    // 全部候选都饱和时 Router 仍会创建任务并进入既有队列（degraded），
+    // 因此这里显式标注为 queued_all_at_capacity，而不是静默改投别的通道。
+    allocation: probe.degraded === true ? 'queued_all_at_capacity' : 'selected_with_capacity',
+    selectedAgentId: probe.selectedAgentId || null,
+    excludedReasons,
+  };
+}
+
 function createOrchestrator(overrides = {}) {
   const getAgents = overrides.getAgents || (() => require('./registry').listAgents());
   const router = overrides.router || require('./router');
+  // 容量探针必须复用 Router 的 decideInternal（同一份 load 快照口径），
+  // 不在编排层重新统计 running / concurrencyLimit。
+  const decide =
+    overrides.decide ||
+    (typeof router.decideWithConfig === 'function'
+      ? input => router.decideWithConfig(input)
+      : typeof router.decide === 'function'
+        ? input => router.decide(input)
+        : null);
 
   /**
    * @param {object} input { intent/goal, capability?, taskType?, agentId?, ...其余字段原样交给 Router }
@@ -106,7 +168,7 @@ function createOrchestrator(overrides = {}) {
 
     const orchestration = {
       entry: 'orchestrator',
-      version: 1,
+      version: 2,
       intentDigest: digestOf(goal),
       capability,
       taskType,
@@ -117,9 +179,29 @@ function createOrchestrator(overrides = {}) {
       requestedAgentId,
     };
 
-    // 复用现有 Router：主体选择、契约、预算、幂等、事件与任务创建都不在这里重写。
+    // 容量探针：直接读 Router `decideInternal` 的候选与 atCapacity 结果（纯决策，无副作用）。
+    // 只有探针成功时才补写分配轨迹；探针失败交由 dispatch 按既有错误码与事件处理。
+    const allocation = buildAllocation(
+      decide ? decide({ ...request, goal, capability, taskType }) : null,
+      agents,
+      matchedAgentIds
+    );
+    if (allocation) Object.assign(orchestration, allocation);
+
+    // 选中主体以 Router 的决策为准；显式回填 agentId 让 dispatch 落在同一主体上，
+    // 避免「探针选 A、落库却选 B」造成轨迹与事实不一致。
+    const selectedAgentId = allocation ? allocation.selectedAgentId : requestedAgentId;
+
+    // 复用现有 Router：契约、预算、幂等、事件与任务创建都不在这里重写。
     const result = router.dispatch(
-      { ...request, goal, capability, taskType, orchestration },
+      {
+        ...request,
+        goal,
+        capability,
+        taskType,
+        orchestration,
+        ...(selectedAgentId ? { agentId: selectedAgentId } : {}),
+      },
       context
     );
     return { ...result, orchestration };
@@ -132,6 +214,7 @@ module.exports = {
   createOrchestrator,
   orchestrate: (input, context) => createOrchestrator().orchestrate(input, context),
   resolveCapability,
+  buildAllocation,
   INTENT_CAPABILITY_RULES,
   CAPABILITY_TASK_TYPE,
 };

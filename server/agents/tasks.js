@@ -134,6 +134,14 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'orchestrationMatchingRule',
   'orchestrationMatchedAgents',
   'orchestrationRegisteredAgents',
+  // Phase 1 交付物 2：容量感知择一的轨迹（容量口径来自 decideInternal.atCapacity）。
+  'orchestrationCapacityRule',
+  'orchestrationPriorityRule',
+  'orchestrationCandidateOrder',
+  'orchestrationSaturated',
+  'orchestrationAllocation',
+  'orchestrationSelected',
+  'orchestrationExcluded',
   'round',
   'phase',
   'attempts',
@@ -573,6 +581,29 @@ function normalizeRoute(route) {
             requestedAgentId: route.orchestration.requestedAgentId
               ? String(route.orchestration.requestedAgentId).slice(0, 80)
               : null,
+            // 交付物 2：容量感知择一的轨迹；capacityRule 说明容量口径来源
+            // （decideInternal.atCapacity），excludedReasons 说明其余候选为何未被选中。
+            capacityRule: route.orchestration.capacityRule
+              ? String(route.orchestration.capacityRule).slice(0, 80)
+              : null,
+            priorityRule: route.orchestration.priorityRule
+              ? String(route.orchestration.priorityRule).slice(0, 80)
+              : null,
+            candidateOrder: Array.isArray(route.orchestration.candidateOrder)
+              ? route.orchestration.candidateOrder.slice(0, 10).map(item => String(item).slice(0, 80))
+              : [],
+            saturatedAgentIds: Array.isArray(route.orchestration.saturatedAgentIds)
+              ? route.orchestration.saturatedAgentIds.slice(0, 10).map(item => String(item).slice(0, 80))
+              : [],
+            allocation: route.orchestration.allocation
+              ? String(route.orchestration.allocation).slice(0, 40)
+              : null,
+            selectedAgentId: route.orchestration.selectedAgentId
+              ? String(route.orchestration.selectedAgentId).slice(0, 80)
+              : null,
+            excludedReasons: route.orchestration.excludedReasons
+              ? String(route.orchestration.excludedReasons).slice(0, 200)
+              : '',
           }
         : null,
   };
