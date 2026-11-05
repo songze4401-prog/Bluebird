@@ -26,6 +26,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { writeFileAtomicSync } = require('../atomic-write');
 const { AgentError } = require('./errors');
+const cycleDetection = require('./cycle-detection');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -436,6 +437,24 @@ function persist({ kind, content, taskId = null, runId = null, now = Date.now() 
   const contentHash = sha256(normalized);
   const boundTaskId = taskId ? String(taskId).slice(0, ID_MAX) : null;
   const id = artifactIdFor(boundTaskId, artifactKind, contentHash);
+
+  // §17：新增 artifact reference 前做传递闭包检查；检测到 lineage 环即拒绝，
+  // 且在任何落盘（正文/索引）之前抛错，不留半截记录。
+  if (
+    content &&
+    typeof content === 'object' &&
+    !Array.isArray(content) &&
+    Array.isArray(content.evidence) &&
+    content.evidence.length > 0
+  ) {
+    for (const item of content.evidence) {
+      const refId = item && item.id ? String(item.id).slice(0, ID_MAX) : '';
+      if (!refId) continue;
+      cycleDetection.assertLineageAcyclic(refId, ref =>
+        readContent(ref)
+      );
+    }
+  }
 
   let store;
   try {

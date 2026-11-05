@@ -20,6 +20,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { writeFileAtomicSync } = require('../atomic-write');
 const { AgentError } = require('./errors');
+const cycleDetection = require('./cycle-detection');
 
 const MAX_DELEGATION_DEPTH = 2;
 const MAX_REPLANS_PER_RUN = 2;
@@ -95,17 +96,19 @@ function readRun(runId) {
  * tasksById 由调用方传入，模块自身不依赖 tasks，避免循环 require。
  */
 function delegationDepth(taskId, tasksById) {
+  // §17：委派环由独立检测器给出可读路径；检测到即拒绝（不继续上行）。
+  const cycle = cycleDetection.findDelegationCycle(taskId, tasksById);
+  if (cycle) {
+    throw limitError(
+      'not_authorized',
+      403,
+      `委派链存在环，拒绝继续委派：${cycle.join(' -> ')}`,
+      { taskId, causeRef: 'delegation_cycle' }
+    );
+  }
   let depth = 0;
   let cursor = taskId;
-  const seen = new Set();
   while (cursor) {
-    if (seen.has(cursor)) {
-      throw limitError('not_authorized', 403, '委派链存在环，拒绝继续委派', {
-        taskId,
-        causeRef: 'delegation_cycle',
-      });
-    }
-    seen.add(cursor);
     const task = tasksById[cursor];
     if (!task || !task.parentTaskId) break;
     depth += 1;
