@@ -109,6 +109,8 @@ const EVENT_TYPES = Object.freeze([
   'task.uncertain',
   // §24.3 第 5 条：非法迁移被拒绝时留审计（只记 from/to 与拒绝原因，不改状态）。
   'task.transition_rejected',
+  // §27：trustLevel 只允许 Verification Engine 写入产物记录；任务写入路径拒绝并留痕。
+  'task.trust_level_write_rejected',
 ]);
 
 const SAFE_PAYLOAD_KEYS = new Set([
@@ -195,6 +197,8 @@ const SAFE_PAYLOAD_KEYS = new Set([
   // §24.3 第 5 条：非法迁移审计只落扁平标量（from/to 与拒绝原因）。
   'fromStatus',
   'toStatus',
+  // §27：越权写入 trustLevel 的审计字段（字段名 + 拒绝来源）。
+  'field',
 ]);
 
 let taskCache = null;
@@ -1289,10 +1293,48 @@ function assertExpectedVersion(task, expectedVersion) {
   }
 }
 
+// §27：trustLevel 是产物记录字段，唯一写入者是 Verification Engine；
+// 任务写入路径（updateTask / transitionTask 及其调用点）一律拒绝，并留审计。
+const TRUST_WRITE_FIELDS = Object.freeze(['trustLevel', 'trust']);
+
+function rejectTrustWrite(task, field, source) {
+  try {
+    appendEvent({
+      botId: task.botId,
+      taskId: task.taskId,
+      runId: task.runId || null,
+      eventType: 'task.trust_level_write_rejected',
+      payload: {
+        status: task.status,
+        field,
+        reason: 'not_authorized',
+        mode: source,
+      },
+    });
+  } catch (_) {
+    // 审计通道不可用时不改变拒绝结论。
+  }
+  throw new AgentError(
+    'not_authorized',
+    'trustLevel 只能由 Verification Engine 写入产物记录',
+    403,
+    { field, source }
+  );
+}
+
+function assertNoTrustWrite(task, patch, source) {
+  for (const field of TRUST_WRITE_FIELDS) {
+    if (patch && patch[field] !== undefined) rejectTrustWrite(task, field, source);
+  }
+}
+
 function updateTask(taskId, patch = {}) {
   const tasks = loadTasks();
   const task = tasks.tasks[String(taskId || '')];
   if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+
+  // §27：越权写 trustLevel 必须在任何字段被修改之前拒绝。
+  assertNoTrustWrite(task, patch, 'updateTask');
 
   // 状态只允许经 transitionTask 写入；这里显式拒绝而不是静默丢弃，
   // 否则会留下一条看不见的第二写入路径。
@@ -1543,6 +1585,8 @@ function transitionTask(taskId, options = {}) {
   const tasks = loadTasks();
   const task = tasks.tasks[String(taskId || '')];
   if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+  // §27：必须在 applyTransition 改内存之前拒绝，避免半截状态变化。
+  assertNoTrustWrite(task, options, 'transitionTask');
   // ② CAS：必须在 applyTransition 之前校验，否则冲突会留下已改的内存状态。
   assertExpectedVersion(task, options.expectedVersion);
   // ③ §11 第 3 步：产物引用必须在进入 completed 之前可读、schema 合格。

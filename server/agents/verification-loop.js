@@ -46,6 +46,9 @@ const DECISION_CODES = Object.freeze({
   reviewNeedsHuman: 'review_needs_human',
 });
 
+// §27：Verification Engine 是 trustLevel 的唯一写入者。策略版本取值原文未定义（待确认）。
+const TRUST_POLICY_VERSION = 'trust-rules-v1';
+
 // 仅测试使用的故障注入。生产默认关闭；用于验收要求的"失败注入"，注入的是一个
 // 校验错误码，不是伪造产物——真实的哈希/引用损坏另有常规用例覆盖。
 let faultInjection = null;
@@ -673,12 +676,63 @@ function auditResolution({ producerTask, deterministic, review, resolution, runI
   );
 }
 
+/**
+ * §27：把验证结论映射到产物 trustLevel（Engine 侧唯一写入口的封装）。
+ *
+ * - 唯一写入者：始终以 artifactStore.TRUST_WRITER 调用 setTrustLevel；任务更新、
+ *   artifact 直写等其他路径在各自入口被拒绝并留痕。
+ * - 有序语义：untrusted < declared < evidence_checked < independently_verified，
+ *   调用方按门禁顺序调用；失败路径显式降回 declared 并携带原因。
+ * - 单个写入失败不改变验证结论（结论已由任务错误码/审计表达），只补审计。
+ */
+function applyArtifactTrustLevel({
+  refs = [],
+  level,
+  reason = null,
+  taskId = null,
+  runId = null,
+  evidenceRefs = [],
+  scope = null,
+  now = Date.now(),
+} = {}) {
+  const applied = [];
+  for (const ref of Array.isArray(refs) ? refs : []) {
+    if (!ref || !ref.id) continue;
+    try {
+      const artifact = artifactStore.setTrustLevel(String(ref.id), {
+        level,
+        writer: artifactStore.TRUST_WRITER,
+        policyVersion: TRUST_POLICY_VERSION,
+        evidenceRefs,
+        scope,
+        reason,
+        now,
+      });
+      applied.push({
+        id: artifact.id,
+        level: artifact.trustLevel,
+        rank: artifactStore.trustRank(artifact.trustLevel),
+      });
+    } catch (error) {
+      artifactStore.auditFailure('artifact.trust_level_write_failed', {
+        artifactId: String(ref.id),
+        taskId,
+        reason: (error && error.code) || 'trust_write_failed',
+        now,
+      });
+    }
+  }
+  return applied;
+}
+
 module.exports = {
   VERIFY_CODES,
   DECISION_CODES,
   REVIEWER_BOT_ID,
+  TRUST_POLICY_VERSION,
   verifyDeterministic,
   primaryArtifactRef,
+  applyArtifactTrustLevel,
   openReview,
   parseVerdict,
   resolveConflict,

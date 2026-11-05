@@ -920,6 +920,16 @@ async function runTask(taskId) {
       artifacts: produced,
     });
 
+    // §27：产物生成即按生产者声明落到 declared（唯一写入者仍是 Verification Engine，
+    // 这里只是 Engine 路径的第一档；Producer 无法自行越过该档）。
+    verificationLoop.applyArtifactTrustLevel({
+      refs: artifactRefs,
+      level: 'declared',
+      reason: 'producer_declared',
+      taskId: task.taskId,
+      runId: result.runId || runId,
+    });
+
     const finalResult = normalizeWorkerResult({
       status: 'completed',
       summary,
@@ -940,6 +950,16 @@ async function runTask(taskId) {
     const verification = verificationLoop.verifyDeterministic({
       taskId: task.taskId,
       result: finalResult,
+    });
+
+    // §27：确定性校验全过才升到 evidence_checked；未过则保持/降回 declared 并记原因。
+    // 未触发审校（requiresReview=false）时最高只到这一档，绝不跳到 independently_verified。
+    verificationLoop.applyArtifactTrustLevel({
+      refs: artifactRefs,
+      level: verification.ok ? 'evidence_checked' : 'declared',
+      reason: verification.ok ? 'deterministic_passed' : verification.errorCode || 'verification_failed',
+      taskId: task.taskId,
+      runId: result.runId || runId,
     });
 
     const current = tasks.getRawTask(task.taskId);
@@ -1043,6 +1063,14 @@ async function runTask(taskId) {
             })
           );
         }
+        // §27：任一验证失败不得保留高一档，降回 declared 并记录原因。
+        verificationLoop.applyArtifactTrustLevel({
+          refs: artifactRefs,
+          level: 'declared',
+          reason: resolution.errorCode || 'verification_conflict',
+          taskId: task.taskId,
+          runId,
+        });
         verificationLoop.invalidateArtifactRefs(finalResult, {
           reason: resolution.errorCode || 'verification_conflict',
         });
@@ -1057,6 +1085,13 @@ async function runTask(taskId) {
         return;
       }
       if (resolution.action === 'reject') {
+        verificationLoop.applyArtifactTrustLevel({
+          refs: artifactRefs,
+          level: 'declared',
+          reason: resolution.errorCode || 'review_rejected',
+          taskId: task.taskId,
+          runId,
+        });
         verificationLoop.invalidateArtifactRefs(finalResult, {
           reason: resolution.errorCode || 'review_rejected',
         });
@@ -1081,6 +1116,13 @@ async function runTask(taskId) {
       }
       // action === complete：两边一致通过，继续进入 completed。
     } else if (!verification.ok) {
+      verificationLoop.applyArtifactTrustLevel({
+        refs: artifactRefs,
+        level: 'declared',
+        reason: verification.errorCode,
+        taskId: task.taskId,
+        runId,
+      });
       verificationLoop.invalidateArtifactRefs(finalResult, {
         reason: verification.errorCode,
       });
@@ -1101,6 +1143,20 @@ async function runTask(taskId) {
         '确定性验证未通过，不得进入 completed',
         409
       );
+    }
+
+    // §27：只有"独立审校任务（非同一任务自审）通过"才允许 primary 产物到
+    // independently_verified；requiresReview=false 的路径永远停在上面的 evidence_checked。
+    if (current.requiresReview === true && review && review.decision === 'pass' && primary) {
+      verificationLoop.applyArtifactTrustLevel({
+        refs: [primary],
+        level: 'independently_verified',
+        reason: 'independent_review_passed',
+        taskId: task.taskId,
+        runId,
+        evidenceRefs: (review.evidence || []).map(item => item && item.id).filter(Boolean),
+        scope: review.reviewTaskId ? `independent-review:${review.reviewTaskId}` : 'independent-review',
+      });
     }
 
     // §11 第 2/3 步：进入 completed 前，任务记录已持有产物引用；校验门禁在

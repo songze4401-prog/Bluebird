@@ -62,6 +62,17 @@ const TRUST_LEVELS = Object.freeze([
 // 原文只写"Verification Engine"，未定义服务端标识取值；此处取固定标识便于校验（待确认）。
 const TRUST_WRITER = 'verification-engine';
 
+// §27 有序语义：按 TRUST_LEVELS 下标比较，越靠后可信度越高。
+// 缺字段/历史非法值按 untrusted 处理（fail-closed，只在读取边界使用）。
+function trustRank(level) {
+  const index = TRUST_LEVELS.indexOf(TRUST_LEVELS.includes(level) ? level : 'untrusted');
+  return index < 0 ? 0 : index;
+}
+
+function trustAtLeast(level, threshold) {
+  return trustRank(level) >= trustRank(threshold);
+}
+
 const KIND_MAX = 40;
 const ID_MAX = 120;
 const HASH_RE = /^[0-9a-f]{64}$/;
@@ -736,12 +747,35 @@ function markStatus(id, status, { by = null, reason = '', now = Date.now() } = {
  * trustLevel 不代表访问权限，授权仍由 Policy Engine 独立判断。
  * 记录同时保存验证策略版本、验证器、时间、证据与适用范围（字段名原文未定义，待确认）。
  */
+// 越权/非法写入被拒也要留痕：审计不可用时不得掩盖原拒绝（仍抛原错误）。
+function auditTrustRejection(artifactId, { writer, level, reason, now }) {
+  try {
+    appendAudit('artifact.trust_level_write_rejected', artifactId ? { id: artifactId } : null, {
+      now,
+      reason: `${String(reason || 'rejected')}|writer:${String(writer || '') || 'null'}|level:${
+        String(level || '') || 'null'
+      }`,
+    });
+  } catch (_) {
+    // 审计失败不改变拒绝结论。
+  }
+}
+
 function setTrustLevel(
   id,
-  { level, writer, policyVersion = null, evidenceRefs = [], scope = null, now = Date.now() } = {}
+  {
+    level,
+    writer,
+    policyVersion = null,
+    evidenceRefs = [],
+    scope = null,
+    reason = null,
+    now = Date.now(),
+  } = {}
 ) {
   const key = String(id || '').slice(0, ID_MAX);
   if (String(writer || '') !== TRUST_WRITER) {
+    auditTrustRejection(key, { writer, level, reason: 'not_authorized', now });
     throw new AgentError('not_authorized', 'trustLevel 只能由 Verification Engine 写入', 403, {
       artifactId: key || null,
       writer: writer ? String(writer).slice(0, 60) : null,
@@ -749,6 +783,7 @@ function setTrustLevel(
   }
   const next = String(level || '');
   if (!TRUST_LEVELS.includes(next)) {
+    auditTrustRejection(key, { writer, level, reason: 'invalid_level', now });
     throw new AgentError('artifact_trust_level_invalid', 'trustLevel 取值非法', 400, {
       artifactId: key || null,
       level: next || null,
@@ -768,6 +803,8 @@ function setTrustLevel(
       ? evidenceRefs.map(item => String(item).slice(0, ID_MAX)).slice(0, 20)
       : [],
     scope: scope === null ? null : String(scope).slice(0, 120),
+    // 变更原因（尤其降级原因）随记录保存；字段名原文未定义（待确认）。
+    reason: reason === null ? null : String(reason).slice(0, 200),
   };
   artifact.lastCheckedAt = nowIso(now);
   try {
@@ -777,7 +814,7 @@ function setTrustLevel(
   }
   appendAudit('artifact.trust_level_changed', artifact, {
     now,
-    reason: `${previous}->${next}`,
+    reason: `${previous}->${next}${reason ? `|${String(reason).slice(0, 120)}` : ''}`,
   });
   return artifact;
 }
@@ -898,6 +935,8 @@ module.exports = {
   COMMIT_STATES,
   TRUST_LEVELS,
   TRUST_WRITER,
+  trustRank,
+  trustAtLeast,
   empty,
   persist,
   get,
