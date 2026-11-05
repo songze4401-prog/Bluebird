@@ -108,6 +108,20 @@ const APPROVAL_POLICY_FIELDS = Object.freeze([
   'policyVersion',
 ]);
 
+// A-08 / §15：批量审批、申诉改判与审批负载。
+// 原文只写了「审批吞吐」与批量/申诉的存在，未给批量上限、申诉时限与申诉主体；
+// 以下三条均为**本仓库裁决（非 Notion 原文）**，变更必须升版本并留记录：
+//  - 批量上限 10 条：单次裁决过大时审计与失败隔离都不可控；
+//  - 申诉窗口 24 小时、仅一次：拒绝后给一次人工复核，不设无限上诉；
+//  - 仅 `local-owner`（单用户 Owner）可申诉：Agent 不能替自己申诉。
+const APPROVAL_BATCH_POLICY_VERSION = 'approval-batch-v1';
+const APPROVAL_BATCH_MAX = 10;
+const APPROVAL_APPEAL_POLICY_VERSION = 'approval-appeal-v1';
+const APPEAL_WINDOW_MS = 24 * 60 * 60 * 1000;
+const APPEAL_MAX_TIMES = 1;
+const APPEAL_ALLOWED_ACTORS = Object.freeze([permissions.SINGLE_USER_ACTOR]);
+const APPEAL_DECISIONS = Object.freeze(['overturn', 'uphold']);
+
 // Phase 3 第 1 项：验证闭环的"人工审批门"。
 // 这两个操作的执行不触碰记忆/外部副作用，因此不走 memoryService 参数校验与
 // 权限白名单；但仍复用同一条审批记录、riskLevel/expiresAt/SLA 与超时语义：
@@ -269,6 +283,11 @@ function publicApproval(record) {
     expiresAt: typeof record.expiresAt === 'string' ? record.expiresAt : null,
     escalationAt: typeof record.escalationAt === 'string' ? record.escalationAt : null,
     policyVersion: Number.isInteger(record.policyVersion) ? record.policyVersion : null,
+    // A-08：批量裁决归属（单条裁决为 null）与申诉历史（原裁决快照另存）。
+    batchId: record.batchId || null,
+    appealStatus: record.appealStatus || null,
+    appeals: Array.isArray(record.appeals) ? clone(record.appeals) : [],
+    originalDecision: record.originalDecision ? clone(record.originalDecision) : null,
     overdue: record.overdue === true,
     overdueAt: record.overdueAt || null,
     escalatedAt: record.escalatedAt || null,
@@ -1161,7 +1180,11 @@ function createApproval({
   return publicApproval(record);
 }
 
-function decide(approvalId, decision, { actor = permissions.SINGLE_USER_ACTOR, reason = null } = {}) {
+function decide(
+  approvalId,
+  decision,
+  { actor = permissions.SINGLE_USER_ACTOR, reason = null, batchId = null } = {}
+) {
   const current = load();
   const record = current.approvals[String(approvalId || '')];
   if (!record) throw new AgentError('approval_not_found', '审批不存在', 404);
@@ -1186,6 +1209,7 @@ function decide(approvalId, decision, { actor = permissions.SINGLE_USER_ACTOR, r
   record.decidedBy = String(actor || permissions.SINGLE_USER_ACTOR).slice(0, 80);
   record.decidedAt = now;
   record.reason = typeof reason === 'string' ? reason.slice(0, 200) : null;
+  if (batchId) record.batchId = String(batchId).slice(0, 80);
   // 离开 pending 后不再需要 escalation/overdue 计时。
   disarmDeadline(record.approvalId);
   save();
@@ -1250,6 +1274,275 @@ function approve(approvalId, options) {
 
 function reject(approvalId, options) {
   return decide(approvalId, 'reject', options);
+}
+
+/**
+ * A-08 批量裁决：同风险等级、同动作类型的多条审批一次裁决。
+ *
+ * - 单条失败不吞掉其它条：每条独立 try/catch，返回逐条结果；
+ * - 组基准取第一条存在的记录；风险等级/动作类型不一致的条目单独记失败、不裁决；
+ * - 每条成功裁决都由 decide() 落 `approval.resolved` 审计，并写回 batchId 供追溯。
+ */
+function batchDecide({
+  approvalIds,
+  decision,
+  actor = permissions.SINGLE_USER_ACTOR,
+  reason = null,
+} = {}) {
+  if (!Array.isArray(approvalIds) || approvalIds.length === 0) {
+    throw new AgentError('invalid_approval', '批量审批必须提供非空 approvalIds 数组', 400);
+  }
+  if (approvalIds.length > APPROVAL_BATCH_MAX) {
+    throw new AgentError(
+      'invalid_approval',
+      `批量审批最多 ${APPROVAL_BATCH_MAX} 条（本仓库裁决，非 Notion 原文）`,
+      400
+    );
+  }
+  if (!['approve', 'reject'].includes(decision)) {
+    throw new AgentError('invalid_approval', '批量裁决只支持 approve / reject', 400);
+  }
+  const ids = approvalIds.map(id => String(id === null || id === undefined ? '' : id).trim());
+  if (ids.some(id => !id)) {
+    throw new AgentError('invalid_approval', 'approvalIds 不能包含空值', 400);
+  }
+  if (new Set(ids).size !== ids.length) {
+    throw new AgentError('invalid_approval', 'approvalIds 不能重复', 400);
+  }
+
+  const current = load();
+  const batchId = `bat_${crypto.randomUUID()}`;
+  const results = [];
+  let group = null;
+  for (const approvalId of ids) {
+    const record = current.approvals[approvalId];
+    if (!record) {
+      results.push({ approvalId, ok: false, errorCode: 'approval_not_found' });
+      continue;
+    }
+    const riskLevel = typeof record.riskLevel === 'string' ? record.riskLevel : null;
+    if (!group) {
+      group = { operation: record.operation, riskLevel };
+    } else if (record.operation !== group.operation || riskLevel !== group.riskLevel) {
+      results.push({
+        approvalId,
+        ok: false,
+        errorCode: 'approval_batch_mismatch',
+        error: `与批量基准不一致（基准 ${group.operation}/${group.riskLevel || 'unknown'}）`,
+      });
+      continue;
+    }
+    try {
+      const approval = decide(approvalId, decision, { actor, reason, batchId });
+      results.push({ approvalId, ok: true, approval });
+    } catch (error) {
+      results.push({
+        approvalId,
+        ok: false,
+        errorCode: (error && error.code) || 'internal_error',
+        error: error && error.message ? error.message : String(error),
+      });
+    }
+  }
+  const applied = results.filter(item => item.ok).length;
+  return {
+    policyVersion: APPROVAL_BATCH_POLICY_VERSION,
+    batchId,
+    decision,
+    requested: ids.length,
+    applied,
+    failed: ids.length - applied,
+    results,
+  };
+}
+
+/**
+ * A-08 申诉：被拒绝的审批可由 Owner 发起一次申诉（24 小时窗口）。
+ * 只追加 appeals 历史与 appealStatus，不改原裁决字段；改判在 resolveAppeal() 里落。
+ */
+function appealApproval(
+  approvalId,
+  { actor = permissions.SINGLE_USER_ACTOR, reason = null, now = Date.now() } = {}
+) {
+  if (!APPEAL_ALLOWED_ACTORS.includes(String(actor || ''))) {
+    throw new AgentError('not_authorized', '只有 Owner 可以发起审批申诉', 403);
+  }
+  const current = load();
+  const record = current.approvals[String(approvalId || '')];
+  if (!record) throw new AgentError('approval_not_found', '审批不存在', 404);
+  if (record.status !== 'rejected' || requestStatusOf(record) !== 'rejected') {
+    throw new AgentError('approval_appeal_not_rejected', '只有被拒绝的审批可以申诉', 409);
+  }
+  const appeals = Array.isArray(record.appeals) ? record.appeals : [];
+  if (appeals.length >= APPEAL_MAX_TIMES) {
+    throw new AgentError(
+      'approval_appeal_exhausted',
+      '该审批已申诉过，不能再次申诉（本仓库裁决，非 Notion 原文）',
+      409
+    );
+  }
+  const decidedAt = Date.parse(record.decidedAt || '');
+  if (!Number.isFinite(decidedAt)) {
+    throw new AgentError('approval_appeal_window_closed', '缺少原裁决时间，不能申诉', 409);
+  }
+  if (now - decidedAt > APPEAL_WINDOW_MS) {
+    throw new AgentError(
+      'approval_appeal_window_closed',
+      '申诉窗口已关闭（本仓库裁决：拒绝后 24 小时内，非 Notion 原文）',
+      409
+    );
+  }
+  const cleanReason = typeof reason === 'string' ? reason.trim().slice(0, 200) : '';
+  if (!cleanReason) {
+    throw new AgentError('invalid_approval', '申诉必须填写理由', 400);
+  }
+
+  const appeal = {
+    appealId: `apl_${crypto.randomUUID()}`,
+    requestedBy: String(actor).slice(0, 80),
+    requestedAt: nowIso(now),
+    reason: cleanReason,
+    outcome: 'pending',
+    decidedBy: null,
+    decidedAt: null,
+    decisionReason: null,
+  };
+  appeals.push(appeal);
+  record.appeals = appeals;
+  record.appealStatus = 'pending';
+  record.appealPolicyVersion = APPROVAL_APPEAL_POLICY_VERSION;
+  save();
+
+  recordEvent(
+    record.botId,
+    'approval.appealed',
+    {
+      status: 'pending',
+      decision: 'appeal_requested',
+      mode: 'approval_appeal',
+      policyVersion: APPROVAL_APPEAL_POLICY_VERSION,
+      detail: cleanReason,
+    },
+    { approvalId: record.approvalId, taskId: record.taskId, sessionId: record.sessionId }
+  );
+  return publicApproval(record);
+}
+
+/**
+ * A-08 申诉裁决：uphold 维持原拒绝；overturn 改判为 approved。
+ * 改判前先把原裁决冻结到 originalDecision，status/requestStatus 改判后仍保留完整历史。
+ *
+ * 限定（本仓库裁决）：改判只写回审批记录，不复活 reject 时已 cancelled 的任务；
+ * 任务侧需重新发起。改判不重置 SLA（不重新计时、不自动执行）。
+ */
+function resolveAppeal(
+  approvalId,
+  { decision, actor = permissions.SINGLE_USER_ACTOR, reason = null, now = Date.now() } = {}
+) {
+  if (!APPEAL_ALLOWED_ACTORS.includes(String(actor || ''))) {
+    throw new AgentError('not_authorized', '只有 Owner 可以裁决申诉', 403);
+  }
+  if (!APPEAL_DECISIONS.includes(decision)) {
+    throw new AgentError('invalid_approval', '申诉裁决只支持 overturn / uphold', 400);
+  }
+  const current = load();
+  const record = current.approvals[String(approvalId || '')];
+  if (!record) throw new AgentError('approval_not_found', '审批不存在', 404);
+  const appeals = Array.isArray(record.appeals) ? record.appeals : [];
+  const index = appeals.findIndex(item => item && item.outcome === 'pending');
+  if (index < 0) {
+    throw new AgentError('approval_appeal_not_pending', '没有待处理的申诉', 409);
+  }
+
+  const cleanReason = typeof reason === 'string' ? reason.trim().slice(0, 200) : null;
+  const appeal = appeals[index];
+  appeal.outcome = decision === 'overturn' ? 'overturned' : 'upheld';
+  appeal.decidedBy = String(actor).slice(0, 80);
+  appeal.decidedAt = nowIso(now);
+  appeal.decisionReason = cleanReason;
+  record.appealStatus = appeal.outcome;
+  record.appeals = appeals;
+
+  if (decision === 'overturn') {
+    if (!record.originalDecision) {
+      record.originalDecision = {
+        status: record.status,
+        requestStatus: requestStatusOf(record),
+        decidedBy: record.decidedBy || null,
+        decidedAt: record.decidedAt || null,
+        reason: record.reason || null,
+      };
+    }
+    record.status = 'approved';
+    record.requestStatus = 'approved';
+    record.requestStatusChangedAt = nowIso(now);
+    record.reappliedAt = nowIso(now);
+  }
+  save();
+
+  recordEvent(
+    record.botId,
+    'approval.appealed',
+    {
+      status: record.appealStatus,
+      decision: decision === 'overturn' ? 'appeal_overturned' : 'appeal_upheld',
+      mode: 'approval_appeal',
+      policyVersion: APPROVAL_APPEAL_POLICY_VERSION,
+      ...(cleanReason ? { detail: cleanReason } : {}),
+    },
+    { approvalId: record.approvalId, taskId: record.taskId, sessionId: record.sessionId }
+  );
+  return publicApproval(record);
+}
+
+/**
+ * A-08 审批负载：待审队列分布（按风险等级 / 动作类型 / 等待时长）。
+ * 计数来自真实待审记录；吞吐、SLA 达成率、P95 等待等性能指标需要压测，
+ * 这里只留字段位并固定为 null，不填估算值。
+ */
+function approvalQueueDistribution({ botId = null, now = Date.now() } = {}) {
+  if (botId) assertBot(botId);
+  const current = load();
+  const pending = Object.values(current.approvals).filter(
+    item =>
+      item.status === 'pending' &&
+      requestStatusOf(item) !== 'cancelled' &&
+      (!botId || item.botId === botId)
+  );
+  const byRiskLevel = { R2: 0, R3: 0, unknown: 0 };
+  const byOperation = {};
+  const waitingBuckets = { lt5m: 0, lt30m: 0, lt2h: 0, gte2h: 0 };
+  let oldestWaitMs = 0;
+  for (const item of pending) {
+    const riskLevel = typeof item.riskLevel === 'string' ? item.riskLevel : 'unknown';
+    byRiskLevel[riskLevel] = (byRiskLevel[riskLevel] || 0) + 1;
+    byOperation[item.operation] = (byOperation[item.operation] || 0) + 1;
+    const requestedAt = Date.parse(item.requestedAt || '');
+    const waitMs = Number.isFinite(requestedAt) ? Math.max(0, now - requestedAt) : 0;
+    if (waitMs < 5 * 60 * 1000) waitingBuckets.lt5m += 1;
+    else if (waitMs < 30 * 60 * 1000) waitingBuckets.lt30m += 1;
+    else if (waitMs < 2 * 60 * 60 * 1000) waitingBuckets.lt2h += 1;
+    else waitingBuckets.gte2h += 1;
+    if (waitMs > oldestWaitMs) oldestWaitMs = waitMs;
+  }
+  return {
+    // 原文 §15 只写「审批吞吐」，未定义指标口径；数值需压测，留位不填。
+    policyVersion: 'approval-workload-v1',
+    generatedAt: nowIso(now),
+    botId: botId || null,
+    totalPending: pending.length,
+    byRiskLevel,
+    byOperation,
+    waitingBuckets,
+    oldestWaitMs,
+    metrics: {
+      source: 'requires_load_test',
+      throughputPerHour: null,
+      slaComplianceRate: null,
+      p50WaitMs: null,
+      p95WaitMs: null,
+    },
+  };
 }
 
 async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {}) {
@@ -1620,6 +1913,11 @@ module.exports = {
   REQUEST_TRANSITIONS,
   APPROVAL_STATES,
   APPROVAL_SLA_POLICY_VERSION,
+  APPROVAL_BATCH_POLICY_VERSION,
+  APPROVAL_BATCH_MAX,
+  APPROVAL_APPEAL_POLICY_VERSION,
+  APPEAL_WINDOW_MS,
+  APPEAL_MAX_TIMES,
   MAX_NOTIFICATION_ATTEMPTS,
   R2_SLA_MS,
   R2_ESCALATION_RATIO,
@@ -1636,6 +1934,10 @@ module.exports = {
   remindApproval,
   escalateApproval,
   cancelApproval,
+  batchDecide,
+  appealApproval,
+  resolveAppeal,
+  approvalQueueDistribution,
   requestStatusOf,
   mergedStateOf,
   slaViewOf,

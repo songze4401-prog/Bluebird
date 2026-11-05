@@ -95,6 +95,8 @@ const EVENT_TYPES = Object.freeze([
   // §29 提醒 / 取消两条完整路径的审计事件（只记状态与来源，不记正文）。
   'approval.reminded',
   'approval.cancelled',
+  // A-08：申诉的发起与裁决（原裁决保留在记录内，事件只记结果与理由摘要）。
+  'approval.appealed',
   // Phase 3 第 1 项：验证闭环的审计事件（只记录裁决与引用，不记录正文）。
   'verification.review_opened',
   'verification.verdict',
