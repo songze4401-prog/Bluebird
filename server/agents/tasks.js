@@ -114,6 +114,10 @@ const EVENT_TYPES = Object.freeze([
   // §16：provenanceRefs / taintLabels 只允许创建时继承或被验证路径改写；
   // 任务写入路径（updateTask / transitionTask）拒绝并留痕。
   'task.taint_write_rejected',
+  // §16：跨 Agent 读取自动追加来源引用 / 读取工具返回追加污点标签（只追加不覆盖）。
+  'task.provenance_appended',
+  // §16：Gateway 每次工具调用的污点策略判定（含 policyVersion 与 ruleId）。
+  'tool.policy_decision',
 ]);
 
 const SAFE_PAYLOAD_KEYS = new Set([
@@ -130,6 +134,7 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'resultCount',
   'stopReason',
   'errorCode',
+  'detail',
   'mode',
   'decision',
   'messageId',
@@ -147,6 +152,9 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'contractVersion',
   'idempotent',
   'policyDigest',
+  'policyVersion',
+  'ruleId',
+  'added',
   // Phase 1 交付物 1：编排轨迹以扁平标量写入既有事件（嵌套对象不入白名单），
   // 与 task.route.orchestration 同源，不新建审计存储。
   'orchestrationEntry',
@@ -1034,11 +1042,13 @@ function createTask({
   }
   const inheritedTaint = artifactStore.inheritedTaintOf(cleanProvenanceRefs);
   const mergedTaint = [...new Set([...inheritedTaint, ...declaredTaint])].sort();
-  const cleanTaintLabels = mergedTaint.length > 0 ? mergedTaint : [artifactStore.TAINT_UNKNOWN];
+  // 新任务未读取任何上游内容时是"无污点"（空集合），不是"未知"；
+  // unknown 只用于旧数据缺字段与断裂引用（未知即最保守，见 readTaintLabels）。
+  const cleanTaintLabels = mergedTaint;
   const cleanTaintPolicyVersion =
     typeof taintPolicyVersion === 'string' && taintPolicyVersion.trim()
       ? taintPolicyVersion.trim().slice(0, 60)
-      : artifactStore.TAINT_POLICY_VERSION;
+      : artifactStore.currentTaintPolicyVersion();
 
   let tools = [...manifest.toolAllowlist];
   if (allowedTools !== null) {
@@ -1408,6 +1418,101 @@ function assertNoTaintWrite(task, patch, source) {
   for (const field of TAINT_WRITE_FIELDS) {
     if (patch && patch[field] !== undefined) rejectTaintWrite(task, field, source);
   }
+}
+
+// §16 读路径专用：跨 Agent / 上下文投影 / 记忆检索读到的内容自动进入任务来源链。
+// 只追加不覆盖、去重、按上限截断；只改任务记录，不改被读对象。
+const PROVENANCE_APPEND_MAX = 20;
+
+function provenanceRefKey(ref) {
+  return `${ref.kind || ''}|${ref.id}|${ref.version === undefined ? '' : ref.version}`;
+}
+
+function appendProvenanceRefs(taskId, refs, { source = 'read' } = {}) {
+  const store = loadTasks();
+  const task = store.tasks[String(taskId || '')];
+  if (!task) return null;
+  const existing = Array.isArray(task.provenanceRefs) ? task.provenanceRefs.slice() : [];
+  const seen = new Set(existing.map(provenanceRefKey));
+  const labels = new Set(Array.isArray(task.taintLabels) ? task.taintLabels : []);
+  let added = 0;
+  let incoming = null;
+  try {
+    incoming = artifactStore.normalizeProvenanceRefs(refs, 'provenanceRefs');
+  } catch (_) {
+    // 读取到不可解析的引用：不得默认干净，记 unknown。
+    labels.add(artifactStore.TAINT_UNKNOWN);
+  }
+  if (incoming) {
+    for (const ref of incoming) {
+      const key = provenanceRefKey(ref);
+      if (!seen.has(key) && existing.length < PROVENANCE_APPEND_MAX) {
+        existing.push(ref);
+        seen.add(key);
+        added += 1;
+      }
+    }
+    for (const label of artifactStore.inheritedTaintOf(incoming)) labels.add(label);
+  }
+  // 旧任务缺 taintLabels 字段：读作 unknown 后再追加，不得被当成干净。
+  if (!Array.isArray(task.taintLabels)) labels.add(artifactStore.TAINT_UNKNOWN);
+  const nextLabels = [...labels].sort();
+  const labelsChanged =
+    nextLabels.length !== (Array.isArray(task.taintLabels) ? task.taintLabels.length : -1) ||
+    nextLabels.some((label, index) => label !== task.taintLabels[index]);
+  if (added === 0 && !labelsChanged) return task;
+
+  task.provenanceRefs = existing;
+  task.taintLabels = nextLabels;
+  task.updatedAt = Date.now();
+  saveTasks();
+  try {
+    appendEvent({
+      botId: task.botId,
+      taskId: task.taskId,
+      runId: task.runId || null,
+      eventType: 'task.provenance_appended',
+      payload: { status: task.status, mode: source, added },
+    });
+  } catch (_) {
+    // 审计通道不可用不影响已经落地的只追加传播。
+  }
+  return task;
+}
+
+function appendTaintLabels(taskId, labels, { source = 'read' } = {}) {
+  const store = loadTasks();
+  const task = store.tasks[String(taskId || '')];
+  if (!task) return null;
+  let clean;
+  try {
+    clean = artifactStore.normalizeTaintLabels(labels, 'taintLabels');
+  } catch (_) {
+    clean = [artifactStore.TAINT_UNKNOWN];
+  }
+  const base = Array.isArray(task.taintLabels)
+    ? task.taintLabels.slice()
+    : [artifactStore.TAINT_UNKNOWN];
+  const next = [...new Set([...base, ...clean])].sort();
+  const changed =
+    next.length !== (Array.isArray(task.taintLabels) ? task.taintLabels.length : -1) ||
+    next.some((label, index) => label !== task.taintLabels[index]);
+  if (!changed) return task;
+  task.taintLabels = next;
+  task.updatedAt = Date.now();
+  saveTasks();
+  try {
+    appendEvent({
+      botId: task.botId,
+      taskId: task.taskId,
+      runId: task.runId || null,
+      eventType: 'task.provenance_appended',
+      payload: { status: task.status, mode: source, added: next.length - base.length },
+    });
+  } catch (_) {
+    // 同上
+  }
+  return task;
 }
 
 function updateTask(taskId, patch = {}) {
@@ -2355,4 +2460,6 @@ module.exports = {
   reserveTaskBudget,
   settleTaskBudget,
   releaseTaskBudget,
+  appendProvenanceRefs,
+  appendTaintLabels,
 };

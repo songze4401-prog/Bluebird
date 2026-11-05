@@ -444,7 +444,13 @@ async function executeToolCall(name, rawArgs, context) {
       });
       if (typeof context.onToolDenied === 'function') {
         try {
-          context.onToolDenied({ name: def.name, code });
+          context.onToolDenied({
+            name: def.name,
+            code,
+            detail: (verdict && verdict.detail) || null,
+            ruleId: (verdict && verdict.ruleId) || null,
+            policyVersion: (verdict && verdict.policyVersion) || null,
+          });
         } catch (_) {
           // 审计失败不能改变拒绝结果。
         }

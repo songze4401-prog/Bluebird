@@ -27,6 +27,7 @@ const crypto = require('crypto');
 const { writeFileAtomicSync } = require('../atomic-write');
 const { AgentError } = require('./errors');
 const cycleDetection = require('./cycle-detection');
+const taintPolicy = require('./taint-policy');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -521,14 +522,24 @@ function normalizeProvenanceRefs(refs, field = 'provenanceRefs') {
   return out;
 }
 
-// 读边界：缺字段/空数组的旧记录不得默认成"干净"，一律读作 unknown。
+// 读边界：缺字段的旧记录不得默认成"干净"，读作 unknown；
+// 显式空集合表示"该对象没有任何上游污点"（新任务未读取任何内容），是合法状态。
 function readTaintLabels(target) {
   const artifact = typeof target === 'string' ? get(target) : target;
-  if (!artifact || !Array.isArray(artifact.taintLabels) || artifact.taintLabels.length === 0) {
+  if (!artifact || !Array.isArray(artifact.taintLabels)) {
     return [TAINT_UNKNOWN];
   }
-  const labels = artifact.taintLabels.filter(item => typeof item === 'string' && item.trim());
-  return labels.length > 0 ? labels.slice() : [TAINT_UNKNOWN];
+  return artifact.taintLabels
+    .filter(item => typeof item === 'string' && item.trim())
+    .map(item => item.trim());
+}
+
+function currentTaintPolicyVersion() {
+  try {
+    return taintPolicy.currentPolicyVersion();
+  } catch (_) {
+    return TAINT_POLICY_VERSION;
+  }
 }
 
 function readProvenanceRefs(target) {
@@ -736,7 +747,7 @@ function persist({
     // §16：来源引用与污点标签。旧记录缺字段时读作 unknown（见 readTaintLabels）。
     provenanceRefs: cleanRefs,
     taintLabels,
-    taintPolicyVersion: TAINT_POLICY_VERSION,
+    taintPolicyVersion: currentTaintPolicyVersion(),
     taintChangedAt: null,
     taintChangedBy: null,
     lastCheckedAt: null,
@@ -1170,6 +1181,7 @@ module.exports = {
   TAINT_UNKNOWN,
   TAINT_UNVERIFIED,
   TAINT_VERIFIED,
+  currentTaintPolicyVersion,
   normalizeTaintLabels,
   normalizeProvenanceRefs,
   readTaintLabels,

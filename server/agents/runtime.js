@@ -20,6 +20,7 @@ const deadLetter = require('./dead-letter');
 const { projectWorkerContext } = require('./context-projection');
 const { normalizeWorkerResult } = require('./worker-result');
 const { createToolAuthorizer } = require('./tool-gateway');
+const { listToolMetadata } = require('../agent-runtime');
 const { AgentError, budgetExceededError } = require('./errors');
 const approvalDeadline = require('./approval-deadline');
 const conflictRecord = require('./conflict-record');
@@ -107,6 +108,37 @@ function scheduleTaskQueue() {
   } finally {
     scheduling = false;
   }
+}
+
+// §16：memory_search 的结果没有版本化 artifact 引用，无法构造可解析的
+// `{kind,id,version}`（强行构造会让 Gateway 永久断链），因此按来源标签继承。
+// 来源映射（本仓库裁决，非 Notion 原文）：import/tool/web → external:*，
+// user/agent/model → internal:*；缺来源元数据 → unknown。
+function memorySearchTaintLabels(result) {
+  const labels = ['tool:memory_search'];
+  const items = Array.isArray(result && result.results) ? result.results : [];
+  for (const item of items) {
+    const sources = Array.isArray(item && item.sourceTypes) ? item.sourceTypes : [];
+    if (sources.length === 0) {
+      labels.push('unknown');
+      continue;
+    }
+    for (const source of sources) {
+      const name = String(source || '').trim().toLowerCase();
+      if (!name) {
+        labels.push('unknown');
+      } else if (name === 'import') {
+        labels.push('external:import');
+      } else if (name === 'tool') {
+        labels.push('external:tool');
+      } else if (name === 'web') {
+        labels.push('external:web');
+      } else {
+        labels.push(`internal:${name.slice(0, 32)}`);
+      }
+    }
+  }
+  return labels;
 }
 
 function safeEvent(botId, eventType, payload = {}, context = {}) {
@@ -384,6 +416,11 @@ async function execute({
             },
             { taskId, runId, sessionId }
           );
+          // §16 读到即继承：记忆检索结果没有可解析的版本化 artifact 引用，
+          // 用来源标签记录（缺失来源元数据时记 unknown，绝不默认干净）。
+          tasks.appendTaintLabels(taskId, memorySearchTaintLabels(result.result), {
+            source: 'tool.memory_search',
+          });
         }
         if (result.ok && result.name === 'memory_remember') {
           safeEvent(
@@ -829,10 +866,36 @@ async function runTask(taskId) {
       task,
       systemPrompt: config.prompt.systemPrompt,
     });
+    const toolMeta = {};
+    for (const item of listToolMetadata()) {
+      if (item && item.name) toolMeta[item.name] = item;
+    }
     const authorizer = createToolAuthorizer({
       allowedTools: task.allowedTools,
-      // §16：每次工具调用前校验任务来源链可解析（Gateway 内 fail-closed）。
-      provenanceRefs: Array.isArray(task.provenanceRefs) ? task.provenanceRefs : [],
+      // §16：每次工具调用前重新读取任务的来源链与污点（跨 Agent 读取可能在
+      // 运行中追加；只在规划时快照会漏掉这些继承）。
+      getTaintState: () => {
+        const live = tasks.getRawTask(task.taskId) || task;
+        return {
+          provenanceRefs: Array.isArray(live.provenanceRefs) ? live.provenanceRefs : [],
+          taintLabels: Array.isArray(live.taintLabels) ? live.taintLabels : ['unknown'],
+        };
+      },
+      toolMeta,
+      onDecision: decision => {
+        safeEvent(
+          task.botId,
+          'tool.policy_decision',
+          {
+            tool: decision.tool,
+            decision: decision.decision,
+            ruleId: decision.ruleId,
+            policyVersion: decision.policyVersion,
+            mode: 'delegated_task',
+          },
+          { taskId: task.taskId, runId, sessionId: task.sessionId || null }
+        );
+      },
     });
     recordCheckpoint({ round: 0, toolCalls: 0, phase: 'started' });
 
@@ -884,11 +947,18 @@ async function runTask(taskId) {
         resource: `bot:${task.botId}`,
         operation: 'execute',
       },
-      onToolDenied: ({ name, code }) => {
+      onToolDenied: ({ name, code, detail, ruleId, policyVersion }) => {
         safeEvent(
           task.botId,
           'tool.denied',
-          { tool: name, errorCode: code, mode: 'delegated_task' },
+          {
+            tool: name,
+            errorCode: code,
+            detail: detail || null,
+            ruleId: ruleId || null,
+            policyVersion: policyVersion || null,
+            mode: 'delegated_task',
+          },
           { taskId: task.taskId, runId, sessionId: task.sessionId }
         );
       },
