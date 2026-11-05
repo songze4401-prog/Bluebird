@@ -13,11 +13,14 @@ const { assertRunnable } = require('./registry');
 const { getCredentialKey } = require('./credentials');
 const sessions = require('./sessions');
 const tasks = require('./tasks');
+const dependencies = require('./dependencies');
+const workerScope = require('./worker-scope');
 const resultDelivery = require('./result-delivery');
+const deadLetter = require('./dead-letter');
 const { projectWorkerContext } = require('./context-projection');
 const { normalizeWorkerResult } = require('./worker-result');
 const { createToolAuthorizer } = require('./tool-gateway');
-const { AgentError } = require('./errors');
+const { AgentError, budgetExceededError } = require('./errors');
 const approvalDeadline = require('./approval-deadline');
 const artifactCommit = require('./artifact-commit');
 const { createSideEffectGuard } = require('./side-effect-guard');
@@ -25,6 +28,7 @@ const crashHook = require('./crash-hook');
 const opLedger = require('./op-ledger');
 const workflowStore = require('./workflow-store');
 const { createCleanupScheduler } = require('./orphan-scheduler');
+const verificationLoop = require('./verification-loop');
 
 const MAX_USER_MESSAGE = 4000;
 const HISTORY_MESSAGES = 24;
@@ -32,6 +36,12 @@ const MAX_TASK_TOOLS = 6;
 // 工具调用次数预算与“允许的工具种类数”无关。旧实现用工具种类数当上限，
 // 3 个工具就只能调用 3 次，正常的多次检索会提前耗尽预算。
 const MAX_TASK_TOOL_CALLS = 6;
+// Phase 3 第 1 项：生产者等待独立审校任务收敛的上限。超时即按"审校不可用"
+// 保守处理（转人工），绝不当成通过；上限不超过单个 Task deadline 的量级。
+const REVIEW_WAIT_MS = Math.min(
+  60000,
+  Math.max(5000, Number(process.env.BLUEBIRD_AGENT_REVIEW_WAIT_MS) || 30000)
+);
 // Worker 心跳：运行期间每 N 毫秒刷新任务 heartbeatAt 并写一条安全事件。
 // 只证明"执行器仍活着"，不携带任何内容。
 const HEARTBEAT_MS = Math.min(
@@ -59,6 +69,9 @@ function scheduleTaskQueue() {
   if (scheduling) return;
   scheduling = true;
   try {
+    // Phase 1 交付物 2：每次取队前先收敛依赖失败（含下游的下游），
+    // 这样所有终态写入路径都不必各自埋钩子——它们最终都会走到这里。
+    tasks.settleDependencies();
     while (activeRuns.size < TASK_CONCURRENCY) {
       const next = tasks.nextQueuedTask();
       if (!next) break;
@@ -113,6 +126,17 @@ function safeEvent(botId, eventType, payload = {}, context = {}) {
       }`
     );
   }
+}
+
+async function waitForReviewTask(taskId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const reviewTask = tasks.getRawTask(taskId);
+    if (!reviewTask) return null;
+    if (tasks.isTerminalStatus(reviewTask.status)) return reviewTask;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  return tasks.getRawTask(taskId);
 }
 
 function allowedToolsFor(config, manifest, taskTools) {
@@ -447,6 +471,8 @@ async function execute({
       providerId: config.modelProfile.providerId,
       modelId: config.modelProfile.modelId,
     },
+    // B-06：供应商真实 usage（多轮累计）；缺失时为 null，绝不估算。
+    usage: outcome.usage || null,
     runId,
   };
 }
@@ -553,6 +579,7 @@ function finalizeWaitingApprovalExpiry(task, outcome) {
     status,
     errorCode,
     finishedAt,
+    usage: (result && result.usage) || null,
   });
   tasks.releaseLease(task.taskId);
   resultDelivery.deliverTaskOutcome(task.taskId, { status, result, errorCode });
@@ -584,6 +611,10 @@ async function runTask(taskId) {
   if (!task) return;
   // waiting_approval 是暂停态，不是终态；由 approvals.execute/reject 收尾。
   if (tasks.isTerminalStatus(task.status) || task.status === 'waiting_approval') return;
+  // Phase 1 交付物 2：依赖未就绪不在执行侧启动。
+  // 判定复用 dependencies.isReady（与 tasks.nextQueuedTask 是同一实现），
+  // 这里只是防「取队后依赖态变化」的二次确认，未就绪立即回队列。
+  if (!dependencies.isReady(task, tasks.rawTasksById())) return;
 
   const controller = new AbortController();
   activeRuns.set(task.taskId, controller);
@@ -621,6 +652,31 @@ async function runTask(taskId) {
   // S7：retrying 任务退避到期后直接启动 attempt（retrying → running），
   // 不再经 queued/accepted 中转。
   const retryAttempt = task.status === 'retrying';
+
+  // B-06：本次 attempt 的 Token 预留。reserve 在 execute 之前一次性占用剩余额度，
+  // 结束后按真实 usage 结算并回冲差额；失败/取消/未拿到 usage 时释放。
+  let reservation = null;
+  const settleReservation = usage => {
+    if (!reservation || reservation.settled) return;
+    const total =
+      usage && Number.isFinite(usage.total_tokens) && usage.total_tokens > 0
+        ? Math.floor(usage.total_tokens)
+        : 0;
+    reservation.settled = true;
+    tasks.settleTaskBudget(task.taskId, {
+      reserved: reservation.amount,
+      actual: total,
+    });
+  };
+  const releaseReservation = () => {
+    if (!reservation || reservation.settled) return;
+    reservation.settled = true;
+    try {
+      tasks.releaseTaskBudget(task.taskId, { amount: reservation.amount });
+    } catch (_) {
+      // 释放失败由下一次 reserve 的账本校验兜底，不能影响任务终态。
+    }
+  };
 
   try {
     // ---- accept ----
@@ -696,17 +752,13 @@ async function runTask(taskId) {
     if (workerSession.owner && workerSession.owner.taskId !== task.taskId) {
       const ownerTask = tasks.getTask(workerSession.owner.taskId);
       allowTakeover = Boolean(ownerTask && tasks.isTerminalStatus(ownerTask.status));
-      if (!allowTakeover) {
-        throw new AgentError(
-          'worker_session_owner_mismatch',
-          'Worker 会话已归属其他任务',
-          409
-        );
-      }
     }
-    sessions.attachOwner(task.botId, workerSessionId, {
-      agentId: task.botId,
+    // 隔离边界：归属判定与 owner 绑定统一走 worker-scope（拒绝码仍是
+    // worker_session_owner_mismatch），运行时不再手工 attachOwner。
+    workerScope.openWorkerScope({
+      botId: task.botId,
       taskId: task.taskId,
+      sessionId: workerSessionId,
       runId,
       allowTakeover,
     });
@@ -777,6 +829,24 @@ async function runTask(taskId) {
     const authorizer = createToolAuthorizer({ allowedTools: task.allowedTools });
     recordCheckpoint({ round: 0, toolCalls: 0, phase: 'started' });
 
+    // B-06：执行前原子预留。按 Task 剩余上限全额预留（预估不精确，结算时回冲），
+    // 无上限/额度耗尽一律 budget_exceeded 且 retryable=false。
+    const budgetSnapshot = tasks.getTaskBudgetSnapshot(task.taskId);
+    const budgetLimit = budgetSnapshot ? budgetSnapshot.limit : null;
+    const budgetRemaining = budgetSnapshot ? budgetSnapshot.remaining : null;
+    if (budgetLimit === null || budgetRemaining === null || budgetRemaining <= 0) {
+      throw budgetExceededError({
+        taskId: task.taskId,
+        scope: 'task',
+        required: 1,
+        remaining: budgetRemaining === null ? 0 : Math.max(0, budgetRemaining),
+        runId: task.budgetRunId || null,
+        causeRef: budgetLimit === null ? 'budget_not_configured' : 'budget_exhausted',
+      });
+    }
+    tasks.reserveTaskBudget(task.taskId, { amount: budgetRemaining });
+    reservation = { amount: budgetRemaining, settled: false };
+
     const result = await execute({
       botId: task.botId,
       messages: projection.messages,
@@ -817,6 +887,10 @@ async function runTask(taskId) {
       },
       onProgress: recordCheckpoint,
     });
+
+    // B-06：结算本次预留。真实 usage 缺失时按 0 结算（相当于全额回冲），
+    // 不拿字符数估算冒充 token；该限制已在用例注释中如实标注。
+    settleReservation(result && result.usage);
 
     const latest = tasks.getRawTask(task.taskId);
     if (!latest || tasks.isTerminalStatus(latest.status) || latest.cancelRequested) {
@@ -860,6 +934,156 @@ async function runTask(taskId) {
       finishedAt: nowIso(),
     });
 
+    // Phase 3 第 1 项：进入 completed 前先过确定性验证（不依赖模型的机械校验）。
+    // 校验失败不得进入 completed；错误码直接落到任务 errorCode。
+    const verification = verificationLoop.verifyDeterministic({
+      taskId: task.taskId,
+      result: finalResult,
+    });
+
+    const current = tasks.getRawTask(task.taskId);
+    if (!current) return;
+
+    const primary = verificationLoop.primaryArtifactRef(finalResult);
+    let review = null;
+    if (current.requiresReview === true) {
+      // 独立审校：必须是一个独立任务（不同 taskId + 独立 worker 作用域），
+      // 由既有 orchestrator 路由到 reviewer；绝不在本任务内自查自批。
+      if (!primary) {
+        review = {
+          decision: 'needs_human',
+          valid: false,
+          code: 'review_artifact_missing',
+          evidence: [],
+          reviewTaskId: null,
+        };
+      } else {
+        let opened = null;
+        try {
+          opened = verificationLoop.openReview({
+            producerTaskId: task.taskId,
+            artifactRef: primary,
+            runId,
+          });
+        } catch (error) {
+          // 无法建立独立审校：按"审校不可用"保守处理，绝不当作通过。
+          safeEvent(
+            task.botId,
+            'verification.verdict',
+            {
+              verdict: 'needs_human',
+              producerTaskId: task.taskId,
+              deterministicOk: verification.ok,
+              errorCode: (error && error.code) || 'verification_review_unavailable',
+              mode: 'review',
+            },
+            { taskId: task.taskId, runId, sessionId: task.sessionId }
+          );
+          review = {
+            decision: 'needs_human',
+            valid: false,
+            code: 'review_unavailable',
+            evidence: [],
+            reviewTaskId: null,
+          };
+        }
+        if (opened) {
+          // 审校任务由 orchestrator → router 创建时已入队，这里只等待其终态，
+          // 不重复执行（避免与队列调度并发跑同一任务）。
+          review = verificationLoop.parseVerdict(
+            await waitForReviewTask(opened.reviewTaskId, REVIEW_WAIT_MS)
+          );
+        }
+      }
+
+      // 审校期间任务可能已取消/被审批冻结/超时收敛：以当前状态为准。
+      const afterReview = tasks.getRawTask(task.taskId);
+      if (
+        deadlineExceeded ||
+        !afterReview ||
+        tasks.isTerminalStatus(afterReview.status) ||
+        afterReview.cancelRequested ||
+        afterReview.status === 'waiting_approval'
+      ) {
+        return;
+      }
+
+      const resolution = verificationLoop.planGate({
+        deterministic: verification,
+        review,
+        task: afterReview,
+      });
+      verificationLoop.auditResolution({
+        producerTask: afterReview,
+        deterministic: verification,
+        review,
+        resolution,
+        runId,
+      });
+
+      if (resolution.action === 'approval') {
+        // 冲突 / 高风险审校不通过 / 审校无法给出结论：默认保守（不通过 + 标 conflict），
+        // 停在审批节点等人工；审批超时只标 overdue，绝不解释为通过。
+        verificationLoop.invalidateArtifactRefs(finalResult, {
+          reason: resolution.errorCode || 'verification_conflict',
+        });
+        verificationLoop.requestHumanApproval({
+          producerTask: afterReview,
+          artifactRef: primary,
+          resolution,
+          deterministic: verification,
+          review,
+          runId,
+        });
+        return;
+      }
+      if (resolution.action === 'reject') {
+        verificationLoop.invalidateArtifactRefs(finalResult, {
+          reason: resolution.errorCode || 'review_rejected',
+        });
+        safeEvent(
+          task.botId,
+          'verification.rejected',
+          {
+            status: 'failed',
+            errorCode: resolution.errorCode,
+            checkCode: verification.errorCode || '',
+            deterministicOk: verification.ok,
+            verdict: review && review.decision ? review.decision : 'needs_human',
+            mode: 'verification',
+          },
+          { taskId: task.taskId, runId, sessionId: task.sessionId }
+        );
+        throw new AgentError(
+          resolution.errorCode || 'review_rejected',
+          '独立审校与机械校验一致判定不通过',
+          409
+        );
+      }
+      // action === complete：两边一致通过，继续进入 completed。
+    } else if (!verification.ok) {
+      verificationLoop.invalidateArtifactRefs(finalResult, {
+        reason: verification.errorCode,
+      });
+      safeEvent(
+        task.botId,
+        'verification.rejected',
+        {
+          status: 'failed',
+          errorCode: verification.errorCode,
+          checkCode: verification.errorCode,
+          deterministicOk: false,
+          mode: 'verification',
+        },
+        { taskId: task.taskId, runId, sessionId: task.sessionId }
+      );
+      throw new AgentError(
+        verification.errorCode || verificationLoop.VERIFY_CODES.structure,
+        '确定性验证未通过，不得进入 completed',
+        409
+      );
+    }
+
     // §11 第 2/3 步：进入 completed 前，任务记录已持有产物引用；校验门禁在
     // transitionTask 内执行，状态与 result 同一次落盘（stateVersion 同一次 +1）。
     artifactCommit.completeTask(task.taskId, {
@@ -870,6 +1094,7 @@ async function runTask(taskId) {
       runId,
       status: 'completed',
       finishedAt: finalResult.finishedAt,
+      usage: finalResult.usage || null,
     });
     tasks.releaseLease(task.taskId);
     safeEvent(
@@ -1027,6 +1252,15 @@ async function runTask(taskId) {
       errorCode,
       finishedAt: failureResult.finishedAt,
     });
+    // 死信：连续失败已达上限 → 在既有 failed 终态上打标记（不新增状态）。
+    // 只有真正重试耗尽才算死信；取消/超时/结果不确定（recovery）不走这里。
+    if (status === 'failed' && attempts >= maxAttempts) {
+      try {
+        deadLetter.mark(task.taskId, { errorCode, attempts, maxAttempts });
+      } catch (_) {
+        // 死信标记失败不反转任务终态；下次启动可补标。
+      }
+    }
     tasks.releaseLease(task.taskId);
     resultDelivery.deliverTaskOutcome(task.taskId, {
       status,
@@ -1047,6 +1281,8 @@ async function runTask(taskId) {
     if (deadlineTimer) clearTimeout(deadlineTimer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     activeRuns.delete(task.taskId);
+    // B-06：未经 settle 的预留必须释放（失败/取消/提前返回/抛错的所有路径）。
+    releaseReservation();
     // 租约只在本次运行结束时释放；释放失败由过期机制兜底。
     try {
       const finalTask = tasks.getRawTask(task.taskId);

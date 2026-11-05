@@ -6,7 +6,8 @@
  * 也不允许主控直接调用记忆维护接口。
  */
 const { getManifest } = require('./agents/manifest');
-const router = require('./agents/router');
+// Phase 1 交付物 1：创建/排队统一走唯一编排入口（内部复用 Router，不另起一套）。
+const orchestrator = require('./agents/orchestrator');
 const mainSessions = require('./sessions');
 const { textLength } = require('./text-utils');
 
@@ -127,11 +128,12 @@ const definition = Object.freeze({
       };
     }
 
-    // 兼容适配器：工具 schema 与成功返回形状保持不变，创建/排队统一走 Router。
+    // 兼容适配器：工具 schema 与成功返回形状保持不变，创建/排队统一走编排入口。
     try {
-      const { task, idempotent } = router.dispatch(
+      const { task, idempotent } = orchestrator.orchestrate(
         {
           agentId: args.botId,
+          capability: args.taskType,
           taskType: args.taskType,
           goal: args.goal,
           context: args.context || '',

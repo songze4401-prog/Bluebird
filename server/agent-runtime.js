@@ -892,6 +892,26 @@ async function runAgentTurn({
   let toolCallCount = 0;
   let readOnlyRetries = 0;
   let consecutiveFailures = 0;
+  // B-06：累计本次 Run 的供应商真实 usage（每轮一次）。供应商没回 usage 时保持 null，
+  // 绝不用字符数估算冒充 token 计量；累计值交给 Task 预算的 settle。
+  let usageTotals = null;
+  const addUsage = usage => {
+    if (!usage || typeof usage !== 'object') return;
+    const prompt = Number.isFinite(usage.prompt_tokens) ? usage.prompt_tokens : 0;
+    const completionTokens = Number.isFinite(usage.completion_tokens)
+      ? usage.completion_tokens
+      : 0;
+    const total = Number.isFinite(usage.total_tokens)
+      ? usage.total_tokens
+      : prompt + completionTokens;
+    if (!total) return;
+    if (!usageTotals) {
+      usageTotals = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    }
+    usageTotals.prompt_tokens += prompt;
+    usageTotals.completion_tokens += completionTokens;
+    usageTotals.total_tokens += total;
+  };
 
   // 执行并记录一次工具调用：循环与「强制委派」共用同一路径，
   // 保证超时、只读重试、去重、事件、toolSteps 与监控口径完全一致。
@@ -1151,6 +1171,7 @@ async function runAgentTurn({
     if (stream) {
       completion = await consumeCompletionStream(completion, onDelta);
     }
+    addUsage(completion && completion.usage);
 
     const message =
       completion &&
@@ -1293,6 +1314,7 @@ async function runAgentTurn({
     readOnlyRetries,
     reachedMaxRounds,
     delegationEnforced: forcedDelegationDispatched,
+    usage: usageTotals,
   };
 }
 

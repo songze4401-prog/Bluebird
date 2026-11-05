@@ -17,6 +17,10 @@ const { getInstanceUserId } = require('../user-scope');
 const { CONTRACT_VERSION } = require('./contract');
 const orchestrator = require('../context/orchestrator');
 const PRIORITY_VALUES = Object.freeze(['high', 'normal', 'low']);
+// B-06（§25）：路由冻结的 Task Token 硬上限。
+// A 类常量：与路由 profile 的轮次/工具上限一同冻结进任务，不代表供应商真实配额，
+// 需随后续真实 usage 数据校准；显式调用方仍可通过 budget.tokenBudget 覆盖。
+const TOKEN_BUDGET_BY_PATH = Object.freeze({ fast: 12000, slow: 20000 });
 const STATUS_BY_CODE = Object.freeze({
   invalid_task: 400,
   tool_not_allowed: 403,
@@ -198,6 +202,7 @@ function decideInternal(input, options = {}) {
     maxToolCalls: profile.maxToolCalls,
     maxReadOnlyRetries: profile.maxReadOnlyRetries,
     generatePlan: profile.generatePlan === true,
+    tokenBudget: TOKEN_BUDGET_BY_PATH[path],
   };
   const decision = {
     ok: true,
@@ -358,6 +363,43 @@ function computeLoad(taskStore) {
   }
 }
 
+function normalizeOrchestration(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (value.entry !== 'orchestrator') return null;
+  return {
+    entry: 'orchestrator',
+    version: Number.isInteger(value.version) ? value.version : 1,
+    intentDigest: String(value.intentDigest || '').slice(0, 80),
+    capability: String(value.capability || '').slice(0, 80),
+    taskType: String(value.taskType || '').slice(0, 80),
+    basis: String(value.basis || '').slice(0, 40),
+    matchingRule: String(value.matchingRule || '').slice(0, 80),
+    registeredAgents: Number.isInteger(value.registeredAgents) ? value.registeredAgents : 0,
+    matchedAgentIds: Array.isArray(value.matchedAgentIds)
+      ? value.matchedAgentIds.slice(0, 10).map(String)
+      : [],
+    requestedAgentId: value.requestedAgentId
+      ? String(value.requestedAgentId).slice(0, 80)
+      : null,
+    // 交付物 2：容量感知择一的轨迹（容量口径来自 decideInternal，不在这里重算）。
+    capacityRule: value.capacityRule ? String(value.capacityRule).slice(0, 80) : null,
+    priorityRule: value.priorityRule ? String(value.priorityRule).slice(0, 80) : null,
+    candidateOrder: Array.isArray(value.candidateOrder)
+      ? value.candidateOrder.slice(0, 10).map(item => String(item).slice(0, 80))
+      : [],
+    saturatedAgentIds: Array.isArray(value.saturatedAgentIds)
+      ? value.saturatedAgentIds.slice(0, 10).map(item => String(item).slice(0, 80))
+      : [],
+    allocation: value.allocation ? String(value.allocation).slice(0, 40) : null,
+    selectedAgentId: value.selectedAgentId
+      ? String(value.selectedAgentId).slice(0, 80)
+      : null,
+    excludedReasons: value.excludedReasons
+      ? String(value.excludedReasons).slice(0, 200)
+      : '',
+  };
+}
+
 function routeEventPayload(decision, extra = {}) {
   const rejected = decision.rejected
     .map(item => `${item.agentId}:${item.code}`)
@@ -382,6 +424,28 @@ function routeEventPayload(decision, extra = {}) {
     priority: extra.priority || 'normal',
     contractVersion: decision.contractVersion,
     policyDigest: decision.policyDigest,
+    // 编排轨迹只在使用统一入口时出现；旧调用路径不新增字段，事件形状保持兼容。
+    // 事件 payload 只接受白名单标量，因此这里把轨迹摊平（与 task.route.orchestration 同源）。
+    ...(decision.orchestration
+      ? {
+          orchestrationEntry: decision.orchestration.entry,
+          orchestrationBasis: decision.orchestration.basis,
+          orchestrationIntentDigest: decision.orchestration.intentDigest,
+          orchestrationCapability: decision.orchestration.capability,
+          orchestrationTaskType: decision.orchestration.taskType,
+          orchestrationMatchingRule: decision.orchestration.matchingRule,
+          orchestrationMatchedAgents: decision.orchestration.matchedAgentIds.join(','),
+          orchestrationRegisteredAgents: decision.orchestration.registeredAgents,
+          // 交付物 2：容量感知择一的轨迹同样摊平进既有事件（嵌套对象不入白名单）。
+          orchestrationCapacityRule: decision.orchestration.capacityRule || '',
+          orchestrationPriorityRule: decision.orchestration.priorityRule || '',
+          orchestrationCandidateOrder: decision.orchestration.candidateOrder.join(',').slice(0, 200),
+          orchestrationSaturated: decision.orchestration.saturatedAgentIds.join(','),
+          orchestrationAllocation: decision.orchestration.allocation || '',
+          orchestrationSelected: decision.orchestration.selectedAgentId || '',
+          orchestrationExcluded: decision.orchestration.excludedReasons || '',
+        }
+      : {}),
     ...(extra.idempotent !== undefined ? { idempotent: extra.idempotent === true } : {}),
   };
 }
@@ -459,6 +523,7 @@ function createRouter(overrides = {}) {
       now,
     });
     const decision = internal.decision;
+    decision.orchestration = normalizeOrchestration(request.orchestration);
     if (!decision.ok) {
       writeRouteEvent(appendEvent, internal.eventAgentId, 'route.rejected', decision, {
         priority: normalizeString(request.priority) || 'normal',
@@ -506,14 +571,24 @@ function createRouter(overrides = {}) {
       workerSessionId = session.id;
     }
 
-    // 写序（硬要求）：计划先落盘并 fsync，任务才带着指针创建。
-    // appendVersion 内部是 writeFileAtomicSync（fsync + rename + 目录 fsync），
-    // 返回时计划已经可读；因此不存在「任务引用了不存在的计划」的持久态。
-    // 若 createTask 随后失败（如任务总数上限），计划会留成孤儿，24h 后由 Store 清理，
-    // 但磁盘上绝不会出现指向不存在计划的任务。
-    const workflowPlan = workflowStore.appendVersion({
-      plan: buildWorkflowPlan(normalized, decision),
-    });
+    // Phase 1 交付物 1（Planner 侧）：批量计划一次落盘，多任务共享同一个
+    // (planId, planVersion)。调用方传入 workflowPlan 时**只校验并复用**，
+    // 不再 appendVersion；未传时保持原行为（每个任务冻结自己的单步计划）。
+    let workflowPlan;
+    if (input.workflowPlan) {
+      const pinned = input.workflowPlan;
+      const frozen = workflowStore.getVersion(pinned.planId, pinned.planVersion);
+      workflowPlan = { planId: frozen.planId, planVersion: frozen.planVersion };
+    } else {
+      // 写序（硬要求）：计划先落盘并 fsync，任务才带着指针创建。
+      // appendVersion 内部是 writeFileAtomicSync（fsync + rename + 目录 fsync），
+      // 返回时计划已经可读；因此不存在「任务引用了不存在的计划」的持久态。
+      // 若 createTask 随后失败（如任务总数上限），计划会留成孤儿，24h 后由 Store 清理，
+      // 但磁盘上绝不会出现指向不存在计划的任务。
+      workflowPlan = workflowStore.appendVersion({
+        plan: buildWorkflowPlan(normalized, decision),
+      });
+    }
 
     const task = taskStore.createTask({
       agentId,
@@ -534,6 +609,7 @@ function createRouter(overrides = {}) {
         capability: decision.capability,
         policyDigest: decision.policyDigest,
         decidedAt: decision.decidedAt,
+        orchestration: decision.orchestration || null,
       },
       budget: decision.budget,
       parentSessionId: normalizeString(input.parentSessionId) || null,
@@ -541,6 +617,14 @@ function createRouter(overrides = {}) {
       parentUserText: typeof input.parentUserText === 'string' ? input.parentUserText : '',
       // 记忆归属用户：调用方给可信身份就用它，否则落回实例用户（服务端身份）。
       parentUserId: normalizeString(input.parentUserId) || getInstanceUserId(),
+      // B-06：父子覆盖与 Run 总闸门由调用方显式声明；缺省时任务只受自身 tokenBudget 约束。
+      parentTaskId: normalizeString(input.parentTaskId) || null,
+      runId: normalizeString(input.runId) || null,
+      runBudget:
+        Number.isInteger(input.runBudget) && input.runBudget > 0 ? input.runBudget : null,
+      // Phase 1 交付物 2：依赖边原样交给 Task Store 做同 botId/上限校验；
+      // Router 不重算依赖语义，也不在此落盘。
+      dependsOn: input.dependsOn === undefined ? [] : input.dependsOn,
     });
 
     if (task.idempotent === true) {

@@ -64,6 +64,8 @@ function normalizeWorkerResult({
   model = null,
   runId = null,
   finishedAt = null,
+  neverStarted = false,
+  blockedBy = null,
 } = {}) {
   if (!TERMINAL_STATUSES.includes(status)) {
     throw new TypeError(`Worker 结果状态无效：${status}`);
@@ -90,6 +92,16 @@ function normalizeWorkerResult({
         : null,
     runId: typeof runId === 'string' ? runId.slice(0, 80) : null,
     finishedAt: typeof finishedAt === 'string' ? finishedAt : null,
+    // 依赖失败收敛专用：该任务从未进入 running。只在为 true 时出现，
+    // 其余结果形状保持不变（既有断言依赖原字段集）。
+    ...(neverStarted === true
+      ? {
+          neverStarted: true,
+          blockedBy: Array.isArray(blockedBy)
+            ? blockedBy.slice(0, 8).map(item => String(item).slice(0, 120))
+            : [],
+        }
+      : {}),
   };
 }
 

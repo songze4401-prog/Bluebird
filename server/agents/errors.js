@@ -43,6 +43,38 @@ function conflictError({ taskId, expectedVersion, currentVersion, runId = null, 
   return new AgentError('conflict', '任务已被其他写入更新，请重读后再试', 409, details);
 }
 
+/**
+ * B-06 预算超限错误契约（§25 / §30）：`budget_exceeded` 一律 retryable=false。
+ * 重试不得重置额度，因此这里不提供任何“可重试”字段；details 与 conflict 同形，
+ * 复用七字段（errorFingerprint 为 sha256("<taskId>:<scope>:<required>")）。
+ * 不含记忆正文或用户数据。
+ */
+function budgetExceededError({
+  taskId,
+  scope = 'task',
+  required = 0,
+  remaining = 0,
+  runId = null,
+  causeRef = null,
+} = {}) {
+  const fingerprint = crypto
+    .createHash('sha256')
+    .update(`${String(taskId || '')}:${String(scope)}:${String(required)}`)
+    .digest('hex');
+  const details = {
+    retryable: false,
+    errorFingerprint: fingerprint,
+    failedAt: new Date().toISOString(),
+    taskId: String(taskId || ''),
+    runId: runId === null || runId === undefined ? null : String(runId),
+    scope: String(scope),
+    required: Number(required) || 0,
+    remaining: Number(remaining) || 0,
+  };
+  if (causeRef) details.causeRef = String(causeRef).slice(0, 120);
+  return new AgentError('budget_exceeded', 'Token 预算不足，任务被硬限制拒绝', 409, details);
+}
+
 function describeAgentError(error) {
   if (error instanceof AgentError) {
     const info = { code: error.code, error: error.message, status: error.status };
@@ -65,5 +97,6 @@ module.exports = {
   AgentError,
   agentError,
   conflictError,
+  budgetExceededError,
   describeAgentError,
 };

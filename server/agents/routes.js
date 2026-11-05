@@ -10,6 +10,7 @@ const config = require('./config');
 const credentials = require('./credentials');
 const sessions = require('./sessions');
 const tasks = require('./tasks');
+const workerScope = require('./worker-scope');
 const runtime = require('./runtime');
 const agentRouter = require('./router');
 const resultDelivery = require('./result-delivery');
@@ -247,10 +248,14 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
     '/agents/:botId/sessions/:sessionId',
     route(async (req, res) => {
       const botId = req.params.botId;
-      const session = sessions.getSession(botId, req.params.sessionId);
-      if (!session) {
-        return res.status(404).json({ error: 'Bot 会话不存在', code: 'agent_session_not_found' });
-      }
+      // Worker 会话读作用域：direct 会话保持既有行为；worker 会话只认服务端签发的
+      // 作用域令牌（x-worker-scope-token），不接受调用方自报的 requesterTaskId /
+      // grantedBy。非法令牌 401、越界 409，均写审计且不回显对方内容。
+      const session = workerScope.authorizeSessionRead({
+        botId,
+        sessionId: req.params.sessionId,
+        token: req.get('x-worker-scope-token') || null,
+      });
       res.json({
         session,
         messages: sessions.getMessages(botId, req.params.sessionId),
@@ -463,6 +468,7 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
           parentSessionId: body.parentSessionId,
           parentMessageId: body.parentMessageId,
           parentUserText: body.parentUserText,
+          dependsOn: body.dependsOn,
         },
         { source: 'api' }
       );

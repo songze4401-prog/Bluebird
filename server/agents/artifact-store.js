@@ -54,6 +54,8 @@ const COMMIT_STATES = Object.freeze(['pending-commit', 'committed', 'orphan']);
 const KIND_MAX = 40;
 const ID_MAX = 120;
 const HASH_RE = /^[0-9a-f]{64}$/;
+// Phase 2 第 1 项：单次共享登记的接收方上限（同批次任务规模的一个安全默认值）。
+const SHARE_TASK_MAX = 50;
 
 function nowIso(now = Date.now()) {
   return new Date(now).toISOString();
@@ -255,6 +257,138 @@ function versionsOf({ taskId = null, kind } = {}) {
   return Object.values(readArtifacts().artifacts)
     .filter(item => item && item.taskId === boundTaskId && item.kind === artifactKind)
     .sort((a, b) => (Number(a.version) || 0) - (Number(b.version) || 0));
+}
+
+/**
+ * Phase 2 第 1 项：任务级共享登记。
+ *
+ * 产物默认仍是任务私有（只有 artifact.taskId 能读）；share() 在产物记录上追加
+ * 一个 `share` 字段（唯一新增字段），表达"哪一版、共享给哪些任务、由谁登记"。
+ * 版本在登记时钉住：读方只能读登记的那一版，不能自动漂到最新版。
+ * 不新建共享表/共享存储，也不改 {kind,id,version} 引用 schema。
+ */
+function normalizeShareTargets(value, ownerTaskId) {
+  if (!Array.isArray(value)) {
+    throw new AgentError('artifact_share_invalid', '共享目标必须是任务 id 数组', 400);
+  }
+  const targets = [];
+  for (const item of value) {
+    if (typeof item !== 'string' || !item.trim()) {
+      throw new AgentError('artifact_share_invalid', '共享目标只能是非空任务 id', 400);
+    }
+    const taskId = item.trim().slice(0, ID_MAX);
+    // 拥有者天然可读，不算共享接收方。
+    if (taskId === ownerTaskId || targets.includes(taskId)) continue;
+    targets.push(taskId);
+  }
+  if (targets.length === 0) {
+    throw new AgentError('artifact_share_invalid', '共享产物至少需要一个其它任务', 400);
+  }
+  if (targets.length > SHARE_TASK_MAX) {
+    throw new AgentError(
+      'artifact_share_invalid',
+      `单次共享最多 ${SHARE_TASK_MAX} 个任务`,
+      400
+    );
+  }
+  return targets;
+}
+
+function share(id, { withTaskIds = [], byTaskId = null, now = Date.now() } = {}) {
+  const key = String(id || '').slice(0, ID_MAX);
+  if (!key) throw new AgentError('artifact_not_found', '产物引用不可读', 409);
+  const store = readArtifacts();
+  const artifact = store.artifacts[key];
+  if (!artifact) {
+    throw new AgentError('artifact_not_found', '产物引用不可读', 409, { artifactId: key });
+  }
+  if (artifact.status === 'invalidated') {
+    throw new AgentError('artifact_not_active', '产物已失效，不能登记共享', 409, {
+      artifactId: key,
+      status: artifact.status,
+    });
+  }
+  const targets = normalizeShareTargets(withTaskIds, artifact.taskId);
+  // 共享登记前必须复读正文（缺失/损坏/hash 不符一律 fail-closed），
+  // 否则等于把"读不回来"的产物登记成共享结论的来源。
+  readContent(key, { version: artifact.version });
+  const previous = artifact.share && Array.isArray(artifact.share.taskIds)
+    ? artifact.share.taskIds
+    : [];
+  const merged = [...previous];
+  for (const taskId of targets) if (!merged.includes(taskId)) merged.push(taskId);
+  artifact.share = {
+    version: artifact.version,
+    contentHash: artifact.contentHash,
+    taskIds: merged,
+    byTaskId: byTaskId ? String(byTaskId).slice(0, ID_MAX) : null,
+    sharedAt: (artifact.share && artifact.share.sharedAt) || nowIso(now),
+    updatedAt: nowIso(now),
+  };
+  try {
+    writeArtifacts(store);
+  } catch (error) {
+    throw wrapStoreError(error, 'artifact_store_write_failed');
+  }
+  appendAudit('artifact.shared', artifact, {
+    now,
+    taskId: byTaskId,
+    reason: `share_targets:${merged.length}`,
+  });
+  return artifact;
+}
+
+/**
+ * 共享读取的判定（只返回结论与版本，不返回正文）：
+ * 供 worker-scope 先审计再读取，保证"拒绝时不回显内容"。
+ * 已被 superseded 的旧版仍可读——版本不可变的语义要求旧版保留；
+ * 只有显式 invalidated 才拒绝。
+ */
+function sharedAccess(id, { requesterTaskId = null, version = null } = {}) {
+  const key = String(id || '').slice(0, ID_MAX);
+  const artifact = key ? get(key) : null;
+  if (!artifact) return { ok: false, state: 'not_found', version: null };
+  const shareInfo = artifact.share;
+  if (!shareInfo || !Array.isArray(shareInfo.taskIds)) {
+    return { ok: false, state: 'not_shared', version: null };
+  }
+  const requester = String(requesterTaskId || '').slice(0, ID_MAX);
+  if (!requester || !shareInfo.taskIds.includes(requester)) {
+    return { ok: false, state: 'requester_not_allowed', version: null };
+  }
+  if (artifact.status === 'invalidated') {
+    return { ok: false, state: 'invalidated', version: null };
+  }
+  const pinned = shareInfo.version;
+  const requested = Number.isInteger(version) ? version : pinned;
+  if (Number.isInteger(requested) && Number.isInteger(pinned) && requested !== pinned) {
+    return { ok: false, state: 'version_mismatch', version: pinned };
+  }
+  return { ok: true, state: 'shared', version: pinned };
+}
+
+/** 共享读取：显式登记 + 版本钉住 + 正文 hash 校验；失败一律抛错（不返回内容）。 */
+function readSharedArtifact(id, { requesterTaskId = null, version = null } = {}) {
+  const access = sharedAccess(id, { requesterTaskId, version });
+  if (!access.ok) {
+    if (access.state === 'not_found') {
+      throw new AgentError('artifact_not_found', '产物引用不可读', 409, { artifactId: id });
+    }
+    if (access.state === 'version_mismatch') {
+      throw new AgentError('artifact_version_mismatch', '共享产物版本不一致', 409, {
+        artifactId: id,
+        expectedVersion: access.version,
+        refVersion: version,
+      });
+    }
+    if (access.state === 'invalidated') {
+      throw new AgentError('artifact_not_active', '共享产物已失效', 409, { artifactId: id });
+    }
+    throw new AgentError('artifact_not_shared', '产物未登记共享给该任务', 409, {
+      artifactId: id,
+    });
+  }
+  return readContent(id, { version: access.version });
 }
 
 // identity 由 (taskId, kind, contentHash) 决定：同一任务重试产生同样输出时
@@ -606,6 +740,58 @@ function auditEntries() {
   return readAudit().entries;
 }
 
+// Phase 2 第 2 项：来源追踪。沿产物正文里的 evidence 引用逐环复读；
+// 链上任一环缺失、版本不符、invalidated 或非 active（含 superseded）即失败，
+// 用固定错误码 artifact_chain_broken 表达，details.reason 区分原因。
+const PROVENANCE_MAX_DEPTH = 3;
+const PROVENANCE_MAX_REFS = 20;
+
+function chainBroken(reason, artifactId) {
+  return new AgentError('artifact_chain_broken', '证据链不可追溯', 409, {
+    reason,
+    artifactId: artifactId || null,
+  });
+}
+
+function resolveProvenance(id, { version = null, maxDepth = PROVENANCE_MAX_DEPTH } = {}) {
+  const chain = [];
+  const visited = new Set();
+  const walk = (refId, refVersion, depth) => {
+    const key = String(refId || '').slice(0, ID_MAX);
+    if (!key) throw chainBroken('missing', null);
+    const artifact = get(key);
+    if (!artifact) throw chainBroken('missing', key);
+    if (
+      Number.isInteger(refVersion) &&
+      Number.isInteger(artifact.version) &&
+      refVersion !== artifact.version
+    ) {
+      throw chainBroken('version_mismatch', key);
+    }
+    if (artifact.status === 'invalidated') throw chainBroken('invalidated', key);
+    if (artifact.status !== 'active') throw chainBroken('stale', key);
+    if (depth > maxDepth) throw chainBroken('depth_exceeded', key);
+    const marker = `${key}@${artifact.version}`;
+    if (visited.has(marker)) throw chainBroken('cycle', key);
+    visited.add(marker);
+    const read = readContent(key, { version: artifact.version });
+    chain.push({ kind: read.kind, id: key, version: artifact.version });
+    const evidence = read.content && read.content.evidence;
+    if (Array.isArray(evidence) && evidence.length > 0) {
+      if (evidence.length > PROVENANCE_MAX_REFS) throw chainBroken('refs_exceeded', key);
+      for (const item of evidence) {
+        walk(
+          item && item.id,
+          item && Number.isInteger(item.version) ? item.version : null,
+          depth + 1
+        );
+      }
+    }
+  };
+  walk(id, Number.isInteger(version) ? version : null, 0);
+  return chain;
+}
+
 module.exports = {
   ARTIFACTS_FILE,
   AUDIT_FILE,
@@ -620,6 +806,10 @@ module.exports = {
   all,
   readContent,
   versionsOf,
+  share,
+  sharedAccess,
+  readSharedArtifact,
+  resolveProvenance,
   assertRefsCommitReady,
   confirmRefs,
   markOrphan,

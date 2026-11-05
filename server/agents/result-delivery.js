@@ -78,6 +78,9 @@ function recordDeliveryEvent(task, status, messageId, errorCode) {
         mode: 'result_delivery',
       },
       correlationId: task.taskId,
+      // 同一任务同一投递结局只审计一行：重复投递命中同一 eventId 槽位，
+      // 只在 dedupeCount 上留痕，不会出现两条 task.delivery。
+      dedupeKey: `${task.taskId}|${status}|${messageId || errorCode || 'none'}`,
     });
   } catch (_) {
     // 事件 outbox 已负责持久化；投递本身不因事件写入失败而回滚。
@@ -131,6 +134,9 @@ function deliverTaskOutcome(taskOrId, {
         deliveryErrorCode: null,
       });
     }
+    // 重复投递不再产生消息，但要在审计上留痕：同一 dedupeKey 命中既有事件槽位，
+    // 只累加 dedupeCount，事件行数不变。
+    recordDeliveryEvent(task, 'delivered', messageId, null);
     return { delivered: true, alreadyDelivered: true, message: already };
   }
 

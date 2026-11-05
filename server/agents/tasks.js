@@ -14,13 +14,15 @@ const path = require('path');
 const crypto = require('crypto');
 const { writeFileAtomicSync } = require('../atomic-write');
 const { getManifest, isKnownBot } = require('./manifest');
-const { AgentError, conflictError } = require('./errors');
+const { AgentError, conflictError, budgetExceededError } = require('./errors');
 const taskStore = require('./task-store');
 const stateMachine = require('./state-machine');
 const artifactStore = require('./artifact-store');
 const { normalizeWorkerResult } = require('./worker-result');
+const dependencies = require('./dependencies');
 const { LEGACY_ALIASES } = require('./status-vocabulary');
 const approvalDeadline = require('./approval-deadline');
+const crashHook = require('./crash-hook');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -48,8 +50,18 @@ const RESULT_SUMMARY_MAX = 8000;
 const { CONTRACT_VERSION } = require('./contract');
 const CONTEXT_REF_MAX = 200;
 const IDEMPOTENCY_KEY_MAX = 120;
+// 事件幂等键上限：与任务 idempotencyKey 同口径，便于调用方复用同一个业务键。
+const EVENT_DEDUPE_KEY_MAX = 120;
 const PRIORITIES = Object.freeze(['high', 'normal', 'low']);
 const PRIORITY_RANK = Object.freeze({ high: 0, normal: 1, low: 2 });
+// B-06（§25）：Task 级 Token 硬上限的边界与缺省值。
+// A 类常量：12000 是服务端缺省上限，仅用于「调用方未显式给 budget」的内部/旧调用，
+// 不是供应商真实配额，必须随后续真实 usage 数据校准；显式 budget 仍必须自带 tokenBudget。
+const DEFAULT_TASK_TOKEN_BUDGET = 12000;
+const TOKEN_BUDGET_MIN = 1;
+const TOKEN_BUDGET_MAX = 500000;
+// 父链最多回溯 8 层：超过视为异常数据，fail-closed 而不是继续放行。
+const BUDGET_CHAIN_MAX_DEPTH = 8;
 
 const STATUSES = stateMachine.STATUSES;
 const TERMINAL = stateMachine.TERMINAL;
@@ -63,6 +75,8 @@ const EVENT_TYPES = Object.freeze([
   'task.started',
   'worker.checkpoint',
   'worker.heartbeat',
+  'worker.scope_read',
+  'worker.scope_denied',
   'tool.denied',
   'model.requested',
   'model.completed',
@@ -77,9 +91,18 @@ const EVENT_TYPES = Object.freeze([
   'approval.escalated',
   'approval.overdue',
   'approval.resolved',
+  // Phase 3 第 1 项：验证闭环的审计事件（只记录裁决与引用，不记录正文）。
+  'verification.review_opened',
+  'verification.verdict',
+  'verification.rejected',
+  'verification.conflict',
+  'verification.approval_requested',
+  'task.dead_letter',
+  'task.dead_letter_redelivered',
   'task.completed',
   'task.delivery',
   'task.failed',
+  'task.dependency_failed',
   'task.cancelled',
   'task.timed_out',
   'task.uncertain',
@@ -116,11 +139,56 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'contractVersion',
   'idempotent',
   'policyDigest',
+  // Phase 1 交付物 1：编排轨迹以扁平标量写入既有事件（嵌套对象不入白名单），
+  // 与 task.route.orchestration 同源，不新建审计存储。
+  'orchestrationEntry',
+  'orchestrationBasis',
+  'orchestrationIntentDigest',
+  'orchestrationCapability',
+  'orchestrationTaskType',
+  'orchestrationMatchingRule',
+  'orchestrationMatchedAgents',
+  'orchestrationRegisteredAgents',
+  // Phase 1 交付物 2：容量感知择一的轨迹（容量口径来自 decideInternal.atCapacity）。
+  'orchestrationCapacityRule',
+  'orchestrationPriorityRule',
+  'orchestrationCandidateOrder',
+  'orchestrationSaturated',
+  'orchestrationAllocation',
+  'orchestrationSelected',
+  'orchestrationExcluded',
+  // Phase 1 验收「Worker Session 隔离」：跨作用域读取的审计字段
+  // （targetType/targetId 标明被访问对象，access 区分放行/拒绝）。
+  'targetType',
+  'targetId',
+  'requesterTaskId',
+  'access',
+  'grantedBy',
+  'reason',
   'round',
   'phase',
   'attempts',
   'leaseOwner',
   'retryAt',
+  // Phase 1 交付物 2（依赖管理）：依赖失败收敛轨迹。neverStarted 明确写
+  // 「该任务从未进入 running」，避免把 accepted 误读成真的执行过。
+  'neverStarted',
+  'blockedBy',
+  'dependencyTaskId',
+  // Phase 3 第 1 项：验证闭环只落扁平标量（审校任务 id、被审产物引用与裁决码）。
+  'verdict',
+  'reviewTaskId',
+  'producerTaskId',
+  'artifactId',
+  'version',
+  'deterministicOk',
+  'conflict',
+  'approvalId',
+  'riskLevel',
+  'checkCode',
+  'attempts',
+  'maxAttempts',
+  'redeliveredTaskId',
 ]);
 
 let taskCache = null;
@@ -276,6 +344,51 @@ function safePayload(payload) {
   return out;
 }
 
+function assertEventDedupeKey(value) {
+  if (typeof value !== 'string') {
+    throw new AgentError('invalid_event_dedupe_key', '事件幂等键必须是字符串');
+  }
+  const key = value.trim();
+  if (!key || key.length > EVENT_DEDUPE_KEY_MAX) {
+    throw new AgentError('invalid_event_dedupe_key', `事件幂等键为空或超过 ${EVENT_DEDUPE_KEY_MAX} 字符`);
+  }
+  return key;
+}
+
+// 幂等键 → 确定性 eventId：同一 (botId, dedupeKey) 永远落到同一个事件槽位。
+// 重放/重启/重复投递只会命中既有槽位，不会再产生第二行事件。
+function eventIdForDedupeKey(botId, dedupeKey) {
+  return `evt_${crypto
+    .createHash('sha256')
+    .update(`${botId}\u0000${dedupeKey}`)
+    .digest('hex')
+    .slice(0, 32)}`;
+}
+
+// 事件可能停在主事件文件或 outbox 任一处（崩溃窗口里只在前者或只在后者）。
+function findEventById(eventId) {
+  const hit = loadEvents().events.find(item => item.eventId === eventId);
+  if (hit) return { event: hit, store: 'events' };
+  const queued = loadOutbox().events.find(item => item.eventId === eventId);
+  if (queued) return { event: queued, store: 'outbox' };
+  return null;
+}
+
+// 去重不是静默丢弃：命中槽位后在原记录上累加 dedupeCount/lastDedupedAt，
+// 审计能看出「这条事件被重复投递过几次」，而事件行数仍然只有一行。
+function markEventDeduped(found, now) {
+  const event = found.event;
+  event.dedupeCount = (Number(event.dedupeCount) || 0) + 1;
+  event.lastDedupedAt = now;
+  try {
+    if (found.store === 'events') saveEvents();
+    else saveOutbox();
+  } catch (_) {
+    // 计数落盘失败不影响「只生效一次」的结论：事件行已经在唯一槽位里。
+  }
+  return { ...event, payload: { ...event.payload }, deduped: true };
+}
+
 function appendEvent({
   botId,
   taskId = null,
@@ -284,19 +397,31 @@ function appendEvent({
   eventType,
   payload = {},
   correlationId = null,
+  dedupeKey = null,
 }) {
   assertBot(botId);
   if (!EVENT_TYPES.includes(eventType)) {
     throw new AgentError('invalid_event', '事件类型无效');
   }
+  const now = nowIso();
+  const key = dedupeKey === null || dedupeKey === undefined
+    ? null
+    : assertEventDedupeKey(dedupeKey);
+  const eventId = key ? eventIdForDedupeKey(botId, key) : `evt_${crypto.randomUUID()}`;
+  if (key) {
+    const found = findEventById(eventId);
+    if (found) return markEventDeduped(found, now);
+  }
   const events = loadEvents();
   const event = {
-    eventId: `evt_${crypto.randomUUID()}`,
+    eventId,
+    ...(key ? { dedupeKey: key } : {}),
+    dedupeCount: 0,
     taskId,
     runId,
     botId,
     sessionId,
-    timestamp: nowIso(),
+    timestamp: now,
     eventType,
     payload: safePayload(payload),
     correlationId: correlationId || taskId || runId || null,
@@ -321,6 +446,9 @@ function appendEvent({
     );
   }
   saveOutbox();
+  // 崩溃窗口：outbox 已落盘、主事件文件尚未写入。此处被杀后，重启的
+  // flushEventOutbox 会按 eventId 补写一次，不丢也不重。
+  crashHook.hold('event.after-outbox-save');
 
   try {
     if (!events.events.some(item => item.eventId === event.eventId)) {
@@ -393,6 +521,14 @@ function publicTask(task, { includeResult = true } = {}) {
     idempotencyKey: task.idempotencyKey || null,
     route: task.route ? clone(task.route) : null,
     budget: task.budget ? clone(task.budget) : null,
+    // B-06：Token 计量的只读视图（limit 在 budget.tokenBudget 内）。
+    tokenUsage: task.tokenUsage
+      ? { reserved: task.tokenUsage.reserved || 0, used: task.tokenUsage.used || 0 }
+      : { reserved: 0, used: 0 },
+    parentTaskId: task.parentTaskId || null,
+    budgetRunId: task.budgetRunId || null,
+    // Phase 1 交付物 2：依赖边（只读）。空数组表示无依赖，保持快速路径。
+    dependsOn: Array.isArray(task.dependsOn) ? [...task.dependsOn] : [],
     // S8：计划版本指针。仅在 Workflow Engine 创建/重规划计划时由引擎写入；
     // 未接入 Workflow Store 时保持 null，绝不返回占位版本（0 也视为未写入）。
     planId: task.planId || null,
@@ -460,13 +596,25 @@ function pruneDeliveredTerminalTasks(tasks) {
 }
 
 function normalizeBudget(budget) {
-  if (budget === null || budget === undefined) return null;
+  if (budget === null || budget === undefined) {
+    // B-06：Token 上限是 Task 的强制字段。调用方完全不给 budget 时，服务端补一份
+    // 默认硬上限（含默认次数上限），落库任务不存在「无上限」状态；
+    // 若显式给了 budget 却缺 tokenBudget，则拒绝创建（validation_failed）。
+    return {
+      maxRounds: 3,
+      maxToolCalls: 6,
+      maxReadOnlyRetries: 1,
+      generatePlan: false,
+      tokenBudget: DEFAULT_TASK_TOKEN_BUDGET,
+    };
+  }
   if (typeof budget !== 'object' || Array.isArray(budget)) {
     throw new AgentError('invalid_task', 'budget 必须是对象或 null');
   }
   const maxRounds = Number(budget.maxRounds);
   const maxToolCalls = Number(budget.maxToolCalls);
   const maxReadOnlyRetries = Number(budget.maxReadOnlyRetries);
+  const tokenBudget = Number(budget.tokenBudget);
   if (!Number.isInteger(maxRounds) || maxRounds < 2 || maxRounds > 5) {
     throw new AgentError('invalid_task', 'budget.maxRounds 必须在 2 到 5 之间');
   }
@@ -480,11 +628,24 @@ function normalizeBudget(budget) {
   ) {
     throw new AgentError('invalid_task', 'budget.maxReadOnlyRetries 必须在 0 到 1 之间');
   }
+  // 显式 budget 必须自带 Token 上限；上限缺失即拒绝创建，不允许“无上限”任务。
+  if (
+    !Number.isInteger(tokenBudget) ||
+    tokenBudget < TOKEN_BUDGET_MIN ||
+    tokenBudget > TOKEN_BUDGET_MAX
+  ) {
+    throw new AgentError(
+      'validation_failed',
+      `budget.tokenBudget 必填，且必须是 ${TOKEN_BUDGET_MIN} 到 ${TOKEN_BUDGET_MAX} 的整数`,
+      400
+    );
+  }
   return {
     maxRounds,
     maxToolCalls,
     maxReadOnlyRetries,
     generatePlan: budget.generatePlan === true,
+    tokenBudget,
   };
 }
 
@@ -499,7 +660,247 @@ function normalizeRoute(route) {
     capability: String(route.capability || '').slice(0, 80),
     policyDigest: String(route.policyDigest || '').slice(0, 32),
     decidedAt: typeof route.decidedAt === 'string' ? route.decidedAt : null,
+    // Phase 1 交付物 1：编排轨迹（候选集 + 匹配依据 + 最终选择）随任务落库，
+    // 不新建第二套审计存储；最终选择的执行主体仍是 task.agentId/botId。
+    orchestration:
+      route.orchestration &&
+      typeof route.orchestration === 'object' &&
+      !Array.isArray(route.orchestration)
+        ? {
+            entry: String(route.orchestration.entry || '').slice(0, 40),
+            version: Number.isInteger(route.orchestration.version)
+              ? route.orchestration.version
+              : 1,
+            intentDigest: String(route.orchestration.intentDigest || '').slice(0, 80),
+            capability: String(route.orchestration.capability || '').slice(0, 80),
+            taskType: String(route.orchestration.taskType || '').slice(0, 80),
+            basis: String(route.orchestration.basis || '').slice(0, 40),
+            matchingRule: String(route.orchestration.matchingRule || '').slice(0, 80),
+            registeredAgents: Number.isInteger(route.orchestration.registeredAgents)
+              ? route.orchestration.registeredAgents
+              : 0,
+            matchedAgentIds: Array.isArray(route.orchestration.matchedAgentIds)
+              ? route.orchestration.matchedAgentIds.slice(0, 10).map(String)
+              : [],
+            requestedAgentId: route.orchestration.requestedAgentId
+              ? String(route.orchestration.requestedAgentId).slice(0, 80)
+              : null,
+            // 交付物 2：容量感知择一的轨迹；capacityRule 说明容量口径来源
+            // （decideInternal.atCapacity），excludedReasons 说明其余候选为何未被选中。
+            capacityRule: route.orchestration.capacityRule
+              ? String(route.orchestration.capacityRule).slice(0, 80)
+              : null,
+            priorityRule: route.orchestration.priorityRule
+              ? String(route.orchestration.priorityRule).slice(0, 80)
+              : null,
+            candidateOrder: Array.isArray(route.orchestration.candidateOrder)
+              ? route.orchestration.candidateOrder.slice(0, 10).map(item => String(item).slice(0, 80))
+              : [],
+            saturatedAgentIds: Array.isArray(route.orchestration.saturatedAgentIds)
+              ? route.orchestration.saturatedAgentIds.slice(0, 10).map(item => String(item).slice(0, 80))
+              : [],
+            allocation: route.orchestration.allocation
+              ? String(route.orchestration.allocation).slice(0, 40)
+              : null,
+            selectedAgentId: route.orchestration.selectedAgentId
+              ? String(route.orchestration.selectedAgentId).slice(0, 80)
+              : null,
+            excludedReasons: route.orchestration.excludedReasons
+              ? String(route.orchestration.excludedReasons).slice(0, 200)
+              : '',
+          }
+        : null,
   };
+}
+
+// ---- B-06：Token 预算账本（Task / 父链 / Run） ----
+// 所有读写都复用 task-store 的单写者与 task.stateVersion；预留在一次同步调用内
+// 完成「全部闸门校验 → 改内存 → write()」，不存在 check 与 write 之间的 await 缝隙。
+
+function ensureTokenRuns(store) {
+  if (
+    !store.tokenRuns ||
+    typeof store.tokenRuns !== 'object' ||
+    Array.isArray(store.tokenRuns)
+  ) {
+    store.tokenRuns = {};
+  }
+  return store.tokenRuns;
+}
+
+function tokenLimitOf(task) {
+  const limit = task && task.budget ? Number(task.budget.tokenBudget) : NaN;
+  return Number.isInteger(limit) && limit >= TOKEN_BUDGET_MIN ? limit : null;
+}
+
+function usageOf(task) {
+  if (!task.tokenUsage || typeof task.tokenUsage !== 'object') {
+    task.tokenUsage = { reserved: 0, used: 0 };
+  }
+  const usage = task.tokenUsage;
+  if (!Number.isInteger(usage.reserved) || usage.reserved < 0) usage.reserved = 0;
+  if (!Number.isInteger(usage.used) || usage.used < 0) usage.used = 0;
+  return usage;
+}
+
+// 父链：自己 + 所有祖先。父任务余额是子任务上限的硬上界；缺口径一律 fail-closed。
+function budgetChain(tasks, task) {
+  const chain = [task];
+  const seen = new Set([task.taskId]);
+  let cursor = task;
+  for (let depth = 0; depth < BUDGET_CHAIN_MAX_DEPTH; depth += 1) {
+    const parentId = cursor.parentTaskId;
+    if (!parentId) return chain;
+    if (seen.has(parentId)) {
+      throw new AgentError('budget_chain_cycle', 'Token 预算父链存在环', 500);
+    }
+    const parent = tasks.tasks[parentId];
+    if (!parent) {
+      throw new AgentError('budget_parent_missing', 'Token 预算父任务不存在', 409);
+    }
+    seen.add(parentId);
+    chain.push(parent);
+    cursor = parent;
+  }
+  if (cursor.parentTaskId) {
+    throw new AgentError('budget_chain_too_deep', 'Token 预算父链超过 8 层', 409);
+  }
+  return chain;
+}
+
+function budgetSnapshot(task) {
+  const limit = tokenLimitOf(task);
+  const usage = usageOf(task);
+  return {
+    taskId: task.taskId,
+    limit,
+    used: usage.used,
+    reserved: usage.reserved,
+    remaining: limit === null ? null : limit - usage.used - usage.reserved,
+    runId: task.budgetRunId || null,
+  };
+}
+
+function getTaskBudgetSnapshot(taskId) {
+  const tasks = loadTasks();
+  const task = tasks.tasks[String(taskId || '')];
+  if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+  return budgetSnapshot(task);
+}
+
+function requireTokenAmount(amount, label) {
+  const value = Number(amount);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new AgentError('validation_failed', `${label} 必须是正整数`, 400);
+  }
+  return value;
+}
+
+/**
+ * 原子预留：Task 自身、全部祖先、所属 Run 三处同时校验并同时占用额度。
+ * 任一闸门不足 → budget_exceeded（retryable=false），且**不修改任何内存/磁盘状态**。
+ */
+function reserveTaskBudget(taskId, { amount } = {}) {
+  const tasks = loadTasks();
+  const task = tasks.tasks[String(taskId || '')];
+  if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+  const cleanAmount = requireTokenAmount(amount, '预留 token');
+  const chain = budgetChain(tasks, task);
+  const runId = task.budgetRunId || null;
+
+  for (const item of chain) {
+    const limit = tokenLimitOf(item);
+    if (limit === null) {
+      throw budgetExceededError({
+        taskId: task.taskId,
+        scope: item === task ? 'task' : `parent:${item.taskId}`,
+        required: cleanAmount,
+        remaining: 0,
+        runId,
+        causeRef: 'budget_not_configured',
+      });
+    }
+    const usage = usageOf(item);
+    const remaining = limit - usage.used - usage.reserved;
+    if (remaining < cleanAmount) {
+      throw budgetExceededError({
+        taskId: task.taskId,
+        scope: item === task ? 'task' : `parent:${item.taskId}`,
+        required: cleanAmount,
+        remaining: Math.max(0, remaining),
+        runId,
+      });
+    }
+  }
+
+  const run = runId ? ensureTokenRuns(tasks)[runId] || null : null;
+  if (run) {
+    const remaining = run.budget - run.used - run.reserved;
+    if (remaining < cleanAmount) {
+      throw budgetExceededError({
+        taskId: task.taskId,
+        scope: `run:${runId}`,
+        required: cleanAmount,
+        remaining: Math.max(0, remaining),
+        runId,
+      });
+    }
+  }
+
+  const stamp = nowIso();
+  for (const item of chain) {
+    usageOf(item).reserved += cleanAmount;
+    bumpStateVersion(item);
+    item.updatedAt = stamp;
+  }
+  if (run) {
+    run.reserved += cleanAmount;
+    run.updatedAt = stamp;
+  }
+  saveTasks();
+  return budgetSnapshot(task);
+}
+
+/**
+ * 结算：按真实用量扣减，并释放本次预留；差额（预留多、实际少）自动回冲。
+ * reserved 必须是本次 reserve 的金额；actual 可为 0（失败/取消时由 release 调用）。
+ */
+function settleTaskBudget(taskId, { reserved = 0, actual = 0 } = {}) {
+  const tasks = loadTasks();
+  const task = tasks.tasks[String(taskId || '')];
+  if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+  const cleanReserved = Number(reserved);
+  const cleanActual = Number(actual);
+  if (!Number.isInteger(cleanReserved) || cleanReserved < 0) {
+    throw new AgentError('validation_failed', 'reserved 必须是非负整数', 400);
+  }
+  if (!Number.isInteger(cleanActual) || cleanActual < 0) {
+    throw new AgentError('validation_failed', 'actual 必须是非负整数', 400);
+  }
+  const chain = budgetChain(tasks, task);
+  const runId = task.budgetRunId || null;
+  const run = runId ? ensureTokenRuns(tasks)[runId] || null : null;
+
+  const stamp = nowIso();
+  for (const item of chain) {
+    const usage = usageOf(item);
+    usage.reserved = Math.max(0, usage.reserved - cleanReserved);
+    usage.used += cleanActual;
+    bumpStateVersion(item);
+    item.updatedAt = stamp;
+  }
+  if (run) {
+    run.reserved = Math.max(0, run.reserved - cleanReserved);
+    run.used += cleanActual;
+    run.updatedAt = stamp;
+  }
+  saveTasks();
+  return budgetSnapshot(task);
+}
+
+/** 释放未结算的预留（失败/取消/未产生 usage）。 */
+function releaseTaskBudget(taskId, { amount } = {}) {
+  return settleTaskBudget(taskId, { reserved: requireTokenAmount(amount, '释放 token'), actual: 0 });
 }
 
 function findByIdempotencyKey(agentId, idempotencyKey) {
@@ -535,6 +936,14 @@ function createTask({
   parentUserId = null,
   planId = null,
   planVersion = null,
+  // B-06：父子覆盖与 Run 总闸门。runId 是「预算归属 Run」，与执行期每次 attempt
+  // 重写的 task.runId 不同口径，因此单独落 budgetRunId。
+  parentTaskId = null,
+  runId = null,
+  runBudget = null,
+  // Phase 1 交付物 2：依赖边。只允许指向**已存在**且同 agentId 的任务，
+  // 上限 8；循环依赖只能由批量编排入口产生，那里会在落盘前整图校验。
+  dependsOn = null,
 } = {}) {
   const resolvedAgentId = String(agentId || botId || '');
   assertBot(resolvedAgentId);
@@ -615,6 +1024,25 @@ function createTask({
   }
   const cleanRoute = normalizeRoute(route);
   const cleanBudget = normalizeBudget(budget);
+  const cleanParentTaskId =
+    typeof parentTaskId === 'string' && parentTaskId.trim()
+      ? parentTaskId.trim().slice(0, 120)
+      : null;
+  const cleanRunId =
+    typeof runId === 'string' && runId.trim() ? runId.trim().slice(0, 80) : null;
+  const cleanRunBudget = runBudget === null || runBudget === undefined ? null : Number(runBudget);
+  if (
+    cleanRunBudget !== null &&
+    (!Number.isInteger(cleanRunBudget) ||
+      cleanRunBudget < TOKEN_BUDGET_MIN ||
+      cleanRunBudget > TOKEN_BUDGET_MAX)
+  ) {
+    throw new AgentError(
+      'validation_failed',
+      `runBudget 必须是 ${TOKEN_BUDGET_MIN} 到 ${TOKEN_BUDGET_MAX} 的整数`,
+      400
+    );
+  }
 
   // 计划指针只接受「两个都在」或「两个都不在」：单边取值无法表达冻结版本，
   // 写入后只会变成无法解析的悬空引用（启动时会被收敛为 recovery）。
@@ -640,6 +1068,22 @@ function createTask({
   if (existing) return { ...existing, idempotent: true };
 
   const tasks = loadTasks();
+  // 依赖边校验：必须在任何裁剪/落盘之前完成，失败时磁盘与内存都不变。
+  const cleanDependsOn =
+    dependsOn === null || dependsOn === undefined ? [] : dependencies.normalizeRefs(dependsOn);
+  for (const depTaskId of cleanDependsOn) {
+    const dep = tasks.tasks[depTaskId];
+    if (!dep) {
+      throw new AgentError('dependency_not_found', `依赖任务不存在：${depTaskId}`, 400);
+    }
+    if ((dep.agentId || dep.botId) !== resolvedAgentId) {
+      throw new AgentError(
+        'dependency_not_found',
+        `依赖任务不属于同一 Agent：${depTaskId}`,
+        400
+      );
+    }
+  }
   const pruned =
     Object.keys(tasks.tasks).length >= TASK_MAX
       ? pruneDeliveredTerminalTasks(tasks)
@@ -650,6 +1094,58 @@ function createTask({
       '任务数量已达上限，且没有可裁剪的已投递终态任务',
       409
     );
+  }
+
+  // B-06 父子覆盖：父任务余额是子任务上限的硬上界；不够就拒绝创建。
+  const parentTask = cleanParentTaskId ? tasks.tasks[cleanParentTaskId] : null;
+  if (cleanParentTaskId && !parentTask) {
+    throw new AgentError('validation_failed', 'parentTaskId 指向的任务不存在', 400);
+  }
+  const effectiveRunId =
+    cleanRunId || (parentTask && parentTask.budgetRunId ? parentTask.budgetRunId : null);
+  if (parentTask) {
+    const parentLimit = tokenLimitOf(parentTask);
+    if (parentLimit === null) {
+      throw new AgentError('validation_failed', '父任务未配置 token 上限，不能接收子任务', 400);
+    }
+    const parentUsage = usageOf(parentTask);
+    const parentRemaining = parentLimit - parentUsage.used - parentUsage.reserved;
+    if (parentRemaining < cleanBudget.tokenBudget) {
+      throw budgetExceededError({
+        taskId: '',
+        scope: `parent:${parentTask.taskId}`,
+        required: cleanBudget.tokenBudget,
+        remaining: Math.max(0, parentRemaining),
+        runId: effectiveRunId,
+      });
+    }
+  }
+
+  // B-06 Run 级总闸门：同 Run 的预算只由首个任务建立；后续任务不能改写，
+  // 且每个任务的 tokenBudget 在 reserve/settle 时都会累加到同一本账。
+  if (effectiveRunId) {
+    const runs = ensureTokenRuns(tasks);
+    const existingRun = runs[effectiveRunId];
+    if (!existingRun) {
+      if (cleanRunBudget === null) {
+        throw new AgentError(
+          'validation_failed',
+          'Run 首次创建必须提供 runBudget（Run 总预算）',
+          400
+        );
+      }
+      const stamp = nowIso();
+      runs[effectiveRunId] = {
+        runId: effectiveRunId,
+        budget: cleanRunBudget,
+        used: 0,
+        reserved: 0,
+        createdAt: stamp,
+        updatedAt: stamp,
+      };
+    } else if (cleanRunBudget !== null && cleanRunBudget !== existingRun.budget) {
+      throw new AgentError('validation_failed', 'runBudget 与既有 Run 预算不一致', 400);
+    }
   }
 
   const t = nowIso();
@@ -674,6 +1170,11 @@ function createTask({
     // 因此不存在「任务先引用、计划后落盘」的窗口。null 表示该任务没有冻结计划。
     planId: cleanPlanId,
     planVersion: cleanPlanVersion,
+    // B-06：预算归属与计量初值。reserved/used 只由 reserve/settle/release 改写。
+    parentTaskId: cleanParentTaskId,
+    budgetRunId: effectiveRunId,
+    dependsOn: cleanDependsOn,
+    tokenUsage: { reserved: 0, used: 0 },
     runId: null,
     runStartedAt: null,
     heartbeatAt: null,
@@ -813,6 +1314,12 @@ function updateTask(taskId, patch = {}) {
   if (patch.startedAt !== undefined) task.startedAt = patch.startedAt;
   if (patch.completedAt !== undefined) task.completedAt = patch.completedAt;
   if (patch.errorCode !== undefined) task.errorCode = patch.errorCode;
+  // 死信是既有终态上的标记字段，不新增状态：只有 deadLetter 模块会写它。
+  if (patch.deadLetter !== undefined) {
+    task.deadLetter = patch.deadLetter && typeof patch.deadLetter === 'object'
+      ? { ...patch.deadLetter }
+      : null;
+  }
   if (patch.runId !== undefined) task.runId = patch.runId;
   if (patch.runStartedAt !== undefined) task.runStartedAt = patch.runStartedAt;
   if (patch.heartbeatAt !== undefined) task.heartbeatAt = patch.heartbeatAt;
@@ -950,6 +1457,15 @@ function updateTask(taskId, patch = {}) {
             modelId: String(result.model.modelId || '').slice(0, 120),
           }
         : null,
+      // 依赖失败收敛标记：只在结果显式声明时保留，普通结果形状不变。
+      ...(result.neverStarted === true
+        ? {
+            neverStarted: true,
+            blockedBy: Array.isArray(result.blockedBy)
+              ? result.blockedBy.slice(0, 8).map(item => String(item).slice(0, 120))
+              : [],
+          }
+        : {}),
     };
   }
   task.updatedAt = nowIso();
@@ -1011,6 +1527,12 @@ function isTerminalStatus(status) {
 
 function allTasks() {
   return Object.values(loadTasks().tasks);
+}
+
+// 只读任务表快照（同一内存视图）：runTask 前置就绪校验与 nextQueuedTask
+// 共用 dependencies.isReady 时，需要同一份 tasksById 口径。
+function rawTasksById() {
+  return loadTasks().tasks;
 }
 
 function priorityRank(priority) {
@@ -1115,11 +1637,24 @@ function recordRunStart(taskId, { runId, attempt, startedAt } = {}) {
   return publicTask(task);
 }
 
-function recordRunFinish(taskId, { runId, status, errorCode = null, finishedAt } = {}) {
+function normalizeRunUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  const total = Number(usage.total_tokens);
+  if (!Number.isFinite(total) || total < 0) return null;
+  const asInt = value => (Number.isFinite(Number(value)) ? Math.floor(Number(value)) : null);
+  return {
+    prompt_tokens: asInt(usage.prompt_tokens),
+    completion_tokens: asInt(usage.completion_tokens),
+    total_tokens: Math.floor(total),
+  };
+}
+
+function recordRunFinish(taskId, { runId, status, errorCode = null, finishedAt, usage = null } = {}) {
   const state = loadTasks();
   const task = state.tasks[String(taskId || '')];
   if (!task) return null;
   const at = typeof finishedAt === 'string' ? finishedAt : nowIso();
+  const observed = normalizeRunUsage(usage);
   const runs = Array.isArray(task.runs) ? task.runs : [];
   const entry =
     runs.find(item => item.runId === runId && !item.finishedAt) ||
@@ -1129,6 +1664,8 @@ function recordRunFinish(taskId, { runId, status, errorCode = null, finishedAt }
     entry.finishedAt = at;
     entry.status = status || entry.status;
     entry.errorCode = errorCode || null;
+    // 真实供应商 usage：只有本次 attempt 拿到了才写，缺失时保持 null（绝不估算）。
+    entry.usage = observed;
   } else {
     runs.push({
       runId: runId || task.runId || null,
@@ -1137,6 +1674,7 @@ function recordRunFinish(taskId, { runId, status, errorCode = null, finishedAt }
       finishedAt: at,
       status: status || null,
       errorCode: errorCode || null,
+      usage: observed,
     });
   }
   task.runs = runs.slice(-RUN_HISTORY_MAX);
@@ -1440,9 +1978,75 @@ function healthSnapshot(now = Date.now()) {
   };
 }
 
+// 依赖失败收敛（Phase 1 交付物 2）。
+// 未开始（status=queued）且依赖已终态未成功的任务 → failed；
+// 状态机没有 queued → failed 这条边（queued 只到 accepted/cancelled/timed_out），
+// 因此按 queued → accepted → failed 两步收敛，并在 result 与事件里写
+// neverStarted=true，明确「该任务从未进入 running」。
+// 返回已收敛的 [taskId, errorCode, blockedBy] 列表，供调度与探针核对。
+function settleDependencies() {
+  const state = loadTasks();
+  const settled = [];
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    for (const task of Object.values(state.tasks)) {
+      if (task.status !== 'queued' || task.cancelRequested === true) continue;
+      const deps = Array.isArray(task.dependsOn) ? task.dependsOn : [];
+      if (!deps.length) continue;
+      const blocked = dependencies.blockers(task, state.tasks);
+      // 还有依赖在跑 → 继续排队，不判死。
+      if (!blocked.failed.length && !blocked.missing.length) continue;
+
+      const cancelledOnly =
+        blocked.failed.length > 0 &&
+        blocked.failed.every(item => item.status === 'cancelled');
+      const errorCode = cancelledOnly ? 'dependency_cancelled' : 'dependency_failed';
+      const blockedBy = [
+        ...blocked.failed.map(item => item.taskId),
+        ...blocked.missing,
+      ];
+      const finishedAt = nowIso();
+      const result = normalizeWorkerResult({
+        status: 'failed',
+        summary: `依赖未成功完成，任务未开始执行：${blockedBy.join(', ')}`.slice(0, 500),
+        errorCode,
+        finishedAt,
+        neverStarted: true,
+        blockedBy,
+      });
+      transitionTask(task.taskId, { to: 'accepted' });
+      transitionTask(task.taskId, {
+        to: 'failed',
+        completedAt: finishedAt,
+        errorCode,
+        lastErrorCode: errorCode,
+        result,
+      });
+      settled.push({ taskId: task.taskId, errorCode, blockedBy });
+      appendEvent({
+        botId: task.agentId || task.botId,
+        taskId: task.taskId,
+        eventType: 'task.dependency_failed',
+        payload: {
+          status: 'failed',
+          errorCode,
+          neverStarted: true,
+          blockedBy: blockedBy.join(','),
+          dependencyTaskId: blockedBy[0] || '',
+        },
+      });
+      settled.push({ taskId: task.taskId, errorCode, blockedBy });
+      progressed = true;
+    }
+  }
+  return settled;
+}
+
 // 队列顺序：优先级（high → normal → low）优先，同级按创建时间，最后用 taskId
 // 兜底。S7 起队列成员含正式重试态 retrying；尚未到 retryAt 的任务暂不出队，
 // 避免失败后立即重试形成风暴。
+// Phase 1 交付物 2：依赖未就绪的任务不出队；就绪判定复用 dependencies.isReady（唯一实现）。
 function nextQueuedTask(now = Date.now()) {
   const current = loadTasks();
   return (
@@ -1453,6 +2057,7 @@ function nextQueuedTask(now = Date.now()) {
           task.cancelRequested !== true
       )
       .filter(task => !task.retryAt || Date.parse(task.retryAt) <= now)
+      .filter(task => dependencies.isReady(task, current.tasks))
       .sort((a, b) => {
         const byPriority = priorityRank(a.priority) - priorityRank(b.priority);
         if (byPriority !== 0) return byPriority;
@@ -1477,6 +2082,59 @@ function reloadForTests() {
   outboxCache = null;
 }
 
+// 死信只落在既有终态任务的 deadLetter 标记上，不新增状态、不建第二套存储。
+function listDeadLetters({ status = 'open', limit = 50 } = {}) {
+  const state = loadTasks();
+  const rows = Object.values(state.tasks)
+    .filter(task => task.deadLetter && (!status || task.deadLetter.status === status))
+    .map(task => {
+      const detail = publicTask(task);
+      const artifacts = Array.isArray(task.result && task.result.artifacts)
+        ? task.result.artifacts.map(ref => ({
+            kind: ref && ref.kind,
+            id: ref && ref.id,
+            version: ref && ref.version,
+          }))
+        : [];
+      return {
+        taskId: task.taskId,
+        botId: task.botId,
+        taskType: task.taskType,
+        goal: task.goal,
+        status: detail.status,
+        errorCode: detail.errorCode,
+        attempts: Number(task.attempts) || 0,
+        deadLetter: { ...task.deadLetter },
+        artifacts,
+      };
+    })
+    .sort((left, right) =>
+      String((right.deadLetter && right.deadLetter.createdAt) || '').localeCompare(
+        String((left.deadLetter && left.deadLetter.createdAt) || '')
+      )
+    );
+  return rows.slice(0, Math.max(1, Number(limit) || 50));
+}
+
+// 成本/死信只读视图：全部任务（跨 bot）与 Run 预算账，避免调用方自建第二套存储。
+function listAllTasks() {
+  const state = loadTasks();
+  return Object.values(state.tasks).map(publicTask);
+}
+
+function getRunUsage(runId) {
+  const key = String(runId || '');
+  if (!key) return null;
+  const run = ensureTokenRuns(loadTasks())[key];
+  if (!run) return null;
+  return {
+    runId: key,
+    budget: Number.isInteger(run.budget) ? run.budget : null,
+    used: Number(run.used) || 0,
+    reserved: Number(run.reserved) || 0,
+  };
+}
+
 module.exports = {
   TASKS_FILE,
   EVENTS_FILE,
@@ -1486,11 +2144,15 @@ module.exports = {
   CONTRACT_VERSION,
   PRIORITIES,
   SIDE_EFFECT_TOOLS,
+  DEFAULT_TASK_TOKEN_BUDGET,
   TASK_SCHEMA_VERSION,
   createTask,
   getTask,
+  listDeadLetters,
   getRawTask,
   listTasks,
+  listAllTasks,
+  getRunUsage,
   updateTask,
   transitionTask,
   appendEvent,
@@ -1499,7 +2161,9 @@ module.exports = {
   safePayload,
   isTerminalStatus,
   allTasks,
+  rawTasksById,
   nextQueuedTask,
+  settleDependencies,
   queuedCount,
   recoverInterrupted,
   forcePlanRecovery,
@@ -1517,4 +2181,8 @@ module.exports = {
   setRetry,
   healthSnapshot,
   reloadForTests,
+  getTaskBudgetSnapshot,
+  reserveTaskBudget,
+  settleTaskBudget,
+  releaseTaskBudget,
 };

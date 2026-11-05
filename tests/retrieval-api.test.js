@@ -447,7 +447,7 @@ test('Memory Bot API：公开根路径不受影响，/agents 复用 Bearer 鉴�
 
   const agents = await req('/agents');
   assert.equal(agents.status, 200);
-  assert.equal(agents.json.agents.length, 1);
+  assert.equal(agents.json.agents.length, 4);
   assert.equal(agents.json.agents[0].botId, 'memory');
 });
 

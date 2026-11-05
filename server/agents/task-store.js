@@ -31,7 +31,7 @@ const SCHEMA_VERSION = 2;
 const SUPPORTED_VERSIONS = Object.freeze([1, 2]);
 
 function empty() {
-  return { version: SCHEMA_VERSION, tasks: {} };
+  return { version: SCHEMA_VERSION, tasks: {}, tokenRuns: {} };
 }
 
 function ensureDir() {
@@ -80,6 +80,14 @@ function normalizeTask(task) {
   add('checkpointVersion', 0);
   add('runs', []);
   add('requiresReview', false);
+  // B-06：Token 原子计量的默认视图。与 stateVersion 同一读边界策略——只补默认值，
+  // 不参与 migrated 判定，旧任务原文件字节不变；首次真实写入时自然带出。
+  if (task.tokenUsage === undefined) task.tokenUsage = { reserved: 0, used: 0 };
+  if (task.parentTaskId === undefined) task.parentTaskId = null;
+  if (task.budgetRunId === undefined) task.budgetRunId = null;
+  // Phase 1 交付物 2：依赖边的只读默认视图。与 stateVersion 同一读边界策略——
+  // 只补默认值，不参与 migrated 判定；首次真实写入时自然带出。
+  if (task.dependsOn === undefined) task.dependsOn = [];
   return changed;
 }
 
@@ -100,6 +108,13 @@ function migrate(raw) {
   if (raw.version !== SCHEMA_VERSION) {
     raw.version = SCHEMA_VERSION;
     changed = true;
+  }
+  // B-06：Run 级 token 预算账本与任务同文件、同单写者。缺省时不参与 migrated 判定，
+  // 只有真实预算写入才落盘；结构非法则按损坏处理，避免静默丢账。
+  if (raw.tokenRuns === undefined) {
+    raw.tokenRuns = {};
+  } else if (typeof raw.tokenRuns !== 'object' || Array.isArray(raw.tokenRuns)) {
+    throw new AgentError('agent_tasks_corrupted', 'Bot 任务存储结构无效', 500);
   }
   for (const task of Object.values(raw.tasks)) {
     if (normalizeTask(task)) changed = true;
