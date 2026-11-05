@@ -1102,6 +1102,7 @@ async function runTask(taskId) {
       rounds: result.rounds,
       stopReason: result.stopReason,
       model: result.model,
+      usage: result.usage,
       runId: result.runId || runId,
       finishedAt: nowIso(),
     });
