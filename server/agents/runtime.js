@@ -22,6 +22,7 @@ const { normalizeWorkerResult } = require('./worker-result');
 const { createToolAuthorizer } = require('./tool-gateway');
 const { AgentError, budgetExceededError } = require('./errors');
 const approvalDeadline = require('./approval-deadline');
+const conflictRecord = require('./conflict-record');
 const artifactCommit = require('./artifact-commit');
 const { createSideEffectGuard } = require('./side-effect-guard');
 const crashHook = require('./crash-hook');
@@ -1024,6 +1025,24 @@ async function runTask(taskId) {
       if (resolution.action === 'approval') {
         // 冲突 / 高风险审校不通过 / 审校无法给出结论：默认保守（不通过 + 标 conflict），
         // 停在审批节点等人工；审批超时只标 overdue，绝不解释为通过。
+        // §28：冲突先落 ConflictRecord，再进入人工审批，保证裁决前就有可复读的记录。
+        if (resolution.outcome === 'conflict') {
+          conflictRecord.persist(
+            conflictRecord.createRecord({
+              subjectKey: `${afterReview.taskId}:${primary && primary.id ? primary.id : 'verification'}`,
+              candidateRefs: primary && primary.id ? [String(primary.id)] : [],
+              conflictType: 'factual',
+              evidenceRefs: [
+                `deterministic:${verification.errorCode || 'pass'}`,
+                `review:${review && review.decision ? review.decision : 'needs_human'}`,
+              ],
+              resolutionStatus: 'open',
+              rationale: resolution.errorCode || 'verification_conflict',
+              taskId: afterReview.taskId,
+              runId,
+            })
+          );
+        }
         verificationLoop.invalidateArtifactRefs(finalResult, {
           reason: resolution.errorCode || 'verification_conflict',
         });
