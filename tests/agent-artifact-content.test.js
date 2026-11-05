@@ -22,6 +22,7 @@ process.env.BLUEBIRD_DATA_DIR = TMP;
 const tasks = require('../server/agents/tasks');
 const artifactStore = require('../server/agents/artifact-store');
 const artifactCommit = require('../server/agents/artifact-commit');
+const conflictRecord = require('../server/agents/conflict-record');
 const { normalizeWorkerResult } = require('../server/agents/worker-result');
 
 let seq = 0;
@@ -197,4 +198,109 @@ test('正文超过 256 KB 显式拒绝：不留记录、不写正文文件', () 
   const artifact = artifactStore.persist({ kind: 'message', content: atLimit, taskId: 'task_big' });
   assert.ok(artifact.id);
   assert.strictEqual(artifactStore.readContent(artifact.id).bytes, artifactStore.CONTENT_MAX_BYTES);
+});
+
+// ---- A-02：Blackboard CAS / 版本裁决 / 冲突 ----
+test('A-02 并发双写同一 expectedVersion：一次成功，另一次 409 conflict 并落 ConflictRecord', () => {
+  const task = makeTask('CAS 并发');
+  const v1 = artifactStore.persist({
+    kind: 'message',
+    content: { text: 'CAS 第一版' },
+    taskId: task.taskId,
+  });
+  assert.strictEqual(v1.stateVersion, 1);
+  assert.strictEqual(
+    artifactStore.lineageStateVersion({ taskId: task.taskId, kind: 'message' }),
+    1
+  );
+
+  // 两个写入方都读到 stateVersion=1，随后各写一份不同内容（真实两次 persist）。
+  const winner = artifactStore.persist({
+    kind: 'message',
+    content: { text: 'CAS 第二版' },
+    taskId: task.taskId,
+    expectedVersion: 1,
+    runId: 'run_cas_winner',
+  });
+  assert.strictEqual(winner.version, 2);
+  assert.strictEqual(winner.stateVersion, 2);
+
+  assert.throws(
+    () =>
+      artifactStore.persist({
+        kind: 'message',
+        content: { text: 'CAS 第三版（过期写入）' },
+        taskId: task.taskId,
+        expectedVersion: 1,
+        runId: 'run_cas_loser',
+      }),
+    error => {
+      assert.strictEqual(error.code, 'conflict');
+      assert.strictEqual(error.status, 409);
+      // 七字段契约：code/retryable/errorFingerprint/failedAt/taskId/runId/causeRef
+      assert.strictEqual(error.details.retryable, true);
+      assert.match(error.details.errorFingerprint, /^[0-9a-f]{64}$/);
+      assert.ok(error.details.failedAt);
+      assert.strictEqual(error.details.taskId, task.taskId);
+      assert.strictEqual(error.details.runId, 'run_cas_loser');
+      assert.ok(error.details.causeRef);
+      return true;
+    }
+  );
+
+  // 冲突必须落到既有 ConflictRecord（temporal + 同一 lineage subjectKey）。
+  const records = conflictRecord
+    .listRecords()
+    .filter(item => item.subjectKey === `artifact-lineage:${task.taskId}:message`);
+  assert.strictEqual(records.length, 1);
+  assert.strictEqual(records[0].conflictType, 'temporal');
+  assert.strictEqual(records[0].resolutionStatus, 'open');
+  assert.strictEqual(records[0].candidateRefs.length, 2);
+  assert.strictEqual(records[0].candidateRefs[0], winner.id);
+  assert.notStrictEqual(records[0].candidateRefs[1], winner.id);
+  assert.ok(records[0].evidenceRefs.includes('expectedStateVersion:1'));
+  assert.ok(records[0].evidenceRefs.includes('currentStateVersion:2'));
+});
+
+test('A-02 expectedVersion 过期被拒：原记录内容/版本/状态不变，superseded 链可复读', () => {
+  const task = makeTask('CAS 过期');
+  const v1 = artifactStore.persist({
+    kind: 'message',
+    content: { text: '过期测试第一版' },
+    taskId: task.taskId,
+  });
+  const v2 = artifactStore.persist({
+    kind: 'message',
+    content: { text: '过期测试第二版' },
+    taskId: task.taskId,
+    expectedVersion: v1.stateVersion,
+  });
+  const before = {
+    v1: JSON.parse(JSON.stringify(artifactStore.get(v1.id))),
+    v2: JSON.parse(JSON.stringify(artifactStore.get(v2.id))),
+  };
+
+  assert.throws(
+    () =>
+      artifactStore.persist({
+        kind: 'message',
+        content: { text: '不应写入的第三版' },
+        taskId: task.taskId,
+        expectedVersion: 1,
+      }),
+    error => error.code === 'conflict' && error.status === 409
+  );
+
+  // 失败写入不得产生任何记录/正文；原头部记录逐字段不变。
+  const versions = artifactStore.versionsOf({ taskId: task.taskId, kind: 'message' });
+  assert.strictEqual(versions.length, 2);
+  assert.deepStrictEqual(artifactStore.get(v2.id), before.v2);
+  assert.deepStrictEqual(artifactStore.get(v1.id), before.v1);
+
+  // superseded 链：旧版仍可复读，且 supersededBy 指向当前头部。
+  assert.strictEqual(artifactStore.get(v1.id).status, 'superseded');
+  assert.strictEqual(artifactStore.get(v1.id).supersededBy, v2.id);
+  const replayed = artifactStore.readContent(v1.id, { version: 1 });
+  assert.strictEqual(replayed.content.text, '过期测试第一版');
+  assert.strictEqual(replayed.status, 'superseded');
 });

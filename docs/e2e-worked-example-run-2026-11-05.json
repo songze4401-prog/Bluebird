@@ -1,0 +1,1111 @@
+{
+  "policyVersion": "worked-example-v1",
+  "traceId": "trace_77086298-25a5-4ec1-82ab-5efdafbc3cbf",
+  "stepCount": 9,
+  "environment": {
+    "provider": "local-http-stub",
+    "realModel": false,
+    "note": "非真实模型环境，仅验证链路与数据形态；Token 为 provider 返回的真实 usage。"
+  },
+  "startedAt": "2026-11-05T14:07:12.473Z",
+  "finishedAt": "2026-11-05T14:07:13.278Z",
+  "durationMs": 805,
+  "parallel": true,
+  "taskIds": {
+    "workerA": "task_ed029110-e34a-456f-8637-64c19f141c2f",
+    "workerB": "task_1b22a0c5-017a-4c9b-8dff-a893d47420d3",
+    "reviewer": "task_ca32fc48-f59e-4b01-b3de-9a0c955d1758"
+  },
+  "artifacts": {
+    "S1": {
+      "kind": "source",
+      "id": "art_2b4997d47beec8ee07cdb2cadb52bd12",
+      "version": 1,
+      "taskId": "task_ed029110-e34a-456f-8637-64c19f141c2f",
+      "provenanceRefs": [],
+      "taintLabels": [
+        "unverified",
+        "web:vendor-a.example"
+      ],
+      "taintPolicyVersion": "taint-policy-v1",
+      "createdAt": "2026-11-05T14:07:12.965Z",
+      "contentHash": "f225822296726d0bfc84719e3288088e2da7f7a42c2bbabba3a78e6078dda2f0"
+    },
+    "S2": {
+      "kind": "source",
+      "id": "art_fbe84c8532cfc1fe58f9ac68b371fbe7",
+      "version": 1,
+      "taskId": "task_1b22a0c5-017a-4c9b-8dff-a893d47420d3",
+      "provenanceRefs": [],
+      "taintLabels": [
+        "unverified",
+        "web:vendor-a.example"
+      ],
+      "taintPolicyVersion": "taint-policy-v1",
+      "createdAt": "2026-11-05T14:07:12.972Z",
+      "contentHash": "e06d4919ba70f5190a364420e245226787cdca5e3f29dee327837d85d02a311e"
+    },
+    "A1": {
+      "kind": "conclusion",
+      "id": "art_467c54fd6de17e22d6946a3a6340ab18",
+      "version": 1,
+      "taskId": "task_ed029110-e34a-456f-8637-64c19f141c2f",
+      "provenanceRefs": [
+        {
+          "kind": "source",
+          "id": "art_2b4997d47beec8ee07cdb2cadb52bd12",
+          "version": 1
+        }
+      ],
+      "taintLabels": [
+        "unverified",
+        "web:vendor-a.example"
+      ],
+      "taintPolicyVersion": "taint-policy-v1",
+      "createdAt": "2026-11-05T14:07:12.981Z",
+      "contentHash": "73db00d45d71135c804de0c69a1df9409adf20c452c5fbd08a5afbde28de3097"
+    },
+    "B1": {
+      "kind": "conclusion",
+      "id": "art_1925fe1bed335347408a6e1e2e5402a6",
+      "version": 1,
+      "taskId": "task_1b22a0c5-017a-4c9b-8dff-a893d47420d3",
+      "provenanceRefs": [
+        {
+          "kind": "source",
+          "id": "art_fbe84c8532cfc1fe58f9ac68b371fbe7",
+          "version": 1
+        }
+      ],
+      "taintLabels": [
+        "unverified",
+        "web:vendor-a.example"
+      ],
+      "taintPolicyVersion": "taint-policy-v1",
+      "createdAt": "2026-11-05T14:07:12.990Z",
+      "contentHash": "9618f4d58c301b45154b8ad56565250f13fc1bb104bb43755e3fabfbfed8f8b1"
+    },
+    "delivery": {
+      "kind": "delivery",
+      "id": "art_5101ee642a8c5dade06960cc646b27fe",
+      "version": 1,
+      "taskId": "task_ca32fc48-f59e-4b01-b3de-9a0c955d1758",
+      "provenanceRefs": [
+        {
+          "kind": "conclusion",
+          "id": "art_467c54fd6de17e22d6946a3a6340ab18",
+          "version": 1
+        },
+        {
+          "kind": "conclusion",
+          "id": "art_1925fe1bed335347408a6e1e2e5402a6",
+          "version": 1
+        }
+      ],
+      "taintLabels": [
+        "review:adjudicated",
+        "unverified",
+        "web:vendor-a.example"
+      ],
+      "taintPolicyVersion": "taint-policy-v1",
+      "createdAt": "2026-11-05T14:07:13.265Z",
+      "contentHash": "57c7ffcc6ab54ccc51003f03302f3697c4f92427f19dc3f8caaa4f16749d1102"
+    }
+  },
+  "verification": {
+    "A1": {
+      "ok": true,
+      "errorCode": null
+    },
+    "B1": {
+      "ok": true,
+      "errorCode": null
+    }
+  },
+  "conflict": {
+    "conflictId": "conflict_ad836ce093a6917a57be288c450f6ec9",
+    "conflictType": "factual",
+    "candidateRefs": [
+      "art_467c54fd6de17e22d6946a3a6340ab18",
+      "art_1925fe1bed335347408a6e1e2e5402a6"
+    ],
+    "evidenceRefs": [
+      "art_2b4997d47beec8ee07cdb2cadb52bd12",
+      "art_fbe84c8532cfc1fe58f9ac68b371fbe7"
+    ],
+    "resolutionStatus": "resolved",
+    "resolutionMethod": "review",
+    "selectedCandidateRef": "art_467c54fd6de17e22d6946a3a6340ab18",
+    "rationale": "independent_review_pass",
+    "policyVersion": "conflict-rules-v1",
+    "arbitrationPolicyVersion": "conflict-arbitration-v1",
+    "evidenceOrder": [
+      {
+        "source": "reviewer",
+        "precedence": 2,
+        "authoritative": true,
+        "independent": true,
+        "ok": true
+      }
+    ]
+  },
+  "delivery": {
+    "kind": "delivery",
+    "id": "art_5101ee642a8c5dade06960cc646b27fe",
+    "version": 1
+  },
+  "usage": {
+    "runtimeUsage": {
+      "workerA": {
+        "prompt_tokens": 180,
+        "completion_tokens": 64,
+        "total_tokens": 244
+      },
+      "workerB": {
+        "prompt_tokens": 176,
+        "completion_tokens": 66,
+        "total_tokens": 242
+      },
+      "reviewer": {
+        "prompt_tokens": 320,
+        "completion_tokens": 88,
+        "total_tokens": 408
+      }
+    },
+    "providerUsage": {
+      "workerA": {
+        "prompt_tokens": 180,
+        "completion_tokens": 64,
+        "total_tokens": 244
+      },
+      "workerB": {
+        "prompt_tokens": 176,
+        "completion_tokens": 66,
+        "total_tokens": 242
+      },
+      "reviewer": {
+        "prompt_tokens": 320,
+        "completion_tokens": 88,
+        "total_tokens": 408
+      }
+    },
+    "resolved": {
+      "workerA": {
+        "prompt_tokens": 180,
+        "completion_tokens": 64,
+        "total_tokens": 244
+      },
+      "workerB": {
+        "prompt_tokens": 176,
+        "completion_tokens": 66,
+        "total_tokens": 242
+      },
+      "reviewer": {
+        "prompt_tokens": 320,
+        "completion_tokens": 88,
+        "total_tokens": 408
+      }
+    },
+    "totalTokens": 894,
+    "source": "provider_reported",
+    "cost": "未采集",
+    "costReason": "本地 HTTP stub provider 无计价口径，不估算成本。"
+  },
+  "latencyMs": {
+    "workerA": 391,
+    "workerB": 431,
+    "reviewer": 236
+  },
+  "steps": [
+    {
+      "step": 1,
+      "name": "准备本地 provider 与 Agent 配置",
+      "startedAt": "2026-11-05T14:07:12.510Z",
+      "durationMs": 37,
+      "environment": "local-http-stub（非真实模型）",
+      "providerId": "2e9af084-ac4c-407e-85bc-96e8d398054c",
+      "bots": [
+        "researcher",
+        "reviewer"
+      ]
+    },
+    {
+      "step": 2,
+      "name": "两个 Worker 并行研究",
+      "startedAt": "2026-11-05T14:07:12.965Z",
+      "durationMs": 455,
+      "taskIds": [
+        "task_ed029110-e34a-456f-8637-64c19f141c2f",
+        "task_1b22a0c5-017a-4c9b-8dff-a893d47420d3"
+      ],
+      "sessions": [
+        "bs_3513a42f-e5b5-46a1-8ce2-d42da298ed3a",
+        "bs_38dbb97f-abce-4566-995d-2eb09fb092f2"
+      ],
+      "parallel": true,
+      "outputs": {
+        "A": {
+          "worker": "A",
+          "subject": "订阅价格",
+          "claim": {
+            "key": "monthly_price",
+            "value": "$99"
+          },
+          "source": {
+            "url": "https://vendor-a.example/pricing",
+            "retrievedAt": "2026-11-05T02:10:00.000Z",
+            "title": "Vendor A 官方定价页"
+          },
+          "uncertainty": "促销价可能随时调整"
+        },
+        "B": {
+          "worker": "B",
+          "subject": "订阅价格",
+          "claim": {
+            "key": "monthly_price",
+            "value": "$129"
+          },
+          "source": {
+            "url": "https://vendor-a.example/legacy-pricing",
+            "retrievedAt": "2026-10-26T09:00:00.000Z",
+            "title": "Vendor A 旧版定价页（缓存）"
+          },
+          "uncertainty": "页面可能已过期"
+        }
+      },
+      "eventIds": [
+        "evt_b7bae2e2-9035-4687-a471-e2236b7f1bba",
+        "evt_26339d78-a07b-4bb0-8dae-0a5d721189e6",
+        "evt_189dfc16-fc68-48c7-bdd3-4b430c62bf18",
+        "evt_7c2a30e8-9481-4af0-b2b1-2ead7443821d"
+      ]
+    },
+    {
+      "step": 3,
+      "name": "各写 A1/B1（来源/时间/provenance/taint）",
+      "startedAt": "2026-11-05T14:07:12.998Z",
+      "durationMs": 33,
+      "artifacts": {
+        "S1": {
+          "kind": "source",
+          "id": "art_2b4997d47beec8ee07cdb2cadb52bd12",
+          "version": 1,
+          "taskId": "task_ed029110-e34a-456f-8637-64c19f141c2f",
+          "provenanceRefs": [],
+          "taintLabels": [
+            "unverified",
+            "web:vendor-a.example"
+          ],
+          "taintPolicyVersion": "taint-policy-v1",
+          "createdAt": "2026-11-05T14:07:12.965Z",
+          "contentHash": "f225822296726d0bfc84719e3288088e2da7f7a42c2bbabba3a78e6078dda2f0"
+        },
+        "S2": {
+          "kind": "source",
+          "id": "art_fbe84c8532cfc1fe58f9ac68b371fbe7",
+          "version": 1,
+          "taskId": "task_1b22a0c5-017a-4c9b-8dff-a893d47420d3",
+          "provenanceRefs": [],
+          "taintLabels": [
+            "unverified",
+            "web:vendor-a.example"
+          ],
+          "taintPolicyVersion": "taint-policy-v1",
+          "createdAt": "2026-11-05T14:07:12.972Z",
+          "contentHash": "e06d4919ba70f5190a364420e245226787cdca5e3f29dee327837d85d02a311e"
+        },
+        "A1": {
+          "kind": "conclusion",
+          "id": "art_467c54fd6de17e22d6946a3a6340ab18",
+          "version": 1,
+          "taskId": "task_ed029110-e34a-456f-8637-64c19f141c2f",
+          "provenanceRefs": [
+            {
+              "kind": "source",
+              "id": "art_2b4997d47beec8ee07cdb2cadb52bd12",
+              "version": 1
+            }
+          ],
+          "taintLabels": [
+            "unverified",
+            "web:vendor-a.example"
+          ],
+          "taintPolicyVersion": "taint-policy-v1",
+          "createdAt": "2026-11-05T14:07:12.981Z",
+          "contentHash": "73db00d45d71135c804de0c69a1df9409adf20c452c5fbd08a5afbde28de3097"
+        },
+        "B1": {
+          "kind": "conclusion",
+          "id": "art_1925fe1bed335347408a6e1e2e5402a6",
+          "version": 1,
+          "taskId": "task_1b22a0c5-017a-4c9b-8dff-a893d47420d3",
+          "provenanceRefs": [
+            {
+              "kind": "source",
+              "id": "art_fbe84c8532cfc1fe58f9ac68b371fbe7",
+              "version": 1
+            }
+          ],
+          "taintLabels": [
+            "unverified",
+            "web:vendor-a.example"
+          ],
+          "taintPolicyVersion": "taint-policy-v1",
+          "createdAt": "2026-11-05T14:07:12.990Z",
+          "contentHash": "9618f4d58c301b45154b8ad56565250f13fc1bb104bb43755e3fabfbfed8f8b1"
+        }
+      }
+    },
+    {
+      "step": 4,
+      "name": "验证：schema 检查",
+      "startedAt": "2026-11-05T14:07:13.004Z",
+      "durationMs": 6,
+      "result": {
+        "A1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "result_shape",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "required_fields",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "artifact_refs",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "content_readable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "hash_match",
+              "ok": true,
+              "code": null
+            }
+          ]
+        },
+        "B1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "result_shape",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "required_fields",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "artifact_refs",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "content_readable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "hash_match",
+              "ok": true,
+              "code": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "step": 5,
+      "name": "验证：引用检查",
+      "startedAt": "2026-11-05T14:07:13.005Z",
+      "durationMs": 0,
+      "result": {
+        "A1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "refs_resolvable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "version_consistent",
+              "ok": true,
+              "code": null
+            }
+          ]
+        },
+        "B1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "refs_resolvable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "version_consistent",
+              "ok": true,
+              "code": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "step": 6,
+      "name": "验证：来源检查",
+      "startedAt": "2026-11-05T14:07:13.005Z",
+      "durationMs": 0,
+      "result": {
+        "A1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "evidence_resolvable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "provenance_intact",
+              "ok": true,
+              "code": null
+            }
+          ]
+        },
+        "B1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "evidence_resolvable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "provenance_intact",
+              "ok": true,
+              "code": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "step": 7,
+      "name": "Reviewer 对照来源裁决冲突 C1",
+      "startedAt": "2026-11-05T14:07:13.265Z",
+      "durationMs": 260,
+      "reviewTaskId": "task_ca32fc48-f59e-4b01-b3de-9a0c955d1758",
+      "reviewerIndependent": true,
+      "verdict": {
+        "decision": "pass",
+        "valid": true,
+        "evidence": [
+          {
+            "kind": "conclusion",
+            "id": "art_467c54fd6de17e22d6946a3a6340ab18",
+            "version": 1
+          },
+          {
+            "kind": "conclusion",
+            "id": "art_1925fe1bed335347408a6e1e2e5402a6",
+            "version": 1
+          }
+        ],
+        "reasons": [
+          "source_a_newer",
+          "source_b_cached_and_stale"
+        ],
+        "uncertainty": "两来源抓取时间相差 10 天，价格可能已变化"
+      },
+      "conflict": {
+        "conflictId": "conflict_ad836ce093a6917a57be288c450f6ec9",
+        "conflictType": "factual",
+        "candidateRefs": [
+          "art_467c54fd6de17e22d6946a3a6340ab18",
+          "art_1925fe1bed335347408a6e1e2e5402a6"
+        ],
+        "evidenceRefs": [
+          "art_2b4997d47beec8ee07cdb2cadb52bd12",
+          "art_fbe84c8532cfc1fe58f9ac68b371fbe7"
+        ],
+        "resolutionStatus": "resolved",
+        "resolutionMethod": "review",
+        "selectedCandidateRef": "art_467c54fd6de17e22d6946a3a6340ab18",
+        "rationale": "independent_review_pass",
+        "policyVersion": "conflict-rules-v1",
+        "arbitrationPolicyVersion": "conflict-arbitration-v1",
+        "evidenceOrder": [
+          {
+            "source": "reviewer",
+            "precedence": 2,
+            "authoritative": true,
+            "independent": true,
+            "ok": true
+          }
+        ]
+      },
+      "eventIds": [
+        "evt_48d604ff-25e4-4061-b65e-f80b6589dff7",
+        "evt_c3b05f3d-9760-441d-9840-081e76f58d94",
+        "evt_b713b7f4-0dcc-42af-99a1-91b6e4a78349",
+        "evt_67c7f8e0-f4b7-4e0f-b8ce-dc39c16b8eee",
+        "evt_c4800217-557c-467f-ad34-049667b1393f",
+        "evt_509b2634-553e-48f8-ae5d-1cb64eb59b35",
+        "evt_5c6723a1-c8a5-4fc2-b439-4337d395d5f3",
+        "evt_8f74dd1f-0eb4-49ea-93c1-2b2111b16a2e",
+        "evt_effcb3b1-7aa4-43d1-9d6f-28d3c81149da",
+        "evt_16cbf2d3-502d-4b80-a565-78a61ec803f3",
+        "evt_e0e2328d-9031-450a-aea3-a961de9db784"
+      ]
+    },
+    {
+      "step": 8,
+      "name": "交付建议 + 来源 + 分歧处理 + 剩余不确定性",
+      "startedAt": "2026-11-05T14:07:13.277Z",
+      "durationMs": 12,
+      "deliveryRef": {
+        "kind": "delivery",
+        "id": "art_5101ee642a8c5dade06960cc646b27fe",
+        "version": 1
+      },
+      "provenanceChain": [
+        {
+          "kind": "delivery",
+          "id": "art_5101ee642a8c5dade06960cc646b27fe",
+          "version": 1
+        },
+        {
+          "kind": "conclusion",
+          "id": "art_467c54fd6de17e22d6946a3a6340ab18",
+          "version": 1
+        },
+        {
+          "kind": "source",
+          "id": "art_2b4997d47beec8ee07cdb2cadb52bd12",
+          "version": 1
+        },
+        {
+          "kind": "conclusion",
+          "id": "art_1925fe1bed335347408a6e1e2e5402a6",
+          "version": 1
+        },
+        {
+          "kind": "source",
+          "id": "art_fbe84c8532cfc1fe58f9ac68b371fbe7",
+          "version": 1
+        }
+      ],
+      "remainingUncertainty": [
+        "两来源抓取时间相差 10 天，价格可能已变化",
+        "促销价可能随时调整"
+      ]
+    },
+    {
+      "step": 9,
+      "name": "记录 trace / 事件 / Token / 延迟 / 成本",
+      "startedAt": "2026-11-05T14:07:13.278Z",
+      "durationMs": 0,
+      "traceId": "trace_77086298-25a5-4ec1-82ab-5efdafbc3cbf",
+      "eventIds": {
+        "workerA": [
+          {
+            "eventId": "evt_d2a9bc11-09cd-4dea-968c-a954c35a1728",
+            "eventType": "verification.verdict",
+            "timestamp": "2026-11-05T14:07:13.258Z",
+            "status": "conflict"
+          },
+          {
+            "eventId": "evt_b7bae2e2-9035-4687-a471-e2236b7f1bba",
+            "eventType": "task.completed",
+            "timestamp": "2026-11-05T14:07:12.903Z",
+            "status": "completed"
+          },
+          {
+            "eventId": "evt_9b612679-c244-47ec-9590-91751c754995",
+            "eventType": "model.completed",
+            "timestamp": "2026-11-05T14:07:12.859Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_489a6444-a5cd-47ef-8ed7-e5669e24af24",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-05T14:07:12.833Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_982da395-d400-4807-afc7-d16f39298d23",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-05T14:07:12.756Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_5d74454d-85ae-41c9-9515-2ffae1eac3de",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-05T14:07:12.702Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_798085b6-3d4c-4587-bd9c-9a6e30a3200f",
+            "eventType": "worker.checkpoint",
+            "timestamp": "2026-11-05T14:07:12.608Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_2d6d35a0-e565-490a-bce1-5d4a4afe73b0",
+            "eventType": "model.requested",
+            "timestamp": "2026-11-05T14:07:12.598Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_8dd9c027-18bb-434c-86d0-44a026ce689f",
+            "eventType": "worker.checkpoint",
+            "timestamp": "2026-11-05T14:07:12.585Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_350a5bf4-fd03-444c-bd80-9d05c92c4d12",
+            "eventType": "task.started",
+            "timestamp": "2026-11-05T14:07:12.575Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_26339d78-a07b-4bb0-8dae-0a5d721189e6",
+            "eventType": "task.accepted",
+            "timestamp": "2026-11-05T14:07:12.554Z",
+            "status": "accepted"
+          },
+          {
+            "eventId": "evt_d6b3c75e-27eb-4928-b80c-b8afcf1d862a",
+            "eventType": "task.created",
+            "timestamp": "2026-11-05T14:07:12.514Z",
+            "status": "queued"
+          }
+        ],
+        "workerB": [
+          {
+            "eventId": "evt_189dfc16-fc68-48c7-bdd3-4b430c62bf18",
+            "eventType": "task.completed",
+            "timestamp": "2026-11-05T14:07:12.953Z",
+            "status": "completed"
+          },
+          {
+            "eventId": "evt_ea530619-16c8-461d-8238-b563144d09a1",
+            "eventType": "model.completed",
+            "timestamp": "2026-11-05T14:07:12.914Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_a5cee50d-02dc-4cda-aea1-fec2cdfa12de",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-05T14:07:12.843Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_a8738949-e52d-4483-9640-f2b998552429",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-05T14:07:12.805Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_81609fec-5bd8-4b3f-8938-0910d6866a39",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-05T14:07:12.714Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_f01d33bc-7883-4f7f-aae0-6172f7b5e33d",
+            "eventType": "worker.checkpoint",
+            "timestamp": "2026-11-05T14:07:12.673Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_54322b6b-021b-46a5-ba63-e859f2b831b2",
+            "eventType": "model.requested",
+            "timestamp": "2026-11-05T14:07:12.663Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_e0ff247e-97c8-4b6c-ad83-50e1d4772fc7",
+            "eventType": "worker.checkpoint",
+            "timestamp": "2026-11-05T14:07:12.653Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_0654b8e3-e277-4b7a-9cc8-1fbedd0b0df2",
+            "eventType": "task.started",
+            "timestamp": "2026-11-05T14:07:12.643Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_7c2a30e8-9481-4af0-b2b1-2ead7443821d",
+            "eventType": "task.accepted",
+            "timestamp": "2026-11-05T14:07:12.624Z",
+            "status": "accepted"
+          },
+          {
+            "eventId": "evt_d073d0e9-eb67-4ff4-9fe7-7389919f6ec7",
+            "eventType": "task.created",
+            "timestamp": "2026-11-05T14:07:12.525Z",
+            "status": "queued"
+          }
+        ],
+        "reviewer": [
+          {
+            "eventId": "evt_48d604ff-25e4-4061-b65e-f80b6589dff7",
+            "eventType": "task.completed",
+            "timestamp": "2026-11-05T14:07:13.241Z",
+            "status": "completed"
+          },
+          {
+            "eventId": "evt_c3b05f3d-9760-441d-9840-081e76f58d94",
+            "eventType": "model.completed",
+            "timestamp": "2026-11-05T14:07:13.202Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_b713b7f4-0dcc-42af-99a1-91b6e4a78349",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-05T14:07:13.194Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_67c7f8e0-f4b7-4e0f-b8ce-dc39c16b8eee",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-05T14:07:13.146Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_c4800217-557c-467f-ad34-049667b1393f",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-05T14:07:13.102Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_509b2634-553e-48f8-ae5d-1cb64eb59b35",
+            "eventType": "worker.checkpoint",
+            "timestamp": "2026-11-05T14:07:13.070Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_5c6723a1-c8a5-4fc2-b439-4337d395d5f3",
+            "eventType": "model.requested",
+            "timestamp": "2026-11-05T14:07:13.061Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_8f74dd1f-0eb4-49ea-93c1-2b2111b16a2e",
+            "eventType": "worker.checkpoint",
+            "timestamp": "2026-11-05T14:07:13.051Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_effcb3b1-7aa4-43d1-9d6f-28d3c81149da",
+            "eventType": "task.started",
+            "timestamp": "2026-11-05T14:07:13.041Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_16cbf2d3-502d-4b80-a565-78a61ec803f3",
+            "eventType": "task.accepted",
+            "timestamp": "2026-11-05T14:07:13.023Z",
+            "status": "accepted"
+          },
+          {
+            "eventId": "evt_e0e2328d-9031-450a-aea3-a961de9db784",
+            "eventType": "task.created",
+            "timestamp": "2026-11-05T14:07:13.007Z",
+            "status": "queued"
+          }
+        ]
+      },
+      "usage": {
+        "runtimeUsage": {
+          "workerA": {
+            "prompt_tokens": 180,
+            "completion_tokens": 64,
+            "total_tokens": 244
+          },
+          "workerB": {
+            "prompt_tokens": 176,
+            "completion_tokens": 66,
+            "total_tokens": 242
+          },
+          "reviewer": {
+            "prompt_tokens": 320,
+            "completion_tokens": 88,
+            "total_tokens": 408
+          }
+        },
+        "providerUsage": {
+          "workerA": {
+            "prompt_tokens": 180,
+            "completion_tokens": 64,
+            "total_tokens": 244
+          },
+          "workerB": {
+            "prompt_tokens": 176,
+            "completion_tokens": 66,
+            "total_tokens": 242
+          },
+          "reviewer": {
+            "prompt_tokens": 320,
+            "completion_tokens": 88,
+            "total_tokens": 408
+          }
+        },
+        "resolved": {
+          "workerA": {
+            "prompt_tokens": 180,
+            "completion_tokens": 64,
+            "total_tokens": 244
+          },
+          "workerB": {
+            "prompt_tokens": 176,
+            "completion_tokens": 66,
+            "total_tokens": 242
+          },
+          "reviewer": {
+            "prompt_tokens": 320,
+            "completion_tokens": 88,
+            "total_tokens": 408
+          }
+        },
+        "totalTokens": 894,
+        "source": "provider_reported"
+      },
+      "latencyMs": {
+        "workerA": 391,
+        "workerB": 431,
+        "reviewer": 236
+      },
+      "cost": "未采集",
+      "costReason": "本地 HTTP stub provider 无计价口径，不估算成本。"
+    }
+  ],
+  "trace": {
+    "traceId": "trace_77086298-25a5-4ec1-82ab-5efdafbc3cbf",
+    "eventIds": {
+      "workerA": [
+        {
+          "eventId": "evt_d2a9bc11-09cd-4dea-968c-a954c35a1728",
+          "eventType": "verification.verdict",
+          "timestamp": "2026-11-05T14:07:13.258Z",
+          "status": "conflict"
+        },
+        {
+          "eventId": "evt_b7bae2e2-9035-4687-a471-e2236b7f1bba",
+          "eventType": "task.completed",
+          "timestamp": "2026-11-05T14:07:12.903Z",
+          "status": "completed"
+        },
+        {
+          "eventId": "evt_9b612679-c244-47ec-9590-91751c754995",
+          "eventType": "model.completed",
+          "timestamp": "2026-11-05T14:07:12.859Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_489a6444-a5cd-47ef-8ed7-e5669e24af24",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-05T14:07:12.833Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_982da395-d400-4807-afc7-d16f39298d23",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-05T14:07:12.756Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_5d74454d-85ae-41c9-9515-2ffae1eac3de",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-05T14:07:12.702Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_798085b6-3d4c-4587-bd9c-9a6e30a3200f",
+          "eventType": "worker.checkpoint",
+          "timestamp": "2026-11-05T14:07:12.608Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_2d6d35a0-e565-490a-bce1-5d4a4afe73b0",
+          "eventType": "model.requested",
+          "timestamp": "2026-11-05T14:07:12.598Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_8dd9c027-18bb-434c-86d0-44a026ce689f",
+          "eventType": "worker.checkpoint",
+          "timestamp": "2026-11-05T14:07:12.585Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_350a5bf4-fd03-444c-bd80-9d05c92c4d12",
+          "eventType": "task.started",
+          "timestamp": "2026-11-05T14:07:12.575Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_26339d78-a07b-4bb0-8dae-0a5d721189e6",
+          "eventType": "task.accepted",
+          "timestamp": "2026-11-05T14:07:12.554Z",
+          "status": "accepted"
+        },
+        {
+          "eventId": "evt_d6b3c75e-27eb-4928-b80c-b8afcf1d862a",
+          "eventType": "task.created",
+          "timestamp": "2026-11-05T14:07:12.514Z",
+          "status": "queued"
+        }
+      ],
+      "workerB": [
+        {
+          "eventId": "evt_189dfc16-fc68-48c7-bdd3-4b430c62bf18",
+          "eventType": "task.completed",
+          "timestamp": "2026-11-05T14:07:12.953Z",
+          "status": "completed"
+        },
+        {
+          "eventId": "evt_ea530619-16c8-461d-8238-b563144d09a1",
+          "eventType": "model.completed",
+          "timestamp": "2026-11-05T14:07:12.914Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_a5cee50d-02dc-4cda-aea1-fec2cdfa12de",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-05T14:07:12.843Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_a8738949-e52d-4483-9640-f2b998552429",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-05T14:07:12.805Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_81609fec-5bd8-4b3f-8938-0910d6866a39",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-05T14:07:12.714Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_f01d33bc-7883-4f7f-aae0-6172f7b5e33d",
+          "eventType": "worker.checkpoint",
+          "timestamp": "2026-11-05T14:07:12.673Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_54322b6b-021b-46a5-ba63-e859f2b831b2",
+          "eventType": "model.requested",
+          "timestamp": "2026-11-05T14:07:12.663Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_e0ff247e-97c8-4b6c-ad83-50e1d4772fc7",
+          "eventType": "worker.checkpoint",
+          "timestamp": "2026-11-05T14:07:12.653Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_0654b8e3-e277-4b7a-9cc8-1fbedd0b0df2",
+          "eventType": "task.started",
+          "timestamp": "2026-11-05T14:07:12.643Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_7c2a30e8-9481-4af0-b2b1-2ead7443821d",
+          "eventType": "task.accepted",
+          "timestamp": "2026-11-05T14:07:12.624Z",
+          "status": "accepted"
+        },
+        {
+          "eventId": "evt_d073d0e9-eb67-4ff4-9fe7-7389919f6ec7",
+          "eventType": "task.created",
+          "timestamp": "2026-11-05T14:07:12.525Z",
+          "status": "queued"
+        }
+      ],
+      "reviewer": [
+        {
+          "eventId": "evt_48d604ff-25e4-4061-b65e-f80b6589dff7",
+          "eventType": "task.completed",
+          "timestamp": "2026-11-05T14:07:13.241Z",
+          "status": "completed"
+        },
+        {
+          "eventId": "evt_c3b05f3d-9760-441d-9840-081e76f58d94",
+          "eventType": "model.completed",
+          "timestamp": "2026-11-05T14:07:13.202Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_b713b7f4-0dcc-42af-99a1-91b6e4a78349",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-05T14:07:13.194Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_67c7f8e0-f4b7-4e0f-b8ce-dc39c16b8eee",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-05T14:07:13.146Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_c4800217-557c-467f-ad34-049667b1393f",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-05T14:07:13.102Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_509b2634-553e-48f8-ae5d-1cb64eb59b35",
+          "eventType": "worker.checkpoint",
+          "timestamp": "2026-11-05T14:07:13.070Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_5c6723a1-c8a5-4fc2-b439-4337d395d5f3",
+          "eventType": "model.requested",
+          "timestamp": "2026-11-05T14:07:13.061Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_8f74dd1f-0eb4-49ea-93c1-2b2111b16a2e",
+          "eventType": "worker.checkpoint",
+          "timestamp": "2026-11-05T14:07:13.051Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_effcb3b1-7aa4-43d1-9d6f-28d3c81149da",
+          "eventType": "task.started",
+          "timestamp": "2026-11-05T14:07:13.041Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_16cbf2d3-502d-4b80-a565-78a61ec803f3",
+          "eventType": "task.accepted",
+          "timestamp": "2026-11-05T14:07:13.023Z",
+          "status": "accepted"
+        },
+        {
+          "eventId": "evt_e0e2328d-9031-450a-aea3-a961de9db784",
+          "eventType": "task.created",
+          "timestamp": "2026-11-05T14:07:13.007Z",
+          "status": "queued"
+        }
+      ]
+    }
+  }
+}

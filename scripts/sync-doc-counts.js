@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* global __dirname */
 /*
  * 文档计数的单一来源（P3-01）。
  *
@@ -110,6 +111,20 @@ const NOTES = {
     'approval execution idempotency (P3): begin-before-handler, crash-after-execution resumes to recovery without re-running the handler, a succeeded ledger row converges to executed instead of failed, approval-record-before-state-move (W5) leaves no dangling task, orphan waiting_approval tasks converge to recovery',
   'agent-artifact-content':
     'artifact content replay (A): durable per-artifact body, restart-time read-back with contentHash verification, corrupted/missing content fail-closed (never empty), version chain keeps superseded versions while old refs stay frozen, terminal-task-referenced versions are never cleaned, >256KB rejected with no half state',
+  'agent-trust-level':
+    '§27 trustLevel four-level ordered enum: only the Verification Engine may write it, other writers are rejected, invalid values are rejected without touching the stored value, and legacy records missing the field read as untrusted',
+  'agent-task-transition-guard':
+    '§24 write-permission guard: updateTask cannot write status or storage-owned stateVersion, and an illegal transition is rejected while leaving a from/to/reason audit event',
+  'agent-run-limits':
+    '§25 persisted hard limits: delegation depth 2, two replans per run (task-level counts also recorded), three run retries; counts survive restart and retries never reset them',
+  'agent-conflict-record':
+    '§28 ConflictRecord persistence and audit wired into the existing conflict approval path: records read back, audit entries queryable, decisions stay consistent with the stored record, and an unreadable store fails closed',
+  'agent-error-contract':
+    '§23 seven-field contract for validation_failed/not_authorized/budget_exceeded/dependency_failed/internal_error: all fields present, same input yields the same fingerprint, retryable follows the spec, and existing code/error/status keys are untouched',
+  'agent-cycle-detection':
+    '§17 delegation and artifact-lineage cycle detection with a readable cycle path: wired into the delegation entry and artifact persist path, cycles are rejected before any write, and legal chains pass',
+  'agent-approval-request':
+    '§29 Approval Request six states with illegal-transition rejection: an R2 expiry becomes expired and cannot be approved afterwards, and notification retries record attempts/lastError/nextRetryAt before stopping as exhausted',
   'agent-orphan-scheduler':
     'orphan cleanup on a production cadence (B): one startup run plus a 6h period driven by injectable fake timers, single-instance re-entry guard, failures logged without crashing or blocking the next run, TTL boundary measured to the millisecond, and no catch-up for periods missed while the process was down',
   'agent-failopen-enforcement':

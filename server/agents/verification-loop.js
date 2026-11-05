@@ -19,6 +19,7 @@ const artifactStore = require('./artifact-store');
 const artifactCommit = require('./artifact-commit');
 const approvals = require('./approvals');
 const orchestrator = require('./orchestrator');
+const conflictRecordModule = require('./conflict-record');
 const { AgentError } = require('./errors');
 
 const REVIEWER_BOT_ID = 'reviewer';
@@ -44,6 +45,45 @@ const DECISION_CODES = Object.freeze({
   conflict: 'verification_conflict',
   reviewRejected: 'review_rejected',
   reviewNeedsHuman: 'review_needs_human',
+});
+
+// §27：Verification Engine 是 trustLevel 的唯一写入者。策略版本取值原文未定义（待确认）。
+const TRUST_POLICY_VERSION = 'trust-rules-v1';
+
+// A-04 冲突裁决策略（版本化、纯函数）。原文只规定"谁能裁决"与"证据顺序"的语义，
+// 具体阈值/角色字符串原文未给，按本仓库裁决落为安全默认值：
+// - 机械事实（deterministic）优先于独立审校；审校不得推翻已确定的机械结论。
+// - reviewer 只可在机械证据不结论时裁决，且必须独立（不同 taskId / reviewer bot）。
+// - policy / identity 类冲突只能由人工审批裁决，自动仲裁一律升级。
+// - 无法自动裁决 → 复用既有 review.conflict / review.escalate，不新增审批类型。
+const ARBITRATION_POLICY_VERSION = 'conflict-arbitration-v1';
+const ARBITERS = Object.freeze({
+  verificationEngine: 'verification-engine',
+  reviewer: 'reviewer',
+  humanApproval: 'human-approval',
+});
+const ARBITRATION_POLICY = Object.freeze({
+  version: ARBITRATION_POLICY_VERSION,
+  evidencePrecedence: Object.freeze({
+    deterministic: 3,
+    'independent-review': 2,
+    'human-decision': 1,
+    'non-independent-review': 0,
+  }),
+  arbiters: Object.freeze({
+    [ARBITERS.verificationEngine]: Object.freeze({
+      conflicts: Object.freeze(['factual', 'temporal']),
+      evidence: 'deterministic',
+    }),
+    [ARBITERS.reviewer]: Object.freeze({
+      conflicts: Object.freeze(['factual', 'temporal', 'preference']),
+      evidence: 'independent-review',
+    }),
+    [ARBITERS.humanApproval]: Object.freeze({
+      conflicts: Object.freeze(['factual', 'temporal', 'preference', 'identity', 'policy']),
+      evidence: 'human-decision',
+    }),
+  }),
 });
 
 // 仅测试使用的故障注入。生产默认关闭；用于验收要求的"失败注入"，注入的是一个
@@ -577,6 +617,363 @@ function planGate({ deterministic, review, task }) {
   };
 }
 
+// ---- A-04 冲突裁决权 / 证据顺序 / 升级路径（纯函数） ----
+
+/**
+ * 独立审校证据的独立性判定（纯函数）。
+ * 必须同时满足：审校任务与生产任务是不同 taskId；提供方是独立 reviewer bot。
+ * 任一条不满足 → 非独立证据（precedence=0，不参与裁决）。
+ */
+function isIndependentReviewEvidence({
+  reviewerTaskId = null,
+  producerTaskId = null,
+  reviewerBotId = null,
+  evidenceTaskId = null,
+} = {}) {
+  const taskId = reviewerTaskId || evidenceTaskId;
+  if (!taskId || !producerTaskId) return false;
+  if (String(taskId) === String(producerTaskId)) return false;
+  if (reviewerBotId !== null && reviewerBotId !== undefined && reviewerBotId !== REVIEWER_BOT_ID) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * 证据归一化 + 排序（纯函数）。
+ * 输入：{source:'deterministic'|'reviewer'|'human', ok:boolean|null, independent?, candidateRef?, code?}
+ * 输出按 precedence 降序：deterministic(3) > independent-review(2) > human(1) > 非独立审校(0)。
+ */
+function orderEvidence(evidence = []) {
+  const normalized = [];
+  for (const item of Array.isArray(evidence) ? evidence : []) {
+    if (!item || typeof item !== 'object') continue;
+    const source = ['deterministic', 'reviewer', 'human'].includes(item.source)
+      ? item.source
+      : null;
+    if (!source) continue;
+    const independent = source === 'reviewer' ? item.independent === true : true;
+    const precedence =
+      source === 'deterministic'
+        ? ARBITRATION_POLICY.evidencePrecedence.deterministic
+        : source === 'reviewer'
+          ? independent
+            ? ARBITRATION_POLICY.evidencePrecedence['independent-review']
+            : ARBITRATION_POLICY.evidencePrecedence['non-independent-review']
+          : ARBITRATION_POLICY.evidencePrecedence['human-decision'];
+    const ok = item.ok === true ? true : item.ok === false ? false : null;
+    normalized.push({
+      source,
+      independent,
+      precedence,
+      ok,
+      authoritative: precedence > 0 && ok !== null,
+      candidateRef: item.candidateRef ? String(item.candidateRef) : null,
+      code: item.code ? String(item.code) : null,
+    });
+  }
+  return normalized
+    .map((item, index) => ({ ...item, index }))
+    .sort((a, b) => b.precedence - a.precedence || a.index - b.index)
+    .map(({ index, ...item }) => item);
+}
+
+/**
+ * 裁决主体授权（纯函数）。
+ * 越权 / 证据不足一律返回 {allowed:false,errorCode,status}，由调用方拒绝并留痕。
+ */
+function authorizeArbiter({ arbiter, conflictType = 'factual', evidence = [] } = {}) {
+  const role = String(arbiter || '');
+  const info = ARBITRATION_POLICY.arbiters[role];
+  if (!info) {
+    return { allowed: false, errorCode: 'arbiter_unknown', status: 403 };
+  }
+  const type = String(conflictType || 'factual');
+  if (!info.conflicts.includes(type)) {
+    return { allowed: false, errorCode: 'arbiter_scope_exceeded', status: 403 };
+  }
+  const ordered = orderEvidence(evidence);
+  if (role === ARBITERS.verificationEngine) {
+    const deterministic = ordered.filter(
+      item => item.source === 'deterministic' && item.authoritative
+    );
+    if (deterministic.length === 0) {
+      return { allowed: false, errorCode: 'arbiter_evidence_insufficient', status: 409 };
+    }
+    return { allowed: true, errorCode: null, status: 200 };
+  }
+  if (role === ARBITERS.reviewer) {
+    // 机械事实已给出结论时，审校不得再裁决（只能更严、不能推翻机械事实）。
+    if (ordered.some(item => item.source === 'deterministic' && item.authoritative)) {
+      return { allowed: false, errorCode: 'arbiter_scope_exceeded', status: 403 };
+    }
+    const independent = ordered.filter(
+      item => item.source === 'reviewer' && item.authoritative && item.independent
+    );
+    if (independent.length === 0) {
+      const hasReview = ordered.some(item => item.source === 'reviewer');
+      return {
+        allowed: false,
+        errorCode: hasReview ? 'arbiter_not_independent' : 'arbiter_evidence_insufficient',
+        status: 409,
+      };
+    }
+    return { allowed: true, errorCode: null, status: 200 };
+  }
+  // human-approval：最终裁决权，允许在任意冲突类型上裁决；但必须由审批路径给出决定。
+  return { allowed: true, errorCode: null, status: 200 };
+}
+
+/**
+ * 自动裁决（纯函数，不落盘）。
+ * 返回 status: resolved | unresolved | escalated | denied，并携带证据顺序与规则版本，
+ * 供调用方记录 ConflictRecord / 审计。
+ */
+function arbitrateConflict({ conflictRecord, conflictType = null, evidence = [], arbiter } = {}) {
+  if (!conflictRecord || !conflictRecord.conflictId) {
+    throw new AgentError('conflict_record_invalid', '缺少 ConflictRecord', 400);
+  }
+  const record = conflictRecord;
+  const type = String(conflictType || record.conflictType || 'factual');
+  const ordered = orderEvidence(evidence);
+  const base = {
+    conflictId: record.conflictId,
+    conflictType: type,
+    arbiter: String(arbiter || ''),
+    policyVersion: ARBITRATION_POLICY_VERSION,
+    evidenceOrder: ordered.map(item => ({
+      source: item.source,
+      precedence: item.precedence,
+      authoritative: item.authoritative,
+      independent: item.independent,
+      ok: item.ok,
+    })),
+  };
+
+  const auth = authorizeArbiter({ arbiter, conflictType: type, evidence });
+  if (!auth.allowed) {
+    return { ...base, status: 'denied', errorCode: auth.errorCode, httpStatus: auth.status };
+  }
+
+  const deterministic = ordered.find(
+    item => item.source === 'deterministic' && item.authoritative
+  );
+  const independentReview = ordered.find(
+    item => item.source === 'reviewer' && item.authoritative && item.independent
+  );
+
+  if (arbiter === ARBITERS.humanApproval) {
+    const human = ordered.find(item => item.source === 'human' && item.candidateRef);
+    if (!human) {
+      // 自动仲裁不替人做决定：升级到既有审批，由人工给出候选。
+      return { ...base, status: 'escalated', errorCode: 'human_decision_required', method: 'human' };
+    }
+    if (!record.candidateRefs.includes(human.candidateRef)) {
+      return {
+        ...base,
+        status: 'escalated',
+        errorCode: 'conflict_candidate_unresolved',
+        method: 'human',
+        rationale: 'candidate_not_in_record',
+      };
+    }
+    return {
+      ...base,
+      status: 'resolved',
+      method: 'human',
+      selectedCandidateRef: human.candidateRef,
+      rationale: 'human_decision',
+      errorCode: null,
+    };
+  }
+
+  if (arbiter === ARBITERS.verificationEngine) {
+    if (!deterministic) {
+      return { ...base, status: 'denied', errorCode: 'arbiter_evidence_insufficient', method: 'rule' };
+    }
+    if (deterministic.ok !== true) {
+      // 机械事实判定失败：不接受任何候选，保持 unresolved 交人工/审批终局。
+      return {
+        ...base,
+        status: 'unresolved',
+        method: 'rule',
+        errorCode: deterministic.code || 'mechanical_failure_authoritative',
+        rationale: 'deterministic_failure',
+        selectedCandidateRef: null,
+      };
+    }
+    const chosen = deterministic.candidateRef || record.candidateRefs[0] || null;
+    if (!chosen || !record.candidateRefs.includes(chosen)) {
+      return {
+        ...base,
+        status: 'escalated',
+        errorCode: 'conflict_candidate_unresolved',
+        method: 'rule',
+        rationale: 'candidate_not_in_record',
+      };
+    }
+    return {
+      ...base,
+      status: 'resolved',
+      method: 'rule',
+      selectedCandidateRef: chosen,
+      // 机械通过 + 独立审校不通过：按证据顺序机械事实优先，并留痕。
+      rationale:
+        independentReview && independentReview.ok === false
+          ? 'deterministic_precedence'
+          : 'deterministic_rule',
+      errorCode: null,
+    };
+  }
+
+  // reviewer：仅在机械证据不结论时允许（authorizeArbiter 已守卫）。
+  if (!independentReview || independentReview.ok !== true) {
+    return {
+      ...base,
+      status: 'unresolved',
+      method: 'review',
+      errorCode: (independentReview && independentReview.code) || 'review_rejected',
+      rationale: 'independent_review_rejected',
+      selectedCandidateRef: null,
+    };
+  }
+  const chosen = independentReview.candidateRef || record.candidateRefs[0] || null;
+  if (!chosen || !record.candidateRefs.includes(chosen)) {
+    return {
+      ...base,
+      status: 'escalated',
+      errorCode: 'conflict_candidate_unresolved',
+      method: 'review',
+      rationale: 'candidate_not_in_record',
+    };
+  }
+  return {
+    ...base,
+    status: 'resolved',
+    method: 'review',
+    selectedCandidateRef: chosen,
+    rationale: 'independent_review_pass',
+    errorCode: null,
+  };
+}
+
+/**
+ * 落盘裁决结论：resolved/unresolved 写回 ConflictRecord；denied 抛 403（越权被拒）。
+ * 升级（escalated）由 escalateConflict 走审批，不在这里静默处理。
+ */
+function recordArbitration({
+  conflictRecord,
+  decision,
+  producerTask = null,
+  runId = null,
+  now = Date.now(),
+} = {}) {
+  if (!conflictRecord || !conflictRecord.conflictId) {
+    throw new AgentError('conflict_record_invalid', '缺少 ConflictRecord', 400);
+  }
+  if (!decision || decision.status === 'denied') {
+    throw new AgentError(
+      (decision && decision.errorCode) || 'not_authorized',
+      '裁决者越权或证据不足，拒绝裁决',
+      (decision && decision.httpStatus) || 403,
+      { conflictId: conflictRecord.conflictId, arbiter: decision && decision.arbiter }
+    );
+  }
+  if (decision.status !== 'resolved' && decision.status !== 'unresolved' && decision.status !== 'escalated') {
+    throw new AgentError('validation_failed', `非法裁决状态：${decision.status}`, 400);
+  }
+  const updated = conflictRecordModule.resolveRecord(conflictRecord.conflictId, {
+    resolutionStatus: decision.status,
+    resolutionMethod: decision.method || null,
+    selectedCandidateRef:
+      decision.status === 'resolved' ? decision.selectedCandidateRef : null,
+    rationale: decision.rationale || '',
+    decidedBy: decision.status === 'resolved' ? decision.arbiter : null,
+    decidedAt: decision.status === 'resolved' ? new Date(now).toISOString() : null,
+  });
+  if (producerTask && producerTask.botId) {
+    audit(
+      producerTask.botId,
+      decision.status === 'resolved' ? 'verification.verdict' : 'verification.conflict',
+      {
+        status: 'conflict',
+        decision: decision.status,
+        ruleId: decision.rationale || decision.errorCode || '',
+        policyVersion: decision.policyVersion || ARBITRATION_POLICY_VERSION,
+        conflictId: decision.conflictId,
+      },
+      { taskId: producerTask.taskId || null, runId }
+    );
+  }
+  return updated;
+}
+
+/**
+ * 升级路径：无法自动裁决 → 复用既有 review.conflict / review.escalate 审批。
+ * policy / identity 类直接 review.escalate（人工终局）；其余 review.conflict。
+ */
+function escalateConflict({
+  producerTask,
+  conflictRecord,
+  reason = '',
+  runId = null,
+  now = Date.now(),
+} = {}) {
+  if (!producerTask || !producerTask.taskId) {
+    throw new AgentError('task_not_found', '缺少被审任务', 404);
+  }
+  if (!conflictRecord || !conflictRecord.conflictId) {
+    throw new AgentError('conflict_record_invalid', '缺少 ConflictRecord', 400);
+  }
+  const conflictType = String(conflictRecord.conflictType || 'factual');
+  const operation =
+    conflictType === 'policy' || conflictType === 'identity'
+      ? 'review.escalate'
+      : 'review.conflict';
+  // 只使用既有门禁 payload 白名单键；conflictId/subjectKey 通过审计事件关联，
+  // 不扩张审批记录的载荷契约。
+  const record = approvals.createApproval({
+    botId: producerTask.botId,
+    operation,
+    payload: {
+      producerTaskId: producerTask.taskId,
+      artifactId: conflictRecord.candidateRefs[0] || '',
+      version: 1,
+      verdict: 'needs_human',
+      checkCode: conflictType,
+      decision: 'escalated',
+      conflict: true,
+    },
+    taskId: producerTask.taskId,
+    requestedBy: producerTask.botId,
+    now,
+  });
+  try {
+    conflictRecordModule.resolveRecord(conflictRecord.conflictId, {
+      resolutionStatus: 'escalated',
+      resolutionMethod: 'human',
+      rationale: String(reason || 'auto_arbitration_insufficient').slice(0, 200),
+    });
+  } catch (error) {
+    // 已 escalated / 已 resolved 的记录不重复写；审批已创建即视为升级成功。
+    if (error && error.code !== 'validation_failed') throw error;
+  }
+  audit(
+    producerTask.botId,
+    'verification.conflict',
+    {
+      status: 'pending',
+      approvalId: record.approvalId,
+      conflictId: conflictRecord.conflictId,
+      conflictType,
+      taskType: operation,
+      policyVersion: ARBITRATION_POLICY_VERSION,
+    },
+    { taskId: producerTask.taskId, runId }
+  );
+  return record;
+}
+
 function invalidateArtifactRefs(result, { reason = 'verification_failed', now = Date.now() } = {}) {
   const refs = result && Array.isArray(result.artifacts) ? result.artifacts : [];
   const invalidated = [];
@@ -673,12 +1070,72 @@ function auditResolution({ producerTask, deterministic, review, resolution, runI
   );
 }
 
+/**
+ * §27：把验证结论映射到产物 trustLevel（Engine 侧唯一写入口的封装）。
+ *
+ * - 唯一写入者：始终以 artifactStore.TRUST_WRITER 调用 setTrustLevel；任务更新、
+ *   artifact 直写等其他路径在各自入口被拒绝并留痕。
+ * - 有序语义：untrusted < declared < evidence_checked < independently_verified，
+ *   调用方按门禁顺序调用；失败路径显式降回 declared 并携带原因。
+ * - 单个写入失败不改变验证结论（结论已由任务错误码/审计表达），只补审计。
+ */
+function applyArtifactTrustLevel({
+  refs = [],
+  level,
+  reason = null,
+  taskId = null,
+  runId = null,
+  evidenceRefs = [],
+  scope = null,
+  now = Date.now(),
+} = {}) {
+  const applied = [];
+  for (const ref of Array.isArray(refs) ? refs : []) {
+    if (!ref || !ref.id) continue;
+    try {
+      const artifact = artifactStore.setTrustLevel(String(ref.id), {
+        level,
+        writer: artifactStore.TRUST_WRITER,
+        policyVersion: TRUST_POLICY_VERSION,
+        evidenceRefs,
+        scope,
+        reason,
+        now,
+      });
+      applied.push({
+        id: artifact.id,
+        level: artifact.trustLevel,
+        rank: artifactStore.trustRank(artifact.trustLevel),
+      });
+    } catch (error) {
+      artifactStore.auditFailure('artifact.trust_level_write_failed', {
+        artifactId: String(ref.id),
+        taskId,
+        reason: (error && error.code) || 'trust_write_failed',
+        now,
+      });
+    }
+  }
+  return applied;
+}
+
 module.exports = {
   VERIFY_CODES,
   DECISION_CODES,
   REVIEWER_BOT_ID,
+  TRUST_POLICY_VERSION,
+  ARBITRATION_POLICY_VERSION,
+  ARBITERS,
+  ARBITRATION_POLICY,
+  isIndependentReviewEvidence,
+  orderEvidence,
+  authorizeArbiter,
+  arbitrateConflict,
+  recordArbitration,
+  escalateConflict,
   verifyDeterministic,
   primaryArtifactRef,
+  applyArtifactTrustLevel,
   openReview,
   parseVerdict,
   resolveConflict,

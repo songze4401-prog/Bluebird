@@ -42,6 +42,13 @@ function truncate(value) {
   return String(value || '').slice(0, TARGET_ID_MAX);
 }
 
+// §16 读到即继承：跨 Worker 读取（无论成功还是引用不可解析）都把被读对象
+// 记进**消费任务**的来源链，只追加不覆盖，不修改被读产物。
+function recordReadProvenance(targetTaskId, refs, source) {
+  if (!targetTaskId) return;
+  tasks.appendProvenanceRefs(targetTaskId, refs, { source });
+}
+
 function tokenDigest(token) {
   return crypto.createHash('sha256').update(String(token)).digest('hex');
 }
@@ -346,12 +353,19 @@ function openWorkerScope({
     const artifactId = truncate(id);
     const artifact = artifactStore.get(artifactId);
     if (!artifact) {
+      // 引用不可解析：消费任务记 unknown，绝不默认干净。
+      recordReadProvenance(boundTaskId, [{ id: artifactId }], 'worker.readOtherArtifact');
       throw new AgentError('artifact_not_found', '产物不可读', 409, {
         artifactId,
       });
     }
     if (artifact.taskId === boundTaskId) return artifactStore.readContent(artifactId);
     authorizeCross('artifact', artifactId, artifact.taskId, token);
+    recordReadProvenance(
+      boundTaskId,
+      [{ kind: artifact.kind, id: artifactId, version: artifact.version }],
+      'worker.readOtherArtifact'
+    );
     return artifactStore.readContent(artifactId);
   }
 
@@ -374,6 +388,8 @@ function openWorkerScope({
     const artifactId = truncate(id);
     const artifact = artifactStore.get(artifactId);
     if (!artifact) {
+      // 引用不可解析：消费任务记 unknown，绝不默认干净。
+      recordReadProvenance(boundTaskId, [{ id: artifactId }], 'worker.readSharedArtifact');
       throw new AgentError('artifact_not_found', '产物不可读', 409, { artifactId });
     }
     if (artifact.taskId === boundTaskId) {
@@ -408,6 +424,11 @@ function openWorkerScope({
       grantedBy: artifact.share && artifact.share.byTaskId ? artifact.share.byTaskId : null,
       reason: 'shared_artifact',
     });
+    recordReadProvenance(
+      boundTaskId,
+      [{ kind: artifact.kind, id: artifactId, version: access.version }],
+      'worker.readSharedArtifact'
+    );
     return artifactStore.readContent(artifactId, { version: access.version });
   }
 
@@ -462,12 +483,22 @@ function openWorkerScope({
       const artifact = artifactStore.get(ref.id);
       if (!artifact) {
         denyProjection(ref.id, 'missing', 'artifact_not_found');
+        recordReadProvenance(
+          boundTaskId,
+          [{ id: ref.id, version: ref.version }],
+          'context_projection'
+        );
         throw new AgentError('artifact_not_found', '产物引用不可读', 409, { artifactId: ref.id });
       }
       // 版本钉住：只接受请求的那一版且必须仍是 active head，绝不悄悄换成最新版。
       if (artifact.version !== ref.version || artifact.status !== 'active') {
         const reason = artifact.version !== ref.version ? 'version_mismatch' : 'stale';
         denyProjection(ref.id, reason, 'context_projection_stale');
+        recordReadProvenance(
+          boundTaskId,
+          [{ kind: artifact.kind, id: ref.id, version: ref.version }],
+          'context_projection'
+        );
         throw new AgentError('context_projection_stale', '投影拒绝：引用不是当前活动版本', 409, {
           artifactId: ref.id,
           requestVersion: ref.version,

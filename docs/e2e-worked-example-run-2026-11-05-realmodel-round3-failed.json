@@ -1,0 +1,339 @@
+{
+  "policyVersion": "worked-example-v1",
+  "traceId": "trace_73d51ca2-e03d-41ee-9a6c-ee10c936f148",
+  "stepCount": 6,
+  "outcome": "failed",
+  "environment": {
+    "provider": "LongCat",
+    "baseUrl": "https://api.longcat.chat/openai",
+    "modelId": "LongCat-2.5",
+    "realModel": true,
+    "note": "真实模型环境；本轮失败，未用 stub 数据补位。"
+  },
+  "startedAt": "2026-11-05T15:57:35.334Z",
+  "finishedAt": "2026-11-05T15:58:06.883Z",
+  "durationMs": 31549,
+  "failure": {
+    "message": "冲突 C1 未裁决：unresolved/review_rejected",
+    "code": null,
+    "details": null
+  },
+  "tasks": {
+    "workerA": {
+      "taskId": "task_a8011a83-8856-45b6-a580-6860cc52d370",
+      "status": "completed",
+      "errorCode": null
+    },
+    "workerB": {
+      "taskId": "task_1626d2db-6877-4211-a1d4-075eeb67a8b0",
+      "status": "completed",
+      "errorCode": null
+    },
+    "reviewer": {
+      "taskId": "task_b34dd288-2ada-4e01-9e12-290d6979169d",
+      "status": "completed",
+      "errorCode": null
+    }
+  },
+  "steps": [
+    {
+      "step": 1,
+      "name": "准备真实 provider 与 Agent 配置",
+      "startedAt": "2026-11-05T15:57:36.093Z",
+      "durationMs": 759,
+      "environment": "真实模型 provider：LongCat https://api.longcat.chat/openai（LongCat-2.5）",
+      "providerId": "07b434aa-8fe6-45ae-8b86-1151dbf166f9",
+      "bots": [
+        "researcher",
+        "reviewer"
+      ]
+    },
+    {
+      "step": 2,
+      "name": "两个 Worker 并行研究",
+      "startedAt": "2026-11-05T15:57:54.614Z",
+      "durationMs": 18521,
+      "taskIds": [
+        "task_a8011a83-8856-45b6-a580-6860cc52d370",
+        "task_1626d2db-6877-4211-a1d4-075eeb67a8b0"
+      ],
+      "sessions": [
+        "bs_5a909122-c2f1-435e-a1e4-0067fa83e935",
+        "bs_f5e97793-33dd-4110-b170-cca121640ce7"
+      ],
+      "outputs": {
+        "A": {
+          "worker": "A",
+          "subject": "订阅价格",
+          "claim": {
+            "key": "monthly_price",
+            "value": "$99"
+          },
+          "source": {
+            "url": "https://vendor-a.example/pricing",
+            "retrievedAt": "2026-11-05T02:10:00.000Z",
+            "title": "Vendor A 官方定价页"
+          },
+          "uncertainty": "促销价可能随时调整"
+        },
+        "B": {
+          "worker": "B",
+          "subject": "订阅价格",
+          "claim": {
+            "key": "monthly_price",
+            "value": "$129"
+          },
+          "source": {
+            "url": "https://vendor-a.example/legacy-pricing",
+            "retrievedAt": "2026-10-26T09:00:00.000Z",
+            "title": "Vendor A 旧版定价页（缓存）"
+          },
+          "uncertainty": "页面可能已过期"
+        }
+      },
+      "eventIds": [
+        "evt_d0af4b43-bcce-4260-8212-b60538603518",
+        "evt_8ac9841b-270d-44ea-a724-db2a54fd6d77"
+      ]
+    },
+    {
+      "step": 3,
+      "name": "各写 A1/B1（来源/时间/provenance/taint）",
+      "startedAt": "2026-11-05T15:57:54.641Z",
+      "durationMs": 26,
+      "artifacts": {
+        "S1": {
+          "kind": "source",
+          "id": "art_35526964d780be17ff419d631791b97f",
+          "version": 1,
+          "taskId": "task_a8011a83-8856-45b6-a580-6860cc52d370",
+          "provenanceRefs": [],
+          "taintLabels": [
+            "unverified",
+            "web:vendor-a.example"
+          ],
+          "taintPolicyVersion": "taint-policy-v1",
+          "createdAt": "2026-11-05T15:57:54.615Z",
+          "contentHash": "f225822296726d0bfc84719e3288088e2da7f7a42c2bbabba3a78e6078dda2f0"
+        },
+        "S2": {
+          "kind": "source",
+          "id": "art_78487e9df4ca688d0932278f0087987e",
+          "version": 1,
+          "taskId": "task_1626d2db-6877-4211-a1d4-075eeb67a8b0",
+          "provenanceRefs": [],
+          "taintLabels": [
+            "unverified",
+            "web:vendor-a.example"
+          ],
+          "taintPolicyVersion": "taint-policy-v1",
+          "createdAt": "2026-11-05T15:57:54.621Z",
+          "contentHash": "e06d4919ba70f5190a364420e245226787cdca5e3f29dee327837d85d02a311e"
+        },
+        "A1": {
+          "kind": "conclusion",
+          "id": "art_24064e9baa1533b677b7d59c0c1efb01",
+          "version": 1,
+          "taskId": "task_a8011a83-8856-45b6-a580-6860cc52d370",
+          "provenanceRefs": [
+            {
+              "kind": "source",
+              "id": "art_35526964d780be17ff419d631791b97f",
+              "version": 1
+            }
+          ],
+          "taintLabels": [
+            "unverified",
+            "web:vendor-a.example"
+          ],
+          "taintPolicyVersion": "taint-policy-v1",
+          "createdAt": "2026-11-05T15:57:54.628Z",
+          "contentHash": "5c38be42418c00d179166e1f14482c07cc86063a64b68f408a3300a9dbe343ef"
+        },
+        "B1": {
+          "kind": "conclusion",
+          "id": "art_17192fbf8662cba01db620289a27c3cc",
+          "version": 1,
+          "taskId": "task_1626d2db-6877-4211-a1d4-075eeb67a8b0",
+          "provenanceRefs": [
+            {
+              "kind": "source",
+              "id": "art_78487e9df4ca688d0932278f0087987e",
+              "version": 1
+            }
+          ],
+          "taintLabels": [
+            "unverified",
+            "web:vendor-a.example"
+          ],
+          "taintPolicyVersion": "taint-policy-v1",
+          "createdAt": "2026-11-05T15:57:54.634Z",
+          "contentHash": "c73f0412c136f3f4f0b68831451f0c395f991bf7eb19fd6cb9371d852f1abdb2"
+        }
+      }
+    },
+    {
+      "step": 4,
+      "name": "验证：schema 检查",
+      "startedAt": "2026-11-05T15:57:54.646Z",
+      "durationMs": 5,
+      "result": {
+        "A1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "result_shape",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "required_fields",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "artifact_refs",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "content_readable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "hash_match",
+              "ok": true,
+              "code": null
+            }
+          ]
+        },
+        "B1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "result_shape",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "required_fields",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "artifact_refs",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "content_readable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "hash_match",
+              "ok": true,
+              "code": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "step": 5,
+      "name": "验证：引用检查",
+      "startedAt": "2026-11-05T15:57:54.646Z",
+      "durationMs": 0,
+      "result": {
+        "A1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "refs_resolvable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "version_consistent",
+              "ok": true,
+              "code": null
+            }
+          ]
+        },
+        "B1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "refs_resolvable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "version_consistent",
+              "ok": true,
+              "code": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "step": 6,
+      "name": "验证：来源检查",
+      "startedAt": "2026-11-05T15:57:54.647Z",
+      "durationMs": 0,
+      "result": {
+        "A1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "evidence_resolvable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "provenance_intact",
+              "ok": true,
+              "code": null
+            }
+          ]
+        },
+        "B1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "evidence_resolvable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "provenance_intact",
+              "ok": true,
+              "code": null
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "usage": {
+    "workerA": {
+      "prompt_tokens": 374,
+      "completion_tokens": 865,
+      "total_tokens": 1239
+    },
+    "workerB": {
+      "prompt_tokens": 387,
+      "completion_tokens": 853,
+      "total_tokens": 1240
+    },
+    "reviewer": {
+      "prompt_tokens": 615,
+      "completion_tokens": 624,
+      "total_tokens": 1239
+    }
+  },
+  "usageSource": "provider_reported_or_null",
+  "cost": "provider 未返回"
+}

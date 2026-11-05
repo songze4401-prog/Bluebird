@@ -23,6 +23,7 @@ process.env.BLUEBIRD_MONITORING = '0';
 const stateMachine = require('../server/agents/state-machine');
 const taskStore = require('../server/agents/task-store');
 const tasks = require('../server/agents/tasks');
+const artifactStore = require('../server/agents/artifact-store');
 const sessions = require('../server/agents/sessions');
 const resultDelivery = require('../server/agents/result-delivery');
 const mainSessions = require('../server/sessions');
@@ -577,4 +578,91 @@ test('CAS：不传 expectedVersion 的既有调用保持可写', () => {
   assert.equal(heartbeat.status, 'accepted');
   assert.equal(heartbeat.heartbeatAt, '2026-11-04T00:00:00.000Z');
   assert.equal(heartbeat.stateVersion, 2);
+});
+
+// ---- A-03：跨 Store 恢复（任务引用 ↔ Blackboard 只读校验）----
+
+test('A-03 跨 Store：被引用产物被删除后重启 → 任务进 recovery 且事件可追', () => {
+  resetStore();
+  const task = toRunning(makeTask());
+  const artifact = artifactStore.persist({
+    kind: 'message',
+    content: { text: '重启前写入的引用产物' },
+    taskId: task.taskId,
+  });
+  assert.strictEqual(artifact.version, 1);
+  tasks.updateTask(task.taskId, {
+    result: {
+      status: 'completed',
+      summary: '引用了产物',
+      artifacts: [{ kind: 'message', id: artifact.id, version: artifact.version }],
+    },
+  });
+
+  // 模拟"被引用产物丢失"：直接移除 Blackboard 索引记录，不动任务侧任何字段。
+  const indexFile = path.join(AGENTS_DIR, 'agent-artifacts.json');
+  const index = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+  delete index.artifacts[artifact.id];
+  fs.writeFileSync(indexFile, JSON.stringify(index));
+
+  tasks.reloadForTests();
+  const result = tasks.recoverInterrupted({ ownerId: null });
+  assert.strictEqual(result.recovery, 1);
+  assert.strictEqual(result.recovered, 0);
+  const recovered = tasks.getTask(task.taskId);
+  assert.strictEqual(recovered.status, 'recovery');
+  assert.strictEqual(recovered.errorCode, 'recovery_artifact_reference_broken');
+  assert.strictEqual(recovered.requiresReview, true);
+  assert.strictEqual(recovered.result.status, 'recovery');
+
+  const events = tasks.listEvents('memory', { limit: 50 });
+  const recoveredEvent = events.find(
+    event =>
+      event.taskId === task.taskId &&
+      event.eventType === 'task.recovered' &&
+      event.payload &&
+      event.payload.errorCode === 'recovery_artifact_reference_broken'
+  );
+  assert.ok(recoveredEvent, '必须留下 task.recovered 事件');
+  assert.strictEqual(recoveredEvent.payload.mode, 'cross_store_verify');
+  assert.ok(recoveredEvent.payload.detail.includes(artifact.id));
+  assert.ok(recoveredEvent.payload.detail.includes('not_found'));
+
+  // 只读校验不得反写 Blackboard 权威字段：缺失记录不会因恢复被重建。
+  const after = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+  assert.strictEqual(after.artifacts[artifact.id], undefined);
+});
+
+test('A-03 跨 Store：正常重启不误报（引用可读仍按原语义收敛）', () => {
+  resetStore();
+  const task = toRunning(makeTask());
+  const artifact = artifactStore.persist({
+    kind: 'message',
+    content: { text: '可读的引用产物' },
+    taskId: task.taskId,
+  });
+  tasks.updateTask(task.taskId, {
+    result: {
+      status: 'completed',
+      summary: '引用了产物',
+      artifacts: [{ kind: 'message', id: artifact.id, version: artifact.version }],
+    },
+  });
+  tasks.reloadForTests();
+  const result = tasks.recoverInterrupted({ ownerId: null });
+  assert.strictEqual(result.recovered, 1);
+  assert.strictEqual(result.recovery, 0);
+  const recovered = tasks.getTask(task.taskId);
+  assert.strictEqual(recovered.status, 'retrying');
+  assert.strictEqual(recovered.lastErrorCode, 'recovered_after_restart');
+
+  const wrong = tasks
+    .listEvents('memory', { limit: 50 })
+    .filter(
+      event =>
+        event.taskId === task.taskId &&
+        event.payload &&
+        event.payload.errorCode === 'recovery_artifact_reference_broken'
+    );
+  assert.strictEqual(wrong.length, 0);
 });

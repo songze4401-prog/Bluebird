@@ -20,8 +20,10 @@ const deadLetter = require('./dead-letter');
 const { projectWorkerContext } = require('./context-projection');
 const { normalizeWorkerResult } = require('./worker-result');
 const { createToolAuthorizer } = require('./tool-gateway');
-const { AgentError, budgetExceededError } = require('./errors');
+const { listToolMetadata } = require('../agent-runtime');
+const { AgentError, budgetExceededError, classifyFailureMode } = require('./errors');
 const approvalDeadline = require('./approval-deadline');
+const conflictRecord = require('./conflict-record');
 const artifactCommit = require('./artifact-commit');
 const { createSideEffectGuard } = require('./side-effect-guard');
 const crashHook = require('./crash-hook');
@@ -65,6 +67,84 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+// B-02 重试决策归属：Gateway / 模型适配层只返回结果与错误（含 retryable 事实），
+// 不做任何重试；重试/恢复的唯一决策入口是本函数（Workflow Engine 侧）。
+// 收敛点：调度期退避与运行期 retry/terminal/recovery 都必须经过这里，
+// 禁止在其它分支散落重试判断。
+const RETRYABLE_MODEL_ERROR_CODES = Object.freeze([
+  'model_connection',
+  'model_rate_limit',
+  'model_timeout',
+]);
+const DISPATCH_RETRY_DELAY_MS = 2000;
+
+function decideFailureDisposition({
+  phase = 'run',
+  errorCode,
+  cancelled = false,
+  timedOut = false,
+  allowedTools = [],
+  attempts = 0,
+  maxAttempts = 1,
+  dispatchDelayMs = DISPATCH_RETRY_DELAY_MS,
+} = {}) {
+  // 调度期失败（尚未进入 accepted）：只决定"延后多久再取队"，不消耗任务 attempt。
+  if (phase === 'dispatch') {
+    return {
+      action: 'retry_dispatch',
+      retryable: true,
+      retryAtMs: dispatchDelayMs,
+      status: null,
+      errorCode: errorCode || 'agent_task_failed',
+      // A-10：调度期失败也带失败模式，便于 §17 监控按类聚合。
+      failureMode: classifyFailureMode({ errorCode }),
+    };
+  }
+  const artifactFailure =
+    typeof errorCode === 'string' && errorCode.startsWith('artifact_');
+  // 副作用结果不确定（账本 started/unknown）：不能重试也不能当 failed → recovery。
+  const sideEffectFailure =
+    typeof errorCode === 'string' && errorCode.startsWith('side_effect_');
+  const hasSideEffects =
+    Array.isArray(allowedTools) && allowedTools.includes('memory_remember');
+  const retryable =
+    !cancelled &&
+    !sideEffectFailure &&
+    !hasSideEffects &&
+    (artifactFailure || RETRYABLE_MODEL_ERROR_CODES.includes(errorCode)) &&
+    attempts < maxAttempts;
+  const status = cancelled
+    ? 'cancelled'
+    : sideEffectFailure || artifactFailure
+      ? 'recovery'
+      : timedOut
+        ? 'timed_out'
+        : 'failed';
+  const action =
+    retryable
+      ? 'retry'
+      : status === 'recovery'
+        ? 'recovery'
+        : status === 'cancelled'
+          ? 'cancelled'
+          : 'terminal';
+  return {
+    action,
+    retryable,
+    status,
+    errorCode,
+    // A-10 / §17：把本次失败归到九类之一（无法归类为 null），
+    // 事件与监控直接消费该字段，不在别处重复判定。
+    failureMode: classifyFailureMode({ errorCode }),
+    artifactFailure,
+    sideEffectFailure,
+    timedOut,
+    cancelled,
+    attempts,
+    maxAttempts,
+  };
+}
+
 function scheduleTaskQueue() {
   if (scheduling) return;
   scheduling = true;
@@ -86,8 +166,13 @@ function scheduleTaskQueue() {
           if (task && !tasks.isTerminalStatus(task.status)) {
             if (task.status === 'queued' || task.status === 'retrying') {
               // 未能进入 accepted 的失败：延后重试而不是原地热循环。
+              // 退避时长同样由 decideFailureDisposition 统一裁决。
+              const dispatch = decideFailureDisposition({
+                phase: 'dispatch',
+                errorCode: (error && error.code) || 'agent_task_failed',
+              });
               tasks.updateTask(next.taskId, {
-                retryAt: new Date(Date.now() + 2000).toISOString(),
+                retryAt: new Date(Date.now() + dispatch.retryAtMs).toISOString(),
               });
             } else {
               tasks.transitionTask(next.taskId, {
@@ -106,6 +191,37 @@ function scheduleTaskQueue() {
   } finally {
     scheduling = false;
   }
+}
+
+// §16：memory_search 的结果没有版本化 artifact 引用，无法构造可解析的
+// `{kind,id,version}`（强行构造会让 Gateway 永久断链），因此按来源标签继承。
+// 来源映射（本仓库裁决，非 Notion 原文）：import/tool/web → external:*，
+// user/agent/model → internal:*；缺来源元数据 → unknown。
+function memorySearchTaintLabels(result) {
+  const labels = ['tool:memory_search'];
+  const items = Array.isArray(result && result.results) ? result.results : [];
+  for (const item of items) {
+    const sources = Array.isArray(item && item.sourceTypes) ? item.sourceTypes : [];
+    if (sources.length === 0) {
+      labels.push('unknown');
+      continue;
+    }
+    for (const source of sources) {
+      const name = String(source || '').trim().toLowerCase();
+      if (!name) {
+        labels.push('unknown');
+      } else if (name === 'import') {
+        labels.push('external:import');
+      } else if (name === 'tool') {
+        labels.push('external:tool');
+      } else if (name === 'web') {
+        labels.push('external:web');
+      } else {
+        labels.push(`internal:${name.slice(0, 32)}`);
+      }
+    }
+  }
+  return labels;
 }
 
 function safeEvent(botId, eventType, payload = {}, context = {}) {
@@ -230,6 +346,8 @@ function collectArtifacts(name, result, artifacts) {
           decision: String(result.decision || ''),
           pending: result.pending === true,
         },
+        // §16：工具产出的来源标签（并集传播，生产者只能追加）。
+        sourceLabels: [`tool:${name}`],
       });
     }
   }
@@ -381,6 +499,11 @@ async function execute({
             },
             { taskId, runId, sessionId }
           );
+          // §16 读到即继承：记忆检索结果没有可解析的版本化 artifact 引用，
+          // 用来源标签记录（缺失来源元数据时记 unknown，绝不默认干净）。
+          tasks.appendTaintLabels(taskId, memorySearchTaintLabels(result.result), {
+            source: 'tool.memory_search',
+          });
         }
         if (result.ok && result.name === 'memory_remember') {
           safeEvent(
@@ -826,7 +949,37 @@ async function runTask(taskId) {
       task,
       systemPrompt: config.prompt.systemPrompt,
     });
-    const authorizer = createToolAuthorizer({ allowedTools: task.allowedTools });
+    const toolMeta = {};
+    for (const item of listToolMetadata()) {
+      if (item && item.name) toolMeta[item.name] = item;
+    }
+    const authorizer = createToolAuthorizer({
+      allowedTools: task.allowedTools,
+      // §16：每次工具调用前重新读取任务的来源链与污点（跨 Agent 读取可能在
+      // 运行中追加；只在规划时快照会漏掉这些继承）。
+      getTaintState: () => {
+        const live = tasks.getRawTask(task.taskId) || task;
+        return {
+          provenanceRefs: Array.isArray(live.provenanceRefs) ? live.provenanceRefs : [],
+          taintLabels: Array.isArray(live.taintLabels) ? live.taintLabels : ['unknown'],
+        };
+      },
+      toolMeta,
+      onDecision: decision => {
+        safeEvent(
+          task.botId,
+          'tool.policy_decision',
+          {
+            tool: decision.tool,
+            decision: decision.decision,
+            ruleId: decision.ruleId,
+            policyVersion: decision.policyVersion,
+            mode: 'delegated_task',
+          },
+          { taskId: task.taskId, runId, sessionId: task.sessionId || null }
+        );
+      },
+    });
     recordCheckpoint({ round: 0, toolCalls: 0, phase: 'started' });
 
     // B-06：执行前原子预留。按 Task 剩余上限全额预留（预估不精确，结算时回冲），
@@ -877,11 +1030,18 @@ async function runTask(taskId) {
         resource: `bot:${task.botId}`,
         operation: 'execute',
       },
-      onToolDenied: ({ name, code }) => {
+      onToolDenied: ({ name, code, detail, ruleId, policyVersion }) => {
         safeEvent(
           task.botId,
           'tool.denied',
-          { tool: name, errorCode: code, mode: 'delegated_task' },
+          {
+            tool: name,
+            errorCode: code,
+            detail: detail || null,
+            ruleId: ruleId || null,
+            policyVersion: policyVersion || null,
+            mode: 'delegated_task',
+          },
           { taskId: task.taskId, runId, sessionId: task.sessionId }
         );
       },
@@ -917,6 +1077,18 @@ async function runTask(taskId) {
       taskId: task.taskId,
       runId: result.runId || runId,
       artifacts: produced,
+      // §16：任务级上游引用随产物落盘；缺字段的旧任务按空数组处理（不伪造来源）。
+      provenanceRefs: Array.isArray(task.provenanceRefs) ? task.provenanceRefs : [],
+    });
+
+    // §27：产物生成即按生产者声明落到 declared（唯一写入者仍是 Verification Engine，
+    // 这里只是 Engine 路径的第一档；Producer 无法自行越过该档）。
+    verificationLoop.applyArtifactTrustLevel({
+      refs: artifactRefs,
+      level: 'declared',
+      reason: 'producer_declared',
+      taskId: task.taskId,
+      runId: result.runId || runId,
     });
 
     const finalResult = normalizeWorkerResult({
@@ -930,6 +1102,7 @@ async function runTask(taskId) {
       rounds: result.rounds,
       stopReason: result.stopReason,
       model: result.model,
+      usage: result.usage,
       runId: result.runId || runId,
       finishedAt: nowIso(),
     });
@@ -939,6 +1112,16 @@ async function runTask(taskId) {
     const verification = verificationLoop.verifyDeterministic({
       taskId: task.taskId,
       result: finalResult,
+    });
+
+    // §27：确定性校验全过才升到 evidence_checked；未过则保持/降回 declared 并记原因。
+    // 未触发审校（requiresReview=false）时最高只到这一档，绝不跳到 independently_verified。
+    verificationLoop.applyArtifactTrustLevel({
+      refs: artifactRefs,
+      level: verification.ok ? 'evidence_checked' : 'declared',
+      reason: verification.ok ? 'deterministic_passed' : verification.errorCode || 'verification_failed',
+      taskId: task.taskId,
+      runId: result.runId || runId,
     });
 
     const current = tasks.getRawTask(task.taskId);
@@ -1024,6 +1207,32 @@ async function runTask(taskId) {
       if (resolution.action === 'approval') {
         // 冲突 / 高风险审校不通过 / 审校无法给出结论：默认保守（不通过 + 标 conflict），
         // 停在审批节点等人工；审批超时只标 overdue，绝不解释为通过。
+        // §28：冲突先落 ConflictRecord，再进入人工审批，保证裁决前就有可复读的记录。
+        if (resolution.outcome === 'conflict') {
+          conflictRecord.persist(
+            conflictRecord.createRecord({
+              subjectKey: `${afterReview.taskId}:${primary && primary.id ? primary.id : 'verification'}`,
+              candidateRefs: primary && primary.id ? [String(primary.id)] : [],
+              conflictType: 'factual',
+              evidenceRefs: [
+                `deterministic:${verification.errorCode || 'pass'}`,
+                `review:${review && review.decision ? review.decision : 'needs_human'}`,
+              ],
+              resolutionStatus: 'open',
+              rationale: resolution.errorCode || 'verification_conflict',
+              taskId: afterReview.taskId,
+              runId,
+            })
+          );
+        }
+        // §27：任一验证失败不得保留高一档，降回 declared 并记录原因。
+        verificationLoop.applyArtifactTrustLevel({
+          refs: artifactRefs,
+          level: 'declared',
+          reason: resolution.errorCode || 'verification_conflict',
+          taskId: task.taskId,
+          runId,
+        });
         verificationLoop.invalidateArtifactRefs(finalResult, {
           reason: resolution.errorCode || 'verification_conflict',
         });
@@ -1038,6 +1247,13 @@ async function runTask(taskId) {
         return;
       }
       if (resolution.action === 'reject') {
+        verificationLoop.applyArtifactTrustLevel({
+          refs: artifactRefs,
+          level: 'declared',
+          reason: resolution.errorCode || 'review_rejected',
+          taskId: task.taskId,
+          runId,
+        });
         verificationLoop.invalidateArtifactRefs(finalResult, {
           reason: resolution.errorCode || 'review_rejected',
         });
@@ -1062,6 +1278,13 @@ async function runTask(taskId) {
       }
       // action === complete：两边一致通过，继续进入 completed。
     } else if (!verification.ok) {
+      verificationLoop.applyArtifactTrustLevel({
+        refs: artifactRefs,
+        level: 'declared',
+        reason: verification.errorCode,
+        taskId: task.taskId,
+        runId,
+      });
       verificationLoop.invalidateArtifactRefs(finalResult, {
         reason: verification.errorCode,
       });
@@ -1082,6 +1305,20 @@ async function runTask(taskId) {
         '确定性验证未通过，不得进入 completed',
         409
       );
+    }
+
+    // §27：只有"独立审校任务（非同一任务自审）通过"才允许 primary 产物到
+    // independently_verified；requiresReview=false 的路径永远停在上面的 evidence_checked。
+    if (current.requiresReview === true && review && review.decision === 'pass' && primary) {
+      verificationLoop.applyArtifactTrustLevel({
+        refs: [primary],
+        level: 'independently_verified',
+        reason: 'independent_review_passed',
+        taskId: task.taskId,
+        runId,
+        evidenceRefs: (review.evidence || []).map(item => item && item.id).filter(Boolean),
+        scope: review.reviewTaskId ? `independent-review:${review.reviewTaskId}` : 'independent-review',
+      });
     }
 
     // §11 第 2/3 步：进入 completed 前，任务记录已持有产物引用；校验门禁在
@@ -1168,7 +1405,11 @@ async function runTask(taskId) {
       safeEvent(
         task.botId,
         'task.failed',
-        { status: 'failed', errorCode: 'task_lease_lost' },
+        {
+          status: 'failed',
+          errorCode: 'task_lease_lost',
+          failureMode: 'stale_lease',
+        },
         { taskId: task.taskId, runId, sessionId: task.sessionId }
       );
       return;
@@ -1185,22 +1426,19 @@ async function runTask(taskId) {
       : (error && error.code) || (timedOut ? 'model_timeout' : 'agent_failed');
     const attempts = Number.isInteger(latest.attempts) ? latest.attempts : 0;
     const maxAttempts = Number.isInteger(latest.maxAttempts) ? latest.maxAttempts : 1;
-    // ③ §11 第 4 步：产物写失败绝不允许 completed。无副作用工具的任务按 retry 退避，
-    // 有副作用（已写记忆等）时不能重跑，收口为 recovery 等人工核对。
-    const artifactFailure =
-      typeof errorCode === 'string' && errorCode.startsWith('artifact_');
-    // P2：副作用结果不确定（账本里 started/unknown，或账本不可用而阻止执行）。
-    // 既不能重试（可能已经写过），也不能当 failed（可能已经成功）→ recovery 人工核对。
-    const sideEffectFailure =
-      typeof errorCode === 'string' && errorCode.startsWith('side_effect_');
-    const retryable =
-      !cancelled &&
-      !sideEffectFailure &&
-      !latest.allowedTools.includes('memory_remember') &&
-      (artifactFailure || ['model_connection', 'model_rate_limit', 'model_timeout'].includes(errorCode)) &&
-      attempts < maxAttempts;
+    // ③ §11 第 4 步 + B-02：retry/terminal/recovery 的唯一裁决点。
+    // 产物写失败绝不允许 completed；无副作用任务按 retry 退避，有副作用
+    // （已写记忆等）时不能重跑，收口为 recovery 等人工核对。
+    const disposition = decideFailureDisposition({
+      errorCode,
+      cancelled,
+      timedOut,
+      allowedTools: latest.allowedTools,
+      attempts,
+      maxAttempts,
+    });
 
-    if (retryable) {
+    if (disposition.retryable) {
       tasks.recordRunFinish(task.taskId, {
         runId,
         status: 'retry',
@@ -1216,6 +1454,7 @@ async function runTask(taskId) {
           errorCode,
           mode: 'retry',
           attempts: retried.attempts,
+          ...(disposition.failureMode ? { failureMode: disposition.failureMode } : {}),
           ...(retried.retryAt ? { retryAt: retried.retryAt } : {}),
         },
         { taskId: task.taskId, sessionId: task.sessionId }
@@ -1223,15 +1462,7 @@ async function runTask(taskId) {
       return;
     }
 
-    const status = cancelled
-      ? 'cancelled'
-      : sideEffectFailure
-        ? 'recovery'
-        : timedOut
-          ? 'timed_out'
-          : artifactFailure
-            ? 'recovery'
-            : 'failed';
+    const status = disposition.status;
     // 统一结果 schema：失败/取消/超时也落一份结果，而不是 result: null。
     const failureResult = normalizeWorkerResult({
       status,
@@ -1274,7 +1505,11 @@ async function runTask(taskId) {
         : status === 'timed_out'
           ? 'task.timed_out'
           : 'task.failed',
-      { status, errorCode },
+      {
+        status,
+        errorCode,
+        ...(disposition.failureMode ? { failureMode: disposition.failureMode } : {}),
+      },
       { taskId: task.taskId, runId, sessionId: task.sessionId }
     );
   } finally {
@@ -1612,4 +1847,5 @@ module.exports = {
   getQueueStats,
   allowedToolsFor,
   buildPolicy,
+  decideFailureDisposition,
 };

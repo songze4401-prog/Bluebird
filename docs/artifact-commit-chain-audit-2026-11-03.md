@@ -307,3 +307,35 @@
 - 本节为**追加段**；§0–§5 与「附：取证清单」既有判断的文字未改写（仅在其后追加一行已核对状态）。
 - 不改协议方案的 S1–S10 编号；工作量与范围问题见 §附2.5，未在正文自行调整。
 - 未修改源码、测试、配置或数据；未 commit、未 push。
+
+---
+
+## 附三：双权威边界与跨 Store 恢复（2026-11-05 实现口径）
+
+> 本节记录 A-03 落地后的现行边界，不回溯改写 §0–§5 的历史取证。
+
+### 附3.1 权威边界
+
+| 域 | 唯一权威 | 允许写入什么 | 禁止写入什么 |
+|---|---|---|---|
+| Task / Workflow | State Store（`DATA_DIR/agents/agent-tasks.json`，[tasks.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/tasks.js)） | 任务状态、lease、attempts、运行计数、`result.artifacts` 的**引用** | 产物正文、产物的 `stateVersion`/验证状态/taint |
+| Artifact | Blackboard（`DATA_DIR/agents/artifacts.json` + 正文文件，[artifact-store.js](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/artifact-store.js)） | 产物正文、lineage `version`/`stateVersion`、`superseded`、taint、refCount、commit 状态 | 任务状态、attempts、retry/lease 等 State Store 权威字段 |
+| Event Bus | 仅通知，不是权威来源 | 审计事件 | 任何可被当作状态读取的权威值 |
+
+两侧只通过**引用**（`{kind,id,version}`）和**只读校验**交互，不互相复制权威字段；任何"以一侧覆盖另一侧"的同步都属于越界。
+
+### 附3.2 重启跨 Store 恢复
+
+`tasks.recoverInterrupted()` 在收敛任何可恢复任务前，先调用
+`artifactStore.verifyRefsReadable(task.result.artifacts)`（只读、不抛异常）。断裂条件：
+
+- 引用记录不存在（`not_found`）；
+- `kind` 或 `version` 与引用不符（`kind_mismatch` / `version_mismatch`）；
+- 产物已 `invalidated`；
+- 已 `superseded` 但 `supersededBy` 解析不到后继（`superseded_chain_broken`）；
+- 正文不可读（沿用 `readContent` 的既有错误码）。
+
+命中任一条即走既有 `recoveryPath` 收敛为 `recovery`（不新增状态），
+`errorCode = recovery_artifact_reference_broken`，并追加 `task.recovered` 事件
+（`mode = cross_store_verify`，`detail = <artifactId>:<reason>` 列表），供审计追踪。
+正常重启（引用全部可读）不触发该分支，仍按原有 recovered/queued 语义收敛。

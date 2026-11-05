@@ -50,6 +50,17 @@ function changes(value) {
     }));
 }
 
+// A-13：Token 用量必须按 provider 实际返回值落库，拿不到就不带该字段（不估算）。
+function normalizeUsage(value) {
+  if (!value || typeof value !== 'object') return null;
+  const tokens = {};
+  for (const key of ['prompt_tokens', 'completion_tokens', 'total_tokens']) {
+    const num = Number(value[key]);
+    if (Number.isFinite(num) && num >= 0) tokens[key] = Math.trunc(num);
+  }
+  return Object.keys(tokens).length ? tokens : null;
+}
+
 function normalizeWorkerResult({
   status,
   summary = '',
@@ -66,6 +77,7 @@ function normalizeWorkerResult({
   finishedAt = null,
   neverStarted = false,
   blockedBy = null,
+  usage = null,
 } = {}) {
   if (!TERMINAL_STATUSES.includes(status)) {
     throw new TypeError(`Worker 结果状态无效：${status}`);
@@ -92,6 +104,8 @@ function normalizeWorkerResult({
         : null,
     runId: typeof runId === 'string' ? runId.slice(0, 80) : null,
     finishedAt: typeof finishedAt === 'string' ? finishedAt : null,
+    // 只有 provider 返回真实 usage 时才出现，避免给旧调用方增加空字段。
+    ...(normalizeUsage(usage) ? { usage: normalizeUsage(usage) } : {}),
     // 依赖失败收敛专用：该任务从未进入 running。只在为 true 时出现，
     // 其余结果形状保持不变（既有断言依赖原字段集）。
     ...(neverStarted === true

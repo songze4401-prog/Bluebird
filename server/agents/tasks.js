@@ -20,6 +20,7 @@ const stateMachine = require('./state-machine');
 const artifactStore = require('./artifact-store');
 const { normalizeWorkerResult } = require('./worker-result');
 const dependencies = require('./dependencies');
+const agentLimits = require('./agent-limits');
 const { LEGACY_ALIASES } = require('./status-vocabulary');
 const approvalDeadline = require('./approval-deadline');
 const crashHook = require('./crash-hook');
@@ -91,6 +92,11 @@ const EVENT_TYPES = Object.freeze([
   'approval.escalated',
   'approval.overdue',
   'approval.resolved',
+  // §29 提醒 / 取消两条完整路径的审计事件（只记状态与来源，不记正文）。
+  'approval.reminded',
+  'approval.cancelled',
+  // A-08：申诉的发起与裁决（原裁决保留在记录内，事件只记结果与理由摘要）。
+  'approval.appealed',
   // Phase 3 第 1 项：验证闭环的审计事件（只记录裁决与引用，不记录正文）。
   'verification.review_opened',
   'verification.verdict',
@@ -106,6 +112,17 @@ const EVENT_TYPES = Object.freeze([
   'task.cancelled',
   'task.timed_out',
   'task.uncertain',
+  // §24.3 第 5 条：非法迁移被拒绝时留审计（只记 from/to 与拒绝原因，不改状态）。
+  'task.transition_rejected',
+  // §27：trustLevel 只允许 Verification Engine 写入产物记录；任务写入路径拒绝并留痕。
+  'task.trust_level_write_rejected',
+  // §16：provenanceRefs / taintLabels 只允许创建时继承或被验证路径改写；
+  // 任务写入路径（updateTask / transitionTask）拒绝并留痕。
+  'task.taint_write_rejected',
+  // §16：跨 Agent 读取自动追加来源引用 / 读取工具返回追加污点标签（只追加不覆盖）。
+  'task.provenance_appended',
+  // §16：Gateway 每次工具调用的污点策略判定（含 policyVersion 与 ruleId）。
+  'tool.policy_decision',
 ]);
 
 const SAFE_PAYLOAD_KEYS = new Set([
@@ -122,6 +139,7 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'resultCount',
   'stopReason',
   'errorCode',
+  'detail',
   'mode',
   'decision',
   'messageId',
@@ -139,6 +157,9 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'contractVersion',
   'idempotent',
   'policyDigest',
+  'policyVersion',
+  'ruleId',
+  'added',
   // Phase 1 交付物 1：编排轨迹以扁平标量写入既有事件（嵌套对象不入白名单），
   // 与 task.route.orchestration 同源，不新建审计存储。
   'orchestrationEntry',
@@ -189,6 +210,13 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'attempts',
   'maxAttempts',
   'redeliveredTaskId',
+  // §24.3 第 5 条：非法迁移审计只落扁平标量（from/to 与拒绝原因）。
+  'fromStatus',
+  'toStatus',
+  // §27：越权写入 trustLevel 的审计字段（字段名 + 拒绝来源）。
+  'field',
+  // A-10 / §17：九类失败模式的分类标签，随既有失败/恢复/升级事件一起落审计。
+  'failureMode',
 ]);
 
 let taskCache = null;
@@ -499,6 +527,46 @@ function listEvents(botId, { limit = 50 } = {}) {
     .map(event => ({ ...event, payload: { ...event.payload } }));
 }
 
+/**
+ * A-10 / §17：事件乱序 / 重复投递检测（只读，不改事件历史）。
+ * - duplicate_delivery：同一 dedupeKey 被重复投递（appendEvent 只累加 dedupeCount）；
+ * - timestamp_regression：同一 task 的事件在文件顺序上出现时间倒序。
+ * 返回 [{ taskId, reason, eventId }]，由启动恢复流程消费。
+ */
+function detectEventOrderViolations({ botId = null } = {}) {
+  let events = [];
+  try {
+    events = loadEvents().events || [];
+  } catch (_) {
+    events = [];
+  }
+  const violations = [];
+  const lastTimestampByTask = new Map();
+  for (const event of events) {
+    if (!event || typeof event.taskId !== 'string' || !event.taskId) continue;
+    if (botId && event.botId !== botId) continue;
+    if (Number.isInteger(event.dedupeCount) && event.dedupeCount > 0) {
+      violations.push({
+        taskId: event.taskId,
+        reason: 'duplicate_delivery',
+        eventId: event.eventId,
+      });
+      continue;
+    }
+    const timestamp = Date.parse(event.timestamp);
+    const previous = lastTimestampByTask.get(event.taskId);
+    if (Number.isFinite(timestamp) && Number.isFinite(previous) && timestamp < previous) {
+      violations.push({
+        taskId: event.taskId,
+        reason: 'timestamp_regression',
+        eventId: event.eventId,
+      });
+    }
+    if (Number.isFinite(timestamp)) lastTimestampByTask.set(event.taskId, timestamp);
+  }
+  return violations;
+}
+
 function publicTask(task, { includeResult = true } = {}) {
   if (!task) return null;
   const agentId = task.agentId || task.botId;
@@ -552,6 +620,12 @@ function publicTask(task, { includeResult = true } = {}) {
     stateVersion: Number.isInteger(task.stateVersion) ? task.stateVersion : 0,
     runs: Array.isArray(task.runs) ? clone(task.runs) : [],
     requiresReview: task.requiresReview === true,
+    // §16：来源引用与污点标签（只读）。旧记录缺字段读作 unknown，绝不默认"干净"。
+    provenanceRefs: Array.isArray(task.provenanceRefs)
+      ? task.provenanceRefs.map(item => ({ ...item }))
+      : [],
+    taintLabels: artifactStore.readTaintLabels(task),
+    taintPolicyVersion: task.taintPolicyVersion || null,
     deliveredToParentAt: task.deliveredToParentAt || null,
     deliveryMessageId: task.deliveryMessageId || null,
     deliveryStatus: task.deliveryStatus || 'not_applicable',
@@ -944,6 +1018,11 @@ function createTask({
   // Phase 1 交付物 2：依赖边。只允许指向**已存在**且同 agentId 的任务，
   // 上限 8；循环依赖只能由批量编排入口产生，那里会在落盘前整图校验。
   dependsOn = null,
+  // §16：来源引用与污点标签。Task 上的这两类字段与 Artifact 同构；
+  // 生产者只能追加/继承，不能清除（updateTask/transitionTask 会拒绝改写）。
+  provenanceRefs = null,
+  taintLabels = null,
+  taintPolicyVersion = null,
 } = {}) {
   const resolvedAgentId = String(agentId || botId || '');
   assertBot(resolvedAgentId);
@@ -990,6 +1069,33 @@ function createTask({
   ) {
     throw new AgentError('invalid_task', 'deadlineMs 必须在 5000 到 120000 之间');
   }
+
+  // §16：来源引用复用 {kind,id,version}；污点取"继承 ∪ 声明"，空集读作 unknown。
+  let cleanProvenanceRefs;
+  try {
+    cleanProvenanceRefs = artifactStore.normalizeProvenanceRefs(provenanceRefs);
+  } catch (error) {
+    throw new AgentError('invalid_task', '任务 provenanceRefs 非法', 400, {
+      reason: (error && error.code) || 'invalid',
+    });
+  }
+  let declaredTaint;
+  try {
+    declaredTaint = artifactStore.normalizeTaintLabels(taintLabels, 'taintLabels');
+  } catch (error) {
+    throw new AgentError('invalid_task', '任务 taintLabels 非法', 400, {
+      reason: (error && error.code) || 'invalid',
+    });
+  }
+  const inheritedTaint = artifactStore.inheritedTaintOf(cleanProvenanceRefs);
+  const mergedTaint = [...new Set([...inheritedTaint, ...declaredTaint])].sort();
+  // 新任务未读取任何上游内容时是"无污点"（空集合），不是"未知"；
+  // unknown 只用于旧数据缺字段与断裂引用（未知即最保守，见 readTaintLabels）。
+  const cleanTaintLabels = mergedTaint;
+  const cleanTaintPolicyVersion =
+    typeof taintPolicyVersion === 'string' && taintPolicyVersion.trim()
+      ? taintPolicyVersion.trim().slice(0, 60)
+      : artifactStore.currentTaintPolicyVersion();
 
   let tools = [...manifest.toolAllowlist];
   if (allowedTools !== null) {
@@ -1101,6 +1207,10 @@ function createTask({
   if (cleanParentTaskId && !parentTask) {
     throw new AgentError('validation_failed', 'parentTaskId 指向的任务不存在', 400);
   }
+  // §25：委派深度最多 2 层；超限在创建入口拒绝，避免多建一层再回滚。
+  if (parentTask) {
+    agentLimits.assertDelegationAllowed(cleanParentTaskId, tasks.tasks);
+  }
   const effectiveRunId =
     cleanRunId || (parentTask && parentTask.budgetRunId ? parentTask.budgetRunId : null);
   if (parentTask) {
@@ -1190,6 +1300,10 @@ function createTask({
     stateVersion: 0,
     runs: [],
     requiresReview: false,
+    // §16：来源引用 + 污点并集；旧数据缺字段时由读取边界按 unknown 返回。
+    provenanceRefs: cleanProvenanceRefs,
+    taintLabels: cleanTaintLabels,
+    taintPolicyVersion: cleanTaintPolicyVersion,
     parentSessionId: cleanParentSession,
     parentMessageId: cleanParentMessage,
     parentUserText: cleanParentUserText,
@@ -1279,10 +1393,184 @@ function assertExpectedVersion(task, expectedVersion) {
   }
 }
 
+// §27：trustLevel 是产物记录字段，唯一写入者是 Verification Engine；
+// 任务写入路径（updateTask / transitionTask 及其调用点）一律拒绝，并留审计。
+const TRUST_WRITE_FIELDS = Object.freeze(['trustLevel', 'trust']);
+
+function rejectTrustWrite(task, field, source) {
+  try {
+    appendEvent({
+      botId: task.botId,
+      taskId: task.taskId,
+      runId: task.runId || null,
+      eventType: 'task.trust_level_write_rejected',
+      payload: {
+        status: task.status,
+        field,
+        reason: 'not_authorized',
+        mode: source,
+      },
+    });
+  } catch (_) {
+    // 审计通道不可用时不改变拒绝结论。
+  }
+  throw new AgentError(
+    'not_authorized',
+    'trustLevel 只能由 Verification Engine 写入产物记录',
+    403,
+    { field, source }
+  );
+}
+
+function assertNoTrustWrite(task, patch, source) {
+  for (const field of TRUST_WRITE_FIELDS) {
+    if (patch && patch[field] !== undefined) rejectTrustWrite(task, field, source);
+  }
+}
+
+// §16：provenanceRefs / taintLabels 只能由创建时继承或验证路径改写；
+// 任务更新路径不得追加/清除（尤其是"清除标签"必须被拒并留痕）。
+const TAINT_WRITE_FIELDS = Object.freeze([
+  'provenanceRefs',
+  'taintLabels',
+  'taintPolicyVersion',
+]);
+
+function rejectTaintWrite(task, field, source) {
+  try {
+    appendEvent({
+      botId: task.botId,
+      taskId: task.taskId,
+      runId: task.runId || null,
+      eventType: 'task.taint_write_rejected',
+      payload: {
+        status: task.status,
+        field,
+        reason: 'not_authorized',
+        mode: source,
+      },
+    });
+  } catch (_) {
+    // 审计通道不可用时不改变拒绝结论。
+  }
+  throw new AgentError(
+    'not_authorized',
+    'provenanceRefs/taintLabels 只能由验证路径写入',
+    403,
+    { field, source }
+  );
+}
+
+function assertNoTaintWrite(task, patch, source) {
+  for (const field of TAINT_WRITE_FIELDS) {
+    if (patch && patch[field] !== undefined) rejectTaintWrite(task, field, source);
+  }
+}
+
+// §16 读路径专用：跨 Agent / 上下文投影 / 记忆检索读到的内容自动进入任务来源链。
+// 只追加不覆盖、去重、按上限截断；只改任务记录，不改被读对象。
+const PROVENANCE_APPEND_MAX = 20;
+
+function provenanceRefKey(ref) {
+  return `${ref.kind || ''}|${ref.id}|${ref.version === undefined ? '' : ref.version}`;
+}
+
+function appendProvenanceRefs(taskId, refs, { source = 'read' } = {}) {
+  const store = loadTasks();
+  const task = store.tasks[String(taskId || '')];
+  if (!task) return null;
+  const existing = Array.isArray(task.provenanceRefs) ? task.provenanceRefs.slice() : [];
+  const seen = new Set(existing.map(provenanceRefKey));
+  const labels = new Set(Array.isArray(task.taintLabels) ? task.taintLabels : []);
+  let added = 0;
+  let incoming = null;
+  try {
+    incoming = artifactStore.normalizeProvenanceRefs(refs, 'provenanceRefs');
+  } catch (_) {
+    // 读取到不可解析的引用：不得默认干净，记 unknown。
+    labels.add(artifactStore.TAINT_UNKNOWN);
+  }
+  if (incoming) {
+    for (const ref of incoming) {
+      const key = provenanceRefKey(ref);
+      if (!seen.has(key) && existing.length < PROVENANCE_APPEND_MAX) {
+        existing.push(ref);
+        seen.add(key);
+        added += 1;
+      }
+    }
+    for (const label of artifactStore.inheritedTaintOf(incoming)) labels.add(label);
+  }
+  // 旧任务缺 taintLabels 字段：读作 unknown 后再追加，不得被当成干净。
+  if (!Array.isArray(task.taintLabels)) labels.add(artifactStore.TAINT_UNKNOWN);
+  const nextLabels = [...labels].sort();
+  const labelsChanged =
+    nextLabels.length !== (Array.isArray(task.taintLabels) ? task.taintLabels.length : -1) ||
+    nextLabels.some((label, index) => label !== task.taintLabels[index]);
+  if (added === 0 && !labelsChanged) return task;
+
+  task.provenanceRefs = existing;
+  task.taintLabels = nextLabels;
+  task.updatedAt = Date.now();
+  saveTasks();
+  try {
+    appendEvent({
+      botId: task.botId,
+      taskId: task.taskId,
+      runId: task.runId || null,
+      eventType: 'task.provenance_appended',
+      payload: { status: task.status, mode: source, added },
+    });
+  } catch (_) {
+    // 审计通道不可用不影响已经落地的只追加传播。
+  }
+  return task;
+}
+
+function appendTaintLabels(taskId, labels, { source = 'read' } = {}) {
+  const store = loadTasks();
+  const task = store.tasks[String(taskId || '')];
+  if (!task) return null;
+  let clean;
+  try {
+    clean = artifactStore.normalizeTaintLabels(labels, 'taintLabels');
+  } catch (_) {
+    clean = [artifactStore.TAINT_UNKNOWN];
+  }
+  const base = Array.isArray(task.taintLabels)
+    ? task.taintLabels.slice()
+    : [artifactStore.TAINT_UNKNOWN];
+  const next = [...new Set([...base, ...clean])].sort();
+  const changed =
+    next.length !== (Array.isArray(task.taintLabels) ? task.taintLabels.length : -1) ||
+    next.some((label, index) => label !== task.taintLabels[index]);
+  if (!changed) return task;
+  task.taintLabels = next;
+  task.updatedAt = Date.now();
+  saveTasks();
+  try {
+    appendEvent({
+      botId: task.botId,
+      taskId: task.taskId,
+      runId: task.runId || null,
+      eventType: 'task.provenance_appended',
+      payload: { status: task.status, mode: source, added: next.length - base.length },
+    });
+  } catch (_) {
+    // 同上
+  }
+  return task;
+}
+
 function updateTask(taskId, patch = {}) {
   const tasks = loadTasks();
   const task = tasks.tasks[String(taskId || '')];
   if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+
+  // §27：越权写 trustLevel 必须在任何字段被修改之前拒绝。
+  assertNoTrustWrite(task, patch, 'updateTask');
+  // §16：provenanceRefs/taintLabels 同理，任务更新路径不得清除污点。
+  assertNoTaintWrite(task, patch, 'updateTask');
 
   // 状态只允许经 transitionTask 写入；这里显式拒绝而不是静默丢弃，
   // 否则会留下一条看不见的第二写入路径。
@@ -1299,6 +1587,15 @@ function updateTask(taskId, patch = {}) {
     throw new AgentError(
       'task_checkpoint_version_read_only',
       'checkpointVersion 只能由 recordCheckpoint 写入',
+      400
+    );
+  }
+  // ②/§24.3：stateVersion 由存储层分配（CAS 版本），调用方只读；
+  // 直接写入视为越权，显式拒绝而不是静默忽略。
+  if (patch.stateVersion !== undefined) {
+    throw new AgentError(
+      'task_state_version_read_only',
+      'stateVersion 由存储层分配，调用方只读',
       400
     );
   }
@@ -1478,7 +1775,28 @@ function updateTask(taskId, patch = {}) {
 // recoverInterrupted 需要批量改状态后只落盘一次，因此复用这个内部函数；
 // 对外只能经 transitionTask。
 function applyTransition(task, to) {
-  stateMachine.assertTransition(task.status, to);
+  try {
+    stateMachine.assertTransition(task.status, to);
+  } catch (error) {
+    // §24.3 第 5 条：拒绝非法迁移要记录原因。审计写入失败不得掩盖原拒绝
+    // （吞掉审计异常后仍抛出原错误）。
+    try {
+      appendEvent({
+        botId: task.botId,
+        taskId: task.taskId,
+        runId: task.runId || null,
+        eventType: 'task.transition_rejected',
+        payload: {
+          fromStatus: task.status,
+          toStatus: to,
+          reason: (error && error.code) || 'invalid_transition',
+        },
+      });
+    } catch (_) {
+      // 审计通道不可用时不改变拒绝结论。
+    }
+    throw error;
+  }
   // S6b：审批等待期同样受 Task deadline 约束。进入 waiting_approval 时统一挂计时，
   // 离开时统一清除，避免任何一条入口路径留下永久等待的资源占用。
   if (task.status === 'waiting_approval' && to !== 'waiting_approval') {
@@ -1503,6 +1821,10 @@ function transitionTask(taskId, options = {}) {
   const tasks = loadTasks();
   const task = tasks.tasks[String(taskId || '')];
   if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
+  // §27：必须在 applyTransition 改内存之前拒绝，避免半截状态变化。
+  assertNoTrustWrite(task, options, 'transitionTask');
+  // §16：污点字段同样在任何状态变更前拒绝。
+  assertNoTaintWrite(task, options, 'transitionTask');
   // ② CAS：必须在 applyTransition 之前校验，否则冲突会留下已改的内存状态。
   assertExpectedVersion(task, options.expectedVersion);
   // ③ §11 第 3 步：产物引用必须在进入 completed 之前可读、schema 合格。
@@ -1804,6 +2126,11 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
   const recoveryTaskIds = [];
   const expiredWaitingApproval = [];
   let changed = false;
+  // A-10 / §17：启动恢复时一次性对账事件，避免逐任务重复扫描。
+  const eventViolations = detectEventOrderViolations();
+  const eventViolationTaskIds = new Set(
+    eventViolations.map(item => item.taskId).filter(Boolean)
+  );
 
   for (const task of Object.values(state.tasks)) {
     // S6b：重启后 waiting_approval 也必须按 deadline 收敛——不能只依赖“活着的计时器”。
@@ -1829,6 +2156,109 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
       leftRunning += 1;
       continue;
     }
+
+    // A-03：跨 Store 恢复校验。Task 状态只信 State Store，产物引用只信 Blackboard；
+    // 这里只读校验引用是否仍可读（存在/版本/superseded 链/正文），断裂即进既有
+    // recovery 收敛并写 task.recovered 事件留痕，不改写任何 artifact 记录。
+    const referencedArtifacts = Array.isArray(task.result && task.result.artifacts)
+      ? task.result.artifacts
+      : [];
+    const refIssues = referencedArtifacts.length
+      ? artifactStore.verifyRefsReadable(referencedArtifacts)
+      : [];
+    const brokenRefPath = refIssues.length ? recoveryPath(task.status) : null;
+    if (brokenRefPath) {
+      changed = true;
+      bumpStateVersion(task);
+      for (const step of brokenRefPath) applyTransition(task, step);
+      task.updatedAt = at;
+      task.completedAt = at;
+      task.lease = null;
+      task.retryAt = null;
+      task.heartbeatAt = null;
+      task.errorCode = 'recovery_artifact_reference_broken';
+      task.lastErrorCode = 'recovery_artifact_reference_broken';
+      task.requiresReview = true;
+      task.result = normalizeWorkerResult({
+        status: 'recovery',
+        summary: '',
+        errorCode: 'recovery_artifact_reference_broken',
+        runId: task.runId || null,
+        finishedAt: at,
+      });
+      recovery += 1;
+      recoveryTaskIds.push(task.taskId);
+      try {
+        appendEvent({
+          botId: task.botId,
+          taskId: task.taskId,
+          runId: task.runId || null,
+          sessionId: task.sessionId || null,
+          eventType: 'task.recovered',
+          payload: {
+            status: 'recovery',
+            errorCode: 'recovery_artifact_reference_broken',
+            mode: 'cross_store_verify',
+            failureMode: 'artifact_chain_broken',
+            detail: refIssues
+              .map(item => `${item.artifactId || 'unknown'}:${item.reason}`)
+              .join(','),
+          },
+        });
+      } catch (_) {
+        // 留痕失败不阻断恢复收敛；任务仍以 recovery + errorCode 可查。
+      }
+      continue;
+    }
+
+    // A-10 / §17：事件乱序/重复投递按既有 recovery 收敛（对账后人工核对），
+    // 只读事件历史，不重排、不覆盖、不重放。
+    if (eventViolationTaskIds.has(task.taskId)) {
+      const violation = eventViolations.find(item => item.taskId === task.taskId) || {};
+      const eventPath = recoveryPath(task.status);
+      if (eventPath) {
+        changed = true;
+        bumpStateVersion(task);
+        for (const step of eventPath) applyTransition(task, step);
+        task.updatedAt = at;
+        task.completedAt = at;
+        task.lease = null;
+        task.retryAt = null;
+        task.heartbeatAt = null;
+        task.errorCode = 'recovery_event_order_violation';
+        task.lastErrorCode = 'recovery_event_order_violation';
+        task.requiresReview = true;
+        task.result = normalizeWorkerResult({
+          status: 'recovery',
+          summary: '',
+          errorCode: 'recovery_event_order_violation',
+          runId: task.runId || null,
+          finishedAt: at,
+        });
+        recovery += 1;
+        recoveryTaskIds.push(task.taskId);
+        try {
+          appendEvent({
+            botId: task.botId,
+            taskId: task.taskId,
+            runId: task.runId || null,
+            sessionId: task.sessionId || null,
+            eventType: 'task.recovered',
+            payload: {
+              status: 'recovery',
+              errorCode: 'recovery_event_order_violation',
+              mode: 'event_order_reconcile',
+              failureMode: 'event_out_of_order',
+              detail: `${violation.reason || 'unknown'}:${violation.eventId || ''}`,
+            },
+          });
+        } catch (_) {
+          // 留痕失败不阻断恢复收敛。
+        }
+        continue;
+      }
+    }
+
     changed = true;
     bumpStateVersion(task);
     task.updatedAt = at;
@@ -2040,6 +2470,48 @@ function settleDependencies() {
       progressed = true;
     }
   }
+
+  // A-10 / §17：纯死锁环（互相等待）不会命中上面的 failed/missing 分支，
+  // 这里用纯图检测把仍是 queued 的环成员按既有 failed 终态收口。
+  // 处置口径：环依赖无法靠重试自愈 → 终态（errorCode=dependency_deadlock），不新增状态。
+  const latest = loadTasks();
+  const deadlocked = dependencies.detectDeadlocks(latest.tasks);
+  for (const taskId of deadlocked) {
+    const task = latest.tasks[taskId];
+    if (!task || task.status !== 'queued' || task.cancelRequested === true) continue;
+    const cycle = (Array.isArray(task.dependsOn) ? task.dependsOn : []).slice();
+    const finishedAt = nowIso();
+    const result = normalizeWorkerResult({
+      status: 'failed',
+      summary: `依赖环导致任务无法开始执行：${cycle.join(', ')}`.slice(0, 500),
+      errorCode: 'dependency_deadlock',
+      finishedAt,
+      neverStarted: true,
+      blockedBy: cycle,
+    });
+    transitionTask(task.taskId, { to: 'accepted' });
+    transitionTask(task.taskId, {
+      to: 'failed',
+      completedAt: finishedAt,
+      errorCode: 'dependency_deadlock',
+      lastErrorCode: 'dependency_deadlock',
+      result,
+    });
+    appendEvent({
+      botId: task.agentId || task.botId,
+      taskId: task.taskId,
+      eventType: 'task.dependency_failed',
+      payload: {
+        status: 'failed',
+        errorCode: 'dependency_deadlock',
+        failureMode: 'dependency_deadlock',
+        neverStarted: true,
+        blockedBy: cycle.join(','),
+        dependencyTaskId: cycle[0] || '',
+      },
+    });
+    settled.push({ taskId: task.taskId, errorCode: 'dependency_deadlock', blockedBy: cycle });
+  }
   return settled;
 }
 
@@ -2157,6 +2629,7 @@ module.exports = {
   transitionTask,
   appendEvent,
   listEvents,
+  detectEventOrderViolations,
   flushEventOutbox,
   safePayload,
   isTerminalStatus,
@@ -2185,4 +2658,6 @@ module.exports = {
   reserveTaskBudget,
   settleTaskBudget,
   releaseTaskBudget,
+  appendProvenanceRefs,
+  appendTaintLabels,
 };

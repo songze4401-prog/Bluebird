@@ -1,0 +1,37 @@
+{
+  "policyVersion": "worked-example-v1",
+  "traceId": "trace_7e1ccaad-5dad-4d04-b132-a3c732c4d22b",
+  "stepCount": 1,
+  "outcome": "failed",
+  "environment": {
+    "provider": "LongCat",
+    "baseUrl": "https://api.longcat.chat/openai",
+    "modelId": "LongCat-2.5",
+    "realModel": true,
+    "note": "真实模型环境；本轮失败，未用 stub 数据补位。"
+  },
+  "startedAt": "2026-11-05T15:55:19.483Z",
+  "finishedAt": "2026-11-05T15:55:30.961Z",
+  "durationMs": 11478,
+  "failure": {
+    "message": "worker 未完成：A=completed/null B=failed/tool_call_budget",
+    "code": null,
+    "details": null
+  },
+  "steps": [
+    {
+      "step": 1,
+      "name": "准备真实 provider 与 Agent 配置",
+      "startedAt": "2026-11-05T15:55:19.564Z",
+      "durationMs": 81,
+      "environment": "真实模型 provider：LongCat https://api.longcat.chat/openai（LongCat-2.5）",
+      "providerId": "1b52f89e-ec1d-484d-83a8-40fab24448b9",
+      "bots": [
+        "researcher",
+        "reviewer"
+      ]
+    }
+  ],
+  "usage": "未采集（运行未到达结算步骤）",
+  "cost": "provider 未返回"
+}
