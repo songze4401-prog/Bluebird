@@ -43,6 +43,31 @@ const STATUSES = Object.freeze([
 ]);
 const TERMINAL = new Set(['rejected', 'completed', 'failed']);
 
+// §29：Approval Request 自身的六态（原文取值，顺序不构成优先级）。
+// 与既有执行生命周期 status 并列存在，不改既有 status 语义（待确认：是否最终合并）。
+const REQUEST_STATUSES = Object.freeze([
+  'pending',
+  'approved',
+  'rejected',
+  'expired',
+  'escalated',
+  'cancelled',
+]);
+// §29 原文未给出迁移表；按下文语义推导最小合法边（待确认）。
+// 关键约束：expired 的原请求不得被批准（人工通过需新 Approval Request）；
+// 但允许 reject/cancel 关闭，兼容既有"超时后仍可人工拒绝"的行为。
+const REQUEST_TRANSITIONS = Object.freeze({
+  pending: Object.freeze(['approved', 'rejected', 'expired', 'escalated', 'cancelled']),
+  escalated: Object.freeze(['approved', 'rejected', 'expired', 'cancelled']),
+  approved: Object.freeze(['rejected', 'expired', 'cancelled']),
+  expired: Object.freeze(['rejected', 'cancelled']),
+  rejected: Object.freeze([]),
+  cancelled: Object.freeze([]),
+});
+// §29 要求"通知重试记录"；上限与退避原文未定义（待确认）。
+const MAX_NOTIFICATION_ATTEMPTS = 3;
+const NOTIFICATION_BACKOFF_MS = 60 * 1000;
+
 // A 类：R2 审批 SLA 初始默认硬阈值 30 分钟（v1.3 §36.2，用户 2026-11-03 裁决）。
 // 到期只转人工（overdue 标记 + 升级事件 + 保持 pending），绝不解释为批准，也不改写 Task。
 // 调整必须按 §31.2 留版本记录，不得静默调参。
@@ -224,6 +249,11 @@ function publicApproval(record) {
     overdueAt: record.overdueAt || null,
     escalatedAt: record.escalatedAt || null,
     status: record.status,
+    // §29 六态；旧记录缺字段时按 status 只读推导，不静默改历史数据。
+    requestStatus: requestStatusOf(record),
+    notification: record.notification
+      ? clone(record.notification)
+      : { attempts: 0, lastError: null, lastAttemptAt: null, nextRetryAt: null, exhausted: false },
     requestedBy: record.requestedBy,
     requestedAt: record.requestedAt,
     decidedBy: record.decidedBy || null,
@@ -234,6 +264,78 @@ function publicApproval(record) {
     errorCode: record.errorCode || null,
     result: record.result ? clone(record.result) : null,
   };
+}
+
+function requestStatusOf(record) {
+  if (!record || typeof record !== 'object') return 'pending';
+  if (REQUEST_STATUSES.includes(record.requestStatus)) return record.requestStatus;
+  // 读边界兼容旧记录：按既有 status 只读推导，不回写。
+  if (['approved', 'executing', 'completed', 'failed'].includes(record.status)) return 'approved';
+  if (record.status === 'rejected') return 'rejected';
+  return 'pending';
+}
+
+// §29 六态迁移校验：非法迁移一律拒绝（不自动纠正、不静默通过）。
+function assertRequestStatusTransition(from, to) {
+  const allowed = REQUEST_TRANSITIONS[from];
+  if (!allowed || !allowed.includes(to)) {
+    throw new AgentError(
+      'approval_request_transition_invalid',
+      `审批请求不允许从 ${from} 迁移到 ${to}`,
+      409,
+      { from, to }
+    );
+  }
+}
+
+function transitionRequestStatus(approvalId, to, { now = Date.now() } = {}) {
+  const current = load();
+  const record = current.approvals[String(approvalId || '')];
+  if (!record) throw new AgentError('approval_not_found', '审批不存在', 404);
+  const from = requestStatusOf(record);
+  if (from === to) return publicApproval(record);
+  assertRequestStatusTransition(from, to);
+  record.requestStatus = to;
+  record.requestStatusChangedAt = nowIso(now);
+  save();
+  return publicApproval(record);
+}
+
+/**
+ * §29 通知重试记录：次数、最后错误、下次重试时间。
+ * 通知失败不阻塞主流程——本函数只记账，不改审批状态、不抛审批语义错误。
+ * 达到上限后置 exhausted=true 并停止排期（原文未定义上限/退避，待确认）。
+ */
+function recordNotificationOutcome(
+  approvalId,
+  { ok = false, error = null, now = Date.now(), retryDelayMs = NOTIFICATION_BACKOFF_MS } = {}
+) {
+  const current = load();
+  const record = current.approvals[String(approvalId || '')];
+  if (!record) return null;
+  const previous =
+    record.notification && typeof record.notification === 'object' ? record.notification : {};
+  // 已达上限后不再重试、不再排期；成功的通知仍可清除 exhausted。
+  if (!ok && previous.exhausted === true) return publicApproval(record);
+  const attempts = Number.isInteger(previous.attempts) ? previous.attempts : 0;
+  const notification = {
+    attempts: attempts + 1,
+    lastAttemptAt: nowIso(now),
+    lastError: ok ? null : String(error || 'notification_failed').slice(0, 120),
+    nextRetryAt: null,
+    exhausted: ok ? false : previous.exhausted === true,
+  };
+  if (!ok) {
+    if (notification.attempts >= MAX_NOTIFICATION_ATTEMPTS) {
+      notification.exhausted = true;
+    } else {
+      const delay = Number.isFinite(Number(retryDelayMs)) ? Math.max(0, Number(retryDelayMs)) : 0;
+      notification.nextRetryAt = new Date(now + delay).toISOString();
+    }
+  }
+  record.notification = notification;
+  save();
+  return publicApproval(record);
 }
 
 function listApprovals(botId, { limit = 50, status = null } = {}) {
@@ -569,6 +671,18 @@ function markOverdue(approvalId, { now = Date.now() } = {}) {
     events.push('approval.overdue');
   }
   if (!events.length) return publicApproval(record);
+  // §29：升级 → escalated；过期 → expired（原请求过期，需新 Approval Request）。
+  if (events.includes('approval.escalated') && requestStatusOf(record) === 'pending') {
+    record.requestStatus = 'escalated';
+    record.requestStatusChangedAt = at;
+  }
+  if (events.includes('approval.overdue')) {
+    const from = requestStatusOf(record);
+    if (REQUEST_TRANSITIONS[from] && REQUEST_TRANSITIONS[from].includes('expired')) {
+      record.requestStatus = 'expired';
+      record.requestStatusChangedAt = at;
+    }
+  }
   save();
   for (const eventType of events) {
     recordEvent(
@@ -687,6 +801,16 @@ function createApproval({
     overdueAt: null,
     escalatedAt: null,
     status: 'pending',
+    // §29：Approval Request 自身状态与执行生命周期 status 并列。
+    requestStatus: 'pending',
+    requestStatusChangedAt: now,
+    notification: {
+      attempts: 0,
+      lastError: null,
+      lastAttemptAt: null,
+      nextRetryAt: null,
+      exhausted: false,
+    },
     requestedBy:
       requestedBy === 'user' || requestedBy === 'agent' ? requestedBy : 'agent',
     requestedAt: now,
@@ -752,8 +876,14 @@ function decide(approvalId, decision, { actor = permissions.SINGLE_USER_ACTOR, r
     throw new AgentError('approval_not_pending', '只有待审批记录可以批准', 409);
   }
 
+  // §29：六态迁移先校验后落库；expired 的原请求不得被批准（需新审批）。
+  const requestTo = decision === 'approve' ? 'approved' : 'rejected';
+  assertRequestStatusTransition(requestStatusOf(record), requestTo);
+
   const now = nowIso();
   record.status = decision === 'approve' ? 'approved' : 'rejected';
+  record.requestStatus = requestTo;
+  record.requestStatusChangedAt = now;
   record.decidedBy = String(actor || permissions.SINGLE_USER_ACTOR).slice(0, 80);
   record.decidedAt = now;
   record.reason = typeof reason === 'string' ? reason.slice(0, 200) : null;
@@ -1174,6 +1304,9 @@ function reloadForTests() {
 module.exports = {
   APPROVALS_FILE,
   STATUSES,
+  REQUEST_STATUSES,
+  REQUEST_TRANSITIONS,
+  MAX_NOTIFICATION_ATTEMPTS,
   R2_SLA_MS,
   R2_ESCALATION_RATIO,
   createApproval,
@@ -1185,6 +1318,10 @@ module.exports = {
   execute,
   expireDueApprovals,
   markOverdue,
+  requestStatusOf,
+  assertRequestStatusTransition,
+  transitionRequestStatus,
+  recordNotificationOutcome,
   approvalPolicyState,
   recoverInterrupted,
   reloadForTests,
