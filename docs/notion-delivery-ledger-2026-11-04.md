@@ -1,6 +1,6 @@
 # Notion 交付台账（2026-11-04）
 
-> **结论**：按 Notion 原文口径，**Phase 0 未完成（0.5，其中“权限边界”已由 Owner 裁决暂缓）**，**Phase 1 交付物 3.0/3（第 1 项 1.0；第 2 项 1.0；第 3 项 1.0，真实 LongCat 模型一轮验证；按 §5 原句逐句拆为 3 项，Planner 与 Orchestrator 合算 1 项）**；4 条验收要求 **4/4 已满足（2026-11-04）**：预算硬限制（B-06=1，真实供应商 usage 结算）、任务路由可追踪（真实注册的 researcher/executor/reviewer 分派 + 候选集/依据落盘）、Worker Session 隔离（服务端签发令牌，含过期与吊销路径）、并发结果不串线（5 条混合角色 + `TASK_CONCURRENCY=2`）。**跨进程并发超出 Notion Phase 1 范围，未做；需跨进程锁，不计为未闭合缺口。** **Phase 2：第 1 项（共享产物/证据引用/版本/访问控制）= 1.0、第 2 项（私有上下文分离/按需投影/来源追踪）= 1.0（2026-11-05，本地分支 `phase2/blackboard-2026-11-05`，未 push）；第 3 项（验收句端到端）= 1.0（`59b09cb`），**Phase 2 三句合计 3/3**。**
+> **结论**：按 Notion 原文口径，**Phase 0 未完成（0.5，其中“权限边界”已由 Owner 裁决暂缓）**，**Phase 1 交付物 3.0/3（第 1 项 1.0；第 2 项 1.0；第 3 项 1.0，真实 LongCat 模型一轮验证；按 §5 原句逐句拆为 3 项，Planner 与 Orchestrator 合算 1 项）**；4 条验收要求 **4/4 已满足（2026-11-04）**：预算硬限制（B-06=1，真实供应商 usage 结算）、任务路由可追踪（真实注册的 researcher/executor/reviewer 分派 + 候选集/依据落盘）、Worker Session 隔离（服务端签发令牌，含过期与吊销路径）、并发结果不串线（5 条混合角色 + `TASK_CONCURRENCY=2`）。**跨进程并发超出 Notion Phase 1 范围，未做；需跨进程锁，不计为未闭合缺口。** **Phase 2：第 1 项（共享产物/证据引用/版本/访问控制）= 1.0、第 2 项（私有上下文分离/按需投影/来源追踪）= 1.0（2026-11-05，本地分支 `phase2/blackboard-2026-11-05`，未 push）；第 3 项（验收句端到端）= 1.0（`59b09cb`），**Phase 2 三句合计 3/3**。**Phase 3：第 1/2/3 项均 1.0（`phase3/verification-loop-2026-11-05`；真实模型审校能力未验证）。Phase 4：第 1 项 1.0（仅机制齐备，非退出判据满足）、第 2 项 0.5（未证实）、第 3 项未做/不适用；策略默认关闭，退出判据未满足。**
 >
 > 唯一依据：《Bluebird Agent Runtime｜混合式多 Agent 目标架构 v1.0》
 > https://app.notion.com/p/Bluebird-Agent-Runtime-Agent-v1-0-40da957523c281359607e23f6a3c784f
@@ -25,7 +25,7 @@
 | Phase 1：单主控 + 动态 Worker Pool | “在现有 Runtime 内建立统一 Planner / Orchestrator 接口”“支持少量 Agent 的能力匹配、动态分配、并行和依赖管理”“保留单 Agent 快速路径；先选 2—3 个真实专业 Agent 验证” | “任务路由可追踪、Worker Session 隔离、并发结果不串线、预算硬限制有效” | 1.0 | `server/agents/orchestrator.js` + `tests/agent-orchestrator.test.js` 12 条（交付物 1 的 4 条，`93c5b51`；交付物 2 的 7 条 2a–2g，`6a3cc84`；真实注册表路由 1 条，本轮 `agent-orchestrator` 11→12）；`server/agents/planner.js` + `tests/agent-planner.test.js` 4 条（Planner 侧 a–d，计划只落 workflow-store）；`server/agents/dependencies.js`（唯一 `isReady` + `validateGraph`）+ `server/agents/tasks.js`（`dependsOn`/`settleDependencies`）+ `server/agents/runtime.js`（取队前 settle + runTask 前置校验）+ `tests/agent-worker.test.js` 44 条（依赖 5 条 + 并发上限 1 条 + 令牌/HTTP 5 条 + 5 条混合角色并发 1 条，`agent-worker` 37→44）；`server/agents/worker-scope.js` + 服务端作用域令牌（`issueScopeToken`/`revokeScopeToken`，sha256 映射 + allowlist + TTL；HTTP 读端点只认 `x-worker-scope-token`）；`server/agents/manifest.js` 新增 researcher/executor/reviewer 三个真实 Manifest + 真实 LongCat-2.5 一轮验证（证据见「交付物 3 真实模型验证证据」）；B-06 `tests/agent-budget-atomic.test.js` 7 条（`27b99ec`）+ 真实 usage 结算 | 交付物 1 = **1.0**（Orchestrator 唯一入口 + Planner 规则拆解 + 计划只落既有 workflow-store + 批量多步任务共用同一 planId/planVersion），交付物 2 = **1.0**（四项逐条证据见“交付物 2 四项验收证据”），交付物 3 = **1.0**（三个能力标签可扩展的 Manifest + 真实 LongCat 模型一轮：能力匹配/并行重叠/依赖时序/token usage；见“交付物 3 真实模型验证证据”）；合计 **3.0/3**；4 条验收 **4/4**（路由/隔离/并发/预算，逐条证据见 4–7）。**限定**：三个角色共用同一 LongCat-2.5 模型，只是提示词/能力标签分工，不是异构多模型协作；本轮依赖链下游任务因 `maxTokens=320` 触发 `empty_reply`（依赖时序正确，内容未产出）；**真实模型下的拆解/角色分工质量仍未经评测**；**跨进程并发超出 Notion Phase 1 范围，未做（需跨进程锁），不列为缺口**。下一步＝Phase 2 立项拍板。 |
 | Phase 2：Blackboard + Context Broker | “建立任务级共享产物、证据引用、版本和访问控制”“Worker 私有上下文与共享工作区分离”“支持按需上下文投影和来源追踪” | “跨 Agent 可协作但不能越权读取私有 Session；每个共享结论可追溯来源” | 第 1 项 **1.0**；第 2 项 **1.0**；第 3 项 **1.0**（合计 **3/3**） | 第 1 项（2026-11-05，`c60a1bb` + `4573bc6`）：`share()`/`sharedAccess()`/`readSharedArtifact()` + 令牌第二道门 + `publishSharedConclusion()` 证据门禁。第 2 项（2026-11-05，`db4d3cf`）：`worker-scope.projectSharedContext()` 只放行已共享且版本钉住的引用，`artifact-store.resolveProvenance()` 沿 `{kind,id,version}` 链 fail-closed，投影结果仅含产物引用、不带私有 session/messages。第 3 项（2026-11-05，`59b09cb`）：researcher/executor/reviewer 三个真实注册 Agent 的真实任务一次跑通 A→B→复核，executor 自己的 `wst_` 令牌读 reviewer 私有会话在库层与 HTTP 层均 401 且留痕，A 标 invalidated 后 B 的链 `artifact_chain_broken`（reason=invalidated）。用例：`agent-worker` +1（端到端 1 条，含 4+ 证据采集点与事件/审计时间线）；全量 2199/2199 通过。详见「Phase 2 第 1 项验收证据」「Phase 2 第 2 项验收证据」「Phase 2 第 3 项验收证据」 | 三项完成，但**未新增 HTTP 路由**（库级 API + 复用既有会话读端点）；runtime 不自动投影/自动发布；**尚无撤销共享/逐产物吊销入口**；证据均为同进程 + stub Provider，真实模型协作质量未验证。下一步＝Phase 3 立项拍板（待 Owner）。 |
 | Phase 3：验证闭环 + 事件化工作流 | “引入确定性验证、独立 Reviewer、冲突处理和人工审批节点”“事件、状态、结果投递采用幂等与可恢复设计”“建立失败重试、取消、Checkpoint、死信和成本追踪” | “失败注入、重复事件、Reviewer 检出率和结果投递恢复均有测试证据” | 第 1/2/3 项均 **1.0**（Phase 3 完成） | 第 1 项（2026-11-05，`phase3/verification-loop-2026-11-05`，`3370441` + `a9e500a`）：`server/agents/verification-loop.js`（确定性校验/独立审校/冲突裁决/审批门）+ `runtime.js` 完成前门禁 + `approvals.js` 门禁操作 + `tests/agent-verification-loop.test.js` 7 条。已有局部复用：审批 `approvals.js`、幂等账本 `op-ledger.js`（`a6d3455`）、崩溃注入 `tests/agent-crash-injection.test.js`。验收证据见「Phase 3 第 1 项验收证据」 | 第 1 项完成：三处失败注入 + 10 条构造样本混淆矩阵（TP 7/FN 0/TN 2/FP 1）+ 超时不通过。第 2 项完成（重复事件去重 + 投递崩溃恢复，真实探针见「Phase 3 第 2 项」）。**未验证**：真实模型审校能力；第 3 项（死信/成本追踪）完成，见「Phase 3 第 3 项」。下一步＝Phase 4 入口。 |
-| Phase 4：受控自治与自我改进 | “根据真实运行数据动态组队、重规划和选择验证强度”“建立离线评测集、策略版本、灰度发布和回滚”“在权限、预算和审批边界不变的前提下，逐步开放低风险自动化” | “相对基线在成功率、返工率、成本或延迟上有可重复改善，且安全指标不退化” | 0 | 全仓 `.js` grep `benchmark\|holdout` 零命中；无评测集、无灰度/回滚机制 | 未开始；且验收句要求“相对基线可重复改善”，**必须先有真实模型环境与压测数据**。未合并分支，待合入时以该分支台账为准。 |
+| Phase 4：受控自治与自我改进 | “根据真实运行数据动态组队、重规划和选择验证强度”“建立离线评测集、策略版本、灰度发布和回滚”“在权限、预算和审批边界不变的前提下，逐步开放低风险自动化” | “相对基线在成功率、返工率、成本或延迟上有可重复改善，且安全指标不退化” | 第 1 项 **1.0**（机制齐备，非退出判据满足）；第 2 项 **0.5**（未证实）；第 3 项**未做/不适用** | 第 1 项（2026-11-05，`phase4/eval-baseline-2026-11-05`，`2120311` + `97874c5` + `00336e5`）：`server/agents/eval-suite-v1.json`（5 条固定用例）、`eval-suite.js`/`eval-runner.js`/`eval-metrics.js`/`eval-baseline.js`/`strategy-version.js` + `scripts/eval-offline.js` + `tests/agent-eval-baseline.test.js` 7 条；真实输出与收口门禁见「Phase 4 第 1 项」 | 第 1 项 **1.0 仅指交付物机制齐**（评测集/指标/基线/对比/策略版本最小闭环均可复跑），**不是 Notion 退出判据已满足**：第 2 项后续完成真实 3+3 轮：配对复现 1/3、token +44.0%，判 0.5；第 3 项（灰度发布/逐步开放）未做。最终阶段判定＝退出判据未满足，策略默认关闭，详见「Phase 4 终态收口」。 |
 
 ---
 
@@ -711,6 +711,196 @@ enabled = ["executor","researcher","reviewer"]；registeredAgents = 4
 4. §17 图规模/检测时间/单节点出边上限数值，以及超限拒绝错误码（当前取 `validation_failed` + `cycle_check_limit_exceeded`）。
 5. §29 六态迁移表（原文未给）、通知重试上限 `3` 与退避 `60s`、`requestStatus` 与既有 `status` 的最终合并方式。
 6. §25 重规划计数口径：原文"单 Task 最多 2"与 §26"每 Run 最多 2"存在措辞差异，本轮按 Owner 口径取 Run 级统一计数。
+
+## Phase 4 第 1 项 · 离线评测集与基线度量框架（2026-11-05，`2120311` + `97874c5` + `00336e5`）
+
+依据 Notion §5 Phase 4：交付物「按真实运行数据动态组队、重规划、选择验证强度；**离线评测集**、策略版本、灰度发布、回滚；权限/预算/审批边界不变前提下逐步开放低风险自动化」；退出判据「相对基线在成功率、返工率、成本或延迟上有**可重复改善**，且**安全指标不退化**」。
+
+本轮只做第 1 项（离线评测集 + 基线度量），未碰动态组队/重规划/验证强度选择。
+
+**实现（全部复用既有链路，不新建第二套度量）**
+
+| 要求 | 实现（file:line） | 复用点 |
+|---|---|---|
+| 固定可版本化评测集 | `server/agents/eval-suite-v1.json`（5 条用例）、`eval-suite.js:100` `loadSuite`、`:32` `suiteDigest` | 每条含 goal、agentId/taskType、expectedTerminal、allowedErrorCodes、expectReview、budgetTokenCap、确定性 script；digest 钉住版本 |
+| 离线重放 | `eval-runner.js:45` `runCase`、`:113` `runSuite` | 只走 `createTask→transitionTask→recordRunStart/recordRunFinish`，usage 与预算同生产路径；虚拟时钟写 `startedAt/finishedAt` |
+| 成功率/返工率/token/延迟 | `eval-metrics.js:120` `computeMetrics`、`:60` `latencyOf` | 终态/错误码/attempts 读 `tasks.getTask`；token 读 `cost-tracker.taskCost`（不读 `tokenUsage.used`，避免父链双计）；延迟读 run 的 `startedAt/finishedAt` |
+| 未知桶单列 | `eval-metrics.js:157` `tokenCost{unknownCases,unknownTokens:null,complete}`、`:118` 单例 `tokens:null/usageKnown:false` | 缺 usage 不算 0，不计入已知总额 |
+| 基线快照 | `eval-baseline.js:20` `createSnapshot`、`:38` `writeSnapshot`、`:47` `readSnapshot` | 快照含 suite.version/digest、codeCommit、strategy、metrics、逐用例结果、safety |
+| 对比报告 | `eval-baseline.js:91` `diff`、`:69` `metricDiff`、`:78` `diffCase` | 指标改善/退化方向 + 逐用例变化 + 用例增删 |
+| 安全指标单列 | `eval-metrics.js:96` `collectSafety` | 只读既有事件（`tasks.listEvents`：`verification.review_opened`/`approval.requested`/`worker.scope_denied`/`verification.rejected`/`tool.denied`/`route.rejected`）与既有死信视图（`tasks.listDeadLetters`），不新造埋点 |
+| 策略版本+开关+回滚 | `strategy-version.js:36` `get`、`:50` `apply`、`:71` `setEnabled`、`:77` `rollback` | 状态与任务库同目录（`tasks.TASKS_FILE` 同级），不建路由、不建灰度系统 |
+| CLI | `scripts/eval-offline.js`（`--suite/--out/--compare/--strategy-version`） | 无 HTTP 路由；默认数据目录 `.eval-data/`（已 ignore） |
+
+**真实输出（`node scripts/eval-offline.js` 两次 + `--compare`）**
+
+```
+[EVIDENCE] eval-baseline {"suite":{"version":"p4-eval-v1","digest":"8b66dd9afd537269c6812d4e32fd4ab5d23f51181d8668e5f95b82c677c2ae1d","caseCount":5},"codeCommit":"00336e5f03a7e23406c82f5d7b4093293ea79ca7","strategy":{"version":"p4-default","enabled":true},"successRate":{"value":1,"successCount":5,"caseCount":5},"rework":{"total":1,"casesWithRework":1,"rate":0.2},"tokenCost":{"total":610,"knownCases":4,"unknownCases":1,"unknownTokens":null,"complete":false},"latency":{"totalMs":2850,"avgMs":570,"maxMs":900,"unknownCases":0,"complete":true},"safety":{"approvalBypass":0,"failClosedHits":0,"unauthorizedDenied":0,"deadLetters":0}}
+[EVIDENCE] eval-case {"caseId":"research-success","terminal":"completed","expectedTerminal":"completed","errorCode":null,"success":true,"expectReview":false,"reviewTriggered":false,"attempts":1,"rework":0,"tokens":160,"usageKnown":true,"latencyMs":400,"budgetTokenCap":500}
+[EVIDENCE] eval-case {"caseId":"executor-reviewed-success","terminal":"completed","expectedTerminal":"completed","errorCode":null,"success":true,"expectReview":true,"reviewTriggered":true,"attempts":1,"rework":0,"tokens":250,"usageKnown":true,"latencyMs":900,"budgetTokenCap":600}
+[EVIDENCE] eval-case {"caseId":"retry-then-success","terminal":"completed","expectedTerminal":"completed","errorCode":null,"success":true,"expectReview":false,"attempts":2,"rework":1,"tokens":180,"usageKnown":true,"latencyMs":900,"budgetTokenCap":500}
+[EVIDENCE] eval-case {"caseId":"hard-failure","terminal":"failed","expectedTerminal":"failed","errorCode":"model_timeout","allowedErrorCodes":["model_timeout"],"success":true,"attempts":1,"rework":0,"tokens":20,"usageKnown":true,"latencyMs":300,"budgetTokenCap":500}
+[EVIDENCE] eval-case {"caseId":"unknown-usage-success","terminal":"completed","expectedTerminal":"completed","errorCode":null,"success":true,"expectReview":false,"attempts":1,"rework":0,"tokens":null,"usageKnown":false,"unknownAttempts":1,"latencyMs":350,"budgetTokenCap":400}
+[EVIDENCE] eval-diff {"suiteChanged":false,"codeCommit":{"before":"00336e5f...","after":"00336e5f..."},"metrics":{"successRate":{"before":1,"after":1,"delta":0,"change":"flat"},"reworkRate":{"before":0.2,"after":0.2,"change":"flat"},"tokenCostTotal":{"before":610,"after":610,"change":"flat","comparable":false},"latencyAvgMs":{"before":570,"after":570,"change":"flat"}},"tokenComparable":false,"caseDiffs":[],"safety":{"approvalBypass":{"delta":0,"direction":"flat"},"failClosedHits":{"delta":0,"direction":"monitor"},"unauthorizedDenied":{"delta":0,"direction":"monitor"},"deadLetters":{"delta":0,"direction":"flat"}},"safetyRegressions":[],"safetyDegraded":false}
+[EVIDENCE] strategy-before {"version":"p4-default","enabled":true,"previousVersion":null}
+[EVIDENCE] strategy-apply {"version":"p4-canary-v2","enabled":true,"previousVersion":"p4-default"}
+[EVIDENCE] strategy-switch-off {"version":"p4-canary-v2","enabled":false,"previousVersion":"p4-default"}
+[EVIDENCE] strategy-rollback {"version":"p4-default","enabled":true,"previousVersion":"p4-canary-v2"}
+```
+
+说明：两次基线是同一份代码 + 同一份评测集（digest 相同、逐用例 taskId 不同但结果相同），diff 全部 `flat`、`caseDiffs=[]`，即"重放可复现"；`tokenCostTotal.comparable=false` 是因为 5 条用例中 1 条无 usage（未知桶未补齐），不是 0 成本。
+
+**用例（`tests/agent-eval-baseline.test.js`，7 条，全过）**
+a 评测集字段校验+digest 稳定+非法集被拒；b 同一评测集两次重放逐用例结果一致；c 单任务聚合（attempts=2/rework=1/token=180/latency=900ms）；d 多任务汇总不双计（total=610=各例之和）且无 usage 进未知桶（`tokens=null`、`complete=false`）；e 快照落盘/回读 + diff 识别改善/退化/逐用例变化 + 安全退化（`approvalBypass`/`deadLetters` 上升）；f 策略版本标识/开关/回滚闭环；g 安全指标从既有事件读（`worker.scope_denied` 计入 fail-closed 与 unauthorizedDenied；应审校但无审校事件计为 bypass）。
+
+**判定 1.0（仅指第 1 项交付物）**：评测集、指标、基线录制、对比报告、策略版本最小机制五项均有代码与可复跑证据；指标口径复用 `cost-tracker`/`tasks.getTask`/run 时间戳，未知桶独立且不为 0，安全指标只读既有事件与死信。**但这只是"机制齐了"，不是 Notion 退出判据已满足**：本轮没有任何策略变更，所以 diff 必然 flat，无法证明"可重复改善"；安全计数在离线 stub 下为结构性 0，不能证明"安全不退化"。退出判据需要后续第 2/3 项加上真实策略对比（以及一轮真实模型）后才可能成立。
+
+**偏离与未验证**
+- 延迟是**虚拟时钟**写进 run 的 `startedAt/finishedAt` 的模拟值（stub 脚本推进），不是真实供应商延迟；真实延迟需真实模型轮；
+- 安全计数在离线数据目录里为 0（无真实审批/越权/死信流量），`collectSafety` 只证明读数链路，不证明生产安全水位；
+- 策略版本目前只标识/开关/回滚，未接入任务执行路径（原文只要求最小闭环）；
+- 评测集未校验 `agentId/taskType` 是否在 manifest 注册表中（写错会在 createTask 时失败）；
+- `listEvents` 每 bot 上限 200 条，safety 计数可能截断；
+- 未接真实模型；未做动态组队/重规划/验证强度选择；未做灰度发布系统。
+
+**门禁与全量（本项收口一次）**：baseline 更新（`backendTotal 2217→2224`、`runnerTotal 1995→2002`、新增 `agent-eval-baseline` 7 条、`nodeTestSuiteTotal` 222 不变、`frontend` 188/22 不变）；`sync-doc-counts --write` 更新 10 处；`tsc --noEmit` EXIT=0；`npx expo lint` EXIT=0；`verify-test-coverage` → `backend=2224/2224 nodeSuite=222/222 runner=2002/2002 frontend=188/188 suites=22/22 failed=0`、CI runner 覆盖 92/92、EXIT=0；`sync-doc-counts --check` → `backend 2224、nodeSuite 222、runner 2002、frontend 188、文件 92` EXIT=0；`verify-api-capabilities` → 95 路由 / 20 族 / 仅 API 9，EXIT=0；全量前台 `node scripts/run-tests.js` → `92 个测试文件，全部通过`、`FULL_EXIT=0`。
+
+---
+
+## Phase 4 第 2 项：动态组队 / 重规划 / 验证强度选择（2026-11-05）
+
+对应 Notion：Phase 4 / §5 / 交付物「按真实运行数据动态组队、重规划、选择验证强度」/ 退出判据「相对基线在成功率、返工率、成本或延迟上有可重复改善，且安全指标不退化」。
+
+**实现（全部默认关闭，由 `strategy-version` 开关控制：`p4-default` 关、`p4-autonomy-v1` 开）**
+
+| 交付物 | 位置 | 判据 / 复用口径 |
+|---|---|---|
+| 动态组队 | `server/agents/autonomy-policy.js` `plan` | 高风险任务类型（`action.execute`/`memory.write`）或历史同类型成功率 <0.6 → 组队；否则单 Agent。成员按已注册 manifest 的 `capabilities` 覆盖 `REQUIRED_CAPABILITIES` 选取，依赖边由成员顺序生成 |
+| 轨迹写入 | `eval-runner.js` `route:{orchestration}` | 复用 Phase 1 的 `task.route.orchestration` 字段（`entry/basis/intentDigest/capability/matchingRule/matchedAgentIds/registeredAgents/selectedAgentId`），不新造轨迹口径 |
+| 重规划 | `autonomy-policy.js` `decideReplan` | 只对可恢复错误（`review_rejected`/`evidence_insufficient`/`capability_mismatch`）重规划；`attempts < task.maxAttempts`（既有字段，取自 `createTask` 写入值）且预算有余量才允许，一次即止；瞬态错误走既有 retry，硬失败不重规划，避免假成功 |
+| 验证强度 | `autonomy-policy.js` `verificationStrength` | 高风险 → 审校；高风险 + 证据弱 → 审批；执行器把结果写成既有 `task.requiresReview`，事件仍用 `verification.review_opened`/`verification.verdict` |
+| 团队子任务 | `eval-runner.js` | 高危完成用例创建 `reviewer` 的 `review.verify` 子任务（`parentTaskId` 指向父任务，受父级 token 余额硬约束），其 token 经 `cost-tracker.taskCost` 计入用例成本 |
+| 评测集扩容 | `server/agents/eval-suite-v1.json` | 5 → 13 条，新增：`exec-execute-slow`、`exec-recover-after-failure`（审校拒绝后可重规划翻盘）、`exec-hard-failure`（`evidence_missing` 硬失败不重规划）、`knowledge-multi-source`、`memory-search-quick`（单 Agent 够用）、`write-high-risk`（需组队审校）、`knowledge-unknown-usage`（未知桶）、`summary-fast` |
+
+**两轮对比（同评测集 / 同配置 `BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS=3`，stub 离线重放，非真实模型）**
+
+```
+p4-default      : successRate 12/13=0.9231  rework 1 (rate 0.0769)  tokens 1620 (known 11 / unknown 2)  latency avg 542ms max 1200ms
+p4-autonomy-v1  : successRate 13/13=1.0000  rework 2 (rate 0.1538)  tokens 1860 (known 11 / unknown 2)  latency avg 573ms max 1200ms
+delta           : successRate +0.0769  reworkRate +0.0769  reworkTotal +1  tokenCostTotal +240  latencyAvgMs +31
+caseDiffs       : executor-reviewed-success tokens 250→290；exec-execute-slow 300→340；write-high-risk 150→190；
+                  exec-recover-after-failure terminal failed→completed、attempts 1→2、rework 0→1、tokens 100→220、latency 400→800
+safety          : approvalBypass 0→0  failClosedHits 0→0  unauthorizedDenied 0→0  deadLetters 0→0（safetyRegressions=[]，safetyDegraded=false）
+```
+
+快照文件：`eval-baselines/p4-policy-default.json`、`eval-baselines/p4-policy-autonomy.json`（`tokenComparable=false` 因 2 条无 usage，未知桶未补齐）。
+
+**真实模型两轮（LongCat-2.5；同 13 条集、同 `MAX_ATTEMPTS=3`、脚本层 `scripts/p4-eval-real.js` 串联既有 api-configs/model-adapter 通道）**
+
+| 指标 | `p4-default` | `p4-autonomy-v1` | delta（原始值） |
+|---|---|---|---|
+| 成功率 | 11/13 = 0.8461538461538461 | 13/13 = 1 | +0.15384615384615385 |
+| 返工 | 1 例 / 1 次（rate 0.07692307692307693） | 2 例 / 2 次（rate 0.15384615384615385） | +0.07692307692307693 / +1 |
+| token（真实 usage，含失败调用） | 3070 | 3668 | +598 |
+| 延迟均值（run 墙钟 `startedAt→finishedAt`） | 6144ms | 8089ms | +1945ms |
+| 延迟最大 | 11495ms | 29625ms | +18130ms |
+| 安全计数（approvalBypass / failClosedHits / unauthorizedDenied / deadLetters） | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | flat，`safetyRegressions=[]` |
+
+快照：`eval-baselines/p4-real-default.json`、`eval-baselines/p4-real-autonomy.json`；`eval-diff` 输出 `tokenComparable=true`、`suiteChanged=false`。
+
+逐用例归因（避免把随机波动算成策略收益）：
+- `exec-recover-after-failure`：failed(`review_rejected`) → completed，attempts 1→2、rework 0→1、tokens 170→673、latency 5517→29625ms —— 这是重规划带来的**结构性** +1；
+- `research-success`：failed(`empty_response`，首轮 completion 顶到 400 max_tokens 被截断) → completed(tokens 378) —— 这是**同一配置下的采样波动**，不属于策略收益；
+- 其余 11 例终态不变；`p4-autonomy-v1` 的额外 token 来自 4 个 reviewer 子任务与 1 次 replan；其中 3 个 reviewer 调用因 160 max_tokens 被 reasoning 吃掉而返回空内容（`empty_response`），**如实计为失败调用**，其 usage 仍计入 token；
+- 失败调用：`p4-default` 1 次、`p4-autonomy-v1` 3 次（均在 reviewer 子任务），未丢弃任何一次。
+
+真实消耗与重跑披露：
+- 本轮计费口径的 `billedTokens` = 3070 / 3668；
+- 首次 `p4-default` 轮因脚本 bug 只跑了多 attempt 用例的第 1 步（`retry-then-success` 被判 failed），该轮作废并重跑一次（约 2527 token 未计入上表）；
+- 首次 `p4-autonomy-v1` 轮在 `exec-recover-after-failure` 处因 `const` 重赋值 bug中断（前 7 例调用已发生但未计入上表）；
+- 两次作废轮均为**修 bug**，不是为让 delta 好看而重跑；表内两轮为同一脚本版本、同一配置的完整跑。
+
+密钥纪律：`server/.env` 仅写入一行 `LONGCAT_API_KEY=ak_2Sq…`，`.gitignore:2:.env` 命中、`git status --porcelain=v1 -uall` 从未出现该文件；两轮结束立即删行删文件，`Test-Path server/.env` → `False`，`git grep` 全仓无完整 key，`server/data/` 扫描无残留，临时 Provider 已 `deleteModelProvider`（两轮各输出 `provider-cleanup {"removed":true}`），临时数据目录已删。**已清理，可吊销。**
+
+**用例（`tests/agent-autonomy-policy.test.js`，5 条，全过）**
+a 默认关闭（`p4-default` 不组队、`route=null`、无 policy 字段）；b 开启后高危按能力覆盖组队（`members=[executor,reviewer]`、依赖 1 条）、低风险单 Agent、历史成功率 <0.6 触发组队；c 重规划受 `maxAttempts`/预算/可恢复错误三重约束（关闭→`policy_disabled`、达上限→`max_attempts_reached`、预算耗尽→`budget_exhausted`、`model_timeout`→`non_recoverable_error`）；d 验证强度复用 `requiresReview`，证据弱升级审批；e 同一评测集两轮对比：默认轮无团队子任务/无重规划，开启轮 ≥3 例组队、1 例重规划、`task.route.orchestration` 落盘、团队 token 不漏计。
+
+**判定 0.5（本项）**：真实两轮已跑出可复算的 delta，安全计数未退化，重规划带来 1 例结构性翻转；但按退出判据"可重复改善"仍不成立——成功率 +0.15384615384615385 中有 1 例是采样波动（`research-success` 首轮被 max_tokens 截断），策略结构性收益仅 +1 例；返工 +1、token +598、延迟均值 +1945ms 三项均为负向，且单轮无法证明"可重复"。因此判 0.5：机制与真实证据齐了，净收益未达 1.0 门槛。后续 3+3 稳定性复跑见下一节：**1/3 配对复现**，维持 0.5。补齐条件：把 reviewer/主调用的 `max_tokens` 调到能容纳 reasoning 的水平（不改变预算上限）、评估是否只对高风险子集启用组队以压低 +44% 成本，并扩大样本量。
+
+**门禁（收口一次，全部前台实跑）**
+- `node scripts/sync-doc-counts.js --write` → `文档计数已是最新，无需修改`；
+- `node scripts/verify-test-coverage.js` → `CI runner 覆盖：93/93`、`backend=2229/2229 nodeSuite=222/222 runner=2007/2007`、`frontend=188/188 suites=22/22 failed=0`、`✔ 测试覆盖验证通过`，EXIT=0；
+- `node scripts/sync-doc-counts.js --check` → `✔ 文档计数与基线一致：backend 2229、nodeSuite 222、runner 2007、frontend 188、文件 93`，EXIT=0；
+- `node scripts/verify-api-capabilities.js` → `✔ API 能力登记一致：后端路由 95 条、路由族 20 个、仅 API 的能力 9 个`，EXIT=0；
+- `npx tsc --noEmit` EXIT=0；`npx expo lint` EXIT=0；
+- 全量前台 `node scripts/run-tests.js` → `93 个测试文件，全部通过`（末尾 `通过 29 项，失败 0 项`），EXIT=0。
+
+**限定**
+- 延迟为两轮各自的墙钟 `startedAt/finishedAt`（真实供应商），但受网络与模型排队影响，单轮均值不能当稳定基线；
+- `p4-autonomy-v1` 的 3 次失败调用来自 reviewer 子任务（160 `max_tokens` 被 reasoning 吃掉），属评测串联的额度设置问题，不是策略逻辑失败；
+- 历史成功率判据已实现参数入口，但评测执行器未注入历史值（当前恒为 null，仅高风险规则生效）；
+- 团队子任务是"审校一例"的最小形态，不是通用 DAG 编排；
+- 安全计数在隔离数据目录恒为 0，只证明读数链路，不证明生产安全水位。
+
+---
+
+## Phase 4 第 2 项 稳定性复跑（3 + 3 轮，2026-11-05）
+
+**跑法**：同一 13 条集、LongCat-2.5、`MAX_ATTEMPTS=3`、同一脚本版本；`p4-default` × 3 与 `p4-autonomy-v1` × 3 **顺序执行**（不并行）。结论判定规则在跑前写死：按轮次下标配对（default-rN vs autonomy-rN），`autonomy.successRate > default.successRate` 记为"复现提升"；1.0 要求 3/3 复现 + 6 轮安全计数无退化 + 代价如实量化 + 无未披露作废轮。
+
+**6 轮原始表（逐轮，非均值）**
+
+| 轮次 | 策略 | 成功 | 返工次数 | 真实 token | 延迟均值 | 延迟最大 | 失败调用 | 安全四项 |
+|---|---|---|---|---|---|---|---|---|
+| r1 | `p4-default` | 12/13 = 0.9230769230769231 | 1 | 2840 | 5922ms | 12844ms | 0 | 0/0/0/0 |
+| r2 | `p4-default` | 11/13 = 0.8461538461538461 | 1 | 2849 | 7585ms | 31205ms | 1 | 0/0/0/0 |
+| r3 | `p4-default` | 11/13 = 0.8461538461538461 | 1 | 2498 | 4998ms | 9527ms | 1 | 0/0/0/0 |
+| r1 | `p4-autonomy-v1` | 12/13 = 0.9230769230769231 | 2 | 4469 | 6730ms | 13741ms | 1 | 0/0/0/0 |
+| r2 | `p4-autonomy-v1` | 13/13 = 1 | 2 | 3273 | 4711ms | 10517ms | 4 | 0/0/0/0 |
+| r3 | `p4-autonomy-v1` | 11/13 = 0.8461538461538461 | 1 | 3961 | 7139ms | 16727ms | 4 | 0/0/0/0 |
+
+**配对复现（规则：同轮次下标比较成功率）**
+
+| 配对 | default | autonomy | 是否复现提升 |
+|---|---|---|---|
+| r1 | 0.9230769230769231 | 0.9230769230769231 | 否（flat） |
+| r2 | 0.8461538461538461 | 1 | 是（+0.15384615384615385） |
+| r3 | 0.8461538461538461 | 0.8461538461538461 | 否（flat） |
+
+结论：**1/3 复现**，未达 3/3，按写死规则**判 0.5**。r1 与 r3 未复现的具体原因：
+- r3 `autonomy` 的 `exec-recover-after-failure` 首轮调用返回空内容（`empty_response`，completion 被 400 `max_tokens` 截断），该错误不在可恢复集合，故未触发重规划；同轮 `default` 该例也失败（`review_rejected`），因此打平；
+- r1 `autonomy` 的 `memory-search-quick` 触发真实预算闸门（304 > 300 cap → `budget_exceeded`），而 `default` 同轮该例通过，抵消了重规划翻盘的 +1；`default` r1 只失败 `exec-recover-after-failure` 一例。
+
+**代价（6 轮合计）**：token `p4-default` 8127 / `p4-autonomy-v1` 11702（+3575，约 +44.0%）；返工总次数 3 / 5；延迟按 3 轮均值 6168ms / 6027ms（差异在噪声内，不作为改善）；6 轮安全计数全 0，无退化。
+
+**作废轮披露**：本轮 6 次执行无作废。此前两次作废轮（脚本 bug）不计入上表：`p4-default` 作废轮约 2527 token；`p4-autonomy-v1` 中断轮前 7 例调用已发生但计费量未采集（不可知）。连同上一提交的完整两轮 6738 token，本项已知真实消耗合计约 **29,155 token**（另加不可知的中断轮）。
+
+**限定**：单机、单供应商单模型、13 条构造评测集、每策略 3 轮；空内容失败源于 `max_tokens` 与 reasoning 竞争，属评测串联额度设置，不是策略逻辑失败。
+
+快照：`eval-baselines/p4-real-default-r{1,2,3}.json`、`eval-baselines/p4-real-autonomy-r{1,2,3}.json`。
+
+---
+
+## Phase 4 终态收口（2026-11-05）
+
+| 项 | 判定 | 依据 |
+|---|---|---|
+| 第 1 项 离线评测集与基线度量 | **1.0** | 评测集/指标/基线/对比/策略版本最小闭环均可复跑；仅指机制齐备 |
+| 第 2 项 动态组队/重规划/验证强度 | **0.5（未证实）** | 3 对配对复现 1/3；代价 token +44.0%、返工 3→5；安全未退化 |
+| 第 3 项 灰度发布 / 逐步开放低风险自动化 | **未做/不适用** | 本阶段未做灰度发布与真实流量开放；原文第三分句未进入实施 |
+
+**阶段结论：Notion Phase 4 退出判据未满足。** 原句「相对基线在成功率、返工率、成本或延迟上有可重复改善，且安全指标不退化」——只满足后半句（6 轮四项安全计数全 0，无退化）；前半句不成立：3 对配对中仅 r2 复现提升（0.8461538461538461→1），r1（0.9230769230769231→0.9230769230769231）与 r3（0.8461538461538461→0.8461538461538461）均持平，复现率 1/3。
+
+**默认关闭（生产不启用）**：`server/agents/strategy-version.js:12` `DEFAULT_STATE = { version: 'p4-default', enabled: true }`；`server/agents/autonomy-policy.js:14` `ACTIVE_VERSION = 'p4-autonomy-v1'`，`autonomy-policy.js:28-30` `isEnabled()` 仅在 `state.version === ACTIVE_VERSION` 时为真 → 未写策略状态文件时 `plan/decideReplan/verificationStrength` 全部走关闭分支。因收益未证实且稳定多耗 token（6 轮 8127 → 11702，+44.0%），保持默认关闭。
+
+**不包装为"平均提升"**：6 轮逐轮数字保留在上节表内（success：`p4-default` 12/11/11，`p4-autonomy-v1` 12/13/11）；两种策略各自都没有稳定优于对方，差异主要来自模型单次返回（含 `empty_response`）与预算闸门。
+
+### Phase 4 待办缺陷（登记，不在本阶段修）
+
+| 编号 | 类别 | 现象 | 证据 | 为何本阶段不修 |
+|---|---|---|---|---|
+| P4-D1 | A 类数值（需实测校准） | 单例 token 预算默认 300 过紧，策略重规划被预算闸门提前吃掉 | `p4-autonomy-v1` r1 `memory-search-quick` 实际 304 token > 300 cap → `budget_exceeded`，该例失败；直接导致 r1 配对未复现 | 属预算标定，需在真实流量上校准单例上限与 reasoning 占比，须独立评审；本阶段不得为凑数据放宽 |
+| P4-D2 | 错误分类缺口 | `empty_response` 不在可重试/可重规划错误清单内，失败后重规划路径不触发 | `p4-autonomy-v1` r3 `exec-recover-after-failure` 首轮 `empty_response` → `non_recoverable_error`，未 replan；同轮 default 亦失败，配对持平 | 属策略错误分类（需区分"模型截断"与"硬失败"），会影响安全语义，须独立评审后改 |
 
 ---
 
