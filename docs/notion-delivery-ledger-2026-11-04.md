@@ -45,7 +45,7 @@
 | A-06 | “风险分级验证、验证成本和质量指标明确”· §22；规则见 §13 | 待确认（原文未写） | §13 R0–R3 表（最低验证/审批）+ 漏检率/误拦截率/验证开销统计 | 0.5 | 工具风险映射：`server/agent-runtime.js` `FAIL_OPEN_RISK`、`server/agents/failopen-policy.js`（`c8283ca`）；审批风险 `medium→R2 / high→R3`：`approvals.js:52-54` | 只有“风险等级映射”，没有按等级分派验证强度，也没有成本/漏检/误拦截指标。**需真实模型环境样本集**才能产出评测报告。 |
 | A-07 | “Benchmark 基线可选且记录完整配置；评测集有 holdout 和轮换”· §22；规则见 §14 | 待确认（原文未写） | §14 五类可比较基线 + 配置记录字段 + holdout/轮换规则 | 0 | 全仓 `.js` grep `benchmark\|holdout` 零命中 | 未开始；**必须真实模型环境与可重复评测数据**。 |
 | A-08 | “审批超时、批量、升级和申诉规则明确”· §22；规则见 §15 | 待确认（依据：§15 审批吞吐，原文未写） | §15 动作/参数摘要/影响/风险/证据/有效期；批量规则；超时升级；申诉复核 | 0.5 | `approvals.js:49` `R2_SLA_MS=30min`、`escalationAt`（50%）、`overdue/escalatedAt`；`tests/agent-approval-policy.test.js` a、b、c | 缺批量审批、申诉改判、审批负载分配与指标。 |
-| A-09 | “provenance / taint 贯穿 Task、Artifact 和 Tool Gateway”· §22；规则见 §16 | 待确认（原文未写） | §16 Task Contract 增 `provenanceRefs/taintLabels/taintPolicyVersion`，Gateway 每次校验 | 0.5 | `server/agents/artifact-store.js`（`TAINT_*`/`normalize*`/`setTaintLabels`/`markTaintVerified`）、`tasks.js`（Task 字段 + 写入拒绝）、`tool-gateway.js`（每次调用来源链校验）、`artifact-commit.js`（派生产物继承）、`runtime.js`（接线）；`tests/agent-provenance.test.js` a–e 5 条 | Task/Artifact 记录、传播、查询、Gateway 可校验已落地；跨 Agent 读取注入上下文时未生成 provenanceRefs，工具产物的来源链只有 `tool:<name>` 标签，污点取值与“何种污点禁止何种工具”原文未定义 → 只判 0.5。 |
+| A-09 | “provenance / taint 贯穿 Task、Artifact 和 Tool Gateway”· §22；规则见 §16 | 待确认（原文未写） | §16 Task Contract 增 `provenanceRefs/taintLabels/taintPolicyVersion`，Gateway 每次校验 | 1.0 | 第一轮 `5769609`：`artifact-store.js`（`TAINT_*`/`normalize*`/`setTaintLabels`/`markTaintVerified`）、`tasks.js`（Task 字段 + 写入拒绝）、`tool-gateway.js`（来源链校验）、`artifact-commit.js`（派生产物继承）；`tests/agent-provenance.test.js` a–e。第二轮 `7fe1cd4`：`server/agents/taint-policy.js`（`taint-policy-v1` 版本化策略）、`tasks.js`（`appendProvenanceRefs`/`appendTaintLabels`）、`worker-scope.js`（读路径继承）、`tool-gateway.js`（每次判定 `taint_tool_denied`）、`runtime.js`（实时 `getTaintState` + `tool.policy_decision`）；`tests/agent-taint-policy.test.js` f–j。 | 缺口①②均以真跑闭合：跨 Agent 读自动追加 `{kind,id,version}` 并继承 taint（f/j）、带污点任务副作用工具被拒且只读放行（g）、高 trustLevel+污点不获额外权限（h）、策略版本与 fail-closed（i）。限定：`authorizeSessionRead` 与 `memory_search` 无法生成可解析引用，只接 taint 不接 ref；取值/规则/阈值均为本仓库裁决，非 Notion 原文标准。 |
 | A-10 | “失败模式清单和 Artifact 环检测明确”· §22；规则见 §17 | 待确认（原文未写） | §17 九类失败模式表 + 三类图环检测（委派/依赖/产物 lineage） | 0.5 | 依赖环检测已落地（2026-11-04）：`server/agents/dependencies.js` `validateGraph`（Kahn 拓扑余集判定）+ `tests/agent-orchestrator.test.js` 交付物2f（A↔B → 409 `dependency_cycle`、`taskCountBefore=0/taskCountAfter=0`）、交付物2g（悬空引用 400 零落盘） | 三类环检测只完成**依赖环**；委派环、产物 lineage 环、九类失败模式清单仍未实现。下一步＝按 §17 补委派/lineage 环检测与失败模式表。 |
 | A-11 | “规划 / 审批 / 验证延迟纳入 SLO，有停止重规划判据”· §22；规则见 §18 | 待确认（原文未写） | §18 P50/P95/P99 采集 + deadline/剩余预算/最小收益门槛 | 0 | `runtime.js` 仅 `tool_call_budget` 截断（`:462`），非 SLO；无重规划停止判据 | 未开始；SLO 阈值需真实运行数据。 |
 | A-12 | “组件预算、stub 边界和 Owner 角色明确”· §22；规则见 §19 | 待确认（依据：§19 说“Phase 0 必须明确到人”，原文未写阶段归属） | §19 6 个交付模块表 + Owner 角色 + 可 stub 清单 | 0.5 | v1.3 §41 责任人已指定（`e950997` 文档记录） | 条目判据要求“管理评审记录（非代码测试）”，无记录；按硬规矩不计 1。 |
@@ -63,7 +63,7 @@
 | B-10 | “R2 30 分钟转人工 fail-closed；R3 只接受显式批准”· §30；规则见 §29 | 待确认（原文未写） | §29 风险级别 SLA 表 | 1 | `approvals.js:49`（30 min）、`:52-54`（R2/R3 映射）；`tests/agent-approval-policy.test.js` a（R2 到期仍 pending、任务未放行）、b（R3 长期 pending）、g（老记录缺字段 fail-closed） | 核心满足；备注：原文“转人工队列”在代码中体现为 pending 列表（`pendingCount()`），无独立队列实体。 |
 | B-11 | “审批请求有持久化 SLA、提醒、升级和取消路径，不会静默永久挂起”· §30；规则见 §29 | 待确认（原文未写） | §29 持久化 deadline/escalationAt、通知重试记录、责任队列；六态 pending/approved/rejected/expired/escalated/cancelled | 0.5 | `approvals.js:36-43` 状态为 pending/approved/rejected/executing/completed/failed；持久化 `riskLevel/expiresAt/escalationAt/policyVersion`；`:496-507` 到期只标记 | 六态中的 expired/escalated/cancelled 未落地；无通知重试记录与提醒任务。 |
 
-**汇总**：`1` = 2 项（B-06、B-10）；`0.5` = 12 项（A-01、A-03、A-06、A-08、A-10、A-12、A-14、B-01、B-02、B-03、B-04、B-11）；`0` = 11 项（A-02、A-04、A-05、A-07、A-09、A-11、A-13、B-05、B-07、B-08、B-09）。
+**汇总**：`1` = 3 项（A-09、B-06、B-10）；`0.5` = 12 项（A-01、A-03、A-06、A-08、A-10、A-12、A-14、B-01、B-02、B-03、B-04、B-11）；`0` = 10 项（A-02、A-04、A-05、A-07、A-11、A-13、B-05、B-07、B-08、B-09）。
 
 **阶段归属**：25 条全部「待确认」——原文 §22/§30 均未把条目挂到阶段，本台账**不做归属推断**，只在“依据”列写出原文哪一节在讲它。
 
@@ -634,7 +634,7 @@ enabled = ["executor","researcher","reviewer"]；registeredAgents = 4
 - 证据：`tests/agent-approval-request.test.js` 4 条：通知两次失败后 `attempts=2/lastError/nextRetryAt` 正确且审批仍可批准；达 3 次置 `exhausted`、`nextRetryAt=null`、重复失败不再累加、审批仍 `pending`；六态取值断言 + `rejected→approved` 被拒 409；R2 超时先 `escalated` 再 `expired`，`approve` 抛 `approval_request_transition_invalid`、`cancelled` 合法。
 - 限定（判 0.5 的原因）：六态与既有 `status` **并存而非合并**，属原文与仓库语义冲突的保守处理（见待确认）；仓库没有真实通知发送器，重试记录目前只有记账 API 与用例，未接任何投递渠道；`expired→rejected` 为兼容既有"超时后仍可人工拒绝"行为而保留，并非原文直述。
 
-### 8. §16 provenance / taint（`5769609`）——判定 0.5
+### 8. §16 provenance / taint（`5769609` + 本轮 feat `7fe1cd4`）——判定 1.0
 
 - 原文关键句（§16，原文抽取副本 338–342 行）：
   - 「Task Contract 增加 provenanceRefs、taintLabels、taintPolicyVersion。外部网页、文件、工具返回和 Agent 派生内容保留来源链；污点标签随摘要、引用和产物传播，不因跨 Agent 或写入 Blackboard 自动洗白。」
@@ -657,21 +657,46 @@ enabled = ["executor","researcher","reviewer"]；registeredAgents = 4
     `[EVIDENCE] provenance-d {"taskId":"task_852d9f9a-9f94-4672-94ad-0251346b12e1","brokenRef":{"kind":"note","id":"art_does_not_exist","version":1},"taskTaintLabels":["unknown"],"deniedEvent":{"tool":"memory_search","errorCode":"taint_provenance_broken","mode":"delegated_task"},"status":"completed"}`
   - e 持久化与旧数据：清 `require.cache` 重载 `artifact-store`（模拟进程重启）后复读 `['external:file','unverified']` 不变；手工删除旧记录的 `taintLabels`/`provenanceRefs` 字段后，`readTaintLabels` → `['unknown']`、`readProvenanceRefs` → `[]`。探针原文：
     `[EVIDENCE] provenance-e {"artifactId":"art_aed591bcaa1e1a44b658d26d4b651cc2","labelsBeforeRestart":["external:file","unverified"],"labelsAfterRestart":["external:file","unverified"],"legacyTaintLabels":["unknown"],"legacyProvenanceRefs":[],"reason":"缺字段不得默认成干净：未知即最保守"}`
-- 判定 0.5 的理由（不是 1.0）：
-  - 原文明确的部分已落地：Task/Artifact 三字段、同 Agent 内产物继承并集、Producer 不得移除、唯一可信写入者、Gateway 每次调用校验、旧数据读 `unknown`。
-  - 未落地/未定义的缺口：① 跨 Agent 读取（共享产物/上下文投影注入提示词）时，消费任务没有生成对应 `provenanceRefs`，其后续产物不会自动带上被读取内容的污点——即"随引用传播"只覆盖显式 `content.evidence`/任务级声明，不覆盖"读到就继承"；② 工具返回只有 `tool:<name>` 来源标签，没有指向工具调用/结果的来源链引用；③ 原文未定义 `taintLabels` 取值、`taintPolicyVersion` 版本、哪些污点等级禁止哪些工具/动作——本轮按 Owner 要求**不自造阻断策略**，Gateway 只校验来源链可解析，不做"污点→工具"授权判定；④ 与 `trustLevel`（§12/§27）在"未验证→已验证"语义上重叠，本轮按 Owner 要求并存实现，最终语义边界待确认。
-- 待确认（本轮自定，原文未写）：
-  1. `taintLabels` 取值集合：本轮仅定义 `unknown`/`unverified`/`verified` + 来源标签前缀（`external:web`、`tool:<name>`、`agent:derived`），原文只说"污点标签"未给枚举；
-  2. `TAINT_POLICY_VERSION='taint-policy-v1'` 与 `taintPolicyVersion` 的默认/可覆写规则；
-  3. 来源标签命名与大小写/分隔符规范（当前 `external:*`、`tool:*`、`agent:*`）；
-  4. 旧数据缺字段读 `unknown` 是 Owner 指定口径，但"新任务无任何上游且无声明时也默认 `unknown`"属自定；
-  5. Producer 声明自身来源标签的入口（当前只有 `persist({sourceLabels})`/`persistTaskArtifacts` 内置 `agent:derived`，Task 的 `taintLabels` 由创建方声明）；
-  6. "何种污点等级禁止调用哪类工具/动作"（§16 硬约束后半句）原文未给映射，**本轮未实现阻断**，仅保留 Gateway 来源链校验；
-  7. 跨 Agent 读取自动继承污点的实现路径（是否要把读取的共享产物自动写入消费任务的 `provenanceRefs`）需 Owner 拍板。
+- 第一轮判 0.5 的两个缺口（本轮已闭合）：① 跨 Agent读取不继承（"随引用传播"只覆盖显式 `content.evidence`/任务级声明）；② 没有"污点→工具"阻断，Gateway 只校验来源链。原文未给的具体取值/阈值，本轮按 Owner 授权取**安全默认值 + 版本记录**，均属**本仓库裁决，不是 Notion 原文标准**。
+- 第二轮实现（缺口①：读取即继承，taint propagation on read）：
+  - `tasks.js`：新增 `appendProvenanceRefs`/`appendTaintLabels`。只追加不覆盖、按键去重、来源引用上限 20（与产物引用上限一致）；传入引用不可解析/非法即追加 `unknown`；每次变更写 `task.provenance_appended` 审计（`status/mode/added`）并 `saveTasks()`。跨 Agent 只改消费任务记录，不改被读对象。
+  - `worker-scope.js`：读路径接线 `readSharedArtifact`、`readOtherArtifact`、`projectSharedContext`（含 `missing`/`version_mismatch`/`stale`）——跨任务读取通过或失败时都把被读对象的 `{kind,id,version}` 追加进消费任务；失败时追加 `unknown`（不静默丢弃）。
+  - 接不上的两条（原因）：`authorizeSessionRead` 读的是 Session 而非产物，没有 `{kind,id,version}` 可构造；强造引用会让 Gateway 后续永久 `taint_provenance_broken`，故不接线。`context-projection.js` 是纯投影函数、不读存储，继承接线落在其上游 `projectSharedContext`。
+  - `memory_search`：记忆记录没有 `version`，只追加来源标签（`tool:memory_search` 与 `unknown`/`external:import`/`external:tool`/`external:web`/`internal:<source>`），不追加不可解析引用（原因同上）。
+- 第二轮实现（缺口②：污点到工具的阻断策略）：
+  - 新文件 `server/agents/taint-policy.js`：`taint-policy-v1` 默认规则 `no-taint-allow` / `verified-allow` / `untrusted-read-only-allow` / `untrusted-side-effect-deny`；`evaluate` 为纯函数，未命中任何规则 → `unclassified-fail-closed`（默认拒绝）。
+  - 分类：`unknown`/`unverified`/`external:*` → untrusted；`verified`/`agent:*`/`internal:*`/`tool:*` → trusted（`tool:*` 是内部工具身份标签，外部工具内容用 `external:tool`）。**该取值与规则映射为本仓库裁决，非 Notion 原文标准。**
+  - `tool-gateway.js`：每次 `authorizeTool` 依次做原有授权（`allowedTools`/策略/`answer_only`）→ 来源链解析 → 污点策略；拒绝返回 `code='taint_tool_denied'` + `ruleId` + `policyVersion`；未知工具元数据按 `readOnly:false`（fail-closed）。策略只做 AND，结构上不能放大 `allowedTools`；`trustLevel` 不参与放行；审批要求未被策略修改（只可能更严）。
+  - `runtime.js`：`getTaintState` 每次调用实时读任务（不是 Planner 建任务时的快照）；每次判定写 `tool.policy_decision`（`policyVersion/ruleId/decision`）；拒绝沿用 `tool.denied` 并带 `detail/ruleId/policyVersion`。
+  - 版本记录：`createVersion` 复用 `failopen-policy.js` 的原子写 + history 生效/失效风格（旧版本写 `retiredAt`）；产物落盘 `taintPolicyVersion`，旧产物不回写。
+- 证据（`tests/agent-taint-policy.test.js` 5 条真跑：真实 `artifact-store`/任务存储/Worker Scope/真实 Runtime + Gateway，未 mock 存储与校验）：
+  - f 跨 Agent 读：researcher 任务 A 写带 `external:web` 的共享产物，memory 任务 B 经 `readSharedArtifact` 读取后，`provenanceRefs` 自动出现 `{kind:'note',id,version:1}`，任务 taint 含 `external:web`；B 的派生产物 taint 为 `['agent:derived','external:web','unverified']`；上游产物本身未被修改。探针原文：
+    `[EVIDENCE] taint-f {"upstreamTaskId":"task_56299362-4b3b-4d17-a4dc-9ae7b58ef71a","consumerTaskId":"task_a51f8708-3612-4868-9341-782df2a7d79d","sharedRef":{"kind":"note","id":"art_7881bbd9042ac55af9ad05fed642a2e4","version":1},"consumerProvenanceRefs":[{"kind":"note","id":"art_7881bbd9042ac55af9ad05fed642a2e4","version":1}],"consumerTaintLabels":["external:web","unverified"],"appendEvent":{"status":"queued","mode":"worker.readSharedArtifact","added":1},"derivedArtifact":{"id":"art_e8ac8bd21baa0df65e197d96b866c607","taintLabels":["agent:derived","external:web","unverified"]},"upstreamUnchanged":[]}`
+  - g 阻断与放行：任务 taint `['external:web']`，真实模型先请求 `memory_remember`（副作用）→ Gateway 拒绝，`errorCode='taint_tool_denied'`、`ruleId='untrusted-side-effect-deny'`、`policyVersion='taint-policy-v1'`；随后请求 `memory_search`（只读）→ 放行并完成；两条判定都写 `tool.policy_decision`。探针原文：
+    `[EVIDENCE] taint-g {"taskId":"task_13553a47-c724-476d-9d4a-0eef2aa095fc","taskTaintLabels":["external:web"],"deniedWrite":{"tool":"memory_remember","errorCode":"taint_tool_denied","detail":"untrusted-side-effect-deny","ruleId":"untrusted-side-effect-deny","policyVersion":"taint-policy-v1","mode":"delegated_task"},"allowedRead":{"tool":"memory_search","ok":true,"mode":"delegated_task"},"writeDecision":{"tool":"memory_remember","decision":"deny","ruleId":"untrusted-side-effect-deny","policyVersion":"taint-policy-v1","mode":"delegated_task"},"readDecision":{"tool":"memory_search","decision":"allow","ruleId":"untrusted-read-only-allow","policyVersion":"taint-policy-v1","mode":"delegated_task"},"status":"completed"}`
+  - h 收窄不扩张：上游产物 `trustLevel='independently_verified'` 但仍带 `external:web` 污点；h1 任务允许写工具却被污点策略拒绝（`taint_tool_denied`）；h2 任务未授权写工具 → 先被原有授权拒绝（`task_tool_denied`，`policyVersion=null`），证明策略不能放大 `allowedTools`、trustLevel 不放行。探针原文：
+    `[EVIDENCE] taint-h {"trustLevel":"independently_verified","upstreamTaintLabels":["external:web","unverified"],"h1":{"taskTaintLabels":["external:web","unverified"],"denied":{"tool":"memory_remember","errorCode":"taint_tool_denied","detail":"untrusted-side-effect-deny","ruleId":"untrusted-side-effect-deny","policyVersion":"taint-policy-v1","mode":"delegated_task"}},"h2":{"allowedTools":["memory_search"],"denied":{"tool":"memory_remember","errorCode":"task_tool_denied","detail":null,"ruleId":null,"policyVersion":null,"mode":"delegated_task"}},"conclusion":"trustLevel 与污点正交；策略只收窄，未授权工具不被放大"}`
+  - j 断裂读：`projectSharedContext` 读取不存在的 `{id,version}` → `artifact_not_found`，任务 taint 变 `['unknown']`、引用仍留痕（`kind:null`），`readTaintLabels` 返回 `['unknown']` 而非空集合（不误判干净）。探针原文：
+    `[EVIDENCE] taint-j {"taskId":"task_1aba9192-adcd-412c-861e-e92998bfc452","missingId":"art_taint_missing_never_exists","thrownCode":"artifact_not_found","taskTaintLabels":["unknown"],"taskProvenanceRefs":[{"kind":null,"id":"art_taint_missing_never_exists","version":1}],"readTaintLabels":["unknown"],"deniedEvent":{"targetType":"projection","targetId":"art_taint_missing_never_exists","requesterTaskId":"task_1aba9192-adcd-412c-861e-e92998bfc452","access":"denied","reason":"missing","errorCode":"artifact_not_found"}}`
+  - i 策略版本：`createVersion` 产生 `taint-policy-v2`，旧版 `taint-policy-v1.retiredAt=2026-11-05T01:00:00.000Z`；旧产物仍 `taint-policy-v1`，新产物落 `taint-policy-v2`；新策略下 untrusted 只读被拒（`ruleId='untrusted-deny-all'`）；未分类标签 `weird:foo` 被 `unclassified-fail-closed` 拒绝。探针原文：
+    `[EVIDENCE] taint-i {"legacyArtifactPolicyVersion":"taint-policy-v1","freshArtifactPolicyVersion":"taint-policy-v2","policyFile":"C:\\Users\\Administrator\\AppData\\Local\\Temp\\bluebird-taint-EVbATY\\agent-taint-policies.json","versions":[{"policyVersion":1,"policyLabel":"taint-policy-v1","effectiveFrom":"2026-11-05T00:00:00.000Z","retiredAt":"2026-11-05T01:00:00.000Z","ruleIds":["no-taint-allow","verified-allow","untrusted-read-only-allow","untrusted-side-effect-deny"],"note":"本仓库裁决的默认安全值，非 Notion 原文标准"},{"policyVersion":2,"policyLabel":"taint-policy-v2","effectiveFrom":"2026-11-05T01:00:00.000Z","retiredAt":null,"ruleIds":["empty-allow","trusted-allow","untrusted-deny-all"],"note":"测试用收窄策略：untrusted 连只读也拒绝"}],"untrustedVerdict":{"ruleId":"untrusted-deny-all","policyVersion":"taint-policy-v2"},"unclassified":{"ruleId":"unclassified-fail-closed","reason":"no_rule_matched_fail_closed","gatewayCode":"taint_tool_denied"}}`
+- 判定 1.0 的理由：缺口①②均以真跑证据闭合；原文硬约束"污染内容不得扩大 allowedTools / 触发更高权限"由 g/h 证明——h2 未授权工具仍 `task_tool_denied` 且不经过污点策略（`policyVersion=null`），h1 即使上游 `independently_verified` 仍被污点收窄；策略结构上只 AND，无法放行 `allowedTools` 之外的任何工具。
+- 限定（不改变 1.0 判定，但必须记录）：
+  - `authorizeSessionRead` 与 `memory_search` 无法生成可解析 `{kind,id,version}`，只接 taint/不接 ref（原因见上）；因此"读取即继承"在这两条上只传播标签，不传播引用。
+  - `taintLabels` 取值、规则映射、`taint-policy-v1` 默认值、追加上限 20、`BLUEBIRD_TAINT_POLICY_FILE` 位置均为**本仓库裁决**，非 Notion 原文标准。
+  - 策略存储是本地 JSON（非分布式一致性），未实现灰度/回滚（原文未要求）；HTTP 读端点复用同一库函数故继承同样生效，但未单独跑 HTTP 级用例。
+- 待确认（原文未定义，按安全默认值 + 版本记录）：
+  1. 污点枚举与来源前缀（`unknown`/`unverified`/`verified` + `external:*`/`tool:*`/`agent:*`/`internal:*`）；
+  2. 规则映射"untrusted 禁副作用、放行只读"及未知工具按副作用处理；
+  3. 来源引用追加上限 20（沿用产物上限）；
+  4. 新任务无上游时 taint 为空集合（旧数据缺字段仍 `unknown`，不得默认干净）；
+  5. `memory_search` 无版本 → 只继承 taint 不追加引用；
+  6. `authorizeSessionRead` 不接线（Session 非产物）；
+  7. 策略版本文件位置、生效/失效记录形态与回滚/灰度未实现。
 
 ### 门禁与全量（实测，2026-11-05）
 
-`node scripts/run-tests.js`（前台一次）→ `100 个测试文件，全部通过`、`FULL_EXIT=0`；`npx tsc --noEmit` EXIT=0；`npx expo lint` EXIT=0；`node scripts/verify-test-coverage.js` → `backend=2260/2260 nodeSuite=222/222 runner=2038/2038 frontend=188/188 suites=22/22 failed=0`、CI runner 100/100、EXIT=0；`node scripts/sync-doc-counts.js --check` → `backend 2260、nodeSuite 222、runner 2038、frontend 188、文件 100` EXIT=0；`node scripts/verify-api-capabilities.js`（95 路由 / 20 族 / 仅 API 9）EXIT=0。
+`node scripts/run-tests.js`（前台一次）→ `101 个测试文件，全部通过`、`FULL_EXIT=0`；`npx tsc --noEmit` EXIT=0；`npx expo lint` EXIT=0；`node scripts/verify-test-coverage.js` → `backend=2265/2265 nodeSuite=222/222 runner=2043/2043 frontend=188/188 suites=22/22 failed=0`、CI runner 101/101、EXIT=0；`node scripts/sync-doc-counts.js --check` → `backend 2265、nodeSuite 222、runner 2043、frontend 188、文件 101` EXIT=0；`node scripts/verify-api-capabilities.js`（95 路由 / 20 族 / 仅 API 9）EXIT=0。
 （补充：trustLevel 接线首轮收尾前，`verify-test-coverage` 曾两次在不同文件（`agent-worker` 1/51、`memory-bot` 2/9）出现单次执行失败；两文件单独跑与按 verify 同环境复跑均 EXIT=0，最终门禁一次通过，判为既有偶发 flaky，未改其用例。）
 
 ### 待确认清单（原文未定义，按最小必要自定并在此登记）
