@@ -1,0 +1,179 @@
+{
+  "policyVersion": "taint-propagation-realmodel-v1",
+  "environment": {
+    "provider": "LongCat",
+    "baseUrl": "https://api.longcat.chat/openai",
+    "modelId": "LongCat-2.5",
+    "realModel": true,
+    "note": "真实模型环境；四类检查点逐条按实跑结果记录。"
+  },
+  "startedAt": "2026-11-05T16:09:21.402Z",
+  "checks": {
+    "provenanceRefsGenerated": {
+      "beforeRead": [],
+      "afterRead": [
+        {
+          "kind": "note",
+          "id": "art_4acda03175c5d255608533d8cfc5ab28",
+          "version": 1
+        }
+      ],
+      "expectedRef": {
+        "kind": "note",
+        "id": "art_4acda03175c5d255608533d8cfc5ab28",
+        "version": 1
+      },
+      "hit": true,
+      "appendEvents": [
+        {
+          "eventId": "evt_023f80fc-c04f-402d-b729-9160dc219e3b",
+          "payload": {
+            "status": "queued",
+            "mode": "worker.readSharedArtifact",
+            "added": 1
+          }
+        }
+      ]
+    },
+    "taskTaintInherited": {
+      "taintLabels": [
+        "unverified",
+        "web:vendor-a.example"
+      ],
+      "hit": true
+    },
+    "derivedTaintUnion": {
+      "upstreamTaint": [
+        "unverified",
+        "web:vendor-a.example"
+      ],
+      "derivedTaint": [
+        "agent:derived",
+        "unverified",
+        "web:vendor-a.example"
+      ],
+      "expected": [
+        "agent:derived",
+        "unverified",
+        "web:vendor-a.example"
+      ],
+      "hit": true
+    },
+    "producerClearRejected": {
+      "before": [
+        "agent:derived",
+        "unverified",
+        "web:vendor-a.example"
+      ],
+      "after": [
+        "agent:derived",
+        "unverified",
+        "web:vendor-a.example"
+      ],
+      "error": {
+        "code": "not_authorized",
+        "status": 403,
+        "message": "taintLabels 只能由 Verification Engine 写入"
+      },
+      "hit": true,
+      "auditCount": 1,
+      "audit": [
+        {
+          "at": "2026-11-05T16:09:42.528Z",
+          "action": "artifact.taint_write_rejected",
+          "reason": "not_authorized|writer:producer"
+        }
+      ]
+    },
+    "gatewayBrokenFailClosed": {
+      "taskStatus": "completed",
+      "errorCode": null,
+      "modelTurns": [
+        {
+          "eventId": "evt_3c13ba75-9dff-4529-a6f1-1e7c6372485e"
+        }
+      ],
+      "denied": [
+        {
+          "eventId": "evt_a62f78ca-7302-41bc-9be4-98082fa175ca",
+          "tool": "memory_search",
+          "errorCode": "taint_provenance_broken",
+          "detail": "artifact_chain_broken"
+        }
+      ],
+      "hit": true,
+      "note": "真实模型发起 memory_search，Gateway 以 taint_provenance_broken 拒绝（fail-closed）。"
+    }
+  },
+  "usage": {
+    "upstream": {
+      "prompt_tokens": 327,
+      "completion_tokens": 316,
+      "total_tokens": 643
+    },
+    "downstream": {
+      "prompt_tokens": 326,
+      "completion_tokens": 729,
+      "total_tokens": 1055
+    },
+    "gateway": {
+      "prompt_tokens": 1760,
+      "completion_tokens": 928,
+      "total_tokens": 2688
+    },
+    "source": "provider_reported"
+  },
+  "cost": "provider 未返回",
+  "costReason": "LongCat 响应未返回计价字段；按 provider 上报口径记未返回，不估算成本。",
+  "tasks": {
+    "upstream": {
+      "taskId": "task_03838430-e8a3-4960-aa16-b553b20e5f74",
+      "status": "completed"
+    },
+    "downstream": {
+      "taskId": "task_701b6e83-32f8-4a2d-9c2b-6e340a96b6ab",
+      "status": "completed"
+    },
+    "gateway": {
+      "taskId": "task_0dac8b42-17db-4cd4-9720-e6b9a3aa2837",
+      "status": "completed"
+    }
+  },
+  "artifacts": {
+    "upstream": {
+      "ref": {
+        "kind": "note",
+        "id": "art_4acda03175c5d255608533d8cfc5ab28",
+        "version": 1
+      },
+      "taintLabels": [
+        "unverified",
+        "web:vendor-a.example"
+      ]
+    },
+    "derived": {
+      "ref": {
+        "kind": "summary",
+        "id": "art_615f7b9c7e58352946a5e923c4a1f0e0",
+        "version": 1
+      },
+      "taintLabels": [
+        "agent:derived",
+        "unverified",
+        "web:vendor-a.example"
+      ]
+    }
+  },
+  "totals": {
+    "totalTokens": 4386,
+    "totalLatencyMs": 38201,
+    "latencyMs": {
+      "upstream": 7429,
+      "downstream": 13601,
+      "gateway": 17171
+    },
+    "runDurationMs": 38330
+  },
+  "finishedAt": "2026-11-05T16:09:59.732Z",
+  "outcome": "passed"
+}
