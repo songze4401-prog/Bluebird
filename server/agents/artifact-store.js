@@ -25,9 +25,10 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { writeFileAtomicSync } = require('../atomic-write');
-const { AgentError } = require('./errors');
+const { AgentError, conflictError } = require('./errors');
 const cycleDetection = require('./cycle-detection');
 const taintPolicy = require('./taint-policy');
+const conflictRecord = require('./conflict-record');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -82,6 +83,82 @@ const SHARE_TASK_MAX = 50;
 
 function nowIso(now = Date.now()) {
   return new Date(now).toISOString();
+}
+
+// ---- A-02 Blackboard CAS：stateVersion + expectedVersion ----
+// 语义与 task-store 的 CAS 对齐：每次内容/验证状态写入都让 stateVersion 单调 +1；
+// 写入方可带 expectedVersion（期望的 lineage 当前 stateVersion），不匹配即 409 conflict。
+// 版本裁决沿 lineage（taskId + kind）：内容变化时旧记录 superseded 并记 supersededBy，
+// 新记录继承 lineage 的最大 stateVersion + 1。旧记录缺 stateVersion 时读作 0（不误判为脏）。
+function stateVersionOf(artifact) {
+  return artifact && Number.isInteger(artifact.stateVersion) ? artifact.stateVersion : 0;
+}
+
+function lineageMaxStateVersion(store, taskId, kind) {
+  let max = 0;
+  for (const item of Object.values(store.artifacts)) {
+    if (item && item.taskId === taskId && item.kind === kind) {
+      max = Math.max(max, stateVersionOf(item));
+    }
+  }
+  return max;
+}
+
+function bumpStateVersion(artifact, now) {
+  artifact.stateVersion = stateVersionOf(artifact) + 1;
+  artifact.stateVersionChangedAt = nowIso(now);
+  return artifact;
+}
+
+function lineageKeyOf(taskId, kind) {
+  return `artifact-lineage:${taskId || 'unbound'}:${kind}`;
+}
+
+/**
+ * CAS 失配：先落 ConflictRecord（temporal：同一 lineage 并发写），再抛既有七字段
+ * conflict 错误（复用 errors.conflictError，不新增错误码）。冲突记录写入失败不掩盖
+ * 409 结论——调用方仍能按 conflict 重读重试。
+ */
+function raiseArtifactConflict({
+  taskId = null,
+  kind,
+  expectedVersion,
+  currentVersion,
+  attemptedId,
+  headId = null,
+  runId = null,
+  now = Date.now(),
+}) {
+  const subjectKey = lineageKeyOf(taskId, kind);
+  const candidateRefs = headId ? [String(headId), String(attemptedId)] : [String(attemptedId)];
+  const evidenceRefs = [
+    `expectedStateVersion:${String(expectedVersion)}`,
+    `currentStateVersion:${String(currentVersion)}`,
+  ];
+  let conflictId = null;
+  try {
+    const record = conflictRecord.createRecord({
+      subjectKey,
+      conflictType: 'temporal',
+      candidateRefs,
+      evidenceRefs,
+      rationale: 'artifact_cas_conflict',
+      taskId: taskId || null,
+      runId: runId || null,
+      createdAt: nowIso(now),
+    });
+    conflictRecord.persist(record);
+    conflictId = record.conflictId;
+  } catch (_) {
+    // 冲突记录不可用时仍必须返回 conflict；留痕失败不反转写入拒绝。
+  }
+  throw conflictError({
+    taskId: taskId || '',
+    expectedVersion,
+    currentVersion,
+    runId,
+    causeRef: conflictId || attemptedId,
+  });
 }
 
 function ensureDir() {
@@ -282,6 +359,13 @@ function versionsOf({ taskId = null, kind } = {}) {
     .sort((a, b) => (Number(a.version) || 0) - (Number(b.version) || 0));
 }
 
+/** A-02：读 lineage 当前 stateVersion（写入方据此填 expectedVersion）。 */
+function lineageStateVersion({ taskId = null, kind } = {}) {
+  const artifactKind = assertKind(kind);
+  const boundTaskId = taskId ? String(taskId).slice(0, ID_MAX) : null;
+  return lineageMaxStateVersion(readArtifacts(), boundTaskId, artifactKind);
+}
+
 /**
  * Phase 2 第 1 项：任务级共享登记。
  *
@@ -348,6 +432,7 @@ function share(id, { withTaskIds = [], byTaskId = null, now = Date.now() } = {})
     sharedAt: (artifact.share && artifact.share.sharedAt) || nowIso(now),
     updatedAt: nowIso(now),
   };
+  bumpStateVersion(artifact, now);
   try {
     writeArtifacts(store);
   } catch (error) {
@@ -618,6 +703,7 @@ function setTaintLabels(id, { labels, writer, reason = null, now = Date.now() } 
   record.taintChangedAt = nowIso(now);
   record.taintChangedBy = TRUST_WRITER;
   record.lastCheckedAt = nowIso(now);
+  bumpStateVersion(record, now);
   try {
     writeArtifacts(store);
   } catch (error) {
@@ -655,6 +741,7 @@ function persist({
   runId = null,
   provenanceRefs = [],
   sourceLabels = [],
+  expectedVersion = null,
   now = Date.now(),
 } = {}) {
   const artifactKind = assertKind(kind);
@@ -703,9 +790,36 @@ function persist({
   } catch (error) {
     throw wrapStoreError(error, 'artifact_store_read_failed');
   }
+
+  // A-02：expectedVersion = 调用方读到的 lineage 当前 stateVersion。
+  // 校验先于任何写入（含幂等正文重写），保证过期写入不产生任何副作用。
+  const currentStateVersion = lineageMaxStateVersion(store, boundTaskId, artifactKind);
+  if (expectedVersion !== null && expectedVersion !== undefined) {
+    if (!Number.isInteger(expectedVersion) || expectedVersion < 0) {
+      throw new AgentError('artifact_expected_version_invalid', 'expectedVersion 非法', 400, {
+        expectedVersion,
+      });
+    }
+    if (expectedVersion !== currentStateVersion) {
+      const head = Object.values(store.artifacts)
+        .filter(item => item && item.taskId === boundTaskId && item.kind === artifactKind)
+        .sort((a, b) => stateVersionOf(b) - stateVersionOf(a))[0];
+      raiseArtifactConflict({
+        taskId: boundTaskId,
+        kind: artifactKind,
+        expectedVersion,
+        currentVersion: currentStateVersion,
+        attemptedId: id,
+        headId: head ? head.id : null,
+        runId,
+        now,
+      });
+    }
+  }
+
   const existing = store.artifacts[id];
   if (existing) {
-    // 幂等：同一产物重复落盘不新增记录、不改 refCount。
+    // 幂等：同一产物重复落盘不新增记录、不改 refCount、不提升 stateVersion。
     // 正文按 id 幂等重写一次，兼作"索引在、正文丢"的自愈路径（内容由 hash 决定，写回安全）。
     writeContent(existing, content, normalized);
     return existing;
@@ -726,12 +840,17 @@ function persist({
     item.supersededBy = id;
     item.supersededAt = nowIso(now);
     item.lastCheckedAt = nowIso(now);
+    // 注意：superseded 是生命周期裁决，不单独抬 lineage 计数；
+    // 本条写入的 stateVersion = currentStateVersion + 1，lineage 头部唯一。
   }
 
   const artifact = {
     id,
     kind: artifactKind,
     version,
+    // A-02：lineage 级单调版本；旧记录缺字段时按 0 兜底。
+    stateVersion: currentStateVersion + 1,
+    stateVersionChangedAt: nowIso(now),
     createdAt: nowIso(now),
     contentHash,
     refCount: 0,
@@ -910,6 +1029,7 @@ function confirmRefs(refs, { taskId, runId = null, now = Date.now() } = {}) {
     artifact.refCount = artifact.refs.length;
     artifact.commit = 'committed';
     artifact.lastCheckedAt = at;
+    bumpStateVersion(artifact, now);
   }
 
   try {
@@ -931,6 +1051,7 @@ function markOrphan(id, { reason = 'no_task_reference', now = Date.now() } = {})
   artifact.commit = 'orphan';
   artifact.orphanReason = String(reason).slice(0, 120);
   artifact.lastCheckedAt = nowIso(now);
+  bumpStateVersion(artifact, now);
   try {
     writeArtifacts(store);
   } catch (error) {
@@ -945,6 +1066,7 @@ function markScanned(id, { now = Date.now() } = {}) {
   const artifact = store.artifacts[String(id || '').slice(0, ID_MAX)];
   if (!artifact) return null;
   artifact.lastCheckedAt = nowIso(now);
+  bumpStateVersion(artifact, now);
   writeArtifacts(store);
   return artifact;
 }
@@ -968,6 +1090,7 @@ function markStatus(id, status, { by = null, reason = '', now = Date.now() } = {
     artifact.invalidatedReason = String(reason || '').slice(0, 120);
   }
   artifact.lastCheckedAt = nowIso(now);
+  bumpStateVersion(artifact, now);
   try {
     writeArtifacts(store);
   } catch (error) {
@@ -1043,6 +1166,7 @@ function setTrustLevel(
     reason: reason === null ? null : String(reason).slice(0, 200),
   };
   artifact.lastCheckedAt = nowIso(now);
+  bumpStateVersion(artifact, now);
   try {
     writeArtifacts(store);
   } catch (error) {
@@ -1177,6 +1301,8 @@ module.exports = {
   TRUST_WRITER,
   trustRank,
   trustAtLeast,
+  stateVersionOf,
+  lineageStateVersion,
   TAINT_POLICY_VERSION,
   TAINT_UNKNOWN,
   TAINT_UNVERIFIED,
