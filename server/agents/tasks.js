@@ -107,6 +107,8 @@ const EVENT_TYPES = Object.freeze([
   'task.cancelled',
   'task.timed_out',
   'task.uncertain',
+  // §24.3 第 5 条：非法迁移被拒绝时留审计（只记 from/to 与拒绝原因，不改状态）。
+  'task.transition_rejected',
 ]);
 
 const SAFE_PAYLOAD_KEYS = new Set([
@@ -190,6 +192,9 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'attempts',
   'maxAttempts',
   'redeliveredTaskId',
+  // §24.3 第 5 条：非法迁移审计只落扁平标量（from/to 与拒绝原因）。
+  'fromStatus',
+  'toStatus',
 ]);
 
 let taskCache = null;
@@ -1307,6 +1312,15 @@ function updateTask(taskId, patch = {}) {
       400
     );
   }
+  // ②/§24.3：stateVersion 由存储层分配（CAS 版本），调用方只读；
+  // 直接写入视为越权，显式拒绝而不是静默忽略。
+  if (patch.stateVersion !== undefined) {
+    throw new AgentError(
+      'task_state_version_read_only',
+      'stateVersion 由存储层分配，调用方只读',
+      400
+    );
+  }
   // ② CAS：在任何字段被修改之前校验版本，冲突时内存与磁盘都保持原样。
   // 与 checkpointVersion 无关（后者是检查点序号，不是并发版本）。
   assertExpectedVersion(task, patch.expectedVersion);
@@ -1483,7 +1497,28 @@ function updateTask(taskId, patch = {}) {
 // recoverInterrupted 需要批量改状态后只落盘一次，因此复用这个内部函数；
 // 对外只能经 transitionTask。
 function applyTransition(task, to) {
-  stateMachine.assertTransition(task.status, to);
+  try {
+    stateMachine.assertTransition(task.status, to);
+  } catch (error) {
+    // §24.3 第 5 条：拒绝非法迁移要记录原因。审计写入失败不得掩盖原拒绝
+    // （吞掉审计异常后仍抛出原错误）。
+    try {
+      appendEvent({
+        botId: task.botId,
+        taskId: task.taskId,
+        runId: task.runId || null,
+        eventType: 'task.transition_rejected',
+        payload: {
+          fromStatus: task.status,
+          toStatus: to,
+          reason: (error && error.code) || 'invalid_transition',
+        },
+      });
+    } catch (_) {
+      // 审计通道不可用时不改变拒绝结论。
+    }
+    throw error;
+  }
   // S6b：审批等待期同样受 Task deadline 约束。进入 waiting_approval 时统一挂计时，
   // 离开时统一清除，避免任何一条入口路径留下永久等待的资源占用。
   if (task.status === 'waiting_approval' && to !== 'waiting_approval') {
