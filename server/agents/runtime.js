@@ -21,7 +21,7 @@ const { projectWorkerContext } = require('./context-projection');
 const { normalizeWorkerResult } = require('./worker-result');
 const { createToolAuthorizer } = require('./tool-gateway');
 const { listToolMetadata } = require('../agent-runtime');
-const { AgentError, budgetExceededError } = require('./errors');
+const { AgentError, budgetExceededError, classifyFailureMode } = require('./errors');
 const approvalDeadline = require('./approval-deadline');
 const conflictRecord = require('./conflict-record');
 const artifactCommit = require('./artifact-commit');
@@ -96,6 +96,8 @@ function decideFailureDisposition({
       retryAtMs: dispatchDelayMs,
       status: null,
       errorCode: errorCode || 'agent_task_failed',
+      // A-10：调度期失败也带失败模式，便于 §17 监控按类聚合。
+      failureMode: classifyFailureMode({ errorCode }),
     };
   }
   const artifactFailure =
@@ -131,6 +133,9 @@ function decideFailureDisposition({
     retryable,
     status,
     errorCode,
+    // A-10 / §17：把本次失败归到九类之一（无法归类为 null），
+    // 事件与监控直接消费该字段，不在别处重复判定。
+    failureMode: classifyFailureMode({ errorCode }),
     artifactFailure,
     sideEffectFailure,
     timedOut,
@@ -1399,7 +1404,11 @@ async function runTask(taskId) {
       safeEvent(
         task.botId,
         'task.failed',
-        { status: 'failed', errorCode: 'task_lease_lost' },
+        {
+          status: 'failed',
+          errorCode: 'task_lease_lost',
+          failureMode: 'stale_lease',
+        },
         { taskId: task.taskId, runId, sessionId: task.sessionId }
       );
       return;
@@ -1444,6 +1453,7 @@ async function runTask(taskId) {
           errorCode,
           mode: 'retry',
           attempts: retried.attempts,
+          ...(disposition.failureMode ? { failureMode: disposition.failureMode } : {}),
           ...(retried.retryAt ? { retryAt: retried.retryAt } : {}),
         },
         { taskId: task.taskId, sessionId: task.sessionId }
@@ -1494,7 +1504,11 @@ async function runTask(taskId) {
         : status === 'timed_out'
           ? 'task.timed_out'
           : 'task.failed',
-      { status, errorCode },
+      {
+        status,
+        errorCode,
+        ...(disposition.failureMode ? { failureMode: disposition.failureMode } : {}),
+      },
       { taskId: task.taskId, runId, sessionId: task.sessionId }
     );
   } finally {

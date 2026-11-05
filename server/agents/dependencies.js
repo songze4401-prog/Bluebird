@@ -163,10 +163,53 @@ function validateGraph({ nodes = [], tasksById = {} } = {}) {
   return { order, refsByKey: byKey };
 }
 
+/**
+ * A-10 / §17 死锁检测（纯函数、无 I/O）：在非终态任务之间连边
+ * （A dependsOn B 且 B 仍非终态 → A 等 B），DFS 找出处在环上的任务。
+ * 只返回环成员，不落盘；由调用方按既有终态语义收口（不新增状态）。
+ *
+ * @returns {string[]} 去重且稳定排序的 taskId 列表；无环返回 []
+ */
+function detectDeadlocks(tasksById = {}) {
+  const graph = new Map();
+  for (const task of Object.values(tasksById || {})) {
+    if (!task || typeof task.taskId !== 'string') continue;
+    if (stateMachine.isTerminal(task.status)) continue;
+    const deps = dependencyIds(task);
+    if (!deps.length) continue;
+    graph.set(task.taskId, deps);
+  }
+  const color = new Map(); // 0/undefined=未访问，1=栈内，2=已完成
+  const stack = [];
+  const cycleNodes = new Set();
+  const visit = taskId => {
+    color.set(taskId, 1);
+    stack.push(taskId);
+    for (const depTaskId of graph.get(taskId) || []) {
+      // 依赖不在非终态图内（已终态/不存在）说明等待对象不会回指，不构成互等。
+      if (!graph.has(depTaskId)) continue;
+      const depColor = color.get(depTaskId) || 0;
+      if (depColor === 1) {
+        const start = stack.indexOf(depTaskId);
+        for (let i = start; i < stack.length; i += 1) cycleNodes.add(stack[i]);
+      } else if (depColor === 0) {
+        visit(depTaskId);
+      }
+    }
+    stack.pop();
+    color.set(taskId, 2);
+  };
+  for (const taskId of graph.keys()) {
+    if ((color.get(taskId) || 0) === 0) visit(taskId);
+  }
+  return [...cycleNodes].sort();
+}
+
 module.exports = {
   MAX_DEPENDENCIES,
   isReady,
   blockers,
   normalizeRefs,
   validateGraph,
+  detectDeadlocks,
 };

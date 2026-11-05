@@ -797,6 +797,8 @@ function markOverdue(approvalId, { now = Date.now() } = {}) {
         status: 'pending',
         taskType: record.operation,
         mode: 'approval',
+        // A-10 / §17：审批悬挂/超时统一归入 approval_stall，处置=升级审批。
+        failureMode: 'approval_stall',
         decision: eventType === 'approval.overdue' ? 'overdue' : 'escalated',
       },
       { approvalId: record.approvalId, taskId: record.taskId, sessionId: record.sessionId }
@@ -909,6 +911,7 @@ function escalateApproval(
       decision: 'escalated',
       taskType: record.operation,
       mode: 'approval',
+      failureMode: 'approval_stall',
       source: record.escalationSource,
     },
     { approvalId: record.approvalId, taskId: record.taskId, sessionId: record.sessionId }

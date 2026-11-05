@@ -213,6 +213,8 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'toStatus',
   // §27：越权写入 trustLevel 的审计字段（字段名 + 拒绝来源）。
   'field',
+  // A-10 / §17：九类失败模式的分类标签，随既有失败/恢复/升级事件一起落审计。
+  'failureMode',
 ]);
 
 let taskCache = null;
@@ -521,6 +523,46 @@ function listEvents(botId, { limit = 50 } = {}) {
     .slice(-max)
     .reverse()
     .map(event => ({ ...event, payload: { ...event.payload } }));
+}
+
+/**
+ * A-10 / §17：事件乱序 / 重复投递检测（只读，不改事件历史）。
+ * - duplicate_delivery：同一 dedupeKey 被重复投递（appendEvent 只累加 dedupeCount）；
+ * - timestamp_regression：同一 task 的事件在文件顺序上出现时间倒序。
+ * 返回 [{ taskId, reason, eventId }]，由启动恢复流程消费。
+ */
+function detectEventOrderViolations({ botId = null } = {}) {
+  let events = [];
+  try {
+    events = loadEvents().events || [];
+  } catch (_) {
+    events = [];
+  }
+  const violations = [];
+  const lastTimestampByTask = new Map();
+  for (const event of events) {
+    if (!event || typeof event.taskId !== 'string' || !event.taskId) continue;
+    if (botId && event.botId !== botId) continue;
+    if (Number.isInteger(event.dedupeCount) && event.dedupeCount > 0) {
+      violations.push({
+        taskId: event.taskId,
+        reason: 'duplicate_delivery',
+        eventId: event.eventId,
+      });
+      continue;
+    }
+    const timestamp = Date.parse(event.timestamp);
+    const previous = lastTimestampByTask.get(event.taskId);
+    if (Number.isFinite(timestamp) && Number.isFinite(previous) && timestamp < previous) {
+      violations.push({
+        taskId: event.taskId,
+        reason: 'timestamp_regression',
+        eventId: event.eventId,
+      });
+    }
+    if (Number.isFinite(timestamp)) lastTimestampByTask.set(event.taskId, timestamp);
+  }
+  return violations;
 }
 
 function publicTask(task, { includeResult = true } = {}) {
@@ -2082,6 +2124,11 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
   const recoveryTaskIds = [];
   const expiredWaitingApproval = [];
   let changed = false;
+  // A-10 / §17：启动恢复时一次性对账事件，避免逐任务重复扫描。
+  const eventViolations = detectEventOrderViolations();
+  const eventViolationTaskIds = new Set(
+    eventViolations.map(item => item.taskId).filter(Boolean)
+  );
 
   for (const task of Object.values(state.tasks)) {
     // S6b：重启后 waiting_approval 也必须按 deadline 收敛——不能只依赖“活着的计时器”。
@@ -2150,6 +2197,7 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
             status: 'recovery',
             errorCode: 'recovery_artifact_reference_broken',
             mode: 'cross_store_verify',
+            failureMode: 'artifact_chain_broken',
             detail: refIssues
               .map(item => `${item.artifactId || 'unknown'}:${item.reason}`)
               .join(','),
@@ -2159,6 +2207,54 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
         // 留痕失败不阻断恢复收敛；任务仍以 recovery + errorCode 可查。
       }
       continue;
+    }
+
+    // A-10 / §17：事件乱序/重复投递按既有 recovery 收敛（对账后人工核对），
+    // 只读事件历史，不重排、不覆盖、不重放。
+    if (eventViolationTaskIds.has(task.taskId)) {
+      const violation = eventViolations.find(item => item.taskId === task.taskId) || {};
+      const eventPath = recoveryPath(task.status);
+      if (eventPath) {
+        changed = true;
+        bumpStateVersion(task);
+        for (const step of eventPath) applyTransition(task, step);
+        task.updatedAt = at;
+        task.completedAt = at;
+        task.lease = null;
+        task.retryAt = null;
+        task.heartbeatAt = null;
+        task.errorCode = 'recovery_event_order_violation';
+        task.lastErrorCode = 'recovery_event_order_violation';
+        task.requiresReview = true;
+        task.result = normalizeWorkerResult({
+          status: 'recovery',
+          summary: '',
+          errorCode: 'recovery_event_order_violation',
+          runId: task.runId || null,
+          finishedAt: at,
+        });
+        recovery += 1;
+        recoveryTaskIds.push(task.taskId);
+        try {
+          appendEvent({
+            botId: task.botId,
+            taskId: task.taskId,
+            runId: task.runId || null,
+            sessionId: task.sessionId || null,
+            eventType: 'task.recovered',
+            payload: {
+              status: 'recovery',
+              errorCode: 'recovery_event_order_violation',
+              mode: 'event_order_reconcile',
+              failureMode: 'event_out_of_order',
+              detail: `${violation.reason || 'unknown'}:${violation.eventId || ''}`,
+            },
+          });
+        } catch (_) {
+          // 留痕失败不阻断恢复收敛。
+        }
+        continue;
+      }
     }
 
     changed = true;
@@ -2372,6 +2468,48 @@ function settleDependencies() {
       progressed = true;
     }
   }
+
+  // A-10 / §17：纯死锁环（互相等待）不会命中上面的 failed/missing 分支，
+  // 这里用纯图检测把仍是 queued 的环成员按既有 failed 终态收口。
+  // 处置口径：环依赖无法靠重试自愈 → 终态（errorCode=dependency_deadlock），不新增状态。
+  const latest = loadTasks();
+  const deadlocked = dependencies.detectDeadlocks(latest.tasks);
+  for (const taskId of deadlocked) {
+    const task = latest.tasks[taskId];
+    if (!task || task.status !== 'queued' || task.cancelRequested === true) continue;
+    const cycle = (Array.isArray(task.dependsOn) ? task.dependsOn : []).slice();
+    const finishedAt = nowIso();
+    const result = normalizeWorkerResult({
+      status: 'failed',
+      summary: `依赖环导致任务无法开始执行：${cycle.join(', ')}`.slice(0, 500),
+      errorCode: 'dependency_deadlock',
+      finishedAt,
+      neverStarted: true,
+      blockedBy: cycle,
+    });
+    transitionTask(task.taskId, { to: 'accepted' });
+    transitionTask(task.taskId, {
+      to: 'failed',
+      completedAt: finishedAt,
+      errorCode: 'dependency_deadlock',
+      lastErrorCode: 'dependency_deadlock',
+      result,
+    });
+    appendEvent({
+      botId: task.agentId || task.botId,
+      taskId: task.taskId,
+      eventType: 'task.dependency_failed',
+      payload: {
+        status: 'failed',
+        errorCode: 'dependency_deadlock',
+        failureMode: 'dependency_deadlock',
+        neverStarted: true,
+        blockedBy: cycle.join(','),
+        dependencyTaskId: cycle[0] || '',
+      },
+    });
+    settled.push({ taskId: task.taskId, errorCode: 'dependency_deadlock', blockedBy: cycle });
+  }
   return settled;
 }
 
@@ -2489,6 +2627,7 @@ module.exports = {
   transitionTask,
   appendEvent,
   listEvents,
+  detectEventOrderViolations,
   flushEventOutbox,
   safePayload,
   isTerminalStatus,
