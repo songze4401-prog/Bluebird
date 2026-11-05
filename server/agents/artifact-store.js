@@ -433,7 +433,219 @@ function assertKind(kind) {
  * 新版本沿用同一 lineage（taskId + kind）：内容变化时旧产物标记 superseded
  * 并保留审计，新产物 version = 旧最大 version + 1。
  */
-function persist({ kind, content, taskId = null, runId = null, now = Date.now() } = {}) {
+// ---- §16 来源追踪与污点（provenanceRefs / taintLabels） ----
+// 原文只要求 Task/Artifact 携带这两类字段、污点并集传播、唯一由可信验证/清洗组件
+// 改变标签；未定义标签取值与"何种污点禁止何种工具"的策略。下列常量与取值均为
+// 实现自定（待确认），本轮只做记录/传播/查询/校验，不做阻断策略。
+const TAINT_POLICY_VERSION = 'taint-policy-v1';
+const TAINT_UNKNOWN = 'unknown';
+const TAINT_UNVERIFIED = 'unverified';
+const TAINT_VERIFIED = 'verified';
+const TAINT_LABEL_MAX = 20;
+const TAINT_LABEL_LENGTH = 64;
+const PROVENANCE_REF_MAX = 20;
+
+function normalizeTaintLabels(value, field = 'taintLabels') {
+  if (value === null || value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new AgentError('artifact_taint_invalid', `${field} 必须是标签数组`, 400, { field });
+  }
+  const labels = new Set();
+  for (const item of value) {
+    if (typeof item !== 'string' || !item.trim()) {
+      throw new AgentError('artifact_taint_invalid', `${field} 只能包含非空字符串`, 400, {
+        field,
+      });
+    }
+    const label = item.trim();
+    if (label.length > TAINT_LABEL_LENGTH) {
+      throw new AgentError('artifact_taint_invalid', `${field} 单个标签过长`, 400, {
+        field,
+        maxLength: TAINT_LABEL_LENGTH,
+      });
+    }
+    labels.add(label);
+  }
+  if (labels.size > TAINT_LABEL_MAX) {
+    throw new AgentError('artifact_taint_invalid', `${field} 标签数量超限`, 400, {
+      field,
+      max: TAINT_LABEL_MAX,
+    });
+  }
+  return [...labels].sort();
+}
+
+// 复用既有产物引用 schema {kind,id,version}；version 可省略（表示未钉版本）。
+function normalizeProvenanceRefs(refs, field = 'provenanceRefs') {
+  if (refs === null || refs === undefined) return [];
+  if (!Array.isArray(refs)) {
+    throw new AgentError('artifact_provenance_invalid', `${field} 必须是引用数组`, 400, {
+      field,
+    });
+  }
+  if (refs.length > PROVENANCE_REF_MAX) {
+    throw new AgentError('artifact_provenance_invalid', `${field} 引用数量超限`, 400, {
+      field,
+      max: PROVENANCE_REF_MAX,
+    });
+  }
+  const out = [];
+  for (const item of refs) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new AgentError('artifact_provenance_invalid', `${field} 引用必须是对象`, 400, { field });
+    }
+    const id = String(item.id || '').trim().slice(0, ID_MAX);
+    if (!id) {
+      throw new AgentError('artifact_provenance_invalid', `${field} 引用缺少 id`, 400, { field });
+    }
+    const ref = { kind: null, id, version: null };
+    if (item.kind !== null && item.kind !== undefined) {
+      const kind = String(item.kind).trim();
+      if (!kind || kind.length > 60) {
+        throw new AgentError('artifact_provenance_invalid', `${field} 引用 kind 非法`, 400, {
+          field,
+        });
+      }
+      ref.kind = kind;
+    }
+    if (item.version !== null && item.version !== undefined) {
+      if (!Number.isInteger(item.version) || item.version < 1) {
+        throw new AgentError('artifact_provenance_invalid', `${field} 引用 version 必须是正整数`, 400, {
+          field,
+        });
+      }
+      ref.version = item.version;
+    }
+    out.push(ref);
+  }
+  return out;
+}
+
+// 读边界：缺字段/空数组的旧记录不得默认成"干净"，一律读作 unknown。
+function readTaintLabels(target) {
+  const artifact = typeof target === 'string' ? get(target) : target;
+  if (!artifact || !Array.isArray(artifact.taintLabels) || artifact.taintLabels.length === 0) {
+    return [TAINT_UNKNOWN];
+  }
+  const labels = artifact.taintLabels.filter(item => typeof item === 'string' && item.trim());
+  return labels.length > 0 ? labels.slice() : [TAINT_UNKNOWN];
+}
+
+function readProvenanceRefs(target) {
+  const artifact = typeof target === 'string' ? get(target) : target;
+  if (!artifact || !Array.isArray(artifact.provenanceRefs)) return [];
+  return artifact.provenanceRefs.map(item => ({ ...item }));
+}
+
+// 传播：上游引用可解析则取其标签；不可解析时按 unknown 处理（未知最保守）。
+function inheritedTaintOf(refs) {
+  const labels = new Set();
+  for (const ref of refs) {
+    let artifact = null;
+    try {
+      artifact = get(ref.id);
+    } catch (_) {
+      artifact = null;
+    }
+    if (
+      !artifact ||
+      (ref.kind && ref.kind !== artifact.kind) ||
+      (Number.isInteger(ref.version) &&
+        Number.isInteger(artifact.version) &&
+        ref.version !== artifact.version)
+    ) {
+      labels.add(TAINT_UNKNOWN);
+      continue;
+    }
+    for (const label of readTaintLabels(artifact)) labels.add(label);
+  }
+  return [...labels].sort();
+}
+
+function auditTaintRejection(artifactId, { writer, reason, now }) {
+  try {
+    appendAudit('artifact.taint_write_rejected', artifactId ? { id: artifactId } : null, {
+      now,
+      reason: `${String(reason || 'rejected')}|writer:${String(writer || '') || 'null'}`,
+    });
+  } catch (_) {
+    // 审计失败不改变拒绝结论。
+  }
+}
+
+/**
+ * §16：只有 Verification Engine / 验证路径能改变 taintLabels（与 trustLevel 的唯一
+ * 写入者一致）。生产者或其他路径的写入（含"清除标签"）一律拒绝并留痕。
+ * 原文未定义标签取值与降级规则；本轮只实现"可记录 + 可校验"，不阻断工具。
+ */
+function setTaintLabels(id, { labels, writer, reason = null, now = Date.now() } = {}) {
+  const key = String(id || '').slice(0, ID_MAX);
+  if (String(writer || '') !== TRUST_WRITER) {
+    auditTaintRejection(key, { writer, reason: 'not_authorized', now });
+    throw new AgentError('not_authorized', 'taintLabels 只能由 Verification Engine 写入', 403, {
+      artifactId: key || null,
+      writer: writer ? String(writer).slice(0, 60) : null,
+    });
+  }
+  let next;
+  try {
+    next = normalizeTaintLabels(labels);
+  } catch (error) {
+    auditTaintRejection(key, { writer, reason: 'invalid_labels', now });
+    throw error;
+  }
+  const artifact = get(key);
+  if (!artifact) {
+    auditTaintRejection(key, { writer, reason: 'not_found', now });
+    throw new AgentError('artifact_not_found', '产物引用不可读', 409, { artifactId: key });
+  }
+  const previous = readTaintLabels(artifact).join(',');
+  const store = readArtifacts();
+  const record = store.artifacts[key];
+  record.taintLabels = next;
+  record.taintPolicyVersion = TAINT_POLICY_VERSION;
+  record.taintChangedAt = nowIso(now);
+  record.taintChangedBy = TRUST_WRITER;
+  record.lastCheckedAt = nowIso(now);
+  try {
+    writeArtifacts(store);
+  } catch (error) {
+    throw wrapStoreError(error, 'artifact_store_write_failed');
+  }
+  appendAudit('artifact.taint_changed', record, {
+    now,
+    reason: `${previous}->${next.join(',')}${reason ? `|${String(reason).slice(0, 120)}` : ''}`,
+  });
+  return record;
+}
+
+/**
+ * 验证路径把"未验证"标记转为已验证：移除 unverified、加入 verified。
+ * unknown 保留（未知来源不能仅凭验证洗白，待确认）。
+ */
+function markTaintVerified(id, { writer, reason = 'verification_passed', now = Date.now() } = {}) {
+  const key = String(id || '').slice(0, ID_MAX);
+  const artifact = get(key);
+  if (!artifact) {
+    auditTaintRejection(key, { writer, reason: 'not_found', now });
+    throw new AgentError('artifact_not_found', '产物引用不可读', 409, { artifactId: key });
+  }
+  const next = readTaintLabels(artifact)
+    .filter(label => label !== TAINT_UNVERIFIED)
+    .concat(TAINT_VERIFIED)
+    .sort();
+  return setTaintLabels(key, { labels: next, writer, reason, now });
+}
+
+function persist({
+  kind,
+  content,
+  taskId = null,
+  runId = null,
+  provenanceRefs = [],
+  sourceLabels = [],
+  now = Date.now(),
+} = {}) {
   const artifactKind = assertKind(kind);
   const normalized = normalizeContent(content);
   const bytes = byteLength(normalized);
@@ -448,6 +660,13 @@ function persist({ kind, content, taskId = null, runId = null, now = Date.now() 
   const contentHash = sha256(normalized);
   const boundTaskId = taskId ? String(taskId).slice(0, ID_MAX) : null;
   const id = artifactIdFor(boundTaskId, artifactKind, contentHash);
+
+  // §16：来源引用 + 污点并集（上游 ∪ 生产者自身来源标签 ∪ 未验证标记）。
+  // 生产者只能追加标签，不能清除：交集结果始终保留上游标签。
+  const cleanRefs = normalizeProvenanceRefs(provenanceRefs);
+  const ownLabels = normalizeTaintLabels(sourceLabels, 'sourceLabels');
+  const inheritedLabels = inheritedTaintOf(cleanRefs);
+  const taintLabels = [...new Set([...inheritedLabels, ...ownLabels, TAINT_UNVERIFIED])].sort();
 
   // §17：新增 artifact reference 前做传递闭包检查；检测到 lineage 环即拒绝，
   // 且在任何落盘（正文/索引）之前抛错，不留半截记录。
@@ -514,6 +733,12 @@ function persist({ kind, content, taskId = null, runId = null, now = Date.now() 
     // §27：新 Artifact 默认 untrusted；内容/来源/版本变化时由新记录重新从 untrusted 开始。
     trustLevel: 'untrusted',
     trust: null,
+    // §16：来源引用与污点标签。旧记录缺字段时读作 unknown（见 readTaintLabels）。
+    provenanceRefs: cleanRefs,
+    taintLabels,
+    taintPolicyVersion: TAINT_POLICY_VERSION,
+    taintChangedAt: null,
+    taintChangedBy: null,
     lastCheckedAt: null,
     supersededBy: null,
     supersededAt: null,
@@ -886,7 +1111,11 @@ function chainBroken(reason, artifactId) {
   });
 }
 
-function resolveProvenance(id, { version = null, maxDepth = PROVENANCE_MAX_DEPTH } = {}) {
+function resolveProvenance(
+  id,
+  { version = null, maxDepth = PROVENANCE_MAX_DEPTH, allowStatuses = ['active'] } = {}
+) {
+  const statuses = Array.isArray(allowStatuses) && allowStatuses.length > 0 ? allowStatuses : ['active'];
   const chain = [];
   const visited = new Set();
   const walk = (refId, refVersion, depth) => {
@@ -902,7 +1131,7 @@ function resolveProvenance(id, { version = null, maxDepth = PROVENANCE_MAX_DEPTH
       throw chainBroken('version_mismatch', key);
     }
     if (artifact.status === 'invalidated') throw chainBroken('invalidated', key);
-    if (artifact.status !== 'active') throw chainBroken('stale', key);
+    if (!statuses.includes(artifact.status)) throw chainBroken('stale', key);
     if (depth > maxDepth) throw chainBroken('depth_exceeded', key);
     const marker = `${key}@${artifact.version}`;
     if (visited.has(marker)) throw chainBroken('cycle', key);
@@ -937,6 +1166,17 @@ module.exports = {
   TRUST_WRITER,
   trustRank,
   trustAtLeast,
+  TAINT_POLICY_VERSION,
+  TAINT_UNKNOWN,
+  TAINT_UNVERIFIED,
+  TAINT_VERIFIED,
+  normalizeTaintLabels,
+  normalizeProvenanceRefs,
+  readTaintLabels,
+  readProvenanceRefs,
+  inheritedTaintOf,
+  setTaintLabels,
+  markTaintVerified,
   empty,
   persist,
   get,

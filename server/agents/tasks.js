@@ -111,6 +111,9 @@ const EVENT_TYPES = Object.freeze([
   'task.transition_rejected',
   // §27：trustLevel 只允许 Verification Engine 写入产物记录；任务写入路径拒绝并留痕。
   'task.trust_level_write_rejected',
+  // §16：provenanceRefs / taintLabels 只允许创建时继承或被验证路径改写；
+  // 任务写入路径（updateTask / transitionTask）拒绝并留痕。
+  'task.taint_write_rejected',
 ]);
 
 const SAFE_PAYLOAD_KEYS = new Set([
@@ -562,6 +565,12 @@ function publicTask(task, { includeResult = true } = {}) {
     stateVersion: Number.isInteger(task.stateVersion) ? task.stateVersion : 0,
     runs: Array.isArray(task.runs) ? clone(task.runs) : [],
     requiresReview: task.requiresReview === true,
+    // §16：来源引用与污点标签（只读）。旧记录缺字段读作 unknown，绝不默认"干净"。
+    provenanceRefs: Array.isArray(task.provenanceRefs)
+      ? task.provenanceRefs.map(item => ({ ...item }))
+      : [],
+    taintLabels: artifactStore.readTaintLabels(task),
+    taintPolicyVersion: task.taintPolicyVersion || null,
     deliveredToParentAt: task.deliveredToParentAt || null,
     deliveryMessageId: task.deliveryMessageId || null,
     deliveryStatus: task.deliveryStatus || 'not_applicable',
@@ -954,6 +963,11 @@ function createTask({
   // Phase 1 交付物 2：依赖边。只允许指向**已存在**且同 agentId 的任务，
   // 上限 8；循环依赖只能由批量编排入口产生，那里会在落盘前整图校验。
   dependsOn = null,
+  // §16：来源引用与污点标签。Task 上的这两类字段与 Artifact 同构；
+  // 生产者只能追加/继承，不能清除（updateTask/transitionTask 会拒绝改写）。
+  provenanceRefs = null,
+  taintLabels = null,
+  taintPolicyVersion = null,
 } = {}) {
   const resolvedAgentId = String(agentId || botId || '');
   assertBot(resolvedAgentId);
@@ -1000,6 +1014,31 @@ function createTask({
   ) {
     throw new AgentError('invalid_task', 'deadlineMs 必须在 5000 到 120000 之间');
   }
+
+  // §16：来源引用复用 {kind,id,version}；污点取"继承 ∪ 声明"，空集读作 unknown。
+  let cleanProvenanceRefs;
+  try {
+    cleanProvenanceRefs = artifactStore.normalizeProvenanceRefs(provenanceRefs);
+  } catch (error) {
+    throw new AgentError('invalid_task', '任务 provenanceRefs 非法', 400, {
+      reason: (error && error.code) || 'invalid',
+    });
+  }
+  let declaredTaint;
+  try {
+    declaredTaint = artifactStore.normalizeTaintLabels(taintLabels, 'taintLabels');
+  } catch (error) {
+    throw new AgentError('invalid_task', '任务 taintLabels 非法', 400, {
+      reason: (error && error.code) || 'invalid',
+    });
+  }
+  const inheritedTaint = artifactStore.inheritedTaintOf(cleanProvenanceRefs);
+  const mergedTaint = [...new Set([...inheritedTaint, ...declaredTaint])].sort();
+  const cleanTaintLabels = mergedTaint.length > 0 ? mergedTaint : [artifactStore.TAINT_UNKNOWN];
+  const cleanTaintPolicyVersion =
+    typeof taintPolicyVersion === 'string' && taintPolicyVersion.trim()
+      ? taintPolicyVersion.trim().slice(0, 60)
+      : artifactStore.TAINT_POLICY_VERSION;
 
   let tools = [...manifest.toolAllowlist];
   if (allowedTools !== null) {
@@ -1204,6 +1243,10 @@ function createTask({
     stateVersion: 0,
     runs: [],
     requiresReview: false,
+    // §16：来源引用 + 污点并集；旧数据缺字段时由读取边界按 unknown 返回。
+    provenanceRefs: cleanProvenanceRefs,
+    taintLabels: cleanTaintLabels,
+    taintPolicyVersion: cleanTaintPolicyVersion,
     parentSessionId: cleanParentSession,
     parentMessageId: cleanParentMessage,
     parentUserText: cleanParentUserText,
@@ -1328,6 +1371,45 @@ function assertNoTrustWrite(task, patch, source) {
   }
 }
 
+// §16：provenanceRefs / taintLabels 只能由创建时继承或验证路径改写；
+// 任务更新路径不得追加/清除（尤其是"清除标签"必须被拒并留痕）。
+const TAINT_WRITE_FIELDS = Object.freeze([
+  'provenanceRefs',
+  'taintLabels',
+  'taintPolicyVersion',
+]);
+
+function rejectTaintWrite(task, field, source) {
+  try {
+    appendEvent({
+      botId: task.botId,
+      taskId: task.taskId,
+      runId: task.runId || null,
+      eventType: 'task.taint_write_rejected',
+      payload: {
+        status: task.status,
+        field,
+        reason: 'not_authorized',
+        mode: source,
+      },
+    });
+  } catch (_) {
+    // 审计通道不可用时不改变拒绝结论。
+  }
+  throw new AgentError(
+    'not_authorized',
+    'provenanceRefs/taintLabels 只能由验证路径写入',
+    403,
+    { field, source }
+  );
+}
+
+function assertNoTaintWrite(task, patch, source) {
+  for (const field of TAINT_WRITE_FIELDS) {
+    if (patch && patch[field] !== undefined) rejectTaintWrite(task, field, source);
+  }
+}
+
 function updateTask(taskId, patch = {}) {
   const tasks = loadTasks();
   const task = tasks.tasks[String(taskId || '')];
@@ -1335,6 +1417,8 @@ function updateTask(taskId, patch = {}) {
 
   // §27：越权写 trustLevel 必须在任何字段被修改之前拒绝。
   assertNoTrustWrite(task, patch, 'updateTask');
+  // §16：provenanceRefs/taintLabels 同理，任务更新路径不得清除污点。
+  assertNoTaintWrite(task, patch, 'updateTask');
 
   // 状态只允许经 transitionTask 写入；这里显式拒绝而不是静默丢弃，
   // 否则会留下一条看不见的第二写入路径。
@@ -1587,6 +1671,8 @@ function transitionTask(taskId, options = {}) {
   if (!task) throw new AgentError('task_not_found', '任务不存在', 404);
   // §27：必须在 applyTransition 改内存之前拒绝，避免半截状态变化。
   assertNoTrustWrite(task, options, 'transitionTask');
+  // §16：污点字段同样在任何状态变更前拒绝。
+  assertNoTaintWrite(task, options, 'transitionTask');
   // ② CAS：必须在 applyTransition 之前校验，否则冲突会留下已改的内存状态。
   assertExpectedVersion(task, options.expectedVersion);
   // ③ §11 第 3 步：产物引用必须在进入 completed 之前可读、schema 合格。

@@ -31,10 +31,19 @@ function ttlFor(options = {}) {
 
 /**
  * 第 1 步：Worker 先持久化产物。
- * 输入是产物内容描述 [{kind, content}]，输出是任务结果里可落库的引用
- * [{kind, id, version}]——保持 {kind,id} 既有形状，只增量一个 version。
+ * 输入是产物内容描述 [{kind, content, provenanceRefs?, sourceLabels?}]，
+ * 输出是任务结果里可落库的引用 [{kind, id, version}]——保持 {kind,id} 既有形状，
+ * 只增量一个 version。
+ *
+ * §16：产物继承任务级上游引用与自身来源标签（并集，生产者只能追加不能清除）。
  */
-function persistTaskArtifacts({ taskId, runId = null, artifacts = [], now = Date.now() } = {}) {
+function persistTaskArtifacts({
+  taskId,
+  runId = null,
+  artifacts = [],
+  provenanceRefs = [],
+  now = Date.now(),
+} = {}) {
   const refs = [];
   // 同一任务同一 kind 只保留最后一次产出；先前版本在存储里标 superseded 并留审计。
   const latest = new Map();
@@ -45,11 +54,21 @@ function persistTaskArtifacts({ taskId, runId = null, artifacts = [], now = Date
     latest.set(kind, item);
   }
   for (const item of latest.values()) {
+    const itemRefs =
+      Array.isArray(item.provenanceRefs) && item.provenanceRefs.length > 0
+        ? item.provenanceRefs
+        : provenanceRefs;
+    const sourceLabels = [
+      ...(Array.isArray(item.sourceLabels) ? item.sourceLabels : []),
+      'agent:derived',
+    ];
     const artifact = artifactStore.persist({
       kind: item.kind,
       content: item.content,
       taskId,
       runId,
+      provenanceRefs: itemRefs,
+      sourceLabels,
       now,
     });
     refs.push({ kind: artifact.kind, id: artifact.id, version: artifact.version });
@@ -151,6 +170,9 @@ function publishSharedConclusion({
     },
     taskId: owner,
     runId,
+    // §16：共享结论是证据的派生物，必须继承证据来源链的污点并集。
+    provenanceRefs: evidenceRefs,
+    sourceLabels: ['agent:derived'],
     now,
   });
   artifactStore.share(artifact.id, { withTaskIds, byTaskId: owner, now });

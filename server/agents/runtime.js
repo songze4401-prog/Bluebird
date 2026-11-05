@@ -231,6 +231,8 @@ function collectArtifacts(name, result, artifacts) {
           decision: String(result.decision || ''),
           pending: result.pending === true,
         },
+        // §16：工具产出的来源标签（并集传播，生产者只能追加）。
+        sourceLabels: [`tool:${name}`],
       });
     }
   }
@@ -827,7 +829,11 @@ async function runTask(taskId) {
       task,
       systemPrompt: config.prompt.systemPrompt,
     });
-    const authorizer = createToolAuthorizer({ allowedTools: task.allowedTools });
+    const authorizer = createToolAuthorizer({
+      allowedTools: task.allowedTools,
+      // §16：每次工具调用前校验任务来源链可解析（Gateway 内 fail-closed）。
+      provenanceRefs: Array.isArray(task.provenanceRefs) ? task.provenanceRefs : [],
+    });
     recordCheckpoint({ round: 0, toolCalls: 0, phase: 'started' });
 
     // B-06：执行前原子预留。按 Task 剩余上限全额预留（预估不精确，结算时回冲），
@@ -918,6 +924,8 @@ async function runTask(taskId) {
       taskId: task.taskId,
       runId: result.runId || runId,
       artifacts: produced,
+      // §16：任务级上游引用随产物落盘；缺字段的旧任务按空数组处理（不伪造来源）。
+      provenanceRefs: Array.isArray(task.provenanceRefs) ? task.provenanceRefs : [],
     });
 
     // §27：产物生成即按生产者声明落到 declared（唯一写入者仍是 Verification Engine，
