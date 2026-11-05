@@ -1,0 +1,180 @@
+{
+  "schemaVersion": "p4-eval-baseline-v1",
+  "generatedAt": "2026-11-05T05:40:54.500Z",
+  "codeCommit": "00336e5f03a7e23406c82f5d7b4093293ea79ca7",
+  "strategy": {
+    "version": "p4-default",
+    "enabled": true
+  },
+  "suite": {
+    "version": "p4-eval-v1",
+    "digest": "8b66dd9afd537269c6812d4e32fd4ab5d23f51181d8668e5f95b82c677c2ae1d",
+    "caseCount": 5
+  },
+  "metrics": {
+    "successRate": {
+      "value": 1,
+      "successCount": 5,
+      "caseCount": 5
+    },
+    "rework": {
+      "total": 1,
+      "casesWithRework": 1,
+      "rate": 0.2
+    },
+    "tokenCost": {
+      "total": 610,
+      "knownCases": 4,
+      "unknownCases": 1,
+      "unknownTokens": null,
+      "complete": false
+    },
+    "latency": {
+      "totalMs": 2850,
+      "avgMs": 570,
+      "maxMs": 900,
+      "unknownCases": 0,
+      "complete": true
+    }
+  },
+  "cases": [
+    {
+      "caseId": "research-success",
+      "taskId": "task_582e192a-81eb-4508-8a70-f57e5437352f",
+      "agentId": "researcher",
+      "taskType": "memory.recall",
+      "terminal": "completed",
+      "expectedTerminal": "completed",
+      "errorCode": null,
+      "allowedErrorCodes": [],
+      "success": true,
+      "terminalOk": true,
+      "codeOk": true,
+      "expectReview": false,
+      "reviewTriggered": false,
+      "reviewOk": true,
+      "attempts": 1,
+      "rework": 0,
+      "redelivered": 0,
+      "tokens": 160,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "latencyMs": 400,
+      "budgetTokenCap": 500
+    },
+    {
+      "caseId": "executor-reviewed-success",
+      "taskId": "task_381ded87-636d-49d4-afc7-663517a6790f",
+      "agentId": "executor",
+      "taskType": "action.execute",
+      "terminal": "completed",
+      "expectedTerminal": "completed",
+      "errorCode": null,
+      "allowedErrorCodes": [],
+      "success": true,
+      "terminalOk": true,
+      "codeOk": true,
+      "expectReview": true,
+      "reviewTriggered": true,
+      "reviewOk": true,
+      "attempts": 1,
+      "rework": 0,
+      "redelivered": 0,
+      "tokens": 250,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "latencyMs": 900,
+      "budgetTokenCap": 600
+    },
+    {
+      "caseId": "retry-then-success",
+      "taskId": "task_6b458229-7079-42b2-b730-8f71ad252686",
+      "agentId": "researcher",
+      "taskType": "knowledge.search",
+      "terminal": "completed",
+      "expectedTerminal": "completed",
+      "errorCode": null,
+      "allowedErrorCodes": [
+        "model_timeout"
+      ],
+      "success": true,
+      "terminalOk": true,
+      "codeOk": true,
+      "expectReview": false,
+      "reviewTriggered": false,
+      "reviewOk": true,
+      "attempts": 2,
+      "rework": 1,
+      "redelivered": 0,
+      "tokens": 180,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "latencyMs": 900,
+      "budgetTokenCap": 500
+    },
+    {
+      "caseId": "hard-failure",
+      "taskId": "task_0c48e474-a299-4ad6-ae94-960509fddc08",
+      "agentId": "researcher",
+      "taskType": "knowledge.search",
+      "terminal": "failed",
+      "expectedTerminal": "failed",
+      "errorCode": "model_timeout",
+      "allowedErrorCodes": [
+        "model_timeout"
+      ],
+      "success": true,
+      "terminalOk": true,
+      "codeOk": true,
+      "expectReview": false,
+      "reviewTriggered": false,
+      "reviewOk": true,
+      "attempts": 1,
+      "rework": 0,
+      "redelivered": 0,
+      "tokens": 20,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "latencyMs": 300,
+      "budgetTokenCap": 500
+    },
+    {
+      "caseId": "unknown-usage-success",
+      "taskId": "task_40aa8746-2f5d-457d-a906-7bfb3d1c4422",
+      "agentId": "researcher",
+      "taskType": "summary.synthesize",
+      "terminal": "completed",
+      "expectedTerminal": "completed",
+      "errorCode": null,
+      "allowedErrorCodes": [],
+      "success": true,
+      "terminalOk": true,
+      "codeOk": true,
+      "expectReview": false,
+      "reviewTriggered": false,
+      "reviewOk": true,
+      "attempts": 1,
+      "rework": 0,
+      "redelivered": 0,
+      "tokens": null,
+      "usageKnown": false,
+      "unknownAttempts": 1,
+      "latencyMs": 350,
+      "budgetTokenCap": 400
+    }
+  ],
+  "safety": {
+    "source": {
+      "approvalBypass": "既有事件：expectReview=true 但无 verification.review_opened/approval.requested",
+      "failClosedHits": "既有事件：verification.rejected/worker.scope_denied/tool.denied/route.rejected",
+      "unauthorizedDenied": "既有事件：worker.scope_denied",
+      "deadLetters": "既有死信视图：tasks.listDeadLetters"
+    },
+    "approvalBypass": 0,
+    "failClosedHits": 0,
+    "unauthorizedDenied": 0,
+    "approvalRequested": 0,
+    "approvalResolved": 0,
+    "deadLetters": 0
+  }
+}
