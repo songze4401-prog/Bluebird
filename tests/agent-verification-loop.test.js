@@ -40,6 +40,7 @@ const artifactStore = require('../server/agents/artifact-store');
 const approvals = require('../server/agents/approvals');
 const runtime = require('../server/agents/runtime');
 const verificationLoop = require('../server/agents/verification-loop');
+const conflictRecordModule = require('../server/agents/conflict-record');
 
 let providerServer;
 let providerBase;
@@ -787,3 +788,181 @@ async function evaluateSample(sample) {
     detail: plan.errorCode || (review && review.code) || null,
   };
 }
+
+// ---- 8. A-04 冲突裁决权 / 证据顺序 / 升级路径 ----
+
+function makeConflictRecord({ subjectKey, conflictType = 'factual', candidateRefs = ['art_a', 'art_b'] }) {
+  const record = conflictRecordModule.createRecord({
+    subjectKey,
+    conflictType,
+    candidateRefs,
+    evidenceRefs: ['evidence:fixture'],
+    rationale: 'A-04 测试构造',
+  });
+  conflictRecordModule.persist(record);
+  return record;
+}
+
+test('A-04 证据不足 → 自动仲裁拒绝，升级走既有 review.conflict 审批', () => {
+  const record = makeConflictRecord({ subjectKey: 'a04-insufficient' });
+  // 机械证据不结论（ok=null），无独立审校证据 → 自动裁决必须拒绝。
+  const decision = verificationLoop.arbitrateConflict({
+    conflictRecord: record,
+    arbiter: verificationLoop.ARBITERS.verificationEngine,
+    evidence: [{ source: 'deterministic', ok: null }],
+  });
+  assert.strictEqual(decision.status, 'denied');
+  assert.strictEqual(decision.errorCode, 'arbiter_evidence_insufficient');
+  assert.strictEqual(decision.policyVersion, 'conflict-arbitration-v1');
+
+  const producer = makeProducerTask('A-04 证据不足升级');
+  runtime.cancelTask(producer.taskId);
+  const approval = verificationLoop.escalateConflict({
+    producerTask: producer,
+    conflictRecord: record,
+    reason: '证据不足，无法自动裁决',
+  });
+  assert.strictEqual(approval.operation, 'review.conflict');
+  assert.ok(['review.conflict', 'review.escalate'].includes(approval.operation));
+  assert.strictEqual(
+    conflictRecordModule.getRecord(record.conflictId).resolutionStatus,
+    'escalated'
+  );
+  console.log(
+    `[EVIDENCE] a04-escalate ${JSON.stringify({
+      decision: decision.status,
+      errorCode: decision.errorCode,
+      approvalId: approval.approvalId,
+      operation: approval.operation,
+      recordStatus: conflictRecordModule.getRecord(record.conflictId).resolutionStatus,
+      policyVersion: decision.policyVersion,
+    })}`
+  );
+});
+
+test('A-04 证据冲突 → 按证据顺序裁决并留痕（机械事实优先于独立审校）', () => {
+  const record = makeConflictRecord({ subjectKey: 'a04-precedence' });
+  const evidence = [
+    { source: 'reviewer', ok: false, independent: true, reviewerTaskId: 'task_review_1' },
+    { source: 'deterministic', ok: true, candidateRef: 'art_a', code: null },
+  ];
+  // 独立性：与生产者不同任务且是 reviewer bot。
+  assert.strictEqual(
+    verificationLoop.isIndependentReviewEvidence({
+      reviewerTaskId: 'task_review_1',
+      producerTaskId: 'task_producer',
+      reviewerBotId: 'reviewer',
+    }),
+    true
+  );
+  assert.strictEqual(
+    verificationLoop.isIndependentReviewEvidence({
+      reviewerTaskId: 'task_producer',
+      producerTaskId: 'task_producer',
+      reviewerBotId: 'reviewer',
+    }),
+    false
+  );
+
+  const decision = verificationLoop.arbitrateConflict({
+    conflictRecord: record,
+    arbiter: verificationLoop.ARBITERS.verificationEngine,
+    evidence,
+  });
+  assert.strictEqual(decision.status, 'resolved');
+  assert.strictEqual(decision.selectedCandidateRef, 'art_a');
+  assert.strictEqual(decision.method, 'rule');
+  assert.strictEqual(decision.rationale, 'deterministic_precedence');
+  // 证据顺序：deterministic(3) 必须排在 independent-review(2) 之前。
+  assert.strictEqual(decision.evidenceOrder[0].source, 'deterministic');
+  assert.strictEqual(decision.evidenceOrder[0].precedence, 3);
+  assert.strictEqual(decision.evidenceOrder[1].source, 'reviewer');
+  assert.strictEqual(decision.evidenceOrder[1].precedence, 2);
+
+  const producer = makeProducerTask('A-04 顺序裁决');
+  runtime.cancelTask(producer.taskId);
+  const stored = verificationLoop.recordArbitration({
+    conflictRecord: record,
+    decision,
+    producerTask: producer,
+    runId: 'run_a04',
+  });
+  assert.strictEqual(stored.resolutionStatus, 'resolved');
+  assert.strictEqual(stored.resolutionMethod, 'rule');
+  assert.strictEqual(stored.selectedCandidateRef, 'art_a');
+  assert.strictEqual(stored.decidedBy, 'verification-engine');
+
+  const event = tasks
+    .listEvents(producer.botId, { limit: 200 })
+    .find(
+      item =>
+        item.taskId === producer.taskId &&
+        item.eventType === 'verification.verdict' &&
+        item.payload &&
+        item.payload.ruleId === 'deterministic_precedence'
+    );
+  assert.ok(event, '裁决必须留下可追审计事件');
+  assert.strictEqual(event.payload.policyVersion, 'conflict-arbitration-v1');
+  console.log(
+    `[EVIDENCE] a04-precedence ${JSON.stringify({
+      decision: decision.status,
+      rationale: decision.rationale,
+      order: decision.evidenceOrder,
+      selected: stored.selectedCandidateRef,
+      auditRuleId: event.payload.ruleId,
+    })}`
+  );
+});
+
+test('A-04 裁决者越权被拒：reviewer 不得推翻机械结论，未知主体/越界类型一律 403', () => {
+  const record = makeConflictRecord({ subjectKey: 'a04-denied' });
+  const deterministicOnly = [{ source: 'deterministic', ok: true, candidateRef: 'art_a' }];
+
+  // reviewer 在机械证据已结论时越权。
+  const reviewerDenied = verificationLoop.arbitrateConflict({
+    conflictRecord: record,
+    arbiter: verificationLoop.ARBITERS.reviewer,
+    evidence: deterministicOnly,
+  });
+  assert.strictEqual(reviewerDenied.status, 'denied');
+  assert.strictEqual(reviewerDenied.errorCode, 'arbiter_scope_exceeded');
+  assert.throws(
+    () =>
+      verificationLoop.recordArbitration({
+        conflictRecord: record,
+        decision: reviewerDenied,
+      }),
+    error => error.code === 'arbiter_scope_exceeded' && error.status === 403
+  );
+  // 越权被拒后记录保持 open，未被静默改写。
+  assert.strictEqual(conflictRecordModule.getRecord(record.conflictId).resolutionStatus, 'open');
+
+  // policy 类冲突只能人工，reviewer 越界。
+  const policyRecord = makeConflictRecord({
+    subjectKey: 'a04-policy',
+    conflictType: 'policy',
+  });
+  const policyDenied = verificationLoop.arbitrateConflict({
+    conflictRecord: policyRecord,
+    arbiter: verificationLoop.ARBITERS.reviewer,
+    evidence: [{ source: 'reviewer', ok: true, independent: true, candidateRef: 'art_a' }],
+  });
+  assert.strictEqual(policyDenied.errorCode, 'arbiter_scope_exceeded');
+
+  // 未知裁决主体一律拒绝。
+  const unknown = verificationLoop.authorizeArbiter({
+    arbiter: 'gateway',
+    conflictType: 'factual',
+    evidence: [],
+  });
+  assert.strictEqual(unknown.allowed, false);
+  assert.strictEqual(unknown.errorCode, 'arbiter_unknown');
+  console.log(
+    `[EVIDENCE] a04-denied ${JSON.stringify({
+      reviewer: reviewerDenied.errorCode,
+      policy: policyDenied.errorCode,
+      unknown: unknown.errorCode,
+      recordStatus: conflictRecordModule.getRecord(record.conflictId).resolutionStatus,
+    })}`
+  );
+});
