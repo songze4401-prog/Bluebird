@@ -596,11 +596,19 @@ enabled = ["executor","researcher","reviewer"]；registeredAgents = 4
 - 证据：`tests/agent-conflict-record.test.js` 4 条：记录落库后可复读（同 id 幂等）；审计可查（`conflict.recorded` / `conflict.resolved`）；裁决结果与记录一致（`selectedCandidateRef` 必须属 `candidateRefs`，非 resolved 禁止携带裁决结果）；文件损坏时读取抛 `internal_error`（fail-closed）。
 - 限定：`candidateRefs`/`evidenceRefs` 元素形态、`policyVersion` 取值、状态迁移表原文未定义（见待确认）；冲突记录只覆盖"冲突→审批"这一条入口，其他冲突路径（若有）未接。
 
-### 3. trustLevel 四档（§12/§27，`6da3538`）——判定 0.5
+### 3. trustLevel 四档（§12/§27，`6da3538` + 本轮接线）——判定 1.0
 - 原文关键句：`untrusted < declared < evidence_checked < independently_verified` 有序；唯一写入者是 Verification Engine；只表示证据验证状态，不代表访问权限；内容/来源/版本变化时验证结论失效。
-- 实现：`artifact-store.js` 新增 `TRUST_LEVELS` 有序枚举、`TRUST_WRITER='verification-engine'`；`setTrustLevel(id,{level,writer,...})` 非验证器写入一律 `not_authorized` 403、非法值 400 且不改已存值、每次变更写 `artifact.trust_level_changed` 审计；新 `persist` 记录默认 `untrusted`；`readTrustLevel` 对缺字段旧记录回退 `untrusted`（fail-closed）。
-- 证据：`tests/agent-trust-level.test.js` 4 条：非验证器（memory/orchestrator/gateway/null）写入被拒且无副作用；升降级（`untrusted→declared→independently_verified→untrusted`）只有验证器可做且 3 条审计顺序正确；非法值（`verified`/`trusted`/`UNTRUSTED`/空/null）拒绝且保留 `declared`；旧数据删掉 `trustLevel` 字段后读出 `untrusted` 并可正常升级。
-- 限定（判 0.5 的原因）：只有"写入口 + 读取兼容"落地，**未把 Verification Engine 的实际验证结果接进 `verification-loop`/`runtime`**，因此真实产物当前恒为 `untrusted`、不会自动升级；`trustLevel` 也未被 Policy Engine 消费（按原文"不代表访问权限"，这是正确行为，但意味着无端到端证据）。
+- 实现（写入口，上一轮）：`artifact-store.js` 新增 `TRUST_LEVELS` 有序枚举、`TRUST_WRITER='verification-engine'`、`trustRank/trustAtLeast`；`setTrustLevel(id,{level,writer,...,reason})` 非验证器写入一律 `not_authorized` 403、非法值 400，均不改已存值并写 `artifact.trust_level_write_rejected` 审计；每次变更写 `artifact.trust_level_changed`（`前档->后档|原因`）；新 `persist` 记录默认 `untrusted`；`readTrustLevel` 对缺字段旧记录回退 `untrusted`（fail-closed）。
+- 实现（端到端接线，本轮）：`verification-loop.js` 新增 `TRUST_POLICY_VERSION='trust-rules-v1'` 与 Engine 侧唯一写封装 `applyArtifactTrustLevel`（始终以 `TRUST_WRITER` 调用，逐 ref 写入，单条失败只补审计不改验证结论）；`runtime.js` 按门禁顺序落档：产物落盘后全部 `declared`（`producer_declared`）→ 确定性校验全过 `evidence_checked`（`deterministic_passed`）→ 仅 `requiresReview=true` 且独立审校任务通过且 `resolution.action==='complete'` 时 primary `independently_verified`（`independent_review_passed`，`trust.scope=independent-review:<reviewTaskId>`）；确定性失败、审校判否、冲突/审批任一失败路径显式降回 `declared` 并记录原因（`verification_*` 错误码）；`requiresReview=false` 最高只到 `evidence_checked`。越权路径：`updateTask`/`transitionTask`/`artifactCommit.completeTask` 传 `trustLevel`/`trust` 在任何字段变更前拒绝（`not_authorized` 403），并写 `task.trust_level_write_rejected`（mode 区分 updateTask/transitionTask）；`persist` 的未知 trust 字段不生效。
+- 证据：`tests/agent-trust-level.test.js` 7 条：非验证器（memory/orchestrator/gateway/null）写入被拒且无副作用；升降级只有验证器可做且审计顺序正确；非法值拒绝且保留已存值；旧数据缺字段读出 `untrusted`（含重载模块后）；有序语义（`trustRank=[0,1,2,3]`、未知值按 untrusted）；正交性（`independently_verified` 产物跨任务读取仍 `artifact_not_shared` 409 / `requester_not_allowed`）；重启后复读档位/verifier/reason 不变。
+- 证据（真跑 runtime + 独立 Reviewer，不 mock 验证器）：`tests/agent-trust-level-runtime.test.js` 5 条。
+  - a1 确定性通过 → `evidence_checked`，`requiresReview=false` 时无 `independently_verified`（探针 `trust-a1`）。
+  - a2 独立 Reviewer（`verification.review_opened.reviewTaskId != producer taskId`）通过 → `independently_verified`，审计链 `untrusted->declared|producer_declared` / `declared->evidence_checked|deterministic_passed` / `evidence_checked->independently_verified|independent_review_passed`（探针 `trust-a2`）。
+  - b Reviewer 判否（`verdict=fail`）且机械通过 → 冲突进 `waiting_approval`，产物降回 `declared`、`trust.reason=verification_conflict`、审计 `evidence_checked->declared|verification_conflict`（探针 `trust-b`）。
+  - c 越权写入 5 类（`updateTask`×2 / `transitionTask`×2 / `artifactCommit.completeTask`）+ 非验证器 `setTrustLevel` + `persist` 伪造字段 → 全部被拒/不生效，4 条 `task.trust_level_write_rejected` 事件 + `artifact.trust_level_write_rejected` 审计，已存值仍 `declared`、任务状态未被半改（探针 `trust-c`）。
+  - d 高 trustLevel 产物对未共享任务仍 `artifact_not_shared` 409（`sharedWith` 只有 Reviewer）（探针 `trust-d`）。
+- 限定：`declared` 目前由 Engine 在落盘后统一写入（= 生产者声明的最低档），不是 Producer 可传入的字段；所有产物（含工具产物）都走同一映射；被 invalidated 的产物保留 `declared` 记录（`status` 另行表达失效）；`trustLevel` 仍不参与任何授权判定（符合原文"不代表访问权限"），因此没有"高信任免共享"的实现，也无需实现。
+- 待确认（实现自定，登记在清单 1/7）：`TRUST_POLICY_VERSION='trust-rules-v1'`、`trust.reason` 字段名与截断长度、`trust.scope=independent-review:<taskId>` 形态、"生产者声明"是否应由 Producer 显式声明（当前由 Engine 固定落 declared）。
 
 ### 4. §24 两条用例（`8d26d0b`）——判定 1.0
 - 原文关键句：只有 Workflow Engine 可写 Task 状态；Worker/Gateway/Reviewer/审批人不能直接改状态；拒绝非法迁移并记录原因。
@@ -628,10 +636,11 @@ enabled = ["executor","researcher","reviewer"]；registeredAgents = 4
 
 ### 门禁与全量（实测，2026-11-05）
 
-`node scripts/run-tests.js`（前台一次）→ `98 个测试文件，全部通过`、`FULL_EXIT=0`；`npx tsc --noEmit` EXIT=0；`npx expo lint` EXIT=0；`node scripts/verify-test-coverage.js` → `backend=2247/2247 nodeSuite=222/222 runner=2025/2025 frontend=188/188 suites=22/22 failed=0`、CI runner 98/98、EXIT=0；`node scripts/sync-doc-counts.js --check` → `backend 2247、nodeSuite 222、runner 2025、frontend 188、文件 98` EXIT=0；`node scripts/verify-api-capabilities.js`（95 路由 / 20 族 / 仅 API 9）EXIT=0。
+`node scripts/run-tests.js`（前台一次）→ `99 个测试文件，全部通过`、`FULL_EXIT=0`；`npx tsc --noEmit` EXIT=0；`npx expo lint` EXIT=0；`node scripts/verify-test-coverage.js` → `backend=2255/2255 nodeSuite=222/222 runner=2033/2033 frontend=188/188 suites=22/22 failed=0`、CI runner 99/99、EXIT=0；`node scripts/sync-doc-counts.js --check` → `backend 2255、nodeSuite 222、runner 2033、frontend 188、文件 99` EXIT=0；`node scripts/verify-api-capabilities.js`（95 路由 / 20 族 / 仅 API 9）EXIT=0。
+（补充：trustLevel 接线首轮收尾前，`verify-test-coverage` 曾两次在不同文件（`agent-worker` 1/51、`memory-bot` 2/9）出现单次执行失败；两文件单独跑与按 verify 同环境复跑均 EXIT=0，最终门禁一次通过，判为既有偶发 flaky，未改其用例。）
 
 ### 待确认清单（原文未定义，按最小必要自定并在此登记）
-1. trustLevel 写入者标识：原文只写 "Verification Engine"，代码取固定串 `verification-engine`；`trust` 元数据字段名（`policyVersion/verifier/verifiedAt/evidenceRefs/scope`）亦为自定。
+1. trustLevel 写入者标识：原文只写 "Verification Engine"，代码取固定串 `verification-engine`；`trust` 元数据字段名（`policyVersion/verifier/verifiedAt/evidenceRefs/scope/reason`）、`TRUST_POLICY_VERSION='trust-rules-v1'`、`scope=independent-review:<taskId>` 形态、"生产者声明"是否由 Producer 显式提交（当前 Engine 固定落 `declared`）均为自定。
 2. ConflictRecord：`candidateRefs`/`evidenceRefs` 元素形态、`policyVersion` 默认值 `conflict-rules-v1`、状态枚举与迁移表。
 3. §23 错误指纹算法（取 sha256 拼接）与 `failedAt` 取值时机（序列化时）。
 4. §17 图规模/检测时间/单节点出边上限数值，以及超限拒绝错误码（当前取 `validation_failed` + `cycle_check_limit_exceeded`）。
