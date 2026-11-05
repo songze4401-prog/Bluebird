@@ -580,6 +580,66 @@ enabled = ["executor","researcher","reviewer"]；registeredAgents = 4
 
 ---
 
+## Notion 契约补齐（2026-11-05，分支 `notion-contracts-2026-11-05`）
+
+本轮只补 Notion 原文已写明、仓库缺失的七项机制；每项独立提交。不新增状态词、不改 `main`、不碰 `package-lock.json`、不做多用户/权限模型、不碰 §26 限流熔断参数与灰度发布。原文关键句取自本机原文抽取副本（§17 344-360 行、§23/24/25/28/29 436-609 行）。
+
+### 1. §25 三个硬限（`12dcdba`）——判定 1.0
+- 原文关键句：委派深度最多 2 层；重规划单 Task 最多 2 次、每 Run 最多 2 次；Run 最多重试 3 次；计数持久化，重启不重置，重试不重置。
+- 实现：`server/agents/agent-limits.js` 持久化 `agents/agent-run-limits.json`；`tasks.createTask` 父任务入口先校验委派深度；`recordReplan` 以 Run 键统一计数（Task 键只记录、不作为绕过途径）；`recordRunRetry` 同口径；超限按 §23 六类选码（深度＝`not_authorized` 403，重规划/Run 重试＝`validation_failed` 400），七字段齐备。
+- 证据：`tests/agent-run-limits.test.js` 4 条：深度 3 被拒（`delegation_depth_exceeded`）；重规划第 3 次被拒（`replan_limit_exceeded`）；第 4 次 Run 重试被拒（`run_retry_limit_exceeded`）；清 require 缓存重载模块（模拟进程重启）后计数仍为 2/3，不归零。
+- 限定：计数为单进程原子写，跨进程并发未加锁（不在本轮范围）；`replanCount` 采用 Owner 口径（Run 级统一最多 2），比原文"单 Task 2"更严，原文 §25 与 §26 措辞差异列入待确认。
+
+### 2. §28 ConflictRecord（`980ece2`）——判定 1.0
+- 原文关键句：冲突必须是可序列化对象并持久化；记录冲突类型、候选、证据、裁决状态；冲突处理与裁决必须可审计。
+- 实现：`server/agents/conflict-record.js`（`agents/agent-conflict-records.json`，原子写）；`runtime.js` 冲突审批分支把 `resolution.outcome==='conflict'` 写入现有 `resolveConflict` 流程（不另建裁决），随后照旧 `invalidateArtifactRefs`。
+- 证据：`tests/agent-conflict-record.test.js` 4 条：记录落库后可复读（同 id 幂等）；审计可查（`conflict.recorded` / `conflict.resolved`）；裁决结果与记录一致（`selectedCandidateRef` 必须属 `candidateRefs`，非 resolved 禁止携带裁决结果）；文件损坏时读取抛 `internal_error`（fail-closed）。
+- 限定：`candidateRefs`/`evidenceRefs` 元素形态、`policyVersion` 取值、状态迁移表原文未定义（见待确认）；冲突记录只覆盖"冲突→审批"这一条入口，其他冲突路径（若有）未接。
+
+### 3. trustLevel 四档（§12/§27，`6da3538`）——判定 0.5
+- 原文关键句：`untrusted < declared < evidence_checked < independently_verified` 有序；唯一写入者是 Verification Engine；只表示证据验证状态，不代表访问权限；内容/来源/版本变化时验证结论失效。
+- 实现：`artifact-store.js` 新增 `TRUST_LEVELS` 有序枚举、`TRUST_WRITER='verification-engine'`；`setTrustLevel(id,{level,writer,...})` 非验证器写入一律 `not_authorized` 403、非法值 400 且不改已存值、每次变更写 `artifact.trust_level_changed` 审计；新 `persist` 记录默认 `untrusted`；`readTrustLevel` 对缺字段旧记录回退 `untrusted`（fail-closed）。
+- 证据：`tests/agent-trust-level.test.js` 4 条：非验证器（memory/orchestrator/gateway/null）写入被拒且无副作用；升降级（`untrusted→declared→independently_verified→untrusted`）只有验证器可做且 3 条审计顺序正确；非法值（`verified`/`trusted`/`UNTRUSTED`/空/null）拒绝且保留 `declared`；旧数据删掉 `trustLevel` 字段后读出 `untrusted` 并可正常升级。
+- 限定（判 0.5 的原因）：只有"写入口 + 读取兼容"落地，**未把 Verification Engine 的实际验证结果接进 `verification-loop`/`runtime`**，因此真实产物当前恒为 `untrusted`、不会自动升级；`trustLevel` 也未被 Policy Engine 消费（按原文"不代表访问权限"，这是正确行为，但意味着无端到端证据）。
+
+### 4. §24 两条用例（`8d26d0b`）——判定 1.0
+- 原文关键句：只有 Workflow Engine 可写 Task 状态；Worker/Gateway/Reviewer/审批人不能直接改状态；拒绝非法迁移并记录原因。
+- 现状核对：`updateTask` 已拒绝 `status`（`task_status_requires_transition`）、`checkpointVersion`；本轮补 `stateVersion` 显式只读门禁（`task_state_version_read_only`），并在 `applyTransition` 拒绝非法迁移时写 `task.transition_rejected` 事件（from/to/reason；审计失败不掩盖原拒绝）。
+- 证据：`tests/agent-task-transition-guard.test.js` 2 条：绕过 `transitionTask` 写 `status`、直接写 `stateVersion` 均失败且状态/版本原样；`queued→running` 非法迁移返回 `invalid_transition` 409，事件含 `{fromStatus:'queued',toStatus:'running',reason:'invalid_transition'}`，状态不变。
+- 限定：审计只覆盖经 `applyTransition` 的路径；直接改写存储文件不在审计范围。
+
+### 5. §23 五类错误码统一契约（`d5dcf77`）——判定 1.0
+- 原文关键句：六类错误码统一带 `code/retryable/errorFingerprint/failedAt/taskId/runId`（`causeRef` 可选）；`retryable` 默认值按类固定。
+- 实现：`errors.js` 新增 `ERROR_RETRYABLE` 与 `errorContractFingerprint`（sha256(code|taskId|runId|causeRef|message)），在 `describeAgentError` 序列化边界补齐七字段；`code/error/status` 与既有附加字段不覆盖，HTTP 状态码不变。
+- 证据：`tests/agent-error-contract.test.js` 6 条：五类各一条断言七字段齐备、同输入同指纹、`retryable` 为 `false/false/false/true/true`（validation_failed/not_authorized/budget_exceeded/dependency_failed/internal_error），并验证 `budget_exceeded` 既有 `scope/required/remaining` 不丢；无 details 时补 `taskId=''`、`runId=null`、`causeRef=null`。
+- 限定：字段在响应序列化时补齐，不是抛出时补齐，进程内调用方拿到的 `AgentError` 仍只有原 details；无 taskId/runId 上下文的错误取空值。
+
+### 6. §17 委派环 + lineage 环（`c87b61a`）——判定 1.0
+- 原文关键句：循环检测覆盖 Agent 委派图、Task 依赖图、Artifact 引用/lineage 图；新增边前检查成环，间接引用做传递闭包；拒绝并给可读路径；设置图规模与检测时间上限。
+- 实现：`server/agents/cycle-detection.js`（纯图检测，节点/耗时/出边上限）；`agent-limits.delegationDepth` 接入委派环检测；`artifact-store.persist` 在写正文/索引前对 `content.evidence` 逐引用做 lineage 闭包检查；Task 依赖环沿用既有 `dependencies.js`（未改）。
+- 证据：`tests/agent-cycle-detection.test.js` 6 条：委派环 `t1→t2→t3→t1` 抛 `not_authorized` 403 且报文含完整路径，同一检测器经 `assertDelegationAllowed` 生效；合法链放行（深度 2）；lineage 环 `art_A→art_B→art_C→art_A` 抛 `validation_failed` 400 + 可读路径；合法链放行；真实入口持久化环引用被拒且产物文件条数不变；合法引用正常落盘可复读。
+- 限定：上限数值（2000 节点 / 100ms / 每节点 20 出边）原文未定义，属自定保守值；lineage 检查只看 `content.evidence[].id`，其他引用字段不纳入；委派环在正常创建路径不会产生，检测主要防历史/损坏数据。
+
+### 7. §29 通知重试与审批六态（`2172441`）——判定 0.5
+- 原文关键句：Approval Request 状态为 `pending/approved/rejected/expired/escalated/cancelled`；审批节点必须有持久化状态、deadline/escalationAt、通知重试记录；R2 超时→`expired` 并转人工队列，不得解释为批准；通知失败不能视为审批完成。
+- 实现：`approvals.js` 新增并列 `requestStatus` 六态（既有执行生命周期 `status` 不动，避免静默改语义）、迁移校验 `assertRequestStatusTransition`、`transitionRequestStatus`；`decide`/`markOverdue` 同步六态（escalated→expired）；新增 `notification {attempts,lastError,lastAttemptAt,nextRetryAt,exhausted}` 与 `recordNotificationOutcome`（失败不阻塞、达上限停止排期）。
+- 证据：`tests/agent-approval-request.test.js` 4 条：通知两次失败后 `attempts=2/lastError/nextRetryAt` 正确且审批仍可批准；达 3 次置 `exhausted`、`nextRetryAt=null`、重复失败不再累加、审批仍 `pending`；六态取值断言 + `rejected→approved` 被拒 409；R2 超时先 `escalated` 再 `expired`，`approve` 抛 `approval_request_transition_invalid`、`cancelled` 合法。
+- 限定（判 0.5 的原因）：六态与既有 `status` **并存而非合并**，属原文与仓库语义冲突的保守处理（见待确认）；仓库没有真实通知发送器，重试记录目前只有记账 API 与用例，未接任何投递渠道；`expired→rejected` 为兼容既有"超时后仍可人工拒绝"行为而保留，并非原文直述。
+
+### 门禁与全量（实测，2026-11-05）
+
+`node scripts/run-tests.js`（前台一次）→ `98 个测试文件，全部通过`、`FULL_EXIT=0`；`npx tsc --noEmit` EXIT=0；`npx expo lint` EXIT=0；`node scripts/verify-test-coverage.js` → `backend=2247/2247 nodeSuite=222/222 runner=2025/2025 frontend=188/188 suites=22/22 failed=0`、CI runner 98/98、EXIT=0；`node scripts/sync-doc-counts.js --check` → `backend 2247、nodeSuite 222、runner 2025、frontend 188、文件 98` EXIT=0；`node scripts/verify-api-capabilities.js`（95 路由 / 20 族 / 仅 API 9）EXIT=0。
+
+### 待确认清单（原文未定义，按最小必要自定并在此登记）
+1. trustLevel 写入者标识：原文只写 "Verification Engine"，代码取固定串 `verification-engine`；`trust` 元数据字段名（`policyVersion/verifier/verifiedAt/evidenceRefs/scope`）亦为自定。
+2. ConflictRecord：`candidateRefs`/`evidenceRefs` 元素形态、`policyVersion` 默认值 `conflict-rules-v1`、状态枚举与迁移表。
+3. §23 错误指纹算法（取 sha256 拼接）与 `failedAt` 取值时机（序列化时）。
+4. §17 图规模/检测时间/单节点出边上限数值，以及超限拒绝错误码（当前取 `validation_failed` + `cycle_check_limit_exceeded`）。
+5. §29 六态迁移表（原文未给）、通知重试上限 `3` 与退避 `60s`、`requestStatus` 与既有 `status` 的最终合并方式。
+6. §25 重规划计数口径：原文"单 Task 最多 2"与 §26"每 Run 最多 2"存在措辞差异，本轮按 Owner 口径取 Run 级统一计数。
+
+---
+
 ## 准入模板（今后每轮开工必填）
 
 ```
