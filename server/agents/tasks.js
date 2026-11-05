@@ -2104,6 +2104,60 @@ function recoverInterrupted({ ownerId = null, now = Date.now() } = {}) {
       leftRunning += 1;
       continue;
     }
+
+    // A-03：跨 Store 恢复校验。Task 状态只信 State Store，产物引用只信 Blackboard；
+    // 这里只读校验引用是否仍可读（存在/版本/superseded 链/正文），断裂即进既有
+    // recovery 收敛并写 task.recovered 事件留痕，不改写任何 artifact 记录。
+    const referencedArtifacts = Array.isArray(task.result && task.result.artifacts)
+      ? task.result.artifacts
+      : [];
+    const refIssues = referencedArtifacts.length
+      ? artifactStore.verifyRefsReadable(referencedArtifacts)
+      : [];
+    const brokenRefPath = refIssues.length ? recoveryPath(task.status) : null;
+    if (brokenRefPath) {
+      changed = true;
+      bumpStateVersion(task);
+      for (const step of brokenRefPath) applyTransition(task, step);
+      task.updatedAt = at;
+      task.completedAt = at;
+      task.lease = null;
+      task.retryAt = null;
+      task.heartbeatAt = null;
+      task.errorCode = 'recovery_artifact_reference_broken';
+      task.lastErrorCode = 'recovery_artifact_reference_broken';
+      task.requiresReview = true;
+      task.result = normalizeWorkerResult({
+        status: 'recovery',
+        summary: '',
+        errorCode: 'recovery_artifact_reference_broken',
+        runId: task.runId || null,
+        finishedAt: at,
+      });
+      recovery += 1;
+      recoveryTaskIds.push(task.taskId);
+      try {
+        appendEvent({
+          botId: task.botId,
+          taskId: task.taskId,
+          runId: task.runId || null,
+          sessionId: task.sessionId || null,
+          eventType: 'task.recovered',
+          payload: {
+            status: 'recovery',
+            errorCode: 'recovery_artifact_reference_broken',
+            mode: 'cross_store_verify',
+            detail: refIssues
+              .map(item => `${item.artifactId || 'unknown'}:${item.reason}`)
+              .join(','),
+          },
+        });
+      } catch (_) {
+        // 留痕失败不阻断恢复收敛；任务仍以 recovery + errorCode 可查。
+      }
+      continue;
+    }
+
     changed = true;
     bumpStateVersion(task);
     task.updatedAt = at;

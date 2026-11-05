@@ -367,6 +367,76 @@ function lineageStateVersion({ taskId = null, kind } = {}) {
 }
 
 /**
+ * A-03 跨 Store 恢复校验（只读，不抛异常）。
+ *
+ * 权威边界：Task 状态只以 State Store 为准；Artifact 内容/版本/验证状态只以
+ * Blackboard 为准。本函数只回答"任务引用的产物是否仍然可读"，不修改任何一侧：
+ * 返回空数组 = 引用健康；否则逐条返回 {artifactId, reason}，由恢复流程统一收口。
+ * 断裂条件：记录不存在、kind/版本不符、invalidated、正文不可读，
+ * 或 superseded 的后继引用解析不到（superseded 链断裂）。
+ */
+function verifyRefsReadable(refs) {
+  const issues = [];
+  if (!Array.isArray(refs) || refs.length === 0) return issues;
+  let store;
+  try {
+    store = readArtifacts();
+  } catch (error) {
+    return [{ artifactId: null, reason: error && error.code ? error.code : 'store_unreadable' }];
+  }
+  for (const ref of refs) {
+    const id = String((ref && ref.id) || '').slice(0, ID_MAX);
+    if (!id) {
+      issues.push({ artifactId: null, reason: 'missing_id' });
+      continue;
+    }
+    const artifact = store.artifacts[id];
+    if (!artifact) {
+      issues.push({ artifactId: id, reason: 'not_found' });
+      continue;
+    }
+    if (ref.kind && String(ref.kind) !== artifact.kind) {
+      issues.push({ artifactId: id, reason: 'kind_mismatch' });
+      continue;
+    }
+    if (
+      Number.isInteger(ref.version) &&
+      Number.isInteger(artifact.version) &&
+      ref.version !== artifact.version
+    ) {
+      issues.push({ artifactId: id, reason: 'version_mismatch' });
+      continue;
+    }
+    if (artifact.status === 'invalidated') {
+      issues.push({ artifactId: id, reason: 'invalidated' });
+      continue;
+    }
+    if (artifact.status === 'superseded') {
+      const successor = artifact.supersededBy
+        ? store.artifacts[String(artifact.supersededBy).slice(0, ID_MAX)]
+        : null;
+      if (
+        !successor ||
+        successor.kind !== artifact.kind ||
+        successor.taskId !== artifact.taskId
+      ) {
+        issues.push({ artifactId: id, reason: 'superseded_chain_broken' });
+        continue;
+      }
+    }
+    try {
+      readContent(id, { version: artifact.version });
+    } catch (error) {
+      issues.push({
+        artifactId: id,
+        reason: (error && error.code) || 'content_unreadable',
+      });
+    }
+  }
+  return issues;
+}
+
+/**
  * Phase 2 第 1 项：任务级共享登记。
  *
  * 产物默认仍是任务私有（只有 artifact.taskId 能读）；share() 在产物记录上追加
@@ -1303,6 +1373,7 @@ module.exports = {
   trustAtLeast,
   stateVersionOf,
   lineageStateVersion,
+  verifyRefsReadable,
   TAINT_POLICY_VERSION,
   TAINT_UNKNOWN,
   TAINT_UNVERIFIED,
