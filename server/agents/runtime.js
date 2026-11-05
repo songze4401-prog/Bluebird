@@ -67,6 +67,79 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+// B-02 重试决策归属：Gateway / 模型适配层只返回结果与错误（含 retryable 事实），
+// 不做任何重试；重试/恢复的唯一决策入口是本函数（Workflow Engine 侧）。
+// 收敛点：调度期退避与运行期 retry/terminal/recovery 都必须经过这里，
+// 禁止在其它分支散落重试判断。
+const RETRYABLE_MODEL_ERROR_CODES = Object.freeze([
+  'model_connection',
+  'model_rate_limit',
+  'model_timeout',
+]);
+const DISPATCH_RETRY_DELAY_MS = 2000;
+
+function decideFailureDisposition({
+  phase = 'run',
+  errorCode,
+  cancelled = false,
+  timedOut = false,
+  allowedTools = [],
+  attempts = 0,
+  maxAttempts = 1,
+  dispatchDelayMs = DISPATCH_RETRY_DELAY_MS,
+} = {}) {
+  // 调度期失败（尚未进入 accepted）：只决定"延后多久再取队"，不消耗任务 attempt。
+  if (phase === 'dispatch') {
+    return {
+      action: 'retry_dispatch',
+      retryable: true,
+      retryAtMs: dispatchDelayMs,
+      status: null,
+      errorCode: errorCode || 'agent_task_failed',
+    };
+  }
+  const artifactFailure =
+    typeof errorCode === 'string' && errorCode.startsWith('artifact_');
+  // 副作用结果不确定（账本 started/unknown）：不能重试也不能当 failed → recovery。
+  const sideEffectFailure =
+    typeof errorCode === 'string' && errorCode.startsWith('side_effect_');
+  const hasSideEffects =
+    Array.isArray(allowedTools) && allowedTools.includes('memory_remember');
+  const retryable =
+    !cancelled &&
+    !sideEffectFailure &&
+    !hasSideEffects &&
+    (artifactFailure || RETRYABLE_MODEL_ERROR_CODES.includes(errorCode)) &&
+    attempts < maxAttempts;
+  const status = cancelled
+    ? 'cancelled'
+    : sideEffectFailure || artifactFailure
+      ? 'recovery'
+      : timedOut
+        ? 'timed_out'
+        : 'failed';
+  const action =
+    retryable
+      ? 'retry'
+      : status === 'recovery'
+        ? 'recovery'
+        : status === 'cancelled'
+          ? 'cancelled'
+          : 'terminal';
+  return {
+    action,
+    retryable,
+    status,
+    errorCode,
+    artifactFailure,
+    sideEffectFailure,
+    timedOut,
+    cancelled,
+    attempts,
+    maxAttempts,
+  };
+}
+
 function scheduleTaskQueue() {
   if (scheduling) return;
   scheduling = true;
@@ -88,8 +161,13 @@ function scheduleTaskQueue() {
           if (task && !tasks.isTerminalStatus(task.status)) {
             if (task.status === 'queued' || task.status === 'retrying') {
               // 未能进入 accepted 的失败：延后重试而不是原地热循环。
+              // 退避时长同样由 decideFailureDisposition 统一裁决。
+              const dispatch = decideFailureDisposition({
+                phase: 'dispatch',
+                errorCode: (error && error.code) || 'agent_task_failed',
+              });
               tasks.updateTask(next.taskId, {
-                retryAt: new Date(Date.now() + 2000).toISOString(),
+                retryAt: new Date(Date.now() + dispatch.retryAtMs).toISOString(),
               });
             } else {
               tasks.transitionTask(next.taskId, {
@@ -1338,22 +1416,19 @@ async function runTask(taskId) {
       : (error && error.code) || (timedOut ? 'model_timeout' : 'agent_failed');
     const attempts = Number.isInteger(latest.attempts) ? latest.attempts : 0;
     const maxAttempts = Number.isInteger(latest.maxAttempts) ? latest.maxAttempts : 1;
-    // ③ §11 第 4 步：产物写失败绝不允许 completed。无副作用工具的任务按 retry 退避，
-    // 有副作用（已写记忆等）时不能重跑，收口为 recovery 等人工核对。
-    const artifactFailure =
-      typeof errorCode === 'string' && errorCode.startsWith('artifact_');
-    // P2：副作用结果不确定（账本里 started/unknown，或账本不可用而阻止执行）。
-    // 既不能重试（可能已经写过），也不能当 failed（可能已经成功）→ recovery 人工核对。
-    const sideEffectFailure =
-      typeof errorCode === 'string' && errorCode.startsWith('side_effect_');
-    const retryable =
-      !cancelled &&
-      !sideEffectFailure &&
-      !latest.allowedTools.includes('memory_remember') &&
-      (artifactFailure || ['model_connection', 'model_rate_limit', 'model_timeout'].includes(errorCode)) &&
-      attempts < maxAttempts;
+    // ③ §11 第 4 步 + B-02：retry/terminal/recovery 的唯一裁决点。
+    // 产物写失败绝不允许 completed；无副作用任务按 retry 退避，有副作用
+    // （已写记忆等）时不能重跑，收口为 recovery 等人工核对。
+    const disposition = decideFailureDisposition({
+      errorCode,
+      cancelled,
+      timedOut,
+      allowedTools: latest.allowedTools,
+      attempts,
+      maxAttempts,
+    });
 
-    if (retryable) {
+    if (disposition.retryable) {
       tasks.recordRunFinish(task.taskId, {
         runId,
         status: 'retry',
@@ -1376,15 +1451,7 @@ async function runTask(taskId) {
       return;
     }
 
-    const status = cancelled
-      ? 'cancelled'
-      : sideEffectFailure
-        ? 'recovery'
-        : timedOut
-          ? 'timed_out'
-          : artifactFailure
-            ? 'recovery'
-            : 'failed';
+    const status = disposition.status;
     // 统一结果 schema：失败/取消/超时也落一份结果，而不是 result: null。
     const failureResult = normalizeWorkerResult({
       status,
@@ -1765,4 +1832,5 @@ module.exports = {
   getQueueStats,
   allowedToolsFor,
   buildPolicy,
+  decideFailureDisposition,
 };

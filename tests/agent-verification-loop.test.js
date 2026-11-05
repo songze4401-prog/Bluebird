@@ -41,6 +41,7 @@ const approvals = require('../server/agents/approvals');
 const runtime = require('../server/agents/runtime');
 const verificationLoop = require('../server/agents/verification-loop');
 const conflictRecordModule = require('../server/agents/conflict-record');
+const toolGateway = require('../server/agents/tool-gateway');
 
 let providerServer;
 let providerBase;
@@ -963,6 +964,125 @@ test('A-04 裁决者越权被拒：reviewer 不得推翻机械结论，未知主
       policy: policyDenied.errorCode,
       unknown: unknown.errorCode,
       recordStatus: conflictRecordModule.getRecord(record.conflictId).resolutionStatus,
+    })}`
+  );
+});
+
+// ---- 9. B-02 重试决策归属：Gateway 不重试，Engine 唯一裁决 ----
+
+test('B-02 Engine 唯一裁决：retryable 才 retry，非重试错误直接终态，副作用不确定进 recovery', () => {
+  const retry = runtime.decideFailureDisposition({
+    errorCode: 'model_timeout',
+    allowedTools: ['memory_search'],
+    attempts: 1,
+    maxAttempts: 3,
+  });
+  assert.strictEqual(retry.action, 'retry');
+  assert.strictEqual(retry.retryable, true);
+
+  const exhausted = runtime.decideFailureDisposition({
+    errorCode: 'model_timeout',
+    allowedTools: ['memory_search'],
+    attempts: 3,
+    maxAttempts: 3,
+  });
+  assert.strictEqual(exhausted.action, 'terminal');
+  assert.strictEqual(exhausted.retryable, false);
+  assert.strictEqual(exhausted.status, 'failed');
+
+  // 非 retryable 的业务错误不消耗重试，直接终态。
+  const nonRetry = runtime.decideFailureDisposition({
+    errorCode: 'invalid_request',
+    allowedTools: ['memory_search'],
+    attempts: 0,
+    maxAttempts: 3,
+  });
+  assert.strictEqual(nonRetry.action, 'terminal');
+  assert.strictEqual(nonRetry.status, 'failed');
+
+  // 已产生副作用（memory_remember）不能重跑：不做 retry，按普通失败终态。
+  const sideEffect = runtime.decideFailureDisposition({
+    errorCode: 'model_timeout',
+    allowedTools: ['memory_remember'],
+    attempts: 0,
+    maxAttempts: 3,
+  });
+  assert.strictEqual(sideEffect.action, 'terminal');
+  assert.strictEqual(sideEffect.retryable, false);
+  assert.strictEqual(sideEffect.status, 'failed');
+
+  // 产物写失败在重试额度内可 retry；额度耗尽必须 recovery（绝不允许 completed）。
+  assert.strictEqual(
+    runtime
+      .decideFailureDisposition({ errorCode: 'artifact_write_failed', attempts: 0, maxAttempts: 3 })
+      .action,
+    'retry'
+  );
+  assert.strictEqual(
+    runtime
+      .decideFailureDisposition({ errorCode: 'artifact_write_failed', attempts: 3, maxAttempts: 3 })
+      .action,
+    'recovery'
+  );
+  assert.strictEqual(
+    runtime
+      .decideFailureDisposition({ errorCode: 'side_effect_unknown', attempts: 0, maxAttempts: 3 })
+      .action,
+    'recovery'
+  );
+  // 取消优先于任何 retry。
+  assert.strictEqual(
+    runtime.decideFailureDisposition({ errorCode: 'model_timeout', cancelled: true, attempts: 0, maxAttempts: 3 }).action,
+    'cancelled'
+  );
+  // 调度期退避也走同一函数（唯一收敛点）。
+  const dispatch = runtime.decideFailureDisposition({ phase: 'dispatch', errorCode: 'dispatch_failed' });
+  assert.strictEqual(dispatch.action, 'retry_dispatch');
+  assert.strictEqual(dispatch.retryAtMs, 2000);
+
+  console.log(
+    `[EVIDENCE] b02-engine ${JSON.stringify({
+      retry: retry.action,
+      exhausted: exhausted.action,
+      nonRetry: nonRetry.action,
+      sideEffect: sideEffect.action,
+      dispatch: dispatch.action,
+    })}`
+  );
+});
+
+test('B-02 Gateway 单次判定不重试：同一错误重复调用结果一致且无 attempt 状态', () => {
+  const authorizer = toolGateway.createToolAuthorizer({
+    allowedTools: ['memory_search', 'memory_remember'],
+    taintLabels: ['unverified'],
+    toolMeta: {
+      memory_search: { readOnly: true, risk: 'read' },
+      memory_remember: { readOnly: false, risk: 'write' },
+    },
+  });
+
+  const read1 = authorizer('memory_search');
+  const read2 = authorizer('memory_search');
+  assert.strictEqual(read1.ok, true);
+  assert.deepStrictEqual(read2, read1, 'Gateway 不应因重复调用产生重试/状态漂移');
+
+  const write1 = authorizer('memory_remember');
+  const write2 = authorizer('memory_remember');
+  assert.strictEqual(write1.ok, false);
+  assert.strictEqual(write1.code, 'taint_tool_denied');
+  assert.deepStrictEqual(write2, write1);
+  assert.ok(write1.ruleId);
+  assert.ok(write1.policyVersion);
+  // Gateway 模块不暴露任何重试入口：重试只有 Engine 一个归属。
+  assert.strictEqual(typeof toolGateway.retry, 'undefined');
+  assert.strictEqual(typeof toolGateway.decideRetry, 'undefined');
+  console.log(
+    `[EVIDENCE] b02-gateway ${JSON.stringify({
+      readOk: read1.ok,
+      writeCode: write1.code,
+      ruleId: write1.ruleId,
+      policyVersion: write1.policyVersion,
+      retryExports: Object.keys(toolGateway),
     })}`
   );
 });

@@ -14,6 +14,10 @@
  *
  * 拒绝只返回受控短码；调用方（Worker Runtime）负责写审计事件，
  * 事件里只记录工具名、短码、policyVersion 与 ruleId，不记录参数或返回内容。
+ *
+ * B-02 重试归属：网关每次调用只做一次判定并返回结果/错误，**不做任何重试**；
+ * 重试、退避与恢复唯一由 Workflow Engine（runtime.js.decideFailureDisposition）
+ * 决定。同一错误重复调用网关不会产生额外执行或重试副作用。
  */
 const artifactStore = require('./artifact-store');
 const taintPolicy = require('./taint-policy');
