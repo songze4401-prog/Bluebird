@@ -92,6 +92,9 @@ const EVENT_TYPES = Object.freeze([
   'approval.escalated',
   'approval.overdue',
   'approval.resolved',
+  // §29 提醒 / 取消两条完整路径的审计事件（只记状态与来源，不记正文）。
+  'approval.reminded',
+  'approval.cancelled',
   // Phase 3 第 1 项：验证闭环的审计事件（只记录裁决与引用，不记录正文）。
   'verification.review_opened',
   'verification.verdict',

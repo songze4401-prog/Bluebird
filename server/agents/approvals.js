@@ -5,6 +5,13 @@
  *
  * 审批记录保存在独立文件；事件只写安全字段。执行只能由已批准记录触发，
  * 且执行器只能调用 memory-service.js 的稳定维护接口。
+ *
+ * §29 双词表口径（B-11，向后兼容读）：
+ *  - status：既有执行生命周期，保持原语义（pending/approved/rejected/executing/completed/failed）；
+ *  - requestStatus：§29 Approval Request 六态（pending/approved/rejected/expired/escalated/cancelled）；
+ *  - state：二者合并后的只读派生视图，不落盘、不参与迁移校验。
+ * 提醒 / 升级 / 取消三条路径都只写 requestStatus，绝不把请求态硬塞进 status；
+ * SLA 参数在创建时冻结进 record.sla（旧记录由 slaViewOf 只读派生）。
  */
 const fs = require('fs');
 const path = require('path');
@@ -77,6 +84,23 @@ const R2_ESCALATION_RATIO = 0.5;
 // 风险等级映射：medium → R2（人工审批 + 30 分钟 SLA）；high → R3（无自动批准超时）。
 // 未知风险一律按 R3 处理（fail-closed，不降级）。
 const RISK_LEVEL_BY_RISK = Object.freeze({ medium: 'R2', high: 'R3' });
+
+// §29 SLA 持久化版本位：新记录把 SLA 参数冻结到 record.sla，便于审计与后续迁移；
+// 旧记录没有该字段时由 publicApproval 只读派生，不回写历史数据。
+const APPROVAL_SLA_POLICY_VERSION = 'approval-sla-v1';
+// 审批的单一读视图词表：§29 六态 + 既有执行生命周期三态（executing/completed/failed）。
+// 仅作为派生的 state 暴露，不参与写入，也不改既有 status / requestStatus 语义。
+const APPROVAL_STATES = Object.freeze([
+  'pending',
+  'approved',
+  'rejected',
+  'expired',
+  'escalated',
+  'cancelled',
+  'executing',
+  'completed',
+  'failed',
+]);
 const APPROVAL_POLICY_FIELDS = Object.freeze([
   'riskLevel',
   'expiresAt',
@@ -251,6 +275,18 @@ function publicApproval(record) {
     status: record.status,
     // §29 六态；旧记录缺字段时按 status 只读推导，不静默改历史数据。
     requestStatus: requestStatusOf(record),
+    // 单一读视图：§29 六态与执行生命周期合并后的派生值。
+    // 只读派生，权威写入仍是 status（生命周期）与 requestStatus（§29 请求态）。
+    state: mergedStateOf(record),
+    // 持久化 SLA：新记录按 record.sla 读；旧记录由四字段只读派生。
+    sla: slaViewOf(record),
+    reminder: record.reminder
+      ? clone(record.reminder)
+      : { count: 0, lastAt: null, lastBy: null, channel: null },
+    cancelledAt: record.cancelledAt || null,
+    cancelledBy: record.cancelledBy || null,
+    cancelReason: record.cancelReason || null,
+    escalationSource: record.escalationSource || null,
     notification: record.notification
       ? clone(record.notification)
       : { attempts: 0, lastError: null, lastAttemptAt: null, nextRetryAt: null, exhausted: false },
@@ -273,6 +309,68 @@ function requestStatusOf(record) {
   if (['approved', 'executing', 'completed', 'failed'].includes(record.status)) return 'approved';
   if (record.status === 'rejected') return 'rejected';
   return 'pending';
+}
+
+/**
+ * §29 六态与既有执行生命周期 status 的合并读视图（只读派生）。
+ * 规则：请求级终态（cancelled/rejected/expired/escalated）优先；
+ * 请求已批准时再映射执行生命周期（executing/completed/failed），否则 approved。
+ * 写入仍以 status + requestStatus 为准，state 不落盘、不参与迁移校验。
+ */
+function mergedStateOf(record) {
+  const request = requestStatusOf(record);
+  if (request !== 'approved') return request;
+  if (record.status === 'executing') return 'executing';
+  if (record.status === 'completed') return 'completed';
+  if (record.status === 'failed') return 'failed';
+  return 'approved';
+}
+
+/**
+ * SLA 视图：新记录读持久化的 record.sla；旧记录用既有四字段只读派生，
+ * 从而保证向后兼容读，也不对历史数据做静默回写。
+ */
+function slaViewOf(record) {
+  const stored = record && typeof record.sla === 'object' && record.sla ? record.sla : null;
+  const riskLevel =
+    (stored && typeof stored.riskLevel === 'string' ? stored.riskLevel : null) ||
+    (typeof record.riskLevel === 'string' ? record.riskLevel : null);
+  const slaMs =
+    stored && Number.isInteger(stored.slaMs)
+      ? stored.slaMs
+      : riskLevel === 'R2'
+        ? R2_SLA_MS
+        : null;
+  return {
+    slaPolicyVersion:
+      (stored && typeof stored.slaPolicyVersion === 'string' ? stored.slaPolicyVersion : null) ||
+      (record.riskLevel ? APPROVAL_SLA_POLICY_VERSION : null),
+    policyVersion:
+      stored && Number.isInteger(stored.policyVersion)
+        ? stored.policyVersion
+        : Number.isInteger(record.policyVersion)
+          ? record.policyVersion
+          : null,
+    riskLevel,
+    slaMs,
+    escalationRatio:
+      stored && typeof stored.escalationRatio === 'number'
+        ? stored.escalationRatio
+        : riskLevel === 'R2'
+          ? R2_ESCALATION_RATIO
+          : null,
+    startedAt: (stored && stored.startedAt) || record.requestedAt || null,
+    escalationAt:
+      (stored && stored.escalationAt !== undefined ? stored.escalationAt : null) ||
+      record.escalationAt ||
+      null,
+    expiresAt:
+      (stored && stored.expiresAt !== undefined ? stored.expiresAt : null) ||
+      record.expiresAt ||
+      null,
+    escalatedAt: record.escalatedAt || null,
+    overdueAt: record.overdueAt || null,
+  };
 }
 
 // §29 六态迁移校验：非法迁移一律拒绝（不自动纠正、不静默通过）。
@@ -360,7 +458,10 @@ function getRawApproval(approvalId) {
 }
 
 function pendingCount() {
-  return Object.values(load().approvals).filter(item => item.status === 'pending').length;
+  // 已取消的请求即使执行生命周期仍是 pending（向后兼容读），也不再占用待审批额度。
+  return Object.values(load().approvals).filter(
+    item => item.status === 'pending' && requestStatusOf(item) !== 'cancelled'
+  ).length;
 }
 
 // S6：审批入口只能从 running 进入。既有调用方（HTTP 与测试）可能对 queued/accepted
@@ -639,6 +740,8 @@ function scheduleDeadline(record) {
   if (!key) return;
   disarmDeadline(key);
   if (record.status !== 'pending') return;
+  // 已取消的请求不再挂 SLA 计时（status 仍是 pending 只是向后兼容读）。
+  if (requestStatusOf(record) === 'cancelled') return;
   const dueAt = nextDueAt(record);
   if (dueAt === null) return;
   const timer = setTimeout(() => {
@@ -659,6 +762,8 @@ function markOverdue(approvalId, { now = Date.now() } = {}) {
   const current = load();
   const record = current.approvals[String(approvalId || '')];
   if (!record || record.status !== 'pending') return null;
+  // 已取消的请求不再产生升级/过期标记与事件。
+  if (requestStatusOf(record) === 'cancelled') return null;
   const at = nowIso(now);
   const events = [];
   if (record.escalationAt && !record.escalatedAt && Date.parse(record.escalationAt) <= now) {
@@ -709,6 +814,8 @@ function expireDueApprovals({ now = Date.now() } = {}) {
   const result = { checked: 0, escalated: [], overdue: [] };
   for (const record of Object.values(current.approvals)) {
     if (record.status !== 'pending') continue;
+    // 已取消的请求不再参与 SLA 检查（status 仍是 pending 只是向后兼容读）。
+    if (requestStatusOf(record) === 'cancelled') continue;
     result.checked += 1;
     if (!record.expiresAt && !record.escalationAt) continue;
     const beforeEscalated = record.escalatedAt || null;
@@ -719,6 +826,178 @@ function expireDueApprovals({ now = Date.now() } = {}) {
     scheduleDeadline(record);
   }
   return result;
+}
+
+/**
+ * §29 提醒路径：只对仍在等待人工处理的请求记账并写事件。
+ * 提醒不改变审批状态、不产生批准效果，也不重置 SLA 计时。
+ */
+function remindApproval(
+  approvalId,
+  { actor = 'system', now = Date.now(), channel = null } = {}
+) {
+  const current = load();
+  const record = current.approvals[String(approvalId || '')];
+  if (!record) throw new AgentError('approval_not_found', '审批不存在', 404);
+  if (record.status !== 'pending') {
+    throw new AgentError('approval_not_pending', '审批当前状态不允许提醒', 409);
+  }
+  const request = requestStatusOf(record);
+  if (request === 'cancelled' || request === 'rejected' || request === 'expired') {
+    throw new AgentError('approval_not_remindable', '审批请求已关闭，不能再提醒', 409);
+  }
+  const previous =
+    record.reminder && typeof record.reminder === 'object' ? record.reminder : {};
+  const at = nowIso(now);
+  record.reminder = {
+    count: (Number.isInteger(previous.count) ? previous.count : 0) + 1,
+    lastAt: at,
+    lastBy: String(actor || 'system').slice(0, 80),
+    channel: typeof channel === 'string' ? channel.slice(0, 60) : null,
+  };
+  save();
+  recordEvent(
+    record.botId,
+    'approval.reminded',
+    {
+      status: record.status,
+      requestStatus: request,
+      decision: 'reminded',
+      taskType: record.operation,
+      mode: 'approval',
+      ...(channel ? { channel: String(channel).slice(0, 60) } : {}),
+    },
+    { approvalId: record.approvalId, taskId: record.taskId, sessionId: record.sessionId }
+  );
+  return publicApproval(record);
+}
+
+/**
+ * §29 升级路径：显式把 pending 请求升级给更高一级人工（不自动批准）。
+ * 与 SLA 到点的 markOverdue 走同一条 requestStatus 迁移，只是触发来源不同。
+ */
+function escalateApproval(
+  approvalId,
+  { actor = 'system', reason = null, now = Date.now(), source = 'manual' } = {}
+) {
+  const current = load();
+  const record = current.approvals[String(approvalId || '')];
+  if (!record) throw new AgentError('approval_not_found', '审批不存在', 404);
+  if (record.status !== 'pending') {
+    throw new AgentError('approval_not_pending', '审批当前状态不允许升级', 409);
+  }
+  const request = requestStatusOf(record);
+  if (request === 'cancelled') {
+    throw new AgentError('approval_not_escalatable', '审批请求已取消，不能升级', 409);
+  }
+  if (request === 'escalated') return publicApproval(record);
+  assertRequestStatusTransition(request, 'escalated');
+  const at = nowIso(now);
+  record.requestStatus = 'escalated';
+  record.requestStatusChangedAt = at;
+  if (!record.escalatedAt) record.escalatedAt = at;
+  record.escalationSource = String(source || 'manual').slice(0, 40);
+  record.escalatedBy = String(actor || 'system').slice(0, 80);
+  if (typeof reason === 'string') record.escalationReason = reason.slice(0, 200);
+  save();
+  recordEvent(
+    record.botId,
+    'approval.escalated',
+    {
+      status: record.status,
+      requestStatus: 'escalated',
+      decision: 'escalated',
+      taskType: record.operation,
+      mode: 'approval',
+      source: record.escalationSource,
+    },
+    { approvalId: record.approvalId, taskId: record.taskId, sessionId: record.sessionId }
+  );
+  return publicApproval(record);
+}
+
+/**
+ * §29 取消路径（完整版）：
+ *  - requestStatus → cancelled（status 保持原值，保证向后兼容读）；
+ *  - 摘除 SLA 计时器，此后不再产生升级/过期标记；
+ *  - 关联任务离开 waiting_approval，收口为 cancelled 并投递结果、关闭会话；
+ *  - 已进入执行阶段的记录不允许取消，避免“执行中/已执行”被伪造成取消。
+ */
+function cancelApproval(
+  approvalId,
+  { actor = 'system', reason = null, now = Date.now() } = {}
+) {
+  const current = load();
+  const record = current.approvals[String(approvalId || '')];
+  if (!record) throw new AgentError('approval_not_found', '审批不存在', 404);
+  if (['executing', 'completed', 'failed'].includes(record.status)) {
+    throw new AgentError('approval_not_cancellable', '审批已进入执行阶段，不能取消', 409);
+  }
+  const request = requestStatusOf(record);
+  if (request === 'cancelled') return publicApproval(record);
+  assertRequestStatusTransition(request, 'cancelled');
+  const at = nowIso(now);
+  record.requestStatus = 'cancelled';
+  record.requestStatusChangedAt = at;
+  record.cancelledAt = at;
+  record.cancelledBy = String(actor || 'system').slice(0, 80);
+  record.cancelReason = typeof reason === 'string' ? reason.slice(0, 200) : null;
+  disarmDeadline(record.approvalId);
+  save();
+
+  let taskCancelled = false;
+  if (record.taskId) {
+    const task = tasks.getRawTask(record.taskId);
+    if (task && !tasks.isTerminalStatus(task.status) && task.status !== 'recovery') {
+      const cancelResult = normalizeWorkerResult({
+        status: 'cancelled',
+        summary: '',
+        errorCode: 'approval_cancelled',
+        runId: task.runId || null,
+        finishedAt: at,
+      });
+      try {
+        tasks.transitionTask(record.taskId, {
+          to: 'cancelled',
+          completedAt: at,
+          errorCode: 'approval_cancelled',
+          result: cancelResult,
+        });
+        taskCancelled = true;
+      } catch (_) {
+        // 任务状态竞争不影响审批取消结果；等待审批对账会在重启时处理悬空。
+      }
+      if (taskCancelled) {
+        deliverTaskResult(record.taskId, {
+          status: 'cancelled',
+          result: cancelResult,
+          errorCode: 'approval_cancelled',
+        });
+        try {
+          sessions.closeSession(record.botId, task.sessionId, {
+            status: sessions.deriveLifecycleStatus('cancelled'),
+            reason: 'approval_cancelled',
+          });
+        } catch (_) {
+          // 会话收口失败不影响审批取消结果。
+        }
+      }
+    }
+  }
+
+  recordEvent(
+    record.botId,
+    'approval.cancelled',
+    {
+      status: record.status,
+      requestStatus: 'cancelled',
+      decision: 'cancelled',
+      taskType: record.operation,
+      mode: 'approval',
+    },
+    { approvalId: record.approvalId, taskId: record.taskId, sessionId: record.sessionId }
+  );
+  return publicApproval(record);
 }
 
 function createApproval({
@@ -804,6 +1083,23 @@ function createApproval({
     // §29：Approval Request 自身状态与执行生命周期 status 并列。
     requestStatus: 'pending',
     requestStatusChangedAt: now,
+    // §29 SLA 持久化：冻结创建时的版本、风险等级、阈值与到期点，
+    // 供重启恢复、提醒/升级/取消路径与审计复读；旧记录缺省时只读派生。
+    sla: {
+      slaPolicyVersion: APPROVAL_SLA_POLICY_VERSION,
+      policyVersion,
+      riskLevel,
+      slaMs: riskLevel === 'R2' ? R2_SLA_MS : null,
+      escalationRatio: riskLevel === 'R2' ? R2_ESCALATION_RATIO : null,
+      startedAt: now,
+      escalationAt,
+      expiresAt,
+    },
+    reminder: { count: 0, lastAt: null, lastBy: null, channel: null },
+    cancelledAt: null,
+    cancelledBy: null,
+    cancelReason: null,
+    escalationSource: null,
     notification: {
       attempts: 0,
       lastError: null,
@@ -959,6 +1255,10 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
   if (!record) throw new AgentError('approval_not_found', '审批不存在', 404);
   if (record.status !== 'approved') {
     throw new AgentError('approval_not_approved', '审批尚未批准，不能执行', 409);
+  }
+  // §29：请求已取消时，即使执行生命周期仍是 approved（向后兼容读），也绝不执行。
+  if (requestStatusOf(record) === 'cancelled') {
+    throw new AgentError('approval_cancelled', '审批请求已取消，不能执行', 409);
   }
   // ④ 老记录缺 riskLevel/expiresAt/escalationAt/policyVersion 时 fail-closed：
   // 不执行、不推进任务、不把“缺字段”当作低风险。
@@ -1236,6 +1536,8 @@ function recoverInterrupted() {
     }
 
     if (record.status === 'pending' && record.taskId) {
+      // §29 已取消请求不再推回 waiting_approval（它本就不该继续等待）。
+      if (requestStatusOf(record) === 'cancelled') continue;
       const task = tasks.getRawTask(record.taskId);
       if (task && !tasks.isTerminalStatus(task.status) && task.status !== 'waiting_approval') {
         try {
@@ -1256,7 +1558,14 @@ function recoverInterrupted() {
 
   const covered = new Set();
   for (const record of Object.values(current.approvals)) {
-    if (record.taskId && !TERMINAL.has(record.status)) covered.add(record.taskId);
+    // 已取消的请求不覆盖任务：避免取消时任务迁移失败被永久掩盖。
+    if (
+      record.taskId &&
+      !TERMINAL.has(record.status) &&
+      requestStatusOf(record) !== 'cancelled'
+    ) {
+      covered.add(record.taskId);
+    }
   }
   for (const task of tasks.allTasks()) {
     if (task.status !== 'waiting_approval' || covered.has(task.taskId)) continue;
@@ -1306,6 +1615,8 @@ module.exports = {
   STATUSES,
   REQUEST_STATUSES,
   REQUEST_TRANSITIONS,
+  APPROVAL_STATES,
+  APPROVAL_SLA_POLICY_VERSION,
   MAX_NOTIFICATION_ATTEMPTS,
   R2_SLA_MS,
   R2_ESCALATION_RATIO,
@@ -1313,12 +1624,18 @@ module.exports = {
   listApprovals,
   getApproval,
   getRawApproval,
+  pendingCount,
   approve,
   reject,
   execute,
   expireDueApprovals,
   markOverdue,
+  remindApproval,
+  escalateApproval,
+  cancelApproval,
   requestStatusOf,
+  mergedStateOf,
+  slaViewOf,
   assertRequestStatusTransition,
   transitionRequestStatus,
   recordNotificationOutcome,
