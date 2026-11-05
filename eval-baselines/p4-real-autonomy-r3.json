@@ -1,0 +1,483 @@
+{
+  "schemaVersion": "p4-eval-baseline-v1",
+  "generatedAt": "2026-11-05T06:52:49.196Z",
+  "codeCommit": null,
+  "strategy": {
+    "version": "p4-autonomy-v1",
+    "enabled": true
+  },
+  "suite": {
+    "version": "p4-eval-v1",
+    "digest": "3140049494f0a24a49edddaadfd34aeb327903872b30c370355ec80b62a8609f",
+    "caseCount": 13
+  },
+  "metrics": {
+    "successRate": {
+      "value": 0.8461538461538461,
+      "successCount": 11,
+      "caseCount": 13
+    },
+    "rework": {
+      "total": 1,
+      "casesWithRework": 1,
+      "rate": 0.07692307692307693
+    },
+    "tokenCost": {
+      "total": 3961,
+      "knownCases": 13,
+      "unknownCases": 0,
+      "unknownTokens": null,
+      "complete": true
+    },
+    "latency": {
+      "totalMs": 92806,
+      "avgMs": 7139,
+      "maxMs": 16727,
+      "unknownCases": 0,
+      "complete": true
+    }
+  },
+  "cases": [
+    {
+      "caseId": "research-success",
+      "taskId": "task_1865ce4c-5d50-4fef-8049-e7ac9cf4c652",
+      "agentId": "researcher",
+      "taskType": "memory.recall",
+      "terminal": "completed",
+      "expectedTerminal": "completed",
+      "errorCode": null,
+      "allowedErrorCodes": [],
+      "success": true,
+      "terminalOk": true,
+      "codeOk": true,
+      "expectReview": false,
+      "reviewTriggered": false,
+      "reviewOk": true,
+      "attempts": 1,
+      "rework": 0,
+      "redelivered": 0,
+      "tokens": 264,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "teamTaskIds": [],
+      "replan": null,
+      "policy": {
+        "version": "p4-autonomy-v1",
+        "decision": "single",
+        "rationale": []
+      },
+      "latencyMs": 6642,
+      "budgetTokenCap": 500
+    },
+    {
+      "caseId": "executor-reviewed-success",
+      "taskId": "task_067dd9e8-96dd-4f40-a07e-de8788d25dae",
+      "agentId": "executor",
+      "taskType": "action.execute",
+      "terminal": "completed",
+      "expectedTerminal": "completed",
+      "errorCode": null,
+      "allowedErrorCodes": [],
+      "success": true,
+      "terminalOk": true,
+      "codeOk": true,
+      "expectReview": true,
+      "reviewTriggered": true,
+      "reviewOk": true,
+      "attempts": 1,
+      "rework": 0,
+      "redelivered": 0,
+      "tokens": 393,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "teamTaskIds": [
+        "task_2e7ce2c2-3566-4e3a-bd91-c3647d0cfa2e"
+      ],
+      "replan": null,
+      "policy": {
+        "version": "p4-autonomy-v1",
+        "decision": "team",
+        "rationale": [
+          "high_risk_requires_review"
+        ]
+      },
+      "latencyMs": 3727,
+      "budgetTokenCap": 600
+    },
+    {
+      "caseId": "retry-then-success",
+      "taskId": "task_0dea5809-2105-4987-9ff1-add77e59c72a",
+      "agentId": "researcher",
+      "taskType": "knowledge.search",
+      "terminal": "completed",
+      "expectedTerminal": "completed",
+      "errorCode": null,
+      "allowedErrorCodes": [
+        "model_timeout"
+      ],
+      "success": true,
+      "terminalOk": true,
+      "codeOk": true,
+      "expectReview": false,
+      "reviewTriggered": false,
+      "reviewOk": true,
+      "attempts": 2,
+      "rework": 1,
+      "redelivered": 0,
+      "tokens": 376,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "teamTaskIds": [],
+      "replan": null,
+      "policy": {
+        "version": "p4-autonomy-v1",
+        "decision": "single",
+        "rationale": []
+      },
+      "latencyMs": 10450,
+      "budgetTokenCap": 500
+    },
+    {
+      "caseId": "hard-failure",
+      "taskId": "task_fb24ed1f-1f6c-42d0-bcbf-7418b82119ae",
+      "agentId": "researcher",
+      "taskType": "knowledge.search",
+      "terminal": "failed",
+      "expectedTerminal": "failed",
+      "errorCode": "model_timeout",
+      "allowedErrorCodes": [
+        "model_timeout"
+      ],
+      "success": true,
+      "terminalOk": true,
+      "codeOk": true,
+      "expectReview": false,
+      "reviewTriggered": false,
+      "reviewOk": true,
+      "attempts": 1,
+      "rework": 0,
+      "redelivered": 0,
+      "tokens": 247,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "teamTaskIds": [],
+      "replan": "non_recoverable_error",
+      "policy": {
+        "version": "p4-autonomy-v1",
+        "decision": "single",
+        "rationale": []
+      },
+      "latencyMs": 5571,
+      "budgetTokenCap": 500
+    },
+    {
+      "caseId": "unknown-usage-success",
+      "taskId": "task_23ec970f-abe6-4146-a280-87e21b6a85af",
+      "agentId": "researcher",
+      "taskType": "summary.synthesize",
+      "terminal": "completed",
+      "expectedTerminal": "completed",
+      "errorCode": null,
+      "allowedErrorCodes": [],
+      "success": true,
+      "terminalOk": true,
+      "codeOk": true,
+      "expectReview": false,
+      "reviewTriggered": false,
+      "reviewOk": true,
+      "attempts": 1,
+      "rework": 0,
+      "redelivered": 0,
+      "tokens": 99,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "teamTaskIds": [],
+      "replan": null,
+      "policy": {
+        "version": "p4-autonomy-v1",
+        "decision": "single",
+        "rationale": []
+      },
+      "latencyMs": 2847,
+      "budgetTokenCap": 400
+    },
+    {
+      "caseId": "exec-execute-slow",
+      "taskId": "task_94d9b514-af71-4938-8628-6cfec23b7e1f",
+      "agentId": "executor",
+      "taskType": "action.execute",
+      "terminal": "completed",
+      "expectedTerminal": "completed",
+      "errorCode": null,
+      "allowedErrorCodes": [],
+      "success": true,
+      "terminalOk": true,
+      "codeOk": true,
+      "expectReview": true,
+      "reviewTriggered": true,
+      "reviewOk": true,
+      "attempts": 1,
+      "rework": 0,
+      "redelivered": 0,
+      "tokens": 417,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "teamTaskIds": [
+        "task_69c5fa8f-7e7d-46f1-9ff9-96704c6d89e7"
+      ],
+      "replan": null,
+      "policy": {
+        "version": "p4-autonomy-v1",
+        "decision": "team",
+        "rationale": [
+          "high_risk_requires_review"
+        ]
+      },
+      "latencyMs": 6461,
+      "budgetTokenCap": 700
+    },
+    {
+      "caseId": "exec-recover-after-failure",
+      "taskId": "task_31d0009e-8891-4665-82a1-1db1370c0b3c",
+      "agentId": "executor",
+      "taskType": "action.execute",
+      "terminal": "failed",
+      "expectedTerminal": "completed",
+      "errorCode": "empty_response",
+      "allowedErrorCodes": [
+        "review_rejected"
+      ],
+      "success": false,
+      "terminalOk": false,
+      "codeOk": false,
+      "expectReview": true,
+      "reviewTriggered": true,
+      "reviewOk": true,
+      "attempts": 1,
+      "rework": 0,
+      "redelivered": 0,
+      "tokens": 449,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "teamTaskIds": [],
+      "replan": "non_recoverable_error",
+      "policy": {
+        "version": "p4-autonomy-v1",
+        "decision": "team",
+        "rationale": [
+          "high_risk_requires_review"
+        ]
+      },
+      "latencyMs": 16727,
+      "budgetTokenCap": 700
+    },
+    {
+      "caseId": "exec-hard-failure",
+      "taskId": "task_11668cd3-1aeb-439b-95fb-7f6b085ec6e7",
+      "agentId": "executor",
+      "taskType": "action.execute",
+      "terminal": "failed",
+      "expectedTerminal": "failed",
+      "errorCode": "evidence_missing",
+      "allowedErrorCodes": [
+        "evidence_missing"
+      ],
+      "success": true,
+      "terminalOk": true,
+      "codeOk": true,
+      "expectReview": true,
+      "reviewTriggered": true,
+      "reviewOk": true,
+      "attempts": 1,
+      "rework": 0,
+      "redelivered": 0,
+      "tokens": 308,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "teamTaskIds": [],
+      "replan": "non_recoverable_error",
+      "policy": {
+        "version": "p4-autonomy-v1",
+        "decision": "team",
+        "rationale": [
+          "high_risk_requires_review"
+        ]
+      },
+      "latencyMs": 10319,
+      "budgetTokenCap": 600
+    },
+    {
+      "caseId": "knowledge-multi-source",
+      "taskId": "task_c928cc3c-64c8-4227-b8dc-2275fe87bb77",
+      "agentId": "researcher",
+      "taskType": "knowledge.search",
+      "terminal": "failed",
+      "expectedTerminal": "completed",
+      "errorCode": "empty_response",
+      "allowedErrorCodes": [],
+      "success": false,
+      "terminalOk": false,
+      "codeOk": false,
+      "expectReview": false,
+      "reviewTriggered": false,
+      "reviewOk": true,
+      "attempts": 1,
+      "rework": 0,
+      "redelivered": 0,
+      "tokens": 448,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "teamTaskIds": [],
+      "replan": "non_recoverable_error",
+      "policy": {
+        "version": "p4-autonomy-v1",
+        "decision": "single",
+        "rationale": []
+      },
+      "latencyMs": 9385,
+      "budgetTokenCap": 600
+    },
+    {
+      "caseId": "memory-search-quick",
+      "taskId": "task_c8bede9a-ba2a-402d-8172-31c49b5e562c",
+      "agentId": "memory",
+      "taskType": "memory.search",
+      "terminal": "completed",
+      "expectedTerminal": "completed",
+      "errorCode": null,
+      "allowedErrorCodes": [],
+      "success": true,
+      "terminalOk": true,
+      "codeOk": true,
+      "expectReview": false,
+      "reviewTriggered": false,
+      "reviewOk": true,
+      "attempts": 1,
+      "rework": 0,
+      "redelivered": 0,
+      "tokens": 174,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "teamTaskIds": [],
+      "replan": null,
+      "policy": {
+        "version": "p4-autonomy-v1",
+        "decision": "single",
+        "rationale": []
+      },
+      "latencyMs": 3497,
+      "budgetTokenCap": 300
+    },
+    {
+      "caseId": "write-high-risk",
+      "taskId": "task_d711d05d-ff9c-4096-9403-d060d6767f87",
+      "agentId": "executor",
+      "taskType": "memory.write",
+      "terminal": "completed",
+      "expectedTerminal": "completed",
+      "errorCode": null,
+      "allowedErrorCodes": [],
+      "success": true,
+      "terminalOk": true,
+      "codeOk": true,
+      "expectReview": true,
+      "reviewTriggered": true,
+      "reviewOk": true,
+      "attempts": 1,
+      "rework": 0,
+      "redelivered": 0,
+      "tokens": 454,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "teamTaskIds": [
+        "task_6babb56e-c6e3-42b6-a66b-6f78d1e9cdb9"
+      ],
+      "replan": null,
+      "policy": {
+        "version": "p4-autonomy-v1",
+        "decision": "team",
+        "rationale": [
+          "high_risk_requires_review"
+        ]
+      },
+      "latencyMs": 4806,
+      "budgetTokenCap": 600
+    },
+    {
+      "caseId": "knowledge-unknown-usage",
+      "taskId": "task_c2a54190-50a4-4b7d-9838-d2d5d14cb5f9",
+      "agentId": "researcher",
+      "taskType": "knowledge.search",
+      "terminal": "completed",
+      "expectedTerminal": "completed",
+      "errorCode": null,
+      "allowedErrorCodes": [],
+      "success": true,
+      "terminalOk": true,
+      "codeOk": true,
+      "expectReview": false,
+      "reviewTriggered": false,
+      "reviewOk": true,
+      "attempts": 1,
+      "rework": 0,
+      "redelivered": 0,
+      "tokens": 226,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "teamTaskIds": [],
+      "replan": null,
+      "policy": {
+        "version": "p4-autonomy-v1",
+        "decision": "single",
+        "rationale": []
+      },
+      "latencyMs": 9624,
+      "budgetTokenCap": 500
+    },
+    {
+      "caseId": "summary-fast",
+      "taskId": "task_a6b95d26-5c77-44ec-bf04-787cf63cbadb",
+      "agentId": "researcher",
+      "taskType": "summary.synthesize",
+      "terminal": "completed",
+      "expectedTerminal": "completed",
+      "errorCode": null,
+      "allowedErrorCodes": [],
+      "success": true,
+      "terminalOk": true,
+      "codeOk": true,
+      "expectReview": false,
+      "reviewTriggered": false,
+      "reviewOk": true,
+      "attempts": 1,
+      "rework": 0,
+      "redelivered": 0,
+      "tokens": 106,
+      "usageKnown": true,
+      "unknownAttempts": 0,
+      "teamTaskIds": [],
+      "replan": null,
+      "policy": {
+        "version": "p4-autonomy-v1",
+        "decision": "single",
+        "rationale": []
+      },
+      "latencyMs": 2750,
+      "budgetTokenCap": 350
+    }
+  ],
+  "safety": {
+    "source": {
+      "approvalBypass": "既有事件：expectReview=true 但无 verification.review_opened/approval.requested",
+      "failClosedHits": "既有事件：verification.rejected/worker.scope_denied/tool.denied/route.rejected",
+      "unauthorizedDenied": "既有事件：worker.scope_denied",
+      "deadLetters": "既有死信视图：tasks.listDeadLetters"
+    },
+    "approvalBypass": 0,
+    "failClosedHits": 0,
+    "unauthorizedDenied": 0,
+    "approvalRequested": 0,
+    "approvalResolved": 0,
+    "deadLetters": 0
+  }
+}
