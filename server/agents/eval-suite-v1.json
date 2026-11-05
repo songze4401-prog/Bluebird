@@ -1,0 +1,103 @@
+{
+  "version": "p4-eval-v1",
+  "createdAt": "2026-11-05",
+  "description": "Phase 4 离线评测集 v1：固定用例 + 确定性 stub 脚本，不调用真实模型。",
+  "cases": [
+    {
+      "id": "research-success",
+      "goal": "总结本周关于持久任务队列的改动",
+      "agentId": "researcher",
+      "taskType": "memory.recall",
+      "expectedTerminal": "completed",
+      "allowedErrorCodes": [],
+      "expectReview": false,
+      "budgetTokenCap": 500,
+      "script": [
+        {
+          "outcome": "completed",
+          "errorCode": null,
+          "simulatedMs": 400,
+          "usage": { "prompt_tokens": 120, "completion_tokens": 40, "total_tokens": 160 }
+        }
+      ]
+    },
+    {
+      "id": "executor-reviewed-success",
+      "goal": "把已确认的修复提交到目标文件",
+      "agentId": "executor",
+      "taskType": "action.execute",
+      "expectedTerminal": "completed",
+      "allowedErrorCodes": [],
+      "expectReview": true,
+      "budgetTokenCap": 600,
+      "script": [
+        {
+          "outcome": "completed",
+          "errorCode": null,
+          "simulatedMs": 900,
+          "usage": { "prompt_tokens": 200, "completion_tokens": 50, "total_tokens": 250 }
+        }
+      ]
+    },
+    {
+      "id": "retry-then-success",
+      "goal": "检索跨会话记忆并给出带来源的答案",
+      "agentId": "researcher",
+      "taskType": "knowledge.search",
+      "expectedTerminal": "completed",
+      "allowedErrorCodes": ["model_timeout"],
+      "expectReview": false,
+      "budgetTokenCap": 500,
+      "script": [
+        {
+          "outcome": "failed",
+          "errorCode": "model_timeout",
+          "simulatedMs": 200,
+          "usage": { "prompt_tokens": 25, "completion_tokens": 5, "total_tokens": 30 }
+        },
+        {
+          "outcome": "completed",
+          "errorCode": null,
+          "simulatedMs": 600,
+          "usage": { "prompt_tokens": 130, "completion_tokens": 20, "total_tokens": 150 }
+        }
+      ]
+    },
+    {
+      "id": "hard-failure",
+      "goal": "在无证据情况下强行给出结论",
+      "agentId": "researcher",
+      "taskType": "knowledge.search",
+      "expectedTerminal": "failed",
+      "allowedErrorCodes": ["model_timeout"],
+      "expectReview": false,
+      "budgetTokenCap": 500,
+      "script": [
+        {
+          "outcome": "failed",
+          "errorCode": "model_timeout",
+          "simulatedMs": 300,
+          "usage": { "prompt_tokens": 20, "completion_tokens": 0, "total_tokens": 20 }
+        }
+      ]
+    },
+    {
+      "id": "unknown-usage-success",
+      "goal": "把两条来源合并成一段简短摘要",
+      "agentId": "researcher",
+      "taskType": "summary.synthesize",
+      "expectedTerminal": "completed",
+      "allowedErrorCodes": [],
+      "expectReview": false,
+      "budgetTokenCap": 400,
+      "script": [
+        {
+          "outcome": "completed",
+          "errorCode": null,
+          "simulatedMs": 350,
+          "usage": null
+        }
+      ]
+    }
+  ]
+}

@@ -10,3 +10,5 @@ dist/
 server/index.before-memory.js
 
 server/data/
+# Phase 4 离线评测的临时数据目录（快照走 eval-baselines/ 单独提交）
+.eval-data/
