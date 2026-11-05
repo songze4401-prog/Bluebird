@@ -20,6 +20,7 @@ const stateMachine = require('./state-machine');
 const artifactStore = require('./artifact-store');
 const { normalizeWorkerResult } = require('./worker-result');
 const dependencies = require('./dependencies');
+const agentLimits = require('./agent-limits');
 const { LEGACY_ALIASES } = require('./status-vocabulary');
 const approvalDeadline = require('./approval-deadline');
 const crashHook = require('./crash-hook');
@@ -1100,6 +1101,10 @@ function createTask({
   const parentTask = cleanParentTaskId ? tasks.tasks[cleanParentTaskId] : null;
   if (cleanParentTaskId && !parentTask) {
     throw new AgentError('validation_failed', 'parentTaskId 指向的任务不存在', 400);
+  }
+  // §25：委派深度最多 2 层；超限在创建入口拒绝，避免多建一层再回滚。
+  if (parentTask) {
+    agentLimits.assertDelegationAllowed(cleanParentTaskId, tasks.tasks);
   }
   const effectiveRunId =
     cleanRunId || (parentTask && parentTask.budgetRunId ? parentTask.budgetRunId : null);
