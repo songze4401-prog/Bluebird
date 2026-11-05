@@ -10,3 +10,6 @@ dist/
 server/index.before-memory.js
 
 server/data/
+
+# 评测脚本临时数据（策略版本/任务/事件残留），不入库
+.eval-data/
