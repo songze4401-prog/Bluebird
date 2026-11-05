@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/* global __dirname */
 /**
  * A-13 / §20（按 Owner 口径九步）端到端 worked example。
  *
@@ -23,6 +24,21 @@ const crypto = require('crypto');
 function argOf(flag) {
   const index = process.argv.indexOf(flag);
   return index >= 0 ? process.argv[index + 1] : null;
+}
+
+const REAL_MODE =
+  process.argv.includes('--real-provider') || argOf('--provider') === 'longcat';
+const REAL_PROVIDER = {
+  name: 'LongCat',
+  baseUrl: 'https://api.longcat.chat/openai',
+  modelId: 'LongCat-2.5',
+};
+if (REAL_MODE) {
+  // 凭据只从 server/.env（.gitignore）读取，不进日志/记录/命令行。
+  require('dotenv').config({ path: path.join(__dirname, '..', 'server', '.env') });
+  if (!String(process.env.LONGCAT_API_KEY || '').trim()) {
+    throw new Error('real provider 模式缺少 LONGCAT_API_KEY（应在 server/.env）');
+  }
 }
 
 const DATA_DIR = argOf('--data-dir') || fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-e2e-'));
@@ -64,7 +80,7 @@ function lastUserText(messages) {
   return String((messages.at(-1) || {}).content || '');
 }
 
-function waitForTerminal(taskId, timeoutMs = 30000) {
+function waitForTerminal(taskId, timeoutMs = REAL_MODE ? 120000 : 30000) {
   return new Promise(resolve => {
     const deadline = Date.now() + timeoutMs;
     const tick = () => {
@@ -99,9 +115,70 @@ async function main() {
   const startedAt = Date.now();
   // 本地 provider 侧的真实 usage 快照（runtime 透传缺失时以此为准，不估算）。
   const providerUsage = { workerA: null, workerB: null, reviewer: null };
+  // 失败时也能按已创建的任务取真实 usage（不估算、不补位）。
+  const runContext = { taskIds: {} };
   try {
-    // Step 0：本地探针 provider（非真实模型）。
-    const providerServer = http.createServer((req, res) => {
+    // Step 0：provider 配置。真实模式走 LongCat；默认走本地 stub（行为保持不变）。
+    if (REAL_MODE) {
+      const added = apiConfigs.addModelProvider({
+        name: REAL_PROVIDER.name,
+        baseUrl: REAL_PROVIDER.baseUrl,
+        apiKey: String(process.env.LONGCAT_API_KEY || '').trim(),
+        models: [
+          {
+            id: REAL_PROVIDER.modelId,
+            name: REAL_PROVIDER.modelId,
+            capabilities: { tools: false, vision: false },
+          },
+        ],
+      });
+      if (!added || !added.provider) {
+        throw new Error(`真实 provider 注册失败：${(added && added.error) || 'unknown'}`);
+      }
+      const providerId = added.provider.id;
+      for (const botId of ['researcher', 'reviewer']) {
+        agentConfig.updateConfig(botId, {
+          enabled: true,
+          modelProfile: {
+            providerId,
+            modelId: REAL_PROVIDER.modelId,
+            temperature: 0.1,
+            // LongCat-2.5 的 reasoning tokens 计入 completion 预算；2048 仍出现过截断。
+            maxTokens: 4000,
+            timeoutMs: 120000,
+          },
+        });
+        const credential = credentials.putCredential({
+          botId,
+          providerId,
+          apiKey: String(process.env.LONGCAT_API_KEY || '').trim(),
+        });
+        agentConfig.setCredentialId(botId, credential.credentialId);
+      }
+      // Reviewer 需要对照两来源并输出裁决 JSON，reasoning 预算更高。
+      agentConfig.updateConfig('reviewer', {
+        enabled: true,
+        modelProfile: {
+          providerId,
+          modelId: REAL_PROVIDER.modelId,
+          temperature: 0.1,
+          maxTokens: 4000,
+          timeoutMs: 120000,
+        },
+      });
+      STEPS.push({
+        step: 1,
+        name: '准备真实 provider 与 Agent 配置',
+        startedAt: nowIso(),
+        durationMs: Date.now() - startedAt,
+        environment: `真实模型 provider：LongCat ${REAL_PROVIDER.baseUrl}（${REAL_PROVIDER.modelId}）`,
+        providerId,
+        bots: ['researcher', 'reviewer'],
+      });
+    }
+
+    // 默认模式：本地探针 provider（非真实模型）。
+    const providerServer = REAL_MODE ? null : http.createServer((req, res) => {
       if (req.method === 'GET' && req.url === '/v1/models') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ data: [{ id: 'worked-example-local-stub' }] }));
@@ -201,66 +278,88 @@ async function main() {
         }, delay);
       });
     });
-    await new Promise(resolve => providerServer.listen(0, '127.0.0.1', resolve));
-    server = providerServer;
-    const providerBase = `http://127.0.0.1:${providerServer.address().port}/v1`;
-    const added = apiConfigs.addModelProvider({
-      name: 'Worked Example Local Stub',
-      baseUrl: providerBase,
-      apiKey: 'local-not-used',
-      models: [
-        {
-          id: 'worked-example-local-stub',
-          name: 'Worked Example Local Stub',
-          capabilities: { tools: false, vision: false },
-        },
-      ],
-    });
-    const providerId = added.provider.id;
-    for (const botId of ['researcher', 'reviewer']) {
-      agentConfig.updateConfig(botId, {
-        enabled: true,
-        modelProfile: {
+    if (!REAL_MODE) {
+      await new Promise(resolve => providerServer.listen(0, '127.0.0.1', resolve));
+      server = providerServer;
+      const providerBase = `http://127.0.0.1:${providerServer.address().port}/v1`;
+      const added = apiConfigs.addModelProvider({
+        name: 'Worked Example Local Stub',
+        baseUrl: providerBase,
+        apiKey: 'local-not-used',
+        models: [
+          {
+            id: 'worked-example-local-stub',
+            name: 'Worked Example Local Stub',
+            capabilities: { tools: false, vision: false },
+          },
+        ],
+      });
+      const providerId = added.provider.id;
+      for (const botId of ['researcher', 'reviewer']) {
+        agentConfig.updateConfig(botId, {
+          enabled: true,
+          modelProfile: {
+            providerId,
+            modelId: 'worked-example-local-stub',
+            temperature: 0.1,
+            maxTokens: 512,
+            timeoutMs: 20000,
+          },
+        });
+        const credential = credentials.putCredential({
+          botId,
           providerId,
-          modelId: 'worked-example-local-stub',
-          temperature: 0.1,
-          maxTokens: 512,
-          timeoutMs: 20000,
-        },
-      });
-      const credential = credentials.putCredential({
-        botId,
+          apiKey: 'local-stub-key',
+        });
+        agentConfig.setCredentialId(botId, credential.credentialId);
+      }
+      STEPS.push({
+        step: 1,
+        name: '准备本地 provider 与 Agent 配置',
+        startedAt: nowIso(),
+        durationMs: Date.now() - startedAt,
+        environment: 'local-http-stub（非真实模型）',
         providerId,
-        apiKey: 'local-stub-key',
+        bots: ['researcher', 'reviewer'],
       });
-      agentConfig.setCredentialId(botId, credential.credentialId);
     }
-    STEPS.push({
-      step: 1,
-      name: '准备本地 provider 与 Agent 配置',
-      startedAt: nowIso(),
-      durationMs: Date.now() - startedAt,
-      environment: 'local-http-stub（非真实模型）',
-      providerId,
-      bots: ['researcher', 'reviewer'],
-    });
 
     // Step 1-2：两个 Worker 并行研究。
     const stepWorkersStart = Date.now();
+    const goalA = REAL_MODE
+      ? [
+          'WORKER_RESEARCH_A 研究 Vendor A 的月订阅价格，必须给出可核对的来源与抓取时间。',
+          '以下材料视为已抓取的事实，不得改动数字、URL 或时间：',
+          '月订阅价 $99；来源 https://vendor-a.example/pricing；标题「Vendor A 官方定价页」；抓取时间 2026-11-05T02:10:00.000Z。',
+          '只输出一个 JSON 对象（不要 markdown 代码围栏、不要解释），字段固定：',
+          '{"worker":"A","subject":"订阅价格","claim":{"key":"monthly_price","value":"$99"},"source":{"url":"https://vendor-a.example/pricing","retrievedAt":"2026-11-05T02:10:00.000Z","title":"Vendor A 官方定价页"},"uncertainty":"促销价可能随时调整"}',
+        ].join('\n')
+      : 'WORKER_RESEARCH_A 研究 Vendor A 的月订阅价格，必须给出可核对的来源与抓取时间。';
+    const goalB = REAL_MODE
+      ? [
+          'WORKER_RESEARCH_B 独立研究 Vendor A 的月订阅价格，必须给出可核对的来源与抓取时间。',
+          '以下材料视为已抓取的事实，不得改动数字、URL 或时间：',
+          '月订阅价 $129；来源 https://vendor-a.example/legacy-pricing；标题「Vendor A 旧版定价页（缓存）」；抓取时间 2026-10-26T09:00:00.000Z。',
+          '只输出一个 JSON 对象（不要 markdown 代码围栏、不要解释），字段固定：',
+          '{"worker":"B","subject":"订阅价格","claim":{"key":"monthly_price","value":"$129"},"source":{"url":"https://vendor-a.example/legacy-pricing","retrievedAt":"2026-10-26T09:00:00.000Z","title":"Vendor A 旧版定价页（缓存）"},"uncertainty":"页面可能已过期"}',
+        ].join('\n')
+      : 'WORKER_RESEARCH_B 独立研究 Vendor A 的月订阅价格，必须给出可核对的来源与抓取时间。';
     const taskA = tasks.createTask({
       agentId: 'researcher',
       taskType: 'memory.recall',
-      goal: 'WORKER_RESEARCH_A 研究 Vendor A 的月订阅价格，必须给出可核对的来源与抓取时间。',
+      goal: goalA,
       allowedTools: [],
-      deadlineMs: 30000,
+      deadlineMs: REAL_MODE ? 120000 : 30000,
     });
     const taskB = tasks.createTask({
       agentId: 'researcher',
       taskType: 'memory.recall',
-      goal: 'WORKER_RESEARCH_B 独立研究 Vendor A 的月订阅价格，必须给出可核对的来源与抓取时间。',
+      goal: goalB,
       allowedTools: [],
-      deadlineMs: 30000,
+      deadlineMs: REAL_MODE ? 120000 : 30000,
     });
+    runContext.taskIds.workerA = taskA.taskId;
+    runContext.taskIds.workerB = taskB.taskId;
     runtime.startTask(taskA.taskId);
     runtime.startTask(taskB.taskId);
     const [doneA, doneB] = await Promise.all([
@@ -278,13 +377,20 @@ async function main() {
       A: eventsOf(taskA.taskId).find(event => event.eventType === 'task.completed'),
       B: eventsOf(taskB.taskId).find(event => event.eventType === 'task.completed'),
     };
-    const parallel =
-      startedEvents.A &&
-      startedEvents.B &&
-      completedEvents.A &&
-      completedEvents.B &&
-      Date.parse(startedEvents.A.timestamp) < Date.parse(completedEvents.B.timestamp) &&
-      Date.parse(startedEvents.B.timestamp) < Date.parse(completedEvents.A.timestamp);
+    // 事件日志按 bot 只保留最近 200 条；真实模型耗时较长时 task.accepted 会被
+    // 心跳挤出窗口。并行判定改用任务记录里的 startedAt/completedAt 区间。
+    const rawA = tasks.getRawTask(taskA.taskId);
+    const rawB = tasks.getRawTask(taskB.taskId);
+    const parallel = Boolean(
+      rawA &&
+        rawB &&
+        rawA.startedAt &&
+        rawB.startedAt &&
+        rawA.completedAt &&
+        rawB.completedAt &&
+        Date.parse(rawA.startedAt) < Date.parse(rawB.completedAt) &&
+        Date.parse(rawB.startedAt) < Date.parse(rawA.completedAt)
+    );
     STEPS.push({
       step: 2,
       name: '两个 Worker 并行研究',
@@ -293,6 +399,19 @@ async function main() {
       taskIds: [taskA.taskId, taskB.taskId],
       sessions: [doneA.sessionId, doneB.sessionId],
       parallel,
+      eventWindows: {
+        A: {
+          accepted: startedEvents.A ? startedEvents.A.timestamp : null,
+          completed: completedEvents.A ? completedEvents.A.timestamp : null,
+        },
+        B: {
+          accepted: startedEvents.B ? startedEvents.B.timestamp : null,
+          completed: completedEvents.B ? completedEvents.B.timestamp : null,
+        },
+        types: [...eventsOf(taskA.taskId), ...eventsOf(taskB.taskId)]
+          .filter(event => ['task.accepted', 'task.completed'].includes(event.eventType))
+          .map(event => `${event.taskId}:${event.eventType}@${event.timestamp}`),
+      },
       outputs: {
         A: parseWorkerJson(doneA),
         B: parseWorkerJson(doneB),
@@ -423,14 +542,22 @@ async function main() {
       `source_A=${srcA.id} url=${sourceA.url} retrievedAt=${sourceA.retrievedAt}`,
       `source_B=${srcB.id} url=${sourceB.url} retrievedAt=${sourceB.retrievedAt}`,
       'A1：月订阅价 $99；B1：月订阅价 $129。请按来源时间与可信度选择候选，并给出证据与剩余不确定性。',
+      ...(REAL_MODE
+        ? [
+            '只输出一个 JSON 对象（不要 markdown 代码围栏、不要解释），字段固定：',
+            `{"decision":"pass","candidateRef":"${artA.id}","evidence":[{"id":"${srcA.id}","version":${srcA.version}},{"id":"${srcB.id}","version":${srcB.version}}],"reasons":["source_a_newer","source_b_cached_and_stale"],"uncertainty":"两来源抓取时间相差 10 天，价格可能已变化"}`,
+            'decision 只能是 pass / fail / needs_human。',
+          ]
+        : []),
     ].join('\n');
     const reviewTask = tasks.createTask({
       agentId: 'reviewer',
       taskType: 'review.verify',
       goal: reviewGoal,
       allowedTools: [],
-      deadlineMs: 30000,
+      deadlineMs: REAL_MODE ? 120000 : 30000,
     });
+    runContext.taskIds.reviewer = reviewTask.taskId;
     runtime.startTask(reviewTask.taskId);
     const doneReview = await waitForTerminal(reviewTask.taskId);
     if (doneReview.status !== 'completed') {
@@ -469,9 +596,6 @@ async function main() {
       producerTask: tasks.getRawTask(taskA.taskId),
       runId: doneA.runId || null,
     });
-    if (decision.status !== 'resolved' || !resolved.selectedCandidateRef) {
-      throw new Error(`冲突 C1 未裁决：${decision.status}/${decision.errorCode}`);
-    }
     STEPS.push({
       step: 7,
       name: 'Reviewer 对照来源裁决冲突 C1',
@@ -482,9 +606,15 @@ async function main() {
       verdict: {
         decision: verdict.decision,
         valid: verdict.valid,
+        code: verdict.code || null,
         evidence: verdict.evidence,
         reasons: verdict.reasons,
         uncertainty: verdict.raw ? verdict.raw.uncertainty || null : null,
+        // 真实模型输出原样留档（截断），便于复核判定为何未通过；不含凭据。
+        rawSummary:
+          REAL_MODE && doneReview.result && typeof doneReview.result.summary === 'string'
+            ? doneReview.result.summary.slice(0, 800)
+            : null,
       },
       conflict: {
         conflictId: resolved.conflictId,
@@ -501,6 +631,9 @@ async function main() {
       },
       eventIds: eventsOf(reviewTask.taskId).map(event => event.eventId),
     });
+    if (decision.status !== 'resolved' || !resolved.selectedCandidateRef) {
+      throw new Error(`冲突 C1 未裁决：${decision.status}/${decision.errorCode}`);
+    }
 
     // Step 8：交付建议 + 来源 + 分歧处理 + 剩余不确定性。
     const stepDeliveryStart = Date.now();
@@ -566,10 +699,13 @@ async function main() {
     };
     const latencyOf = taskId => {
       const raw = tasks.getRawTask(taskId);
-      const events = eventsOf(taskId);
-      const completed = events.find(event => event.eventType === 'task.completed');
-      if (!completed || !raw) return null;
-      return Date.parse(completed.timestamp) - Date.parse(raw.createdAt);
+      if (!raw) return null;
+      // 事件窗口会裁剪，优先用任务记录 itself 的完成时间。
+      const completedAt =
+        raw.completedAt ||
+        (eventsOf(taskId).find(event => event.eventType === 'task.completed') || {}).timestamp;
+      if (!completedAt) return null;
+      return Date.parse(completedAt) - Date.parse(raw.createdAt);
     };
     const resolvedUsage = {
       workerA: usageOf(taskA.taskId) || providerUsage.workerA,
@@ -608,18 +744,28 @@ async function main() {
       },
       usage,
       latencyMs,
-      cost: '未采集',
-      costReason: '本地 HTTP stub provider 无计价口径，不估算成本。',
+      cost: REAL_MODE ? 'provider 未返回' : '未采集',
+      costReason: REAL_MODE
+        ? 'LongCat 响应未返回计价字段；按 provider 上报口径记未返回，不估算成本。'
+        : '本地 HTTP stub provider 无计价口径，不估算成本。',
     });
     const runRecord = {
       policyVersion: 'worked-example-v1',
       traceId: TRACE_ID,
       stepCount: STEPS.length,
-      environment: {
-        provider: 'local-http-stub',
-        realModel: false,
-        note: '非真实模型环境，仅验证链路与数据形态；Token 为 provider 返回的真实 usage。',
-      },
+      environment: REAL_MODE
+        ? {
+            provider: 'LongCat',
+            baseUrl: REAL_PROVIDER.baseUrl,
+            modelId: REAL_PROVIDER.modelId,
+            realModel: true,
+            note: '真实模型环境（LongCat OpenAI 兼容端点）；Token 取 provider 返回的 usage，成本未由 provider 返回。',
+          }
+        : {
+            provider: 'local-http-stub',
+            realModel: false,
+            note: '非真实模型环境，仅验证链路与数据形态；Token 为 provider 返回的真实 usage。',
+          },
       startedAt: new Date(startedAt).toISOString(),
       finishedAt: nowIso(),
       durationMs: Date.now() - startedAt,
@@ -644,8 +790,10 @@ async function main() {
       delivery: STEPS[7].deliveryRef,
       usage: {
         ...usage,
-        cost: '未采集',
-        costReason: '本地 HTTP stub provider 无计价口径，不估算成本。',
+        cost: REAL_MODE ? 'provider 未返回' : '未采集',
+        costReason: REAL_MODE
+          ? 'LongCat 响应未返回计价字段；按 provider 上报口径记未返回，不估算成本。'
+          : '本地 HTTP stub provider 无计价口径，不估算成本。',
       },
       latencyMs,
       steps: STEPS,
@@ -669,6 +817,63 @@ async function main() {
       console.log(text);
     }
     return runRecord;
+  } catch (error) {
+    // 真实模式失败也必须留可复核记录：不用 stub 数据补位，只记已发生的步骤与错误。
+    if (REAL_MODE) {
+      const failureRecord = {
+        policyVersion: 'worked-example-v1',
+        traceId: TRACE_ID,
+        stepCount: STEPS.length,
+        outcome: 'failed',
+        environment: {
+          provider: 'LongCat',
+          baseUrl: REAL_PROVIDER.baseUrl,
+          modelId: REAL_PROVIDER.modelId,
+          realModel: true,
+          note: '真实模型环境；本轮失败，未用 stub 数据补位。',
+        },
+        startedAt: new Date(startedAt).toISOString(),
+        finishedAt: nowIso(),
+        durationMs: Date.now() - startedAt,
+        failure: {
+          message: error && error.message ? error.message : String(error),
+          code: error && error.code ? error.code : null,
+          details: (error && error.details) || null,
+        },
+        tasks: Object.fromEntries(
+          Object.entries(runContext.taskIds).map(([label, id]) => {
+            const raw = tasks.getRawTask(id);
+            return [
+              label,
+              {
+                taskId: id,
+                status: raw ? raw.status : null,
+                errorCode: raw ? raw.errorCode || null : null,
+              },
+            ];
+          })
+        ),
+        steps: STEPS,
+        usage: Object.fromEntries(
+          Object.entries(runContext.taskIds).map(([label, id]) => {
+            const raw = tasks.getRawTask(id);
+            if (!raw || !Array.isArray(raw.runs) || !raw.runs.length) return [label, null];
+            const run = raw.runs.find(item => item.runId === raw.runId) || raw.runs.at(-1);
+            return [label, (run && run.usage) || null];
+          })
+        ),
+        usageSource: 'provider_reported_or_null',
+        cost: 'provider 未返回',
+      };
+      const out = argOf('--out');
+      if (out) {
+        const target = path.resolve(out);
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, JSON.stringify(failureRecord, null, 2), 'utf8');
+        console.log(`[e2e] wrote failure record ${target}`);
+      }
+    }
+    throw error;
   } finally {
     if (server) {
       if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
@@ -687,8 +892,27 @@ async function main() {
 function parseWorkerJson(task) {
   const text =
     task && task.result && typeof task.result.summary === 'string' ? task.result.summary : '';
-  const parsed = JSON.parse(text);
-  return parsed;
+  const raw = text.trim();
+  if (!raw) throw new Error('worker 未返回内容');
+  try {
+    return JSON.parse(raw);
+  } catch (_) {
+    // 真实模型可能带 markdown 代码围栏或前后缀；只做提取，不改写内容。
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced) {
+      try {
+        return JSON.parse(fenced[1].trim());
+      } catch (_ignored) {
+        // fall through
+      }
+    }
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      return JSON.parse(raw.slice(start, end + 1));
+    }
+    throw new Error(`worker 输出不是可解析 JSON：${raw.slice(0, 120)}`);
+  }
 }
 
 main()

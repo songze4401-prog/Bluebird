@@ -1,0 +1,57 @@
+{
+  "policyVersion": "worked-example-v1",
+  "traceId": "trace_69162bd0-35e7-4abb-82b5-67d2888f99b1",
+  "stepCount": 1,
+  "outcome": "failed",
+  "environment": {
+    "provider": "LongCat",
+    "baseUrl": "https://api.longcat.chat/openai",
+    "modelId": "LongCat-2.5",
+    "realModel": true,
+    "note": "真实模型环境；本轮失败，未用 stub 数据补位。"
+  },
+  "startedAt": "2026-11-05T16:01:11.359Z",
+  "finishedAt": "2026-11-05T16:01:50.369Z",
+  "durationMs": 39010,
+  "failure": {
+    "message": "worker 未完成：A=completed/null B=failed/tool_call_budget",
+    "code": null,
+    "details": null
+  },
+  "tasks": {
+    "workerA": {
+      "taskId": "task_aa3c2a4c-b938-4a01-ae18-be69136f8396",
+      "status": "completed",
+      "errorCode": null
+    },
+    "workerB": {
+      "taskId": "task_12c3f904-9e1d-4d6e-8dee-37cd866bf2e0",
+      "status": "failed",
+      "errorCode": "tool_call_budget"
+    }
+  },
+  "steps": [
+    {
+      "step": 1,
+      "name": "准备真实 provider 与 Agent 配置",
+      "startedAt": "2026-11-05T16:01:11.389Z",
+      "durationMs": 30,
+      "environment": "真实模型 provider：LongCat https://api.longcat.chat/openai（LongCat-2.5）",
+      "providerId": "fa2b299c-ce3a-4b66-83f2-de5cea700d2f",
+      "bots": [
+        "researcher",
+        "reviewer"
+      ]
+    }
+  ],
+  "usage": {
+    "workerA": {
+      "prompt_tokens": 374,
+      "completion_tokens": 177,
+      "total_tokens": 551
+    },
+    "workerB": null
+  },
+  "usageSource": "provider_reported_or_null",
+  "cost": "provider 未返回"
+}
