@@ -1,4 +1,4 @@
-/* global module, __dirname */
+/* global module, __dirname, Buffer */
 /**
  * Artifact Store（Phase 1 前置 ③）。
  *
@@ -50,6 +50,16 @@ const CONTENT_SCHEMA_VERSION = 1;
 // 一个 active 产物可能仍处于 pending-commit，不能用一个枚举混装。
 const STATUSES = Object.freeze(['active', 'superseded', 'invalidated']);
 const COMMIT_STATES = Object.freeze(['pending-commit', 'committed', 'orphan']);
+// §27：trustLevel 固定为有序枚举（升级/降级按数组下标比较）。
+// 只表示证据验证状态，不代表访问权限；唯一写入者是 Verification Engine。
+const TRUST_LEVELS = Object.freeze([
+  'untrusted',
+  'declared',
+  'evidence_checked',
+  'independently_verified',
+]);
+// 原文只写"Verification Engine"，未定义服务端标识取值；此处取固定标识便于校验（待确认）。
+const TRUST_WRITER = 'verification-engine';
 
 const KIND_MAX = 40;
 const ID_MAX = 120;
@@ -471,6 +481,9 @@ function persist({ kind, content, taskId = null, runId = null, now = Date.now() 
     taskId: boundTaskId,
     runId: runId ? String(runId).slice(0, 80) : null,
     refs: [],
+    // §27：新 Artifact 默认 untrusted；内容/来源/版本变化时由新记录重新从 untrusted 开始。
+    trustLevel: 'untrusted',
+    trust: null,
     lastCheckedAt: null,
     supersededBy: null,
     supersededAt: null,
@@ -699,6 +712,70 @@ function markStatus(id, status, { by = null, reason = '', now = Date.now() } = {
 }
 
 /**
+ * §27：trustLevel 的唯一写入口。
+ * 唯一写入者是 Verification Engine——Producer/Orchestrator/Gateway 一律拒绝；
+ * trustLevel 不代表访问权限，授权仍由 Policy Engine 独立判断。
+ * 记录同时保存验证策略版本、验证器、时间、证据与适用范围（字段名原文未定义，待确认）。
+ */
+function setTrustLevel(
+  id,
+  { level, writer, policyVersion = null, evidenceRefs = [], scope = null, now = Date.now() } = {}
+) {
+  const key = String(id || '').slice(0, ID_MAX);
+  if (String(writer || '') !== TRUST_WRITER) {
+    throw new AgentError('not_authorized', 'trustLevel 只能由 Verification Engine 写入', 403, {
+      artifactId: key || null,
+      writer: writer ? String(writer).slice(0, 60) : null,
+    });
+  }
+  const next = String(level || '');
+  if (!TRUST_LEVELS.includes(next)) {
+    throw new AgentError('artifact_trust_level_invalid', 'trustLevel 取值非法', 400, {
+      artifactId: key || null,
+      level: next || null,
+      allowed: TRUST_LEVELS.slice(),
+    });
+  }
+  const store = readArtifacts();
+  const artifact = store.artifacts[key];
+  if (!artifact) throw new AgentError('artifact_not_found', '产物不存在', 404, { artifactId: key });
+  const previous = TRUST_LEVELS.includes(artifact.trustLevel) ? artifact.trustLevel : 'untrusted';
+  artifact.trustLevel = next;
+  artifact.trust = {
+    policyVersion: policyVersion === null ? null : String(policyVersion).slice(0, 60),
+    verifier: TRUST_WRITER,
+    verifiedAt: nowIso(now),
+    evidenceRefs: Array.isArray(evidenceRefs)
+      ? evidenceRefs.map(item => String(item).slice(0, ID_MAX)).slice(0, 20)
+      : [],
+    scope: scope === null ? null : String(scope).slice(0, 120),
+  };
+  artifact.lastCheckedAt = nowIso(now);
+  try {
+    writeArtifacts(store);
+  } catch (error) {
+    throw wrapStoreError(error, 'artifact_store_write_failed');
+  }
+  appendAudit('artifact.trust_level_changed', artifact, {
+    now,
+    reason: `${previous}->${next}`,
+  });
+  return artifact;
+}
+
+/**
+ * 读边界兼容旧数据：缺字段（或历史非法值）按 §27 默认值 untrusted 返回，
+ * 不因为老记录没有 trustLevel 而报错；降级方向回退是安全的（fail-closed）。
+ */
+function readTrustLevel(id) {
+  const key = String(id || '').slice(0, ID_MAX);
+  if (!key) throw new AgentError('artifact_not_found', '产物不存在', 404, { artifactId: null });
+  const artifact = get(key);
+  if (!artifact) throw new AgentError('artifact_not_found', '产物不存在', 404, { artifactId: key });
+  return TRUST_LEVELS.includes(artifact.trustLevel) ? artifact.trustLevel : 'untrusted';
+}
+
+/**
  * 物理清理。调用方必须先完成引用扫描（cleanupOrphans 内做），
  * 且只能用于 active + orphan + 无引用 + 超过 TTL 的产物。
  * 审计先写成功再删除，确保"清理动作可回溯"。
@@ -800,12 +877,16 @@ module.exports = {
   SCHEMA_VERSION,
   STATUSES,
   COMMIT_STATES,
+  TRUST_LEVELS,
+  TRUST_WRITER,
   empty,
   persist,
   get,
   all,
   readContent,
   versionsOf,
+  setTrustLevel,
+  readTrustLevel,
   share,
   sharedAccess,
   readSharedArtifact,
