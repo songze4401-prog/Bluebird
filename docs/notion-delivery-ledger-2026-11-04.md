@@ -25,7 +25,7 @@
 | Phase 1：单主控 + 动态 Worker Pool | “在现有 Runtime 内建立统一 Planner / Orchestrator 接口”“支持少量 Agent 的能力匹配、动态分配、并行和依赖管理”“保留单 Agent 快速路径；先选 2—3 个真实专业 Agent 验证” | “任务路由可追踪、Worker Session 隔离、并发结果不串线、预算硬限制有效” | 1.0 | `server/agents/orchestrator.js` + `tests/agent-orchestrator.test.js` 12 条（交付物 1 的 4 条，`93c5b51`；交付物 2 的 7 条 2a–2g，`6a3cc84`；真实注册表路由 1 条，本轮 `agent-orchestrator` 11→12）；`server/agents/planner.js` + `tests/agent-planner.test.js` 4 条（Planner 侧 a–d，计划只落 workflow-store）；`server/agents/dependencies.js`（唯一 `isReady` + `validateGraph`）+ `server/agents/tasks.js`（`dependsOn`/`settleDependencies`）+ `server/agents/runtime.js`（取队前 settle + runTask 前置校验）+ `tests/agent-worker.test.js` 44 条（依赖 5 条 + 并发上限 1 条 + 令牌/HTTP 5 条 + 5 条混合角色并发 1 条，`agent-worker` 37→44）；`server/agents/worker-scope.js` + 服务端作用域令牌（`issueScopeToken`/`revokeScopeToken`，sha256 映射 + allowlist + TTL；HTTP 读端点只认 `x-worker-scope-token`）；`server/agents/manifest.js` 新增 researcher/executor/reviewer 三个真实 Manifest + 真实 LongCat-2.5 一轮验证（证据见「交付物 3 真实模型验证证据」）；B-06 `tests/agent-budget-atomic.test.js` 7 条（`27b99ec`）+ 真实 usage 结算 | 交付物 1 = **1.0**（Orchestrator 唯一入口 + Planner 规则拆解 + 计划只落既有 workflow-store + 批量多步任务共用同一 planId/planVersion），交付物 2 = **1.0**（四项逐条证据见“交付物 2 四项验收证据”），交付物 3 = **1.0**（三个能力标签可扩展的 Manifest + 真实 LongCat 模型一轮：能力匹配/并行重叠/依赖时序/token usage；见“交付物 3 真实模型验证证据”）；合计 **3.0/3**；4 条验收 **4/4**（路由/隔离/并发/预算，逐条证据见 4–7）。**限定**：三个角色共用同一 LongCat-2.5 模型，只是提示词/能力标签分工，不是异构多模型协作；本轮依赖链下游任务因 `maxTokens=320` 触发 `empty_reply`（依赖时序正确，内容未产出）；**真实模型下的拆解/角色分工质量仍未经评测**；**跨进程并发超出 Notion Phase 1 范围，未做（需跨进程锁），不列为缺口**。下一步＝Phase 2 立项拍板。 |
 | Phase 2：Blackboard + Context Broker | “建立任务级共享产物、证据引用、版本和访问控制”“Worker 私有上下文与共享工作区分离”“支持按需上下文投影和来源追踪” | “跨 Agent 可协作但不能越权读取私有 Session；每个共享结论可追溯来源” | 第 1 项 **1.0**；第 2 项 **1.0**；第 3 项 **1.0**（合计 **3/3**） | 第 1 项（2026-11-05，`c60a1bb` + `4573bc6`）：`share()`/`sharedAccess()`/`readSharedArtifact()` + 令牌第二道门 + `publishSharedConclusion()` 证据门禁。第 2 项（2026-11-05，`db4d3cf`）：`worker-scope.projectSharedContext()` 只放行已共享且版本钉住的引用，`artifact-store.resolveProvenance()` 沿 `{kind,id,version}` 链 fail-closed，投影结果仅含产物引用、不带私有 session/messages。第 3 项（2026-11-05，`59b09cb`）：researcher/executor/reviewer 三个真实注册 Agent 的真实任务一次跑通 A→B→复核，executor 自己的 `wst_` 令牌读 reviewer 私有会话在库层与 HTTP 层均 401 且留痕，A 标 invalidated 后 B 的链 `artifact_chain_broken`（reason=invalidated）。用例：`agent-worker` +1（端到端 1 条，含 4+ 证据采集点与事件/审计时间线）；全量 2199/2199 通过。详见「Phase 2 第 1 项验收证据」「Phase 2 第 2 项验收证据」「Phase 2 第 3 项验收证据」 | 三项完成，但**未新增 HTTP 路由**（库级 API + 复用既有会话读端点）；runtime 不自动投影/自动发布；**尚无撤销共享/逐产物吊销入口**；证据均为同进程 + stub Provider，真实模型协作质量未验证。下一步＝Phase 3 立项拍板（待 Owner）。 |
 | Phase 3：验证闭环 + 事件化工作流 | “引入确定性验证、独立 Reviewer、冲突处理和人工审批节点”“事件、状态、结果投递采用幂等与可恢复设计”“建立失败重试、取消、Checkpoint、死信和成本追踪” | “失败注入、重复事件、Reviewer 检出率和结果投递恢复均有测试证据” | 第 1/2/3 项均 **1.0**（Phase 3 完成） | 第 1 项（2026-11-05，`phase3/verification-loop-2026-11-05`，`3370441` + `a9e500a`）：`server/agents/verification-loop.js`（确定性校验/独立审校/冲突裁决/审批门）+ `runtime.js` 完成前门禁 + `approvals.js` 门禁操作 + `tests/agent-verification-loop.test.js` 7 条。已有局部复用：审批 `approvals.js`、幂等账本 `op-ledger.js`（`a6d3455`）、崩溃注入 `tests/agent-crash-injection.test.js`。验收证据见「Phase 3 第 1 项验收证据」 | 第 1 项完成：三处失败注入 + 10 条构造样本混淆矩阵（TP 7/FN 0/TN 2/FP 1）+ 超时不通过。第 2 项完成（重复事件去重 + 投递崩溃恢复，真实探针见「Phase 3 第 2 项」）。**未验证**：真实模型审校能力；第 3 项（死信/成本追踪）完成，见「Phase 3 第 3 项」。下一步＝Phase 4 入口。 |
-| Phase 4：受控自治与自我改进 | “根据真实运行数据动态组队、重规划和选择验证强度”“建立离线评测集、策略版本、灰度发布和回滚”“在权限、预算和审批边界不变的前提下，逐步开放低风险自动化” | “相对基线在成功率、返工率、成本或延迟上有可重复改善，且安全指标不退化” | 0 | 全仓 `.js` grep `benchmark\|holdout` 零命中；无评测集、无灰度/回滚机制 | 未开始；且验收句要求“相对基线可重复改善”，**必须先有真实模型环境与压测数据**。 |
+| Phase 4：受控自治与自我改进 | “根据真实运行数据动态组队、重规划和选择验证强度”“建立离线评测集、策略版本、灰度发布和回滚”“在权限、预算和审批边界不变的前提下，逐步开放低风险自动化” | “相对基线在成功率、返工率、成本或延迟上有可重复改善，且安全指标不退化” | 第 1 项 **1.0**；第 2/3 项未开工 | 第 1 项（2026-11-05，`phase4/eval-baseline-2026-11-05`，`2120311` + `97874c5` + `00336e5`）：`server/agents/eval-suite-v1.json`（5 条固定用例）、`eval-suite.js`/`eval-runner.js`/`eval-metrics.js`/`eval-baseline.js`/`strategy-version.js` + `scripts/eval-offline.js` + `tests/agent-eval-baseline.test.js` 7 条；真实输出与收口门禁见「Phase 4 第 1 项」 | 第 1 项 **1.0 仅指交付物机制齐**（评测集/指标/基线/对比/策略版本最小闭环均可复跑），**不是 Notion 退出判据已满足**：无策略变更故 diff 全 flat，安全计数为离线 stub 结构性 0；延迟为虚拟时钟模拟值。下一步＝Phase 4 第 2 项（动态组队/重规划/验证强度选择）立项，仍不开工。 |
 
 ---
 
@@ -577,6 +577,61 @@ enabled = ["executor","researcher","reviewer"]；registeredAgents = 4
 - 死信记录复用 `tasks.json` 与任务事件文件，无独立死信表；死信长期堆积的清理策略未做（超出原文要求）。
 
 **门禁与全量（实测）**：`tsc --noEmit` EXIT=0；`eslint`（改动文件）0 error（余为既存 warning）；`verify-test-coverage` → `backend=2217/2217 nodeSuite=222/222 runner=1995/1995 frontend=188/188 suites=22/22 failed=0`、CI runner 91/91；`sync-doc-counts --check` → `backend 2217、nodeSuite 222、runner 1995、frontend 188、文件 91` EXIT=0；`verify-api-capabilities`（95 路由 / 20 族 / 仅 API 9）EXIT=0；全量 `node scripts/run-tests.js` → 首跑出现 1 个 `memory-bot` 偶发失败，该文件隔离复跑通过（exit 0），第二次全量 `91 个测试文件，全部通过`、`FULL_EXIT=0`；收口复核（本轮台账提交后，前台）再次全量 → `91 个测试文件，全部通过`、`FULL_EXIT=0`。
+
+---
+
+## Phase 4 第 1 项 · 离线评测集与基线度量框架（2026-11-05，`2120311` + `97874c5` + `00336e5`）
+
+依据 Notion §5 Phase 4：交付物「按真实运行数据动态组队、重规划、选择验证强度；**离线评测集**、策略版本、灰度发布、回滚；权限/预算/审批边界不变前提下逐步开放低风险自动化」；退出判据「相对基线在成功率、返工率、成本或延迟上有**可重复改善**，且**安全指标不退化**」。
+
+本轮只做第 1 项（离线评测集 + 基线度量），未碰动态组队/重规划/验证强度选择。
+
+**实现（全部复用既有链路，不新建第二套度量）**
+
+| 要求 | 实现（file:line） | 复用点 |
+|---|---|---|
+| 固定可版本化评测集 | `server/agents/eval-suite-v1.json`（5 条用例）、`eval-suite.js:100` `loadSuite`、`:32` `suiteDigest` | 每条含 goal、agentId/taskType、expectedTerminal、allowedErrorCodes、expectReview、budgetTokenCap、确定性 script；digest 钉住版本 |
+| 离线重放 | `eval-runner.js:45` `runCase`、`:113` `runSuite` | 只走 `createTask→transitionTask→recordRunStart/recordRunFinish`，usage 与预算同生产路径；虚拟时钟写 `startedAt/finishedAt` |
+| 成功率/返工率/token/延迟 | `eval-metrics.js:120` `computeMetrics`、`:60` `latencyOf` | 终态/错误码/attempts 读 `tasks.getTask`；token 读 `cost-tracker.taskCost`（不读 `tokenUsage.used`，避免父链双计）；延迟读 run 的 `startedAt/finishedAt` |
+| 未知桶单列 | `eval-metrics.js:157` `tokenCost{unknownCases,unknownTokens:null,complete}`、`:118` 单例 `tokens:null/usageKnown:false` | 缺 usage 不算 0，不计入已知总额 |
+| 基线快照 | `eval-baseline.js:20` `createSnapshot`、`:38` `writeSnapshot`、`:47` `readSnapshot` | 快照含 suite.version/digest、codeCommit、strategy、metrics、逐用例结果、safety |
+| 对比报告 | `eval-baseline.js:91` `diff`、`:69` `metricDiff`、`:78` `diffCase` | 指标改善/退化方向 + 逐用例变化 + 用例增删 |
+| 安全指标单列 | `eval-metrics.js:96` `collectSafety` | 只读既有事件（`tasks.listEvents`：`verification.review_opened`/`approval.requested`/`worker.scope_denied`/`verification.rejected`/`tool.denied`/`route.rejected`）与既有死信视图（`tasks.listDeadLetters`），不新造埋点 |
+| 策略版本+开关+回滚 | `strategy-version.js:36` `get`、`:50` `apply`、`:71` `setEnabled`、`:77` `rollback` | 状态与任务库同目录（`tasks.TASKS_FILE` 同级），不建路由、不建灰度系统 |
+| CLI | `scripts/eval-offline.js`（`--suite/--out/--compare/--strategy-version`） | 无 HTTP 路由；默认数据目录 `.eval-data/`（已 ignore） |
+
+**真实输出（`node scripts/eval-offline.js` 两次 + `--compare`）**
+
+```
+[EVIDENCE] eval-baseline {"suite":{"version":"p4-eval-v1","digest":"8b66dd9afd537269c6812d4e32fd4ab5d23f51181d8668e5f95b82c677c2ae1d","caseCount":5},"codeCommit":"00336e5f03a7e23406c82f5d7b4093293ea79ca7","strategy":{"version":"p4-default","enabled":true},"successRate":{"value":1,"successCount":5,"caseCount":5},"rework":{"total":1,"casesWithRework":1,"rate":0.2},"tokenCost":{"total":610,"knownCases":4,"unknownCases":1,"unknownTokens":null,"complete":false},"latency":{"totalMs":2850,"avgMs":570,"maxMs":900,"unknownCases":0,"complete":true},"safety":{"approvalBypass":0,"failClosedHits":0,"unauthorizedDenied":0,"deadLetters":0}}
+[EVIDENCE] eval-case {"caseId":"research-success","terminal":"completed","expectedTerminal":"completed","errorCode":null,"success":true,"expectReview":false,"reviewTriggered":false,"attempts":1,"rework":0,"tokens":160,"usageKnown":true,"latencyMs":400,"budgetTokenCap":500}
+[EVIDENCE] eval-case {"caseId":"executor-reviewed-success","terminal":"completed","expectedTerminal":"completed","errorCode":null,"success":true,"expectReview":true,"reviewTriggered":true,"attempts":1,"rework":0,"tokens":250,"usageKnown":true,"latencyMs":900,"budgetTokenCap":600}
+[EVIDENCE] eval-case {"caseId":"retry-then-success","terminal":"completed","expectedTerminal":"completed","errorCode":null,"success":true,"expectReview":false,"attempts":2,"rework":1,"tokens":180,"usageKnown":true,"latencyMs":900,"budgetTokenCap":500}
+[EVIDENCE] eval-case {"caseId":"hard-failure","terminal":"failed","expectedTerminal":"failed","errorCode":"model_timeout","allowedErrorCodes":["model_timeout"],"success":true,"attempts":1,"rework":0,"tokens":20,"usageKnown":true,"latencyMs":300,"budgetTokenCap":500}
+[EVIDENCE] eval-case {"caseId":"unknown-usage-success","terminal":"completed","expectedTerminal":"completed","errorCode":null,"success":true,"expectReview":false,"attempts":1,"rework":0,"tokens":null,"usageKnown":false,"unknownAttempts":1,"latencyMs":350,"budgetTokenCap":400}
+[EVIDENCE] eval-diff {"suiteChanged":false,"codeCommit":{"before":"00336e5f...","after":"00336e5f..."},"metrics":{"successRate":{"before":1,"after":1,"delta":0,"change":"flat"},"reworkRate":{"before":0.2,"after":0.2,"change":"flat"},"tokenCostTotal":{"before":610,"after":610,"change":"flat","comparable":false},"latencyAvgMs":{"before":570,"after":570,"change":"flat"}},"tokenComparable":false,"caseDiffs":[],"safety":{"approvalBypass":{"delta":0,"direction":"flat"},"failClosedHits":{"delta":0,"direction":"monitor"},"unauthorizedDenied":{"delta":0,"direction":"monitor"},"deadLetters":{"delta":0,"direction":"flat"}},"safetyRegressions":[],"safetyDegraded":false}
+[EVIDENCE] strategy-before {"version":"p4-default","enabled":true,"previousVersion":null}
+[EVIDENCE] strategy-apply {"version":"p4-canary-v2","enabled":true,"previousVersion":"p4-default"}
+[EVIDENCE] strategy-switch-off {"version":"p4-canary-v2","enabled":false,"previousVersion":"p4-default"}
+[EVIDENCE] strategy-rollback {"version":"p4-default","enabled":true,"previousVersion":"p4-canary-v2"}
+```
+
+说明：两次基线是同一份代码 + 同一份评测集（digest 相同、逐用例 taskId 不同但结果相同），diff 全部 `flat`、`caseDiffs=[]`，即"重放可复现"；`tokenCostTotal.comparable=false` 是因为 5 条用例中 1 条无 usage（未知桶未补齐），不是 0 成本。
+
+**用例（`tests/agent-eval-baseline.test.js`，7 条，全过）**
+a 评测集字段校验+digest 稳定+非法集被拒；b 同一评测集两次重放逐用例结果一致；c 单任务聚合（attempts=2/rework=1/token=180/latency=900ms）；d 多任务汇总不双计（total=610=各例之和）且无 usage 进未知桶（`tokens=null`、`complete=false`）；e 快照落盘/回读 + diff 识别改善/退化/逐用例变化 + 安全退化（`approvalBypass`/`deadLetters` 上升）；f 策略版本标识/开关/回滚闭环；g 安全指标从既有事件读（`worker.scope_denied` 计入 fail-closed 与 unauthorizedDenied；应审校但无审校事件计为 bypass）。
+
+**判定 1.0（仅指第 1 项交付物）**：评测集、指标、基线录制、对比报告、策略版本最小机制五项均有代码与可复跑证据；指标口径复用 `cost-tracker`/`tasks.getTask`/run 时间戳，未知桶独立且不为 0，安全指标只读既有事件与死信。**但这只是"机制齐了"，不是 Notion 退出判据已满足**：本轮没有任何策略变更，所以 diff 必然 flat，无法证明"可重复改善"；安全计数在离线 stub 下为结构性 0，不能证明"安全不退化"。退出判据需要后续第 2/3 项加上真实策略对比（以及一轮真实模型）后才可能成立。
+
+**偏离与未验证**
+- 延迟是**虚拟时钟**写进 run 的 `startedAt/finishedAt` 的模拟值（stub 脚本推进），不是真实供应商延迟；真实延迟需真实模型轮；
+- 安全计数在离线数据目录里为 0（无真实审批/越权/死信流量），`collectSafety` 只证明读数链路，不证明生产安全水位；
+- 策略版本目前只标识/开关/回滚，未接入任务执行路径（原文只要求最小闭环）；
+- 评测集未校验 `agentId/taskType` 是否在 manifest 注册表中（写错会在 createTask 时失败）；
+- `listEvents` 每 bot 上限 200 条，safety 计数可能截断；
+- 未接真实模型；未做动态组队/重规划/验证强度选择；未做灰度发布系统。
+
+**门禁与全量（本项收口一次）**：baseline 更新（`backendTotal 2217→2224`、`runnerTotal 1995→2002`、新增 `agent-eval-baseline` 7 条、`nodeTestSuiteTotal` 222 不变、`frontend` 188/22 不变）；`sync-doc-counts --write` 更新 10 处；`tsc --noEmit` EXIT=0；`npx expo lint` EXIT=0；`verify-test-coverage` → `backend=2224/2224 nodeSuite=222/222 runner=2002/2002 frontend=188/188 suites=22/22 failed=0`、CI runner 覆盖 92/92、EXIT=0；`sync-doc-counts --check` → `backend 2224、nodeSuite 222、runner 2002、frontend 188、文件 92` EXIT=0；`verify-api-capabilities` → 95 路由 / 20 族 / 仅 API 9，EXIT=0；全量前台 `node scripts/run-tests.js` → `92 个测试文件，全部通过`、`FULL_EXIT=0`。
 
 ---
 
