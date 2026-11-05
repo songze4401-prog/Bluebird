@@ -91,6 +91,12 @@ const STEP_KEYS = Object.freeze([
   'capability',
   'taskType',
   'dependsOn',
+  // A-01：§13 产物复用所需的声明字段（可选；历史四字段 step 保持兼容）。
+  'schemaVersion',
+  'permissionScope',
+  'acceptanceDigest',
+  'maxAgeMs',
+  'dependsOnVersions',
 ]);
 const STEP_GOAL_MAX = 200;
 const STEP_DEPENDS_MAX = 8;
@@ -198,13 +204,28 @@ function stepKeyFor({ toolName, args, override = null } = {}) {
   return opLedger.deriveStepId({ toolName, args, override });
 }
 
-function buildStep({ toolName, args, label = '', override = null } = {}) {
+function buildStep({
+  toolName,
+  args,
+  label = '',
+  override = null,
+  schemaVersion,
+  permissionScope,
+  acceptanceDigest,
+  maxAgeMs,
+  dependsOnVersions,
+} = {}) {
   const step = {
     stepKey: stepKeyFor({ toolName, args, override }),
     toolName,
     argsDigest: digestArgs(args),
     label,
   };
+  if (schemaVersion !== undefined) step.schemaVersion = schemaVersion;
+  if (permissionScope !== undefined) step.permissionScope = permissionScope;
+  if (acceptanceDigest !== undefined) step.acceptanceDigest = acceptanceDigest;
+  if (maxAgeMs !== undefined) step.maxAgeMs = maxAgeMs;
+  if (dependsOnVersions !== undefined) step.dependsOnVersions = dependsOnVersions;
   assertStep(step, 0);
   return step;
 }
@@ -279,6 +300,34 @@ function assertStep(step, index) {
     step.dependsOn.forEach((dep, depIndex) => {
       assertString(`${where}.dependsOn[${depIndex}]`, dep, { max: 64 });
     });
+  }
+  // A-01：§13 复用声明字段（可选，给了才校验）。
+  for (const key of ['schemaVersion', 'permissionScope', 'acceptanceDigest']) {
+    if (step[key] !== undefined) {
+      assertString(`${where}.${key}`, step[key], { max: 128 });
+    }
+  }
+  if (step.maxAgeMs !== undefined) {
+    if (!Number.isInteger(step.maxAgeMs) || step.maxAgeMs < 0) {
+      throw planError('plan_invalid', `${where}.maxAgeMs 必须是非负整数`);
+    }
+  }
+  if (step.dependsOnVersions !== undefined) {
+    if (!isPlainObject(step.dependsOnVersions)) {
+      throw planError('plan_invalid', `${where}.dependsOnVersions 必须是纯对象`);
+    }
+    for (const [key, value] of Object.entries(step.dependsOnVersions)) {
+      assertString(`${where}.dependsOnVersions.${key}`, key, { max: 64 });
+      if (
+        !(typeof value === 'string' && value.length <= 64) &&
+        !(Number.isInteger(value) && value >= 0)
+      ) {
+        throw planError(
+          'plan_invalid',
+          `${where}.dependsOnVersions.${key} 必须是字符串或非负整数`
+        );
+      }
+    }
   }
 }
 
@@ -819,6 +868,337 @@ function listRefs() {
   return Object.entries(store.refs).map(([taskId, ref]) => ({ taskId, ...deepCopy(ref) }));
 }
 
+// ---- A-01 计划版本迁移语义（复用 appendVersion，不新造版本分配器）----
+// 原文（§10 / §13）规定了迁移分类与产物复用检查项，但未给具体阈值；
+// 下列默认值是**本仓库裁决，不是 Notion 原文标准**：
+// - 产物复用默认保鲜期 15 分钟；
+// - 无法证明来源/污点干净 → 不复用（fail-closed）；
+// - 权限范围默认必须完全相等（不允许借迁移放权）。
+const PLAN_MIGRATION_POLICY_VERSION = 'plan-migration-v1';
+const DEFAULT_ARTIFACT_REUSE_MAX_AGE_MS = 15 * 60 * 1000;
+const TASK_KEEP_VERSION_STATUSES = Object.freeze([
+  'running',
+  'waiting_approval',
+  'recovery',
+]);
+const TASK_MIGRATE_STATUSES = Object.freeze(['queued', 'accepted', 'retrying']);
+const TASK_TERMINAL_STATUSES = Object.freeze([
+  'completed',
+  'cancelled',
+  'expired',
+  'failed',
+]);
+
+function taintLabelsOf(artifact) {
+  const taint = artifact && artifact.taint;
+  if (Array.isArray(taint)) return taint.map(String);
+  if (taint && Array.isArray(taint.labels)) return taint.labels.map(String);
+  return [];
+}
+
+function isUnsafeTaintLabel(label) {
+  const value = String(label || '').toLowerCase();
+  return (
+    value === 'unknown' ||
+    value === 'unverified' ||
+    value === 'external:web' ||
+    value === 'external:file' ||
+    value.startsWith('external:') ||
+    value.startsWith('unverified')
+  );
+}
+
+/**
+ * §13 产物复用检查（纯函数，七项逐条判定，fail-closed）。
+ * 输入 artifact + 目标 step（+ 依赖版本表 deps）+ now。
+ * 返回 {reusable, reasons}：reasons 为空才可复用；任一条不满足都给出原因码。
+ */
+function artifactReuseDecision({
+  artifact,
+  step = {},
+  deps = {},
+  now = Date.now(),
+  defaultMaxAgeMs = DEFAULT_ARTIFACT_REUSE_MAX_AGE_MS,
+} = {}) {
+  const reasons = [];
+  if (!artifact || !artifact.id) {
+    return { reusable: false, reasons: ['artifact_missing'] };
+  }
+  // 1) 输入与版本：产物必须由同一个 step（内容寻址 stepKey）生产。
+  if (!step.stepKey || String(artifact.stepKey || '') !== String(step.stepKey)) {
+    reasons.push('input_step_mismatch');
+  }
+  if (
+    step.argsDigest !== undefined &&
+    String(artifact.argsDigest || '') !== String(step.argsDigest)
+  ) {
+    reasons.push('input_digest_mismatch');
+  }
+  // 2) 来源与污点：不能证明干净即不复用（不默认干净）。
+  if (taintLabelsOf(artifact).some(isUnsafeTaintLabel)) {
+    reasons.push('provenance_tainted');
+  }
+  // 3) 数据时效。
+  const maxAgeMs =
+    Number.isFinite(step.maxAgeMs) && step.maxAgeMs >= 0
+      ? step.maxAgeMs
+      : Number.isFinite(artifact.maxAgeMs) && artifact.maxAgeMs >= 0
+        ? artifact.maxAgeMs
+        : defaultMaxAgeMs;
+  const createdAt = Date.parse(artifact.createdAt || '');
+  if (!Number.isFinite(createdAt)) {
+    reasons.push('freshness_unknown');
+  } else if (now - createdAt > maxAgeMs) {
+    reasons.push('stale');
+  }
+  // 4) schema 版本。
+  if (String(step.schemaVersion === undefined ? '' : step.schemaVersion) !==
+      String(artifact.schemaVersion === undefined ? '' : artifact.schemaVersion)) {
+    reasons.push('schema_mismatch');
+  }
+  // 5) 验收条件（摘要必须一致；目标步骤未定义验收才可继承）。
+  if (
+    step.acceptanceDigest !== undefined &&
+    String(artifact.acceptanceDigest || '') !== String(step.acceptanceDigest)
+  ) {
+    reasons.push('acceptance_mismatch');
+  }
+  // 6) 权限范围：只允许相等，绝不借迁移扩大。
+  const artifactScope = artifact.permissionScope === undefined ? null : artifact.permissionScope;
+  const stepScope = step.permissionScope === undefined ? null : step.permissionScope;
+  if (String(artifactScope) !== String(stepScope)) {
+    reasons.push('permission_scope_mismatch');
+  }
+  // 7) 依赖产物版本。
+  if (Array.isArray(step.dependsOn) && step.dependsOn.length > 0) {
+    const versions = artifact.dependsOnVersions;
+    if (!versions || typeof versions !== 'object') {
+      reasons.push('dependency_versions_unknown');
+    } else {
+      for (const dep of step.dependsOn) {
+        const expected = deps[dep];
+        if (expected === undefined || versions[dep] === undefined) {
+          reasons.push(`dependency_version_missing:${dep}`);
+        } else if (String(versions[dep]) !== String(expected)) {
+          reasons.push(`dependency_version_mismatch:${dep}`);
+        }
+      }
+    }
+  }
+  return { reusable: reasons.length === 0, reasons };
+}
+
+/**
+ * 单个任务的迁移映射（纯函数）。
+ * 运行中 / 等待审批 / 恢复中：保持原 planVersion（不迁移，避免半途换计划）。
+ * 排队 / 已接受 / 等待重试：迁到新版本。
+ * 终态：completed 走产物复用检查（reused 或 revalidated），其余保持不改。
+ * 新计划中已不存在该 step → cancelled。
+ */
+function planTaskMigration({
+  task,
+  newPlan,
+  artifacts = [],
+  deps = {},
+  now = Date.now(),
+  defaultMaxAgeMs = DEFAULT_ARTIFACT_REUSE_MAX_AGE_MS,
+} = {}) {
+  if (!task || !task.taskId) {
+    throw planError('plan_migration_invalid', '迁移任务缺少 taskId', 400);
+  }
+  const steps = (newPlan && Array.isArray(newPlan.steps)) ? newPlan.steps : [];
+  const stepKey = task.stepKey ? String(task.stepKey) : null;
+  const targetStep = stepKey ? steps.find(step => step.stepKey === stepKey) : null;
+  const refs = Array.isArray(task.result && task.result.artifacts)
+    ? task.result.artifacts
+    : [];
+  const resolvedArtifacts = refs.map(ref => {
+    const found = artifacts.find(item => item && item.id === ref.id);
+    return found || { id: ref.id, missing: true };
+  });
+
+  if (stepKey && !targetStep) {
+    return {
+      taskId: task.taskId,
+      fromPlanVersion: task.planVersion || null,
+      toPlanVersion: task.planVersion || null,
+      status: task.status,
+      mapping: 'cancelled',
+      artifacts: resolvedArtifacts,
+      reasons: ['step_removed_from_new_plan'],
+      compensations: [],
+    };
+  }
+
+  if (TASK_KEEP_VERSION_STATUSES.includes(task.status)) {
+    return {
+      taskId: task.taskId,
+      fromPlanVersion: task.planVersion || null,
+      toPlanVersion: task.planVersion || null,
+      status: task.status,
+      mapping: 'continued',
+      artifacts: resolvedArtifacts,
+      reasons: ['running_node_keeps_original_version'],
+      compensations: [],
+    };
+  }
+
+  if (TASK_MIGRATE_STATUSES.includes(task.status)) {
+    return {
+      taskId: task.taskId,
+      fromPlanVersion: task.planVersion || null,
+      toPlanVersion: newPlan && newPlan.planVersion ? newPlan.planVersion : null,
+      status: task.status,
+      mapping: 'migrated',
+      artifacts: resolvedArtifacts,
+      reasons: ['node_not_started'],
+      compensations: [],
+    };
+  }
+
+  if (task.status === 'completed' && targetStep && resolvedArtifacts.length > 0) {
+    const decisions = resolvedArtifacts.map(artifact => ({
+      artifactId: artifact.id,
+      decision: artifact.missing
+        ? { reusable: false, reasons: ['artifact_missing'] }
+        : artifactReuseDecision({ artifact, step: targetStep, deps, now, defaultMaxAgeMs }),
+    }));
+    const reusable = decisions.every(item => item.decision.reusable);
+    return {
+      taskId: task.taskId,
+      fromPlanVersion: task.planVersion || null,
+      toPlanVersion: newPlan && newPlan.planVersion ? newPlan.planVersion : null,
+      status: task.status,
+      mapping: reusable ? 'reused' : 'revalidated',
+      artifacts: resolvedArtifacts,
+      reasons: reusable ? [] : decisions.flatMap(item => item.decision.reasons),
+      decisions,
+      compensations: [],
+    };
+  }
+
+  // 其它终态（cancelled/expired/failed）不迁移；保留原版本供追溯。
+  return {
+    taskId: task.taskId,
+    fromPlanVersion: task.planVersion || null,
+    toPlanVersion: task.planVersion || null,
+    status: task.status,
+    mapping: TASK_TERMINAL_STATUSES.includes(task.status) ? 'unchanged' : 'unchanged',
+    artifacts: resolvedArtifacts,
+    reasons: ['terminal_task_not_migrated'],
+    compensations: [],
+  };
+}
+
+/**
+ * 计划版本迁移总规划（纯函数，不写盘）。
+ * 由调用方把 appendVersion 分配出的新计划与旧任务快照传入；返回逐任务映射、
+ * 不可复用产物的副作用补偿指令（引用既有 op-ledger 的 override 语义）。
+ */
+function planMigration({
+  planId,
+  fromVersion,
+  newPlan,
+  tasks = [],
+  artifacts = [],
+  deps = {},
+  now = Date.now(),
+  defaultMaxAgeMs = DEFAULT_ARTIFACT_REUSE_MAX_AGE_MS,
+} = {}) {
+  assertPlanId(planId);
+  assertVersion(fromVersion);
+  if (!newPlan || !Array.isArray(newPlan.steps)) {
+    throw planError('plan_migration_invalid', '缺少新计划步骤', 400);
+  }
+  const toVersion = newPlan.planVersion || null;
+  const migrations = tasks.map(task =>
+    planTaskMigration({ task, newPlan, artifacts, deps, now, defaultMaxAgeMs })
+  );
+
+  const compensations = [];
+  for (const migration of migrations) {
+    if (migration.mapping !== 'revalidated') continue;
+    for (const artifact of migration.artifacts) {
+      compensations.push({
+        taskId: migration.taskId,
+        artifactId: artifact.id,
+        mode: 'reexecute',
+        // 复用既有 side-effect-guard/op-ledger 的 override 机制：不同 override
+        // 派生不同 opKey，旧副作用不会被误复用；不新造补偿存储。
+        override: `planMigration:${planId}:v${toVersion || 'next'}:${artifact.id}`,
+        reason: (migration.reasons && migration.reasons[0]) || 'artifact_not_reusable',
+      });
+    }
+  }
+
+  return {
+    planId,
+    fromVersion,
+    toVersion,
+    policyVersion: PLAN_MIGRATION_POLICY_VERSION,
+    reusePolicy: {
+      defaultMaxAgeMs,
+      taint: 'fail_closed',
+      permissionScope: 'must_match',
+      note: '默认值来自本仓库裁决，不是 Notion 原文标准',
+    },
+    migrations,
+    compensations,
+  };
+}
+
+/**
+ * 迁移审计（复用既有 workflow audit 文件，不新造存储）。
+ */
+function recordMigrationAudit({ planId, fromVersion, toVersion, migrations = [], now } = {}) {
+  const at = iso(now);
+  const entries = migrations.map(migration => ({
+    at,
+    action: 'migrate_plan',
+    planId,
+    planVersion: toVersion || fromVersion,
+    taskId: migration.taskId,
+    reason: `${migration.mapping}:${(migration.reasons || []).join('|') || 'ok'}`,
+  }));
+  if (entries.length > 0) writeAudit(entries);
+  return entries;
+}
+
+/**
+ * 端到端迁移入口：先 appendVersion（唯一版本分配器），再按新版本规划迁移并写审计。
+ * 不修改任务文件——任务侧如何落新 planVersion 由调用方复用既有 pinRef/updateTask。
+ */
+function migratePlanVersion({
+  plan,
+  planId,
+  liveRefs = [],
+  tasks = [],
+  artifacts = [],
+  deps = {},
+  now = Date.now(),
+} = {}) {
+  const saved = appendVersion({ plan, planId, liveRefs, now });
+  const snapshot = getVersion(saved.planId, saved.planVersion);
+  const newPlan = { ...snapshot.plan, planVersion: saved.planVersion };
+  const summary = planMigration({
+    planId: saved.planId,
+    fromVersion: saved.planVersion > 1 ? saved.planVersion - 1 : 1,
+    newPlan,
+    tasks,
+    artifacts,
+    deps,
+    now,
+  });
+  recordMigrationAudit({
+    planId: saved.planId,
+    fromVersion: summary.fromVersion,
+    toVersion: saved.planVersion,
+    migrations: summary.migrations,
+    now,
+  });
+  return { ...summary, saved };
+}
+
 /**
  * 裁剪（B 类）。任何被 Store refs 或 liveRefs 引用的版本都不动，与任务状态无关：
  * 已终态、recovery 的任务仍然占 pin，因为人工追溯还要读那份计划。
@@ -881,6 +1261,13 @@ module.exports = {
   planExists,
   createPlan,
   appendVersion,
+  PLAN_MIGRATION_POLICY_VERSION,
+  DEFAULT_ARTIFACT_REUSE_MAX_AGE_MS,
+  artifactReuseDecision,
+  planTaskMigration,
+  planMigration,
+  recordMigrationAudit,
+  migratePlanVersion,
   pinRef,
   unpinRef,
   getRef,

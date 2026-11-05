@@ -392,3 +392,198 @@ test('m. getVersion 区分「计划缺失」与「版本不符」', () => {
     'plan_missing'
   );
 });
+
+// ---- A-01 计划版本迁移：§13 七项复用检查 + 运行中节点 + 副作用补偿 ----
+
+function artifactFixture(overrides = {}) {
+  const s = step();
+  return {
+    id: 'art_fixture',
+    stepKey: s.stepKey,
+    argsDigest: s.argsDigest,
+    createdAt: new Date().toISOString(),
+    taint: [],
+    provenanceRefs: ['agent:researcher'],
+    schemaVersion: 'message-v1',
+    permissionScope: 'task',
+    acceptanceDigest: 'acc_v1',
+    dependsOnVersions: {},
+    ...overrides,
+  };
+}
+
+test('A-01 §13 复用检查逐项 fail-closed：输入/污点/时效/schema/验收/权限/依赖版本', () => {
+  const s = step();
+  const now = Date.now();
+  const clean = artifactFixture();
+  const baseStep = {
+    stepKey: s.stepKey,
+    argsDigest: s.argsDigest,
+    schemaVersion: 'message-v1',
+    permissionScope: 'task',
+    acceptanceDigest: 'acc_v1',
+  };
+
+  const ok = store.artifactReuseDecision({ artifact: clean, step: baseStep, now });
+  assert.strictEqual(ok.reusable, true);
+  assert.deepStrictEqual(ok.reasons, []);
+
+  assert.deepStrictEqual(
+    store.artifactReuseDecision({
+      artifact: clean,
+      step: { ...baseStep, stepKey: 'f'.repeat(64) },
+      now,
+    }).reasons,
+    ['input_step_mismatch']
+  );
+  assert.deepStrictEqual(
+    store.artifactReuseDecision({
+      artifact: artifactFixture({ taint: ['external:web'] }),
+      step: baseStep,
+      now,
+    }).reasons,
+    ['provenance_tainted']
+  );
+  assert.deepStrictEqual(
+    store.artifactReuseDecision({
+      artifact: artifactFixture({
+        createdAt: new Date(now - 60 * 60 * 1000).toISOString(),
+      }),
+      step: baseStep,
+      now,
+    }).reasons,
+    ['stale']
+  );
+  assert.deepStrictEqual(
+    store.artifactReuseDecision({
+      artifact: artifactFixture({ schemaVersion: 'message-v2' }),
+      step: baseStep,
+      now,
+    }).reasons,
+    ['schema_mismatch']
+  );
+  assert.deepStrictEqual(
+    store.artifactReuseDecision({
+      artifact: artifactFixture({ acceptanceDigest: 'acc_v2' }),
+      step: baseStep,
+      now,
+    }).reasons,
+    ['acceptance_mismatch']
+  );
+  assert.deepStrictEqual(
+    store.artifactReuseDecision({
+      artifact: artifactFixture({ permissionScope: 'workspace' }),
+      step: baseStep,
+      now,
+    }).reasons,
+    ['permission_scope_mismatch']
+  );
+  assert.deepStrictEqual(
+    store.artifactReuseDecision({
+      artifact: artifactFixture({ dependsOnVersions: { step_b: 1 } }),
+      step: { ...baseStep, dependsOn: ['step_b'] },
+      deps: { step_b: 2 },
+      now,
+    }).reasons,
+    ['dependency_version_mismatch:step_b']
+  );
+});
+
+test('A-01 迁移：未开始节点迁新版本、运行中节点保原版本、可复用产物复用且保留 provenance/taint', () => {
+  const s = store.buildStep({
+    toolName: 'memory_search',
+    args: { query: 'bluebird', limit: 3 },
+    label: '查记忆',
+    schemaVersion: 'message-v1',
+    permissionScope: 'task',
+    acceptanceDigest: 'acc_v1',
+  });
+  const created = store.createPlan({ plan: basePlan({ steps: [s] }) });
+  const now = Date.now();
+  const clean = artifactFixture({ id: 'art_clean', createdAt: new Date(now).toISOString() });
+  const tainted = artifactFixture({
+    id: 'art_tainted',
+    createdAt: new Date(now).toISOString(),
+    taint: ['external:web'],
+    provenanceRefs: ['agent:researcher', 'external:web'],
+  });
+  const tasks = [
+    { taskId: 'task_queued', status: 'queued', planVersion: 1, stepKey: s.stepKey },
+    { taskId: 'task_running', status: 'running', planVersion: 1, stepKey: s.stepKey },
+    {
+      taskId: 'task_done_clean',
+      status: 'completed',
+      planVersion: 1,
+      stepKey: s.stepKey,
+      result: { artifacts: [{ kind: 'message', id: clean.id, version: 1 }] },
+    },
+    {
+      taskId: 'task_done_tainted',
+      status: 'completed',
+      planVersion: 1,
+      stepKey: s.stepKey,
+      result: { artifacts: [{ kind: 'message', id: tainted.id, version: 1 }] },
+    },
+  ];
+
+  const summary = store.migratePlanVersion({
+    planId: created.planId,
+    plan: basePlan({ steps: [s] }),
+    tasks,
+    artifacts: [clean, tainted],
+    now,
+  });
+
+  assert.strictEqual(summary.saved.planVersion, 2);
+  assert.strictEqual(summary.policyVersion, 'plan-migration-v1');
+  assert.strictEqual(summary.toVersion, 2);
+
+  const byTask = new Map(summary.migrations.map(item => [item.taskId, item]));
+  // 未开始 → 迁到新版本。
+  assert.strictEqual(byTask.get('task_queued').mapping, 'migrated');
+  assert.strictEqual(byTask.get('task_queued').toPlanVersion, 2);
+  // 运行中 → 保持原版本，避免半途换计划。
+  assert.strictEqual(byTask.get('task_running').mapping, 'continued');
+  assert.strictEqual(byTask.get('task_running').toPlanVersion, 1);
+  // 可复用产物 → reused，且 provenance/taint 原样保留（未清洗）。
+  assert.strictEqual(byTask.get('task_done_clean').mapping, 'reused');
+  const reused = byTask.get('task_done_clean').artifacts[0];
+  assert.deepStrictEqual(reused.provenanceRefs, clean.provenanceRefs);
+  assert.deepStrictEqual(reused.taint, clean.taint);
+  // 污点产物 → 不可复用，不得误复用。
+  assert.strictEqual(byTask.get('task_done_tainted').mapping, 'revalidated');
+  assert.ok(byTask.get('task_done_tainted').reasons.includes('provenance_tainted'));
+
+  assert.strictEqual(summary.compensations.length, 1);
+  const compensation = summary.compensations[0];
+  assert.strictEqual(compensation.mode, 'reexecute');
+  assert.strictEqual(compensation.artifactId, tainted.id);
+  assert.ok(compensation.override.includes(`planMigration:${created.planId}:v2:`));
+  // 复用既有 op-ledger override 语义：不同 override 派生不同 opKey（旧副作用不会被误复用）。
+  assert.notStrictEqual(
+    store.stepKeyFor({
+      toolName: 'memory_search',
+      args: { query: 'bluebird', limit: 3 },
+      override: compensation.override,
+    }),
+    store.stepKeyFor({ toolName: 'memory_search', args: { query: 'bluebird', limit: 3 } })
+  );
+
+  // 迁移审计落既有 audit 文件，可追 mapping 与原因。
+  const audit = JSON.parse(fs.readFileSync(store.AUDIT_FILE, 'utf8'));
+  const migrationEntries = audit.entries.filter(entry => entry.action === 'migrate_plan');
+  assert.ok(migrationEntries.length >= 4);
+  assert.ok(
+    migrationEntries.some(
+      entry =>
+        entry.taskId === 'task_done_tainted' &&
+        entry.reason.includes('revalidated') &&
+        entry.reason.includes('provenance_tainted')
+    )
+  );
+  assert.ok(
+    migrationEntries.some(
+      entry => entry.taskId === 'task_running' && entry.reason.includes('continued')
+    )
+  );
+});
