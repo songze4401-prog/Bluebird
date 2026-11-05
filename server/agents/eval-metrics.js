@@ -50,6 +50,15 @@ function caseRecord(result, eventMap, redeliveryByTask) {
   const events = eventMap.get(result.taskId) || [];
   const reviewTriggered = events.some(event => REVIEW_EVENTS.includes(event.eventType));
   const cost = costTracker.taskCost(result.taskId) || { tokens: 0, known: false, unknownAttempts: 0 };
+  let tokens = cost.known ? cost.tokens : null;
+  let usageKnown = cost.known;
+  let unknownAttempts = cost.unknownAttempts;
+  for (const teamTaskId of result.teamTaskIds || []) {
+    const team = costTracker.taskCost(teamTaskId) || { tokens: 0, known: false, unknownAttempts: 0 };
+    usageKnown = usageKnown && team.known;
+    tokens = usageKnown ? (tokens || 0) + (team.tokens || 0) : null;
+    unknownAttempts += team.unknownAttempts;
+  }
   const terminal = task.status;
   const errorCode = task.errorCode || null;
   const terminalOk = terminal === result.expectedTerminal;
@@ -76,9 +85,12 @@ function caseRecord(result, eventMap, redeliveryByTask) {
     attempts,
     rework: Math.max(0, attempts - 1) + redelivered,
     redelivered,
-    tokens: cost.known ? cost.tokens : null,
-    usageKnown: cost.known,
-    unknownAttempts: cost.unknownAttempts,
+    tokens: usageKnown ? tokens : null,
+    usageKnown,
+    unknownAttempts,
+    teamTaskIds: result.teamTaskIds || [],
+    replan: result.replan || null,
+    policy: result.policy || null,
     latencyMs,
     budgetTokenCap: result.budgetTokenCap,
   };

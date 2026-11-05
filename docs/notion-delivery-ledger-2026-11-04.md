@@ -635,6 +635,58 @@ a 评测集字段校验+digest 稳定+非法集被拒；b 同一评测集两次�
 
 ---
 
+## Phase 4 第 2 项：动态组队 / 重规划 / 验证强度选择（2026-11-05）
+
+对应 Notion：Phase 4 / §5 / 交付物「按真实运行数据动态组队、重规划、选择验证强度」/ 退出判据「相对基线在成功率、返工率、成本或延迟上有可重复改善，且安全指标不退化」。
+
+**实现（全部默认关闭，由 `strategy-version` 开关控制：`p4-default` 关、`p4-autonomy-v1` 开）**
+
+| 交付物 | 位置 | 判据 / 复用口径 |
+|---|---|---|
+| 动态组队 | `server/agents/autonomy-policy.js` `plan` | 高风险任务类型（`action.execute`/`memory.write`）或历史同类型成功率 <0.6 → 组队；否则单 Agent。成员按已注册 manifest 的 `capabilities` 覆盖 `REQUIRED_CAPABILITIES` 选取，依赖边由成员顺序生成 |
+| 轨迹写入 | `eval-runner.js` `route:{orchestration}` | 复用 Phase 1 的 `task.route.orchestration` 字段（`entry/basis/intentDigest/capability/matchingRule/matchedAgentIds/registeredAgents/selectedAgentId`），不新造轨迹口径 |
+| 重规划 | `autonomy-policy.js` `decideReplan` | 只对可恢复错误（`review_rejected`/`evidence_insufficient`/`capability_mismatch`）重规划；`attempts < task.maxAttempts`（既有字段，取自 `createTask` 写入值）且预算有余量才允许，一次即止；瞬态错误走既有 retry，硬失败不重规划，避免假成功 |
+| 验证强度 | `autonomy-policy.js` `verificationStrength` | 高风险 → 审校；高风险 + 证据弱 → 审批；执行器把结果写成既有 `task.requiresReview`，事件仍用 `verification.review_opened`/`verification.verdict` |
+| 团队子任务 | `eval-runner.js` | 高危完成用例创建 `reviewer` 的 `review.verify` 子任务（`parentTaskId` 指向父任务，受父级 token 余额硬约束），其 token 经 `cost-tracker.taskCost` 计入用例成本 |
+| 评测集扩容 | `server/agents/eval-suite-v1.json` | 5 → 13 条，新增：`exec-execute-slow`、`exec-recover-after-failure`（审校拒绝后可重规划翻盘）、`exec-hard-failure`（`evidence_missing` 硬失败不重规划）、`knowledge-multi-source`、`memory-search-quick`（单 Agent 够用）、`write-high-risk`（需组队审校）、`knowledge-unknown-usage`（未知桶）、`summary-fast` |
+
+**两轮对比（同评测集 / 同配置 `BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS=3`，stub 离线重放，非真实模型）**
+
+```
+p4-default      : successRate 12/13=0.9231  rework 1 (rate 0.0769)  tokens 1620 (known 11 / unknown 2)  latency avg 542ms max 1200ms
+p4-autonomy-v1  : successRate 13/13=1.0000  rework 2 (rate 0.1538)  tokens 1860 (known 11 / unknown 2)  latency avg 573ms max 1200ms
+delta           : successRate +0.0769  reworkRate +0.0769  reworkTotal +1  tokenCostTotal +240  latencyAvgMs +31
+caseDiffs       : executor-reviewed-success tokens 250→290；exec-execute-slow 300→340；write-high-risk 150→190；
+                  exec-recover-after-failure terminal failed→completed、attempts 1→2、rework 0→1、tokens 100→220、latency 400→800
+safety          : approvalBypass 0→0  failClosedHits 0→0  unauthorizedDenied 0→0  deadLetters 0→0（safetyRegressions=[]，safetyDegraded=false）
+```
+
+快照文件：`eval-baselines/p4-policy-default.json`、`eval-baselines/p4-policy-autonomy.json`（`tokenComparable=false` 因 2 条无 usage，未知桶未补齐）。
+
+**真实模型两轮：未执行（阻塞）**
+- 本会话与仓库内均无 LongCat 真实密钥；`server/.env` 不存在（`Test-Path server/.env` → `False`），也未创建过包含 key 的文件，无任何凭证写入提交/测试/文档/日志/事件/台账。
+- 仓库内未找到 LongCat provider 接线（`git grep -l "LONGCAT|longcat"` 仅命中本台账历史记录）；Phase 1 的真实调用走仓库外脚本，本仓库没有可复用的真实模型适配层。
+- 因此上表 delta 是**确定性 stub 的机制自检**，只能证明"开关能改变行为、指标能度量差异"，**不能**当作真实模型 delta，也不能用于 Notion 退出判据。
+
+**用例（`tests/agent-autonomy-policy.test.js`，5 条，全过）**
+a 默认关闭（`p4-default` 不组队、`route=null`、无 policy 字段）；b 开启后高危按能力覆盖组队（`members=[executor,reviewer]`、依赖 1 条）、低风险单 Agent、历史成功率 <0.6 触发组队；c 重规划受 `maxAttempts`/预算/可恢复错误三重约束（关闭→`policy_disabled`、达上限→`max_attempts_reached`、预算耗尽→`budget_exhausted`、`model_timeout`→`non_recoverable_error`）；d 验证强度复用 `requiresReview`，证据弱升级审批；e 同一评测集两轮对比：默认轮无团队子任务/无重规划，开启轮 ≥3 例组队、1 例重规划、`task.route.orchestration` 落盘、团队 token 不漏计。
+
+**判定 0.5（本项）**：三项策略能力与开关、评测集扩容、两轮可对比的度量链路均已完成并有可复跑证据；但**没有真实模型的两轮 delta**，退出判据要求的"可重复改善"与"安全不退化"在真实流量下均未验证，stub delta 不能替代。补齐条件：拿到 LongCat key 并接上 provider 后，用同一 13 条集跑 `p4-default` 与 `p4-autonomy-v1` 两轮，`eval-diff` 出真实 delta、安全计数、真实 token 消耗，并按密钥纪律用完即删。
+
+**门禁（本次为中途验证，非收口全量）**
+- 改动相关：`node --test tests/agent-eval-baseline.test.js tests/agent-autonomy-policy.test.js` → 12/12 通过，EXIT=0；
+- `npx tsc --noEmit` EXIT=0；改动文件 `npx eslint` → 0 error（5 条既有 `no-redeclare` warning）；
+- 计数：`scripts/test-coverage-baseline.json` 新增 `agent-autonomy-policy` 5 条（`backendTotal 2224→2229`、`runnerTotal 2002→2007`），`verify-test-coverage` → `backend=2229/2229 nodeSuite=222/222 runner=2007/2007 frontend=188/188 suites=22/22 failed=0`、CI runner 覆盖 93/93、EXIT=0；`sync-doc-counts --write` 后 `--check` → `backend 2229、nodeSuite 222、runner 2007、frontend 188、文件 93` EXIT=0；
+- **未跑**：`npx expo lint`、`verify-api-capabilities`、全量前台 `run-tests.js`（按"收口只跑一次"纪律，待真实对比补齐后随收口一并跑）。
+
+**限定**
+- 延迟为虚拟时钟写入 run 的 `startedAt/finishedAt`，非真实供应商延迟；
+- 历史成功率判据已实现参数入口，但评测执行器未注入历史值（当前恒为 null，仅高风险规则生效）；
+- 团队子任务是"审校一例"的最小形态，不是通用 DAG 编排；
+- 安全计数在离线数据目录恒为 0，只证明读数链路，不证明生产安全水位。
+
+---
+
 ## 准入模板（今后每轮开工必填）
 
 ```

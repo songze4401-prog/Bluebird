@@ -8,6 +8,7 @@
  * 使"延迟"来自 run 记录而不是墙钟；这是 stub 模拟量，不是真实供应商延迟。
  */
 const tasks = require('./tasks');
+const autonomyPolicy = require('./autonomy-policy');
 const { loadSuite } = require('./eval-suite');
 
 const DEFAULT_BASE_TIME = '2026-11-05T00:00:00.000Z';
@@ -31,12 +32,18 @@ function totalTokens(usage) {
 }
 
 function runCase(item, clockStart) {
+  const plan = autonomyPolicy.plan({ goal: item.goal, taskType: item.taskType });
+  const strength = autonomyPolicy.verificationStrength({ taskType: item.taskType });
   const task = tasks.createTask({
     botId: item.agentId,
     taskType: item.taskType,
     goal: item.goal,
+    route: plan.enabled ? { orchestration: plan.orchestration } : null,
     budget: budgetOf(item.budgetTokenCap),
   });
+  if (plan.enabled && strength.requiresReview) {
+    tasks.updateTask(task.taskId, { requiresReview: true });
+  }
   tasks.transitionTask(task.taskId, { to: 'accepted' });
   tasks.transitionTask(task.taskId, { to: 'running' });
 
@@ -72,14 +79,69 @@ function runCase(item, clockStart) {
   }
 
   const last = steps[steps.length - 1];
-  const finalStatus = last.outcome === 'failed' ? 'failed' : 'completed';
+  let finalStatus = last.outcome === 'failed' ? 'failed' : 'completed';
+  let replan = null;
+
+  if (finalStatus === 'failed') {
+    const taskNow = tasks.getTask(task.taskId) || {};
+    const usedTokens = steps.reduce((sum, step) => sum + (totalTokens(step.usage) || 0), 0);
+    const decision = autonomyPolicy.decideReplan({
+      task: { agentId: item.agentId, attempts: steps.length, maxAttempts: taskNow.maxAttempts },
+      errorCode: last.errorCode,
+      tokenBudget: item.budgetTokenCap,
+      tokenUsed: usedTokens,
+    });
+    replan = decision.reason;
+    if (decision.replan) {
+      tasks.transitionTask(task.taskId, { to: 'retrying' });
+      tasks.transitionTask(task.taskId, { to: 'running' });
+      const runId = `eval_${item.id}_replan`;
+      runIds.push(runId);
+      const startedAt = new Date(clock).toISOString();
+      const finishedAt = new Date(clock + 300).toISOString();
+      const usage = { prompt_tokens: 60, completion_tokens: 20, total_tokens: 80 };
+      tasks.recordRunStart(task.taskId, { runId, attempt: steps.length, startedAt });
+      tasks.recordRunFinish(task.taskId, { runId, status: 'completed', errorCode: null, finishedAt, usage });
+      tasks.settleTaskBudget(task.taskId, { reserved: 0, actual: 80 });
+      clock += 300 + STEP_GAP_MS;
+      rework += 1;
+      finalStatus = 'completed';
+    }
+  }
+
   tasks.transitionTask(task.taskId, {
     to: finalStatus,
-    errorCode: last.outcome === 'failed' ? last.errorCode : null,
+    errorCode: finalStatus === 'failed' ? last.errorCode : null,
   });
 
-  if (item.expectReview) {
-    const reviewTaskId = `review_${task.taskId}`;
+  const teamTaskIds = [];
+  let reviewTaskId = `review_${task.taskId}`;
+  if (plan.enabled && plan.decision === 'team' && finalStatus === 'completed') {
+    const reviewerTask = tasks.createTask({
+      botId: 'reviewer',
+      taskType: 'review.verify',
+      goal: `复核：${item.goal}`.slice(0, 120),
+      parentTaskId: task.taskId,
+      route: { orchestration: plan.orchestration },
+      budget: budgetOf(200),
+    });
+    tasks.transitionTask(reviewerTask.taskId, { to: 'accepted' });
+    tasks.transitionTask(reviewerTask.taskId, { to: 'running' });
+    const runId = `eval_${item.id}_review`;
+    const startedAt = new Date(clock).toISOString();
+    const finishedAt = new Date(clock + 250).toISOString();
+    const usage = { prompt_tokens: 30, completion_tokens: 10, total_tokens: 40 };
+    tasks.recordRunStart(reviewerTask.taskId, { runId, attempt: 0, startedAt });
+    tasks.recordRunFinish(reviewerTask.taskId, { runId, status: 'completed', errorCode: null, finishedAt, usage });
+    tasks.settleTaskBudget(reviewerTask.taskId, { reserved: 0, actual: 40 });
+    clock += 250 + STEP_GAP_MS;
+    teamTaskIds.push(reviewerTask.taskId);
+    reviewTaskId = reviewerTask.taskId;
+  }
+
+  const reviewNeeded =
+    item.expectReview || (plan.enabled && plan.decision === 'team' && finalStatus === 'completed');
+  if (reviewNeeded) {
     tasks.appendEvent({
       botId: item.agentId,
       taskId: task.taskId,
@@ -99,15 +161,18 @@ function runCase(item, clockStart) {
   return {
     caseId: item.id,
     taskId: task.taskId,
+    teamTaskIds,
     agentId: item.agentId,
     taskType: item.taskType,
     runIds,
-    attempts: steps.length,
+    attempts: steps.length + (replan === 'replan_allowed' ? 1 : 0),
     rework,
     startedAt,
     finishedAt,
     latencyMs: Date.parse(finishedAt) - Date.parse(startedAt),
-    reviewTriggered: item.expectReview,
+    reviewTriggered: reviewNeeded,
+    replan,
+    policy: plan.enabled ? { version: plan.version, decision: plan.decision, rationale: plan.rationale } : null,
     expectedTerminal: item.expectedTerminal,
     allowedErrorCodes: item.allowedErrorCodes,
     expectReview: item.expectReview,

@@ -98,6 +98,150 @@
           "usage": null
         }
       ]
+    },
+    {
+      "id": "exec-execute-slow",
+      "goal": "把修复写入目标仓库并提交",
+      "agentId": "executor",
+      "taskType": "action.execute",
+      "expectedTerminal": "completed",
+      "allowedErrorCodes": [],
+      "expectReview": true,
+      "budgetTokenCap": 700,
+      "script": [
+        {
+          "outcome": "completed",
+          "errorCode": null,
+          "simulatedMs": 1200,
+          "usage": { "prompt_tokens": 240, "completion_tokens": 60, "total_tokens": 300 }
+        }
+      ]
+    },
+    {
+      "id": "exec-recover-after-failure",
+      "goal": "审校拒绝后按反馈修正并完成执行",
+      "agentId": "executor",
+      "taskType": "action.execute",
+      "expectedTerminal": "completed",
+      "allowedErrorCodes": ["review_rejected"],
+      "expectReview": true,
+      "budgetTokenCap": 700,
+      "script": [
+        {
+          "outcome": "failed",
+          "errorCode": "review_rejected",
+          "simulatedMs": 400,
+          "usage": { "prompt_tokens": 90, "completion_tokens": 10, "total_tokens": 100 }
+        }
+      ]
+    },
+    {
+      "id": "exec-hard-failure",
+      "goal": "在缺少证据时执行高危写入",
+      "agentId": "executor",
+      "taskType": "action.execute",
+      "expectedTerminal": "failed",
+      "allowedErrorCodes": ["evidence_missing"],
+      "expectReview": true,
+      "budgetTokenCap": 600,
+      "script": [
+        {
+          "outcome": "failed",
+          "errorCode": "evidence_missing",
+          "simulatedMs": 350,
+          "usage": { "prompt_tokens": 80, "completion_tokens": 0, "total_tokens": 80 }
+        }
+      ]
+    },
+    {
+      "id": "knowledge-multi-source",
+      "goal": "跨三条记忆给出带来源的结论",
+      "agentId": "researcher",
+      "taskType": "knowledge.search",
+      "expectedTerminal": "completed",
+      "allowedErrorCodes": [],
+      "expectReview": false,
+      "budgetTokenCap": 600,
+      "script": [
+        {
+          "outcome": "completed",
+          "errorCode": null,
+          "simulatedMs": 800,
+          "usage": { "prompt_tokens": 180, "completion_tokens": 40, "total_tokens": 220 }
+        }
+      ]
+    },
+    {
+      "id": "memory-search-quick",
+      "goal": "查一下上周记下的部署偏好",
+      "agentId": "memory",
+      "taskType": "memory.search",
+      "expectedTerminal": "completed",
+      "allowedErrorCodes": [],
+      "expectReview": false,
+      "budgetTokenCap": 300,
+      "script": [
+        {
+          "outcome": "completed",
+          "errorCode": null,
+          "simulatedMs": 200,
+          "usage": { "prompt_tokens": 70, "completion_tokens": 20, "total_tokens": 90 }
+        }
+      ]
+    },
+    {
+      "id": "write-high-risk",
+      "goal": "把已确认的项目约定写入长期记忆",
+      "agentId": "executor",
+      "taskType": "memory.write",
+      "expectedTerminal": "completed",
+      "allowedErrorCodes": [],
+      "expectReview": true,
+      "budgetTokenCap": 600,
+      "script": [
+        {
+          "outcome": "completed",
+          "errorCode": null,
+          "simulatedMs": 500,
+          "usage": { "prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150 }
+        }
+      ]
+    },
+    {
+      "id": "knowledge-unknown-usage",
+      "goal": "按来源汇总两条检索结果",
+      "agentId": "researcher",
+      "taskType": "knowledge.search",
+      "expectedTerminal": "completed",
+      "allowedErrorCodes": [],
+      "expectReview": false,
+      "budgetTokenCap": 500,
+      "script": [
+        {
+          "outcome": "completed",
+          "errorCode": null,
+          "simulatedMs": 450,
+          "usage": null
+        }
+      ]
+    },
+    {
+      "id": "summary-fast",
+      "goal": "把三条记录压缩成一句话摘要",
+      "agentId": "researcher",
+      "taskType": "summary.synthesize",
+      "expectedTerminal": "completed",
+      "allowedErrorCodes": [],
+      "expectReview": false,
+      "budgetTokenCap": 350,
+      "script": [
+        {
+          "outcome": "completed",
+          "errorCode": null,
+          "simulatedMs": 300,
+          "usage": { "prompt_tokens": 50, "completion_tokens": 20, "total_tokens": 70 }
+        }
+      ]
     }
   ]
 }

@@ -40,7 +40,7 @@ test('a. 评测集固定可版本化：字段校验通过、digest 稳定、非�
   const first = suiteLoader.loadSuite();
   const second = suiteLoader.loadSuite();
   assert.equal(first.version, 'p4-eval-v1');
-  assert.equal(first.caseCount, 5);
+  assert.equal(first.caseCount, 13);
   assert.equal(first.digest, second.digest);
   assert.equal(first.digest.length, 64);
   for (const item of first.cases) {
@@ -92,9 +92,9 @@ test('d. 多任务汇总不双计；无 usage 进未知桶且 token 不为 0', (
   const known = computed.cases.filter(item => item.usageKnown);
   const sum = known.reduce((total, item) => total + item.tokens, 0);
   assert.equal(computed.metrics.tokenCost.total, sum);
-  assert.equal(computed.metrics.tokenCost.total, 610);
-  assert.equal(computed.metrics.tokenCost.knownCases, 4);
-  assert.equal(computed.metrics.tokenCost.unknownCases, 1);
+  assert.equal(computed.metrics.tokenCost.total, 1620);
+  assert.equal(computed.metrics.tokenCost.knownCases, 11);
+  assert.equal(computed.metrics.tokenCost.unknownCases, 2);
   assert.equal(computed.metrics.tokenCost.unknownTokens, null);
   assert.equal(computed.metrics.tokenCost.complete, false);
   const unknown = caseOf(computed, 'unknown-usage-success');
@@ -123,8 +123,8 @@ test('e. 基线快照含集版本/提交/逐例结果；diff 识别改善与安�
   degraded.codeCommit = 'working-tree';
   degraded.metrics.successRate.value = 0.6;
   degraded.metrics.rework.rate = 0.4;
-  degraded.metrics.tokenCost.total = 700;
-  degraded.metrics.latency.avgMs = 700;
+  degraded.metrics.tokenCost.total = 2000;
+  degraded.metrics.latency.avgMs = 2000;
   degraded.safety.approvalBypass = 1;
   degraded.safety.deadLetters = 2;
 
