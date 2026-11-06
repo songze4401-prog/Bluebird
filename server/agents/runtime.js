@@ -21,7 +21,7 @@ const { projectWorkerContext } = require('./context-projection');
 const { normalizeWorkerResult } = require('./worker-result');
 const { createToolAuthorizer } = require('./tool-gateway');
 const { listToolMetadata } = require('../agent-runtime');
-const { AgentError, budgetExceededError, classifyFailureMode } = require('./errors');
+const { AgentError, budgetExceededError, classifyFailureMode, errorContractFingerprint } = require('./errors');
 const approvalDeadline = require('./approval-deadline');
 const conflictRecord = require('./conflict-record');
 const artifactCommit = require('./artifact-commit');
@@ -31,6 +31,9 @@ const opLedger = require('./op-ledger');
 const workflowStore = require('./workflow-store');
 const { createCleanupScheduler } = require('./orphan-scheduler');
 const verificationLoop = require('./verification-loop');
+const stormSuppression = require('./storm-suppression');
+const throttlePolicy = require('./throttle-policy');
+const circuitBreaker = require('./circuit-breaker');
 
 const MAX_USER_MESSAGE = 4000;
 const HISTORY_MESSAGES = 24;
@@ -57,10 +60,9 @@ const LEASE_TTL_MS = Math.min(
   Math.max(15000, Number(process.env.BLUEBIRD_AGENT_LEASE_MS) || 60000)
 );
 const activeRuns = new Map();
-const TASK_CONCURRENCY = Math.min(
-  4,
-  Math.max(1, Number(process.env.BLUEBIRD_AGENT_TASK_CONCURRENCY) || 2)
-);
+// §26 任务维度并发：取值与 env 口径完全沿用原实现（夹到 1..4，默认 2），
+// 只是把来源收进版本化阈值表，避免出现"运行时一个数、策略文件另一个数"。
+const TASK_CONCURRENCY = throttlePolicy.effectiveThresholds().thresholds.task.concurrency.limit;
 let scheduling = false;
 
 function nowIso() {
@@ -143,6 +145,72 @@ function decideFailureDisposition({
     attempts,
     maxAttempts,
   };
+}
+
+/**
+ * §26 第 4 项：重规划风暴抑制的唯一生产接入点。
+ *
+ * `decideFailureDisposition` 已经判过"允不允许再试"（错误类别 + attempts/maxAttempts），
+ * 这里再判"该不该再试"：等价计划反复撞同一个错误、冷却期内再投、
+ * 每 Task 超过 §25 上限、或换个 runId 想把计数洗掉，都收口成终态而不是继续退避。
+ *
+ * 细则 1（收益声明）在这里刻意不生效：生产路径重跑沿用同一份冻结计划，
+ * 没有"改计划再跑"的入口，拿一个不可能满足的条件拦正常退避是错的。
+ * 该细则的接入点在提案/自改进链（P5-G），纯函数与用例已就绪。
+ */
+function boundPlanDigest(task = {}) {
+  if (!task.planId || !task.planVersion) return null;
+  try {
+    const version = workflowStore.getVersion(task.planId, task.planVersion);
+    return workflowStore.digestPlan(version.plan);
+  } catch (error) {
+    // 计划读不回时不猜哈希：其余四条细则照常生效。
+    return null;
+  }
+}
+
+/**
+ * 等价判据用的错误身份：只按 (taskId, 错误类别) 归一。
+ * §23 的 errorFingerprint 刻意带 runId（用于单次故障的日志相关性），而每次重试都会换
+ * 一个新 runId——直接拿它当等价键会让"同一任务反复撞同一个错"永远不相等，
+ * 细则 2 就形同虚设。这里复用同一个哈希函数，只是把 runId 置空。
+ */
+function stormErrorIdentity({ task, errorCode }) {
+  const code = String(errorCode || 'agent_failed');
+  return errorContractFingerprint({
+    code,
+    taskId: String(task.taskId || ''),
+    runId: '',
+    causeRef: 'storm-equivalence',
+    message: code,
+  });
+}
+
+function retryFingerprint({ task, errorCode, error = null }) {
+  // 错误对象自带指纹时仍然用它做关联展示，但等价键始终按任务维度重算。
+  return stormErrorIdentity({ task, errorCode });
+}
+
+function admitRetryAttempt({
+  task,
+  runId = null,
+  errorCode = null,
+  error = null,
+  now = Date.now(),
+  policy = null,
+} = {}) {
+  const planDigest = boundPlanDigest(task);
+  const decision = stormSuppression.decide(
+    {
+      taskId: task.taskId,
+      runId,
+      planDigest,
+      errorFingerprint: retryFingerprint({ task, errorCode, error }),
+      requiresClaim: false,
+    },
+    { policy, now }
+  );
+  return { ...decision, planDigest };
 }
 
 function scheduleTaskQueue() {
@@ -1438,7 +1506,14 @@ async function runTask(taskId) {
       maxAttempts,
     });
 
-    if (disposition.retryable) {
+    // §26：允许再试之后还要过风暴判据。命中即走下面既有的终态收口，
+    // 不新建第二条终态写入路径；任务上的 errorCode 保留根因，
+    // 风暴本身由事件与 details 表达（否则"为什么没重跑"会盖掉"为什么失败"）。
+    const stormGate = disposition.retryable
+      ? admitRetryAttempt({ task: latest, runId, errorCode, error })
+      : { allowed: true, rule: null, violations: [] };
+
+    if (disposition.retryable && stormGate.allowed) {
       tasks.recordRunFinish(task.taskId, {
         runId,
         status: 'retry',
@@ -1460,6 +1535,24 @@ async function runTask(taskId) {
         { taskId: task.taskId, sessionId: task.sessionId }
       );
       return;
+    }
+
+    if (disposition.retryable && !stormGate.allowed) {
+      safeEvent(
+        task.botId,
+        'replan.storm_denied',
+        {
+          status: disposition.status,
+          errorCode,
+          rule: stormGate.rule,
+          rulesHit: stormGate.violations.map(item => item.rule),
+          retryAfterMs: stormGate.retryAfterMs,
+          replans: stormGate.replans,
+          planDigest: stormGate.planDigest || null,
+          policyVersion: stormGate.policyVersion,
+        },
+        { taskId: task.taskId, runId, sessionId: task.sessionId }
+      );
     }
 
     const status = disposition.status;
@@ -1788,13 +1881,37 @@ function initializeTaskQueue() {
   };
 }
 
-function getQueueStats() {
-  return {
+function getQueueStats({ limits = false } = {}) {
+  const stats = {
     concurrency: TASK_CONCURRENCY,
     active: activeRuns.size,
     queued: tasks.queuedCount(),
     health: tasks.healthSnapshot(),
   };
+  // 阈值与闸门状态每次都要读三个状态文件；调度轮询里默认不带，
+  // 需要看闸门的人显式要（或调 limitsSnapshot）。
+  return limits ? { ...stats, limits: limitsSnapshot() } : stats;
+}
+
+/**
+ * §26「有配置、有状态」的观测出口：四维阈值 + 限流占用 + 熔断三态 + 风暴记账。
+ * 状态文件读坏时不把异常穿给健康接口，而是显式回 `available:false` 附原因——
+ * 这是观测面板而不是授权判定，让它变成 500 会把服务误报成不可用。
+ */
+function limitsSnapshot({ now = Date.now() } = {}) {
+  try {
+    const thresholds = throttlePolicy.effectiveThresholds();
+    return {
+      available: true,
+      at: new Date(now).toISOString(),
+      throttle: throttlePolicy.statusOf(throttlePolicy.load(), thresholds.thresholds, now),
+      policy: throttlePolicy.policySnapshot(),
+      breaker: circuitBreaker.snapshot({ now }),
+      storm: stormSuppression.status({ now }),
+    };
+  } catch (error) {
+    return { available: false, reason: String(error.message || error).slice(0, 200), at: new Date(now).toISOString() };
+  }
 }
 
 function cancelTask(taskId) {
@@ -1848,4 +1965,6 @@ module.exports = {
   allowedToolsFor,
   buildPolicy,
   decideFailureDisposition,
+  admitRetryAttempt,
+  limitsSnapshot,
 };

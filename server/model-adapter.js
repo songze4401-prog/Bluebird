@@ -29,10 +29,13 @@ const dns = require('dns').promises;
 const net = require('net');
 const http = require('http');
 const https = require('https');
+const crypto = require('crypto');
 const { Readable } = require('stream');
 const { URL } = require('url');
 const OpenAI = require('openai');
 const monitoring = require('./monitoring');
+const throttlePolicy = require('./agents/throttle-policy');
+const circuitBreaker = require('./agents/circuit-breaker');
 
 const {
   findProvider,
@@ -555,6 +558,88 @@ function getMemoryClient() {
 
 // ---- 统一调用 ----
 
+// ---- §26 Provider 维度闸门：熔断 + 有界队列 + 速率 + 并发槽位 ----
+/**
+ * 三道闸全部发生在"发上游请求之前"，并且**不改写错误码**：
+ *  - 熔断打开 → 回上游最近一次的瞬态错误类别（timeout / connection / server / rate_limit）。
+ *    对调用方来说"被熔断挡住"与"上游此刻就是这个病"是同一件事；新造一个码会让
+ *    既有逐码断言（tests/model-providers.test.js）和客户端分支全部失真。
+ *  - 限流拒绝 → 复用既有的 `rate_limit`（429），闸门明细挂在 error.throttle 上，
+ *    含维度 / 机制 / 上限 / 当前占用 / retryAfterMs / 阈值版本。
+ * 记账只有一个收口：非流式在返回或抛错处，流式在 wrapMonitoredStream 的 finish()。
+ * 槽位带租约，调用方异常退出没来得及 release 时，最迟 leaseMs 后自动回收。
+ */
+const GATE_FALLBACK_KIND = 'rate_limit';
+
+function gateDetail(parts) {
+  return Object.entries(parts)
+    .filter(([, value]) => value !== null && value !== undefined && value !== '')
+    .map(([key, value]) => `${key}=${value}`)
+    .join(',');
+}
+
+function enterProviderGate({ providerId, holderId, now = Date.now() }) {
+  const policy = circuitBreaker.effectivePolicy();
+  // 半开期要占用探测名额（并发调用不能一起打穿上游），所以这里带 reserveProbe + 落盘路径。
+  const guard = circuitBreaker.guard(
+    circuitBreaker.load(),
+    { kind: 'provider', targetId: providerId, now },
+    policy,
+    { reserveProbe: true, filePath: circuitBreaker.BREAKER_FILE }
+  );
+  if (!guard.allowed) {
+    const kind = guard.lastTransientCode || GATE_FALLBACK_KIND;
+    const error = new ModelCallError(kind, gateDetail({ gate: guard.reason, providerId, retryAfterMs: guard.retryAfterMs, openedAt: guard.openedAt }));
+    error.throttle = {
+      dimension: 'provider',
+      mechanism: 'breaker',
+      reason: guard.reason,
+      state: guard.state,
+      retryAfterMs: guard.retryAfterMs,
+      lastTransientCode: guard.lastTransientCode || null,
+      policyVersion: circuitBreaker.BREAKER_POLICY_VERSION,
+      upstreamRequested: false,
+    };
+    return { allowed: false, error, release() {} };
+  }
+
+  const admit = throttlePolicy.admitProvider({ providerId, holderId, now });
+  if (!admit.allowed) {
+    const info = admit.decision;
+    const error = new ModelCallError(
+      GATE_FALLBACK_KIND,
+      gateDetail({ gate: info.mechanism, providerId, limit: info.limit, used: info.used, retryAfterMs: info.retryAfterMs })
+    );
+    error.throttle = {
+      dimension: info.dimension,
+      mechanism: info.mechanism,
+      reason: info.reason,
+      limit: info.limit,
+      used: info.used,
+      retryAfterMs: info.retryAfterMs,
+      errorFingerprint: info.errorFingerprint,
+      policyVersion: info.policyVersion,
+      upstreamRequested: false,
+    };
+    return { allowed: false, error, release() {} };
+  }
+
+  let settled = false;
+  const settle = (ok, errorCode = null) => {
+    if (settled) return;
+    settled = true;
+    try {
+      circuitBreaker.record({ kind: 'provider', targetId: providerId, ok, errorCode, at: Date.now() });
+    } catch (error) {
+      // 记账失败不能把一次已经成功的上游调用变成失败；
+      // 但要让它看得见——熔断状态不可写时，下一次调用会因读失败而显式报错。
+      console.warn(`[model-adapter] 熔断记账失败：${String(error.message || error).slice(0, 120)}`);
+    }
+    admit.release();
+  };
+  return { allowed: true, error: null, settle, release: () => settle(true) };
+}
+
 /**
  * 创建聊天补全。stream:true 时返回 SDK 的 async iterable，
  * 由调用方 for-await 消费（/chat/stream 现有循环原样复用）。
@@ -563,6 +648,9 @@ function getMemoryClient() {
  * 逐字节一致**（条件展开，绝不下发空数组或默认值）。传入时原样透传
  * 给 OpenAI 兼容服务商，响应里的 tool_calls 由调用方（agent-runtime）
  * 解析执行。
+ *
+ * §26：进入本函数即先过 Provider 维度闸门（见 enterProviderGate），
+ * 被挡住时一次上游请求都不发。
  */
 async function createChatCompletion({
   providerId,
@@ -585,6 +673,9 @@ async function createChatCompletion({
 
   const key = target.key;
   const startedAt = Date.now();
+  // 闸门在 beginModelCall 之前：被本地挡住的调用不该在监控里冒充一次模型请求。
+  const gate = enterProviderGate({ providerId: target.providerId, holderId: `${process.pid}:${crypto.randomUUID()}` });
+  if (!gate.allowed) throw gate.error;
   const monitor = monitoring.beginModelCall({
     providerId: target.providerId,
     modelId: target.modelId,
@@ -619,6 +710,7 @@ async function createChatCompletion({
     );
   } catch (error) {
     const normalized = normalizeSdkError(error, key);
+    gate.settle(false, normalized.kind);
     monitor.fail({
       status: monitoringStatusForKind(normalized.kind),
       durationMs: Date.now() - startedAt,
@@ -629,6 +721,7 @@ async function createChatCompletion({
   }
 
   if (!stream) {
+    gate.settle(true);
     monitor.complete({
       status: 'success',
       durationMs: Date.now() - startedAt,
@@ -637,7 +730,19 @@ async function createChatCompletion({
     return result;
   }
 
-  return wrapMonitoredStream(result, monitor, startedAt);
+  return wrapMonitoredStream(result, monitor, startedAt, (ok, code) => gate.settle(ok, ok ? null : streamSettleKind(code)));
+}
+
+/**
+ * 流式收尾码 → 服务商错误类别。
+ * 客户端主动关闭（cancelled / client_closed）不是服务商故障，按确定性计；
+ * 中途断流属于服务商侧，按瞬态计并推高故障率。
+ */
+function streamSettleKind(code) {
+  const value = String(code || '');
+  if (value === 'cancelled' || value === 'client_closed') return 'cancelled';
+  if (Object.prototype.hasOwnProperty.call(ERROR_STATUS, value)) return value;
+  return 'server';
 }
 
 function monitoringStatusForKind(kind) {
@@ -650,7 +755,7 @@ function monitoringStatusForKind(kind) {
 // 流式响应没有统一的 usage 承诺：能拿到就用供应商真实值，拿不到就明确标 missing。
 // 迭代正常结束记 success，调用方提前 return（客户端断连）记 cancelled，
 // 迭代抛错记 failed；原始错误对象原样抛回，保持上层错误语义不变。
-function wrapMonitoredStream(stream, monitor, startedAt) {
+function wrapMonitoredStream(stream, monitor, startedAt, onSettle = null) {
   let settled = false;
   let usage = null;
 
@@ -671,6 +776,8 @@ function wrapMonitoredStream(stream, monitor, startedAt) {
         errorCategory: status === 'cancelled' ? null : 'provider',
       });
     }
+    // §26：流式的熔断记账与限流槽位释放只有这一个收口，不会重复计数。
+    if (onSettle) onSettle(status === 'success', status === 'success' ? null : String(errorCode || status));
   };
 
   return new Proxy(stream, {
@@ -954,6 +1061,8 @@ module.exports = {
   testProviderConnection,
   invalidateProviderCache,
   getMemoryClient,
+  enterProviderGate,
+  streamSettleKind,
 };
 
 // 启动警告：测试旁路一旦带进生产，自定义 Base URL 就能打内网。

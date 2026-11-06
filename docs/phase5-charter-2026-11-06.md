@@ -77,5 +77,6 @@ A-12 的判据是「管理评审记录（非代码测试）」，属 Owner 产�
 |---|---|---|---|---|
 | P5-A 第 1 轮 | `p5a/eval-tiers-and-comparators-2026-11-06` | §14 四分层 + 泄漏/轮换退役 + 五类比较对象 + 配置记录身份 + CLI 矩阵与门禁 | **完成（本地全门禁绿，已推送分支，未开 PR）** | `tests/agent-eval-tiers.test.js` 6 项、`tests/agent-eval-comparators.test.js` 6 项；覆盖率门 `backend=2333/2333`、`109/109` 文件、`failed=0`；实测输出见 `docs/phase5a-eval-tiers-and-comparators.md` §3 |
 | P5-A 第 2 轮 | — | §7 八项指标（过度拆解率、并行耗时收益、失败恢复率、重复副作用率、证据完整率、来源独立性、Reviewer 检出率、审批命中率与误拦截率） | 未开始 | 指标口径必须复用 `eval-metrics` 既有事件/成本读法，不建第二套 |
+| P5-B 第 1 轮 | `p5b/throttle-breaker-storm-2026-11-07`（基于 P5-A 分支，栈式依赖） | §26 四维限流阈值 + Provider 三态熔断（滑动窗口/半开探测/确定性错误不计故障率）+ 风暴五条细则并接入重试裁决点 | 完成（110/110 测试文件、backend 2341/2341、前端 188/188、五门禁退出码 0；PR 未开） | `tests/agent-throttle-breaker-storm.test.js` 8 项；阈值实测校正记录与边界见 `docs/phase5b-throttle-breaker-storm-2026-11-07.md` §2、§4 |
 
 本轮遗留（不在第 2 轮范围内，需外部条件）：台账 A-07 的 `0 → 0.5` 回填要等 PR #59（同文件改写汇总块）合并后单独执行；`--leak-scan` 接入 CI 门禁属 CI 变更，需与 PR 同轮；真实模型对照轮次要等 LongCat 额度。
