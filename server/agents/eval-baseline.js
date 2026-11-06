@@ -14,16 +14,25 @@ function createSnapshot({
   metrics,
   codeCommit = null,
   strategy = null,
+  comparator = null,
+  config = null,
   generatedAt = new Date().toISOString(),
 } = {}) {
   if (!metrics || !metrics.suite || !metrics.metrics) {
     throw new Error('createSnapshot 需要 computeMetrics 的输出');
+  }
+  if (config && config.codeCommit !== (codeCommit || null)) {
+    // 快照的 commit 必须与配置记录里的 commit 一致，否则"同一份代码"这句话没有依据。
+    throw new Error('快照 codeCommit 与基线配置记录不一致');
   }
   return {
     schemaVersion: SCHEMA_VERSION,
     generatedAt,
     codeCommit: codeCommit || null,
     strategy: strategy ? { version: strategy.version, enabled: strategy.enabled } : null,
+    // P5-A：比较对象与配置记录随快照一起存，报告才能区分「同一基线复现」与「换配置对照」。
+    comparator: comparator ? { id: comparator.id, kind: comparator.kind, mechanisms: comparator.enabled, ablating: comparator.ablating } : null,
+    config: config || null,
     suite: { ...metrics.suite },
     metrics: metrics.metrics,
     cases: metrics.cases,

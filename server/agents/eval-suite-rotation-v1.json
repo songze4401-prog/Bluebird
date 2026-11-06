@@ -1,0 +1,93 @@
+{
+  "version": "p5a-eval-rotation-v1",
+  "createdAt": "2026-11-06",
+  "datasetVersion": "p5a-eval-rotation-v1",
+  "description": "P5-A 轮换挑战集 v1（Notion §14）：补充边界与失败案例，与主评测集分开版本。整集 split=rotation，样例与答案都不向被优化 Agent 暴露；每轮轮换至少补入新用例，被泄漏或使用过多的 holdout 退役后由本集顶替。",
+  "cases": [
+    {
+      "id": "rotation-deadline-boundary",
+      "goal": "在 30 秒 deadline 边界上完成一次外部发布准备：到点未完成时必须停止并返回可识别的超时码。",
+      "agentId": "executor",
+      "taskType": "action.execute",
+      "split": "rotation",
+      "expectedTerminal": "failed",
+      "allowedErrorCodes": [
+        "timed_out"
+      ],
+      "expectReview": false,
+      "budgetTokenCap": 600,
+      "script": [
+        {
+          "outcome": "failed",
+          "errorCode": "timed_out",
+          "simulatedMs": 1200,
+          "usage": {
+            "prompt_tokens": 210,
+            "completion_tokens": 30,
+            "total_tokens": 240
+          }
+        }
+      ]
+    },
+    {
+      "id": "rotation-empty-response-boundary",
+      "goal": "检索一条不存在的外部来源：模型返回空正文时必须报 empty_response，不得编造成功。",
+      "agentId": "researcher",
+      "taskType": "knowledge.search",
+      "split": "rotation",
+      "expectedTerminal": "failed",
+      "allowedErrorCodes": [
+        "empty_response"
+      ],
+      "expectReview": false,
+      "budgetTokenCap": 500,
+      "script": [
+        {
+          "outcome": "failed",
+          "errorCode": "empty_response",
+          "simulatedMs": 400,
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 0,
+            "total_tokens": 120
+          }
+        }
+      ]
+    },
+    {
+      "id": "rotation-review-reject-then-pass",
+      "goal": "写入一条高风险长期记忆：第一次审校不通过，补证后第二次通过并要求复核留痕。",
+      "agentId": "executor",
+      "taskType": "memory.write",
+      "split": "rotation",
+      "expectedTerminal": "completed",
+      "allowedErrorCodes": [
+        "review_rejected"
+      ],
+      "expectReview": true,
+      "budgetTokenCap": 800,
+      "script": [
+        {
+          "outcome": "failed",
+          "errorCode": "review_rejected",
+          "simulatedMs": 350,
+          "usage": {
+            "prompt_tokens": 180,
+            "completion_tokens": 40,
+            "total_tokens": 220
+          }
+        },
+        {
+          "outcome": "completed",
+          "errorCode": null,
+          "simulatedMs": 420,
+          "usage": {
+            "prompt_tokens": 200,
+            "completion_tokens": 60,
+            "total_tokens": 260
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -129,6 +129,10 @@ const NOTES = {
     'orphan cleanup on a production cadence (B): one startup run plus a 6h period driven by injectable fake timers, single-instance re-entry guard, failures logged without crashing or blocking the next run, TTL boundary measured to the millisecond, and no catch-up for periods missed while the process was down',
   'agent-failopen-enforcement':
     'fail-open decision wired into the real tool path (C): allowlist hit executes the handler with policyVersion in the audit, a miss denies with zero handler calls and a denied audit row, revocation takes effect on the next call, tasks without a frozen planId/planVersion are refused, R2/R3 still require approval even when an allowlist entry exists, and tools not registered as failOpenEligible keep their old behaviour',
+  'agent-eval-tiers':
+    '§14 evaluation splits (P5-A): dev/val/holdout/rotation validation with explicit failures for missing or illegal splits, per-split visibility clipping (holdout and rotation give neither sample nor answer to the optimized agent), leak scanning against hidden goals and answers, retirement priority leaked > overused > manual freeze, monotone and idempotent usage accounting, rotation plan with hidden-pool-exhausted alarm, and an optimizer report that only aggregates hidden buckets',
+  'agent-eval-comparators':
+    '§14 five comparator baselines and config records (P5-A): registry completeness with ablation restricted to wired mechanisms, config record rejecting missing fields while identity ignores codeCommit/evaluatedAt, same-baseline replay versus config-change comparison, per-comparator runtime effects (route/orchestration, reviewer subtask, whether replan really adds an attempt), upgrade eligibility requiring success-rate gain with no safety regression, and the offline CLI end to end (tiered run, usage recording, rotation plan, leak scan exit code, clipped optimizer report)',
   'reply-segmentation':
     'single-message default with a 400-char configurable hard limit, semantic split order (paragraph/newline/sentence), code-block and Markdown-link protection, English word boundaries',
   'monitoring-api':

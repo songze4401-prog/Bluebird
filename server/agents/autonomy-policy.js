@@ -62,9 +62,12 @@ function teamMembers(required) {
   return selected;
 }
 
-function plan({ goal = '', taskType, riskLevel = null, historicalSuccessRate = null } = {}) {
+function plan({ goal = '', taskType, riskLevel = null, historicalSuccessRate = null, activeOverride = null } = {}) {
   const state = strategyVersion.get();
-  const active = isEnabled(state);
+  // activeOverride 只给离线评测的五类比较对象用：对照跑要按「声明的开关」出结果，
+  // 而不是被当前落盘的 strategy-version.json 牵着走。线上调用不传，行为完全不变。
+  const override = activeOverride === null || activeOverride === undefined ? null : Boolean(activeOverride);
+  const active = override === null ? isEnabled(state) : override;
   const required = requiredCapabilities(taskType);
   const highRisk = riskLevel ? riskLevel === 'high' : HIGH_RISK_TASK_TYPES.has(taskType);
   const rationale = [];
@@ -97,7 +100,7 @@ function plan({ goal = '', taskType, riskLevel = null, historicalSuccessRate = n
   return {
     policy: ACTIVE_VERSION,
     enabled: active,
-    version: state.version,
+    version: override === true ? ACTIVE_VERSION : state.version,
     decision,
     riskLevel: highRisk ? 'high' : 'low',
     requiredCapabilities: required,
@@ -124,9 +127,10 @@ function plan({ goal = '', taskType, riskLevel = null, historicalSuccessRate = n
  * 失败后是否允许一次重规划。只读既有 attempts/maxAttempts 与预算余量，
  * 不新增重规划计数器：attempts < maxAttempts 即"还有一次机会"。
  */
-function decideReplan({ task = {}, errorCode = null, maxAttempts = 1, tokenBudget = null, tokenUsed = null } = {}) {
+function decideReplan({ task = {}, errorCode = null, maxAttempts = 1, tokenBudget = null, tokenUsed = null, activeOverride = null } = {}) {
   const state = strategyVersion.get();
-  const active = isEnabled(state);
+  const override = activeOverride === null || activeOverride === undefined ? null : Boolean(activeOverride);
+  const active = override === null ? isEnabled(state) : override;
   const attempts = Number(task.attempts || 0);
   const limit = Number(task.maxAttempts || maxAttempts || 1);
   const used = tokenUsed === null ? null : Number(tokenUsed);

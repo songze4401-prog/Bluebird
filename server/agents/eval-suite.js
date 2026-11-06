@@ -86,6 +86,9 @@ function validateCase(item, seen) {
     goal,
     agentId,
     taskType,
+    // split 只做透传与形态检查，分层语义由 eval-tiers 判定：
+    // 这里不默认补 'dev'，缺分层必须显式暴露成分层校验失败。
+    split: item.split === undefined || item.split === null ? null : String(item.split),
     expectedTerminal: item.expectedTerminal,
     allowedErrorCodes: item.allowedErrorCodes.map(code => String(code)),
     expectReview: item.expectReview,
@@ -118,6 +121,9 @@ function loadSuite(filePath = DEFAULT_SUITE_FILE) {
   return {
     file: target,
     version,
+    // datasetVersion 让基线快照能说清"跑的是哪一版数据"：同一 version 下补充或
+    // 替换用例时必须换 datasetVersion，否则两次结果会被混称同一基线（§14）。
+    datasetVersion: raw.datasetVersion ? String(raw.datasetVersion) : version,
     digest: suiteDigest(raw),
     caseCount: cases.length,
     cases,

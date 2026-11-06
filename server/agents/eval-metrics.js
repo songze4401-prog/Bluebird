@@ -69,6 +69,7 @@ function caseRecord(result, eventMap, redeliveryByTask) {
   const latencyMs = latencyOf(runs);
   return {
     caseId: result.caseId,
+    split: result.split || null,
     taskId: result.taskId,
     agentId: result.agentId,
     taskType: result.taskType,
@@ -149,11 +150,21 @@ function computeMetrics({ suite, results }) {
   const latencies = cases.map(item => item.latencyMs).filter(value => value !== null);
   const latencyUnknown = cases.length - latencies.length;
   const latencyTotal = latencies.reduce((sum, value) => sum + value, 0);
+  // §14 分层口径：选型与"日常迭代"必须分开看，否则 holdout 的成功率会被开发集掩盖。
+  const splits = ['dev', 'val', 'holdout', 'rotation'];
+  const bySplit = {};
+  for (const name of splits) {
+    const rows = cases.filter(item => item.split === name);
+    const ok = rows.filter(item => item.success).length;
+    bySplit[name] = { count: rows.length, successCount: ok, successRate: rows.length ? ok / rows.length : null };
+  }
 
   return {
     suite: { version: suite.version, digest: suite.digest, caseCount: suite.caseCount },
     cases,
     metrics: {
+      bySplit,
+      unsplitCases: cases.filter(item => !item.split).length,
       successRate: {
         value: cases.length ? successCount / cases.length : 0,
         successCount,
