@@ -1,13 +1,15 @@
 {
   "version": "p4-eval-v1",
   "createdAt": "2026-11-05",
-  "description": "Phase 4 离线评测集 v1：固定用例 + 确定性 stub 脚本，不调用真实模型。",
+  "datasetVersion": "p5a-eval-dataset-v1",
+  "description": "Phase 4 离线评测集 v1：固定用例 + 确定性 stub 脚本，不调用真实模型。 P5-A 起补分层：dev 日常迭代、val 阶段选型、holdout 不向优化方暴露样例与答案。",
   "cases": [
     {
       "id": "research-success",
       "goal": "总结本周关于持久任务队列的改动",
       "agentId": "researcher",
       "taskType": "memory.recall",
+      "split": "dev",
       "expectedTerminal": "completed",
       "allowedErrorCodes": [],
       "expectReview": false,
@@ -17,7 +19,11 @@
           "outcome": "completed",
           "errorCode": null,
           "simulatedMs": 400,
-          "usage": { "prompt_tokens": 120, "completion_tokens": 40, "total_tokens": 160 }
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 40,
+            "total_tokens": 160
+          }
         }
       ]
     },
@@ -26,6 +32,7 @@
       "goal": "把已确认的修复提交到目标文件",
       "agentId": "executor",
       "taskType": "action.execute",
+      "split": "val",
       "expectedTerminal": "completed",
       "allowedErrorCodes": [],
       "expectReview": true,
@@ -35,7 +42,11 @@
           "outcome": "completed",
           "errorCode": null,
           "simulatedMs": 900,
-          "usage": { "prompt_tokens": 200, "completion_tokens": 50, "total_tokens": 250 }
+          "usage": {
+            "prompt_tokens": 200,
+            "completion_tokens": 50,
+            "total_tokens": 250
+          }
         }
       ]
     },
@@ -44,8 +55,11 @@
       "goal": "检索跨会话记忆并给出带来源的答案",
       "agentId": "researcher",
       "taskType": "knowledge.search",
+      "split": "dev",
       "expectedTerminal": "completed",
-      "allowedErrorCodes": ["model_timeout"],
+      "allowedErrorCodes": [
+        "model_timeout"
+      ],
       "expectReview": false,
       "budgetTokenCap": 500,
       "script": [
@@ -53,13 +67,21 @@
           "outcome": "failed",
           "errorCode": "model_timeout",
           "simulatedMs": 200,
-          "usage": { "prompt_tokens": 25, "completion_tokens": 5, "total_tokens": 30 }
+          "usage": {
+            "prompt_tokens": 25,
+            "completion_tokens": 5,
+            "total_tokens": 30
+          }
         },
         {
           "outcome": "completed",
           "errorCode": null,
           "simulatedMs": 600,
-          "usage": { "prompt_tokens": 130, "completion_tokens": 20, "total_tokens": 150 }
+          "usage": {
+            "prompt_tokens": 130,
+            "completion_tokens": 20,
+            "total_tokens": 150
+          }
         }
       ]
     },
@@ -68,8 +90,11 @@
       "goal": "在无证据情况下强行给出结论",
       "agentId": "researcher",
       "taskType": "knowledge.search",
+      "split": "holdout",
       "expectedTerminal": "failed",
-      "allowedErrorCodes": ["model_timeout"],
+      "allowedErrorCodes": [
+        "model_timeout"
+      ],
       "expectReview": false,
       "budgetTokenCap": 500,
       "script": [
@@ -77,7 +102,11 @@
           "outcome": "failed",
           "errorCode": "model_timeout",
           "simulatedMs": 300,
-          "usage": { "prompt_tokens": 20, "completion_tokens": 0, "total_tokens": 20 }
+          "usage": {
+            "prompt_tokens": 20,
+            "completion_tokens": 0,
+            "total_tokens": 20
+          }
         }
       ]
     },
@@ -86,6 +115,7 @@
       "goal": "把两条来源合并成一段简短摘要",
       "agentId": "researcher",
       "taskType": "summary.synthesize",
+      "split": "dev",
       "expectedTerminal": "completed",
       "allowedErrorCodes": [],
       "expectReview": false,
@@ -104,6 +134,7 @@
       "goal": "把修复写入目标仓库并提交",
       "agentId": "executor",
       "taskType": "action.execute",
+      "split": "val",
       "expectedTerminal": "completed",
       "allowedErrorCodes": [],
       "expectReview": true,
@@ -113,7 +144,11 @@
           "outcome": "completed",
           "errorCode": null,
           "simulatedMs": 1200,
-          "usage": { "prompt_tokens": 240, "completion_tokens": 60, "total_tokens": 300 }
+          "usage": {
+            "prompt_tokens": 240,
+            "completion_tokens": 60,
+            "total_tokens": 300
+          }
         }
       ]
     },
@@ -122,8 +157,11 @@
       "goal": "审校拒绝后按反馈修正并完成执行",
       "agentId": "executor",
       "taskType": "action.execute",
+      "split": "val",
       "expectedTerminal": "completed",
-      "allowedErrorCodes": ["review_rejected"],
+      "allowedErrorCodes": [
+        "review_rejected"
+      ],
       "expectReview": true,
       "budgetTokenCap": 700,
       "script": [
@@ -131,7 +169,11 @@
           "outcome": "failed",
           "errorCode": "review_rejected",
           "simulatedMs": 400,
-          "usage": { "prompt_tokens": 90, "completion_tokens": 10, "total_tokens": 100 }
+          "usage": {
+            "prompt_tokens": 90,
+            "completion_tokens": 10,
+            "total_tokens": 100
+          }
         }
       ]
     },
@@ -140,8 +182,11 @@
       "goal": "在缺少证据时执行高危写入",
       "agentId": "executor",
       "taskType": "action.execute",
+      "split": "holdout",
       "expectedTerminal": "failed",
-      "allowedErrorCodes": ["evidence_missing"],
+      "allowedErrorCodes": [
+        "evidence_missing"
+      ],
       "expectReview": true,
       "budgetTokenCap": 600,
       "script": [
@@ -149,7 +194,11 @@
           "outcome": "failed",
           "errorCode": "evidence_missing",
           "simulatedMs": 350,
-          "usage": { "prompt_tokens": 80, "completion_tokens": 0, "total_tokens": 80 }
+          "usage": {
+            "prompt_tokens": 80,
+            "completion_tokens": 0,
+            "total_tokens": 80
+          }
         }
       ]
     },
@@ -158,6 +207,7 @@
       "goal": "跨三条记忆给出带来源的结论",
       "agentId": "researcher",
       "taskType": "knowledge.search",
+      "split": "dev",
       "expectedTerminal": "completed",
       "allowedErrorCodes": [],
       "expectReview": false,
@@ -167,7 +217,11 @@
           "outcome": "completed",
           "errorCode": null,
           "simulatedMs": 800,
-          "usage": { "prompt_tokens": 180, "completion_tokens": 40, "total_tokens": 220 }
+          "usage": {
+            "prompt_tokens": 180,
+            "completion_tokens": 40,
+            "total_tokens": 220
+          }
         }
       ]
     },
@@ -176,6 +230,7 @@
       "goal": "查一下上周记下的部署偏好",
       "agentId": "memory",
       "taskType": "memory.search",
+      "split": "dev",
       "expectedTerminal": "completed",
       "allowedErrorCodes": [],
       "expectReview": false,
@@ -185,7 +240,11 @@
           "outcome": "completed",
           "errorCode": null,
           "simulatedMs": 200,
-          "usage": { "prompt_tokens": 70, "completion_tokens": 20, "total_tokens": 90 }
+          "usage": {
+            "prompt_tokens": 70,
+            "completion_tokens": 20,
+            "total_tokens": 90
+          }
         }
       ]
     },
@@ -194,6 +253,7 @@
       "goal": "把已确认的项目约定写入长期记忆",
       "agentId": "executor",
       "taskType": "memory.write",
+      "split": "holdout",
       "expectedTerminal": "completed",
       "allowedErrorCodes": [],
       "expectReview": true,
@@ -203,7 +263,11 @@
           "outcome": "completed",
           "errorCode": null,
           "simulatedMs": 500,
-          "usage": { "prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150 }
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 30,
+            "total_tokens": 150
+          }
         }
       ]
     },
@@ -212,6 +276,7 @@
       "goal": "按来源汇总两条检索结果",
       "agentId": "researcher",
       "taskType": "knowledge.search",
+      "split": "val",
       "expectedTerminal": "completed",
       "allowedErrorCodes": [],
       "expectReview": false,
@@ -230,6 +295,7 @@
       "goal": "把三条记录压缩成一句话摘要",
       "agentId": "researcher",
       "taskType": "summary.synthesize",
+      "split": "dev",
       "expectedTerminal": "completed",
       "allowedErrorCodes": [],
       "expectReview": false,
@@ -239,7 +305,11 @@
           "outcome": "completed",
           "errorCode": null,
           "simulatedMs": 300,
-          "usage": { "prompt_tokens": 50, "completion_tokens": 20, "total_tokens": 70 }
+          "usage": {
+            "prompt_tokens": 50,
+            "completion_tokens": 20,
+            "total_tokens": 70
+          }
         }
       ]
     }

@@ -29,7 +29,7 @@ npx expo start             # Metro :8081
 ## Quality gates
 
 ```bash
-npm test                    # backend: auto-discovers tests/*.test.js (107 files / 2321 checks)
+npm test                    # backend: auto-discovers tests/*.test.js (109 files / 2333 checks)
 npm run test:unit -- --ci   # frontend: 22 suites / 188 cases
 npx tsc --noEmit            # TypeScript
 npm run lint                # Expo ESLint
@@ -60,6 +60,8 @@ CI (`.github/workflows/ci.yml`) runs TypeScript, lint, the fixed evaluations, an
 ## Documentation
 
 - `AGENTS.md` — architecture, data safety, commands, tests, and rules. This is the primary engineering reference.
+- `docs/phase5-charter-2026-11-06.md` — Phase 5 立项书：Notion v1.0 未实现项的交付包拆分、每轮验收定义、轮数估算（14–20 轮，中位 16）与里程碑对应的台账预期状态。
+- `docs/phase5a-eval-tiers-and-comparators.md` — Phase 5-A 第 1 轮（§14）：评测集四类分层与可见性裁剪、泄漏检测与轮换退役、五类可比较基线与配置记录身份，含 `--matrix`/`--leak-scan` 实测输出与已知限制。
 - `docs/handover-2026-11-03.md` — handover snapshot: current baseline, what P1–P6 actually proves, unverified/blocked items with evidence, hard constraints, and the acceptance command chain.
 - `docs/persona-custom-prompt.md` — the user-authored persona text: field contract, priority order, untrusted-text handling, and validation error codes.
 - `docs/unified-retrieval.md` — unified semantic retrieval/knowledge index: contracts, source connectors, hybrid pipeline, API, limits, verified/blocked capabilities.
