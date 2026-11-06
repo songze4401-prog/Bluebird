@@ -213,6 +213,52 @@ function admitRetryAttempt({
   return { ...decision, planDigest };
 }
 
+/**
+ * 风暴收口的审计落点（§26 第 4 项）。独立成函数有两个原因：
+ *  1) 事件类型必须在 `tasks.EVENT_TYPES` 白名单里、payload 键必须在
+ *     `SAFE_PAYLOAD_KEYS` 里，否则 `safeEvent` 只会 console.warn，
+ *     审计"写了"却一条都没落——这类静默丢弃只能靠真的写一次去验；
+ *  2) 判定与落账分离，终态收口仍复用既有失败分支，不新建第二条终态写入路径。
+ */
+function recordStormDenial({ task, runId = null, errorCode, disposition, stormGate }) {
+  safeEvent(
+    task.botId,
+    'replan.storm_denied',
+    {
+      status: disposition.status,
+      errorCode,
+      rule: stormGate.rule || 'unknown',
+      rulesHit: (stormGate.violations || []).map(item => item.rule).join(','),
+      retryAfterMs: stormGate.retryAfterMs || 0,
+      replanCount: stormGate.replans || 0,
+      planDigest: stormGate.planDigest || null,
+      policyVersion: stormGate.policyVersion || '',
+    },
+    { taskId: task.taskId, runId, sessionId: task.sessionId }
+  );
+}
+
+/**
+ * 记账失败不写事件：事件写失败本身也是记账失败，再发一次只会重复出错。
+ * 熔断状态真的坏掉时，下一次 `guard()` 会显式抛错，问题不会被吞掉。
+ */
+function recordWorkerOutcome(botId, ok, errorCode) {
+  if (!botId) return null;
+  try {
+    return circuitBreaker.record({
+      kind: 'worker',
+      targetId: String(botId),
+      ok,
+      errorCode: ok ? null : errorCode,
+    });
+  } catch (error) {
+    console.warn(
+      `[agent-breaker] record failed bot=${botId} reason=${String(error.message || error).slice(0, 120)}`
+    );
+    return null;
+  }
+}
+
 function scheduleTaskQueue() {
   if (scheduling) return;
   scheduling = true;
@@ -1401,6 +1447,7 @@ async function runTask(taskId) {
       finishedAt: finalResult.finishedAt,
       usage: finalResult.usage || null,
     });
+    recordWorkerOutcome(task.botId, true, null);
     tasks.releaseLease(task.taskId);
     safeEvent(
       task.botId,
@@ -1538,21 +1585,7 @@ async function runTask(taskId) {
     }
 
     if (disposition.retryable && !stormGate.allowed) {
-      safeEvent(
-        task.botId,
-        'replan.storm_denied',
-        {
-          status: disposition.status,
-          errorCode,
-          rule: stormGate.rule,
-          rulesHit: stormGate.violations.map(item => item.rule),
-          retryAfterMs: stormGate.retryAfterMs,
-          replans: stormGate.replans,
-          planDigest: stormGate.planDigest || null,
-          policyVersion: stormGate.policyVersion,
-        },
-        { taskId: task.taskId, runId, sessionId: task.sessionId }
-      );
+      recordStormDenial({ task: latest, runId, errorCode, disposition, stormGate });
     }
 
     const status = disposition.status;
@@ -1576,6 +1609,9 @@ async function runTask(taskId) {
       errorCode,
       finishedAt: failureResult.finishedAt,
     });
+    // §26 Worker 维度记账：终态失败按 worker 码域分类，
+    // 只有 model_* / internal_error / dependency_failed / agent_failed 算健康度故障。
+    recordWorkerOutcome(task.botId, false, errorCode);
     // 死信：连续失败已达上限 → 在既有 failed 终态上打标记（不新增状态）。
     // 只有真正重试耗尽才算死信；取消/超时/结果不确定（recovery）不走这里。
     if (status === 'failed' && attempts >= maxAttempts) {
@@ -1966,5 +2002,6 @@ module.exports = {
   buildPolicy,
   decideFailureDisposition,
   admitRetryAttempt,
+  recordStormDenial,
   limitsSnapshot,
 };

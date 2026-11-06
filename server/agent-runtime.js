@@ -28,6 +28,7 @@ const { tagModelMessage } = require('./context/projection');
 
 const crashHook = require('./agents/crash-hook');
 const failOpenPolicy = require('./agents/failopen-policy');
+const circuitBreaker = require('./agents/circuit-breaker');
 const { createChatCompletion } = require('./model-adapter');
 const monitoring = require('./monitoring');
 const memorySearchTool = require('./tool-memory-search');
@@ -651,6 +652,43 @@ async function executeToolCall(name, rawArgs, context) {
     ledgerOpKey = verdict.opKey;
   }
 
+  // §26 工具维度熔断：窗口内故障率过高的工具不再执行（handler 一次都不调）。
+  // 位置刻意在"本轮去重复用"与"幂等账本 reuse/blocked 短路"之后、
+  // 超时与副作用 begin 之前：复用已有结果不需要工具健康，
+  // 而只有真的要执行才需要熔断判断。
+  const toolGate = circuitBreaker.guard(
+    circuitBreaker.load(),
+    { kind: 'tool', targetId: def.name },
+    circuitBreaker.effectivePolicy()
+  );
+  if (!toolGate.allowed) {
+    monitor.complete({
+      ok: false,
+      code: 'tool_circuit_open',
+      durationMs: Date.now() - startedAt,
+      executed: false,
+    });
+    // 不写入本轮去重缓存：熔断是暂时状态，缓存它会让同一请求里的后续尝试
+    // 连"上游恢复了吗"都不再问一次，把一次熔断放大成整轮不可用。
+    return {
+      ok: false,
+      code: 'tool_circuit_open',
+      error: '该工具近期连续故障，已暂时熔断，请稍后重试',
+      retryAfterMs: toolGate.retryAfterMs,
+      breakerPolicyVersion: circuitBreaker.BREAKER_POLICY_VERSION,
+    };
+  }
+
+  // 记账只覆盖"真的执行过"的结局；参数校验/权限拒绝根本没碰到工具本体。
+  const recordToolOutcome = (ok, code) => {
+    try {
+      circuitBreaker.record({ kind: 'tool', targetId: def.name, ok, errorCode: ok ? null : code });
+    } catch (error) {
+      // 记账失败不能把一次已经完成的工具调用变成失败；状态读坏时下一次判定会显式抛错。
+      console.warn('[agent] 工具熔断记账失败:', String(error.message || error).slice(0, 120));
+    }
+  };
+
   const timeoutMs =
     Number.isFinite(def.timeoutMs) && def.timeoutMs > 0
       ? def.timeoutMs
@@ -743,6 +781,7 @@ async function executeToolCall(name, rawArgs, context) {
       resultBytes: serialized ? serialized.length : 0,
       truncated: serialized ? serialized.length > TOOL_RESULT_MAX : false,
     });
+    recordToolOutcome(result.ok === true, result.code || null);
     return result;
   } catch (error) {
     if (timedOut || error instanceof ToolTimeoutError) {
@@ -765,6 +804,8 @@ async function executeToolCall(name, rawArgs, context) {
         durationMs: Date.now() - startedAt,
         executed: true,
       });
+      // 超时算工具健康度故障：handler 被中断本身就说明它撑不住这个负载。
+      recordToolOutcome(false, result.code);
       return result;
     }
     const result = remember({ ok: false, code: 'tool_error', error: '工具内部错误' });
@@ -777,6 +818,7 @@ async function executeToolCall(name, rawArgs, context) {
       durationMs: Date.now() - startedAt,
       executed: true,
     });
+    recordToolOutcome(false, result.code);
     return result;
   } finally {
     if (timer) clearTimeout(timer);

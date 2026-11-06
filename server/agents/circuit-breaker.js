@@ -28,12 +28,58 @@ const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
 const AGENTS_DIR = path.join(DATA_DIR, 'agents');
 const BREAKER_FILE = path.join(AGENTS_DIR, 'circuit-breaker.json');
 
-// 默认按 model-adapter 的 ModelCallError.kind 分类（tests/agent-circuit-breaker.test.js
+// 默认按 model-adapter 的 ModelCallError.kind 分类（tests/agent-throttle-breaker-storm.test.js
 // 会用 model-adapter 的 ERROR_STATUS 键集反查本表，防止两处漂移）：
 //   瞬态（计入故障率）：连接、超时、服务商 5xx、服务商限流
 //   确定性（不计故障率）：密钥被拒、模型/请求格式被拒、未配置、能力不支持、客户端取消
 const TRANSIENT_KINDS = Object.freeze(['timeout', 'connection', 'server', 'rate_limit']);
 const DETERMINISTIC_KINDS = Object.freeze(['auth', 'model', 'bad_request', 'not_configured', 'capability', 'cancelled']);
+
+// 工具与 Worker 两个域的码表。取"未列出的码按确定性处理"这一保守方向：
+// 这两个域的码空间是开放的（工具各自报错、任务有恢复态），
+// 一个没归类过的码如果默认算故障，就会把健康的工具/Agent 踢出可用集，
+// 那是比"少算一次故障"更严重的可用性事故。
+const TOOL_TRANSIENT_KINDS = Object.freeze(['tool_error', 'tool_timeout']);
+const TOOL_DETERMINISTIC_KINDS = Object.freeze([
+  'confirmation_required',
+  'failopen_scope_incomplete',
+  'invalid_params',
+  'unknown_tool',
+  'unauthorized_write',
+  'policy_tool_denied',
+  'tool_denied',
+  'tool_circuit_open',
+  'side_effect_unknown',
+  'side_effect_args_invalid',
+  'side_effect_ledger_unavailable',
+  'ledger_write_failed',
+]);
+const WORKER_TRANSIENT_KINDS = Object.freeze([
+  'model_connection',
+  'model_rate_limit',
+  'model_timeout',
+  'internal_error',
+  'dependency_failed',
+  'agent_failed',
+]);
+const WORKER_DETERMINISTIC_KINDS = Object.freeze([
+  'validation_failed',
+  'not_authorized',
+  'budget_exceeded',
+  'conflict',
+  'cancelled',
+  'replan_limit_reached',
+  'side_effect_unknown',
+]);
+
+const DOMAIN_POLICIES = Object.freeze({
+  model: Object.freeze({ transient: TRANSIENT_KINDS, deterministic: DETERMINISTIC_KINDS, unknown: 'transient' }),
+  tool: Object.freeze({ transient: TOOL_TRANSIENT_KINDS, deterministic: TOOL_DETERMINISTIC_KINDS, unknown: 'deterministic' }),
+  worker: Object.freeze({ transient: WORKER_TRANSIENT_KINDS, deterministic: WORKER_DETERMINISTIC_KINDS, unknown: 'deterministic' }),
+});
+
+// 熔断对象类型 → 错误码域：Provider 的健康度就是模型上游健康度。
+const DOMAIN_BY_KIND = Object.freeze({ provider: 'model', tool: 'tool', worker: 'worker' });
 
 function clampInt(value, fallback, min, max) {
   const number = Number(value);
@@ -75,14 +121,17 @@ function effectivePolicy(overrides = {}) {
   return next;
 }
 
-function classifyOutcome({ ok = false, errorCode = null, isTransient = null } = {}) {
+function classifyOutcome({ ok = false, errorCode = null, isTransient = null, domain = 'model' } = {}) {
   if (ok) return 'ok';
   const kind = String(errorCode || '');
   if (typeof isTransient === 'function') return isTransient(kind) ? 'transient' : 'deterministic';
-  if (TRANSIENT_KINDS.includes(kind)) return 'transient';
-  // 未知错误码保守当瞬态：漏判瞬态会让熔断形同虚设，比多算一次故障更危险。
-  if (!DETERMINISTIC_KINDS.includes(kind)) return 'transient';
-  return 'deterministic';
+  const table = DOMAIN_POLICIES[domain];
+  if (!table) throw new Error(`未知熔断域：${domain}`);
+  if (table.transient.includes(kind)) return 'transient';
+  if (table.deterministic.includes(kind)) return 'deterministic';
+  // 未归类码的默认方向由各域自己声明：model 域码空间封闭，漏判即失效，保守当瞬态；
+  // tool/worker 码空间开放，误判成瞬态会把健康对象踢出可用集，保守当确定性。
+  return table.unknown === 'transient' ? 'transient' : 'deterministic';
 }
 
 function targetKey(kind, targetId) {
@@ -331,6 +380,7 @@ function record({
   errorCode = null,
   at = Date.now(),
   isTransient = null,
+  domain = null,
   filePath = BREAKER_FILE,
   persist = true,
   policy = null,
@@ -339,7 +389,12 @@ function record({
   const state = load(filePath);
   const key = targetKey(kind, targetId);
   const current = state.targets[key] || emptyTarget(key);
-  const outcome = classifyOutcome({ ok, errorCode, isTransient });
+  const outcome = classifyOutcome({
+    ok,
+    errorCode,
+    isTransient,
+    domain: domain || DOMAIN_BY_KIND[kind] || 'model',
+  });
   const result = applyOutcome(current, { outcome, at, code: ok ? null : errorCode }, active);
   state.targets[key] = result.target;
   pruneTargets(state, active);
@@ -347,6 +402,7 @@ function record({
   return {
     targetKey: key,
     outcome,
+    domain: domain || DOMAIN_BY_KIND[kind] || 'model',
     state: result.target.state,
     transitions: result.transitions,
     health: result.health,
@@ -411,9 +467,15 @@ module.exports = {
   BREAKER_FILE,
   BREAKER_POLICY_VERSION,
   DETERMINISTIC_KINDS,
+  DOMAIN_BY_KIND,
+  DOMAIN_POLICIES,
   STATES,
   TARGET_KINDS,
+  TOOL_DETERMINISTIC_KINDS,
+  TOOL_TRANSIENT_KINDS,
   TRANSIENT_KINDS,
+  WORKER_DETERMINISTIC_KINDS,
+  WORKER_TRANSIENT_KINDS,
   applyOutcome,
   classifyOutcome,
   effectivePolicy,

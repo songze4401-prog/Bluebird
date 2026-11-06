@@ -13,6 +13,7 @@
 const crypto = require('crypto');
 const { AgentError } = require('./errors');
 const intakeControl = require('./intake-control');
+const circuitBreaker = require('./circuit-breaker');
 const { getInstanceUserId } = require('../user-scope');
 const { CONTRACT_VERSION } = require('./contract');
 const orchestrator = require('../context/orchestrator');
@@ -28,6 +29,7 @@ const STATUS_BY_CODE = Object.freeze({
   agent_not_found: 404,
   agent_not_available: 409,
   agent_queue_full: 409,
+  agent_circuit_open: 503,
 });
 // 多个候选都被拒绝时，取最能说明输入问题的错误。
 const REJECTION_PRECEDENCE = Object.freeze([
@@ -35,6 +37,7 @@ const REJECTION_PRECEDENCE = Object.freeze([
   'tool_not_allowed',
   'agent_not_available',
   'agent_queue_full',
+  'agent_circuit_open',
 ]);
 
 function fail(field, reason) {
@@ -161,6 +164,7 @@ const MESSAGES = Object.freeze({
   agent_not_found: 'Agent 不存在',
   agent_not_available: 'Agent 当前不可用',
   agent_queue_full: '任务队列已满，请稍后重试',
+  agent_circuit_open: '该 Agent 近期连续失败，已暂时熔断，请稍后重试',
 });
 
 function rejection(decision, { code, status, message, field }) {
@@ -179,7 +183,7 @@ function decideInternal(input, options = {}) {
   const {
     agents = [],
     routingConfig,
-    load = { queuedTotal: 0, runningByAgent: {} },
+    load = { queuedTotal: 0, runningByAgent: {}, circuitByAgent: {} },
     policyDigest = '',
     now = Date.now,
   } = options;
@@ -289,6 +293,20 @@ function decideInternal(input, options = {}) {
       decision.rejected.push({ agentId: agent.botId, code: 'agent_queue_full' });
       continue;
     }
+    // §26 Worker 维度熔断：连续故障的 Agent 先不进候选池，
+    // 与"队列满""并发饱和"是三种不同原因，各用各的码，便于路由事件按原因聚合。
+    const circuit = (load.circuitByAgent || {})[agent.botId];
+    if (circuit && circuit.allowed === false) {
+      decision.rejected.push({
+        agentId: agent.botId,
+        code: 'agent_circuit_open',
+        // 刻意不占 reason 字段：reason 会被拼进给用户的那句话，
+        // 而 'circuit_open' 对用户没有增量信息；熔断细节放独立字段。
+        circuitReason: circuit.reason || 'circuit_open',
+        retryAfterMs: circuit.retryAfterMs || 0,
+      });
+      continue;
+    }
     const running = Number(load.runningByAgent[agent.botId] || 0);
     const limit = Number(agent.concurrencyLimit) || 1;
     passed.push({ agent, normalized: checked.value, atCapacity: running >= limit });
@@ -343,7 +361,32 @@ function decide(input, options) {
 }
 
 function emptyLoad() {
-  return { queuedTotal: 0, runningByAgent: {} };
+  return { queuedTotal: 0, runningByAgent: {}, circuitByAgent: {} };
+}
+
+/**
+ * 只把"当前不健康"的 Worker 列进负载快照：decide() 要保持纯函数契约
+ * （只读 Agent 描述、路由配置和负载快照，不写存储），所以熔断状态在这里读，
+ * 判定处只看传入的快照。状态文件读坏时按"无熔断"处理并交给下一次写入显式报错——
+ * 让路由因为观测文件损坏而全量拒绝，是把观测故障升级成可用性故障。
+ */
+function collectOpenCircuits() {
+  try {
+    const state = circuitBreaker.load();
+    const policy = circuitBreaker.effectivePolicy();
+    const opened = {};
+    for (const key of Object.keys(state.targets || {})) {
+      if (!key.startsWith('worker:')) continue;
+      const agentId = key.slice('worker:'.length);
+      const verdict = circuitBreaker.guard(state, { kind: 'worker', targetId: agentId }, policy);
+      if (!verdict.allowed) {
+        opened[agentId] = { allowed: false, reason: verdict.reason, retryAfterMs: verdict.retryAfterMs };
+      }
+    }
+    return opened;
+  } catch (_) {
+    return {};
+  }
 }
 
 function computeLoad(taskStore) {
@@ -357,9 +400,10 @@ function computeLoad(taskStore) {
       const agentId = task.agentId || task.botId;
       load.runningByAgent[agentId] = (Number(load.runningByAgent[agentId]) || 0) + 1;
     }
+    load.circuitByAgent = collectOpenCircuits();
     return load;
   } catch (_) {
-    return emptyLoad();
+    return { ...emptyLoad(), circuitByAgent: collectOpenCircuits() };
   }
 }
 

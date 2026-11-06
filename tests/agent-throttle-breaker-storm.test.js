@@ -282,7 +282,9 @@ test('d. 熔断三态：小样本不开闸、确定性错误不计故障率、�
   const probeFile = path.join(TMP, 'breaker-probe.json');
   breaker.resetForTests(probeFile);
   for (let index = 0; index < 10; index += 1) {
-    breaker.record({ kind: 'worker', targetId: 'executor', ok: false, errorCode: 'timeout', at: N + index * 100, filePath: probeFile });
+    // Worker 域用任务级错误码（model_*），不是 model-adapter 的 kind：
+    // 两个域的错误码空间不同，分类表也分别定义（见 circuit-breaker 的 DOMAIN_POLICIES）。
+    breaker.record({ kind: 'worker', targetId: 'executor', ok: false, errorCode: 'model_timeout', at: N + index * 100, filePath: probeFile });
   }
   const halfAt = N + 1000 + policy.openMs + 5;
   const probeOptions = { reserveProbe: true, filePath: probeFile };
