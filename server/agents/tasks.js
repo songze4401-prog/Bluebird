@@ -123,6 +123,8 @@ const EVENT_TYPES = Object.freeze([
   'task.provenance_appended',
   // §16：Gateway 每次工具调用的污点策略判定（含 policyVersion 与 ruleId）。
   'tool.policy_decision',
+  // §26 第 4 项：重规划被风暴判据收口成终态时留痕（只记规则名、计数与计划摘要）。
+  'replan.storm_denied',
 ]);
 
 const SAFE_PAYLOAD_KEYS = new Set([
@@ -217,6 +219,15 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'field',
   // A-10 / §17：九类失败模式的分类标签，随既有失败/恢复/升级事件一起落审计。
   'failureMode',
+  // §26：限流与风暴判定落审计时需要的扁平标量（规则名、计数、摘要与退避时长），
+  // 全部是非正文量；不加进白名单就会被隐私过滤静默丢掉，事件只剩个空壳。
+  // 注意 `safePayload` 只收 null/boolean/string/number，数组与对象一律丢弃——
+  // 所以列表类字段必须先用逗号拼成字符串（与路由事件的 orchestration* 同一口径）。
+  'rule',
+  'rulesHit',
+  'replanCount',
+  'retryAfterMs',
+  'planDigest',
 ]);
 
 let taskCache = null;
