@@ -26,9 +26,10 @@
 | `REQUIRED_CONFIG_FIELDS` | 8 项 | §14 原句逐项 | 原文可直引 |
 | 消融允许关闭的机制 | `autonomyPolicy`/`teamReview`/`replan` | 只有 runner 真的听得懂的三个开关；未接线的机制不允许写进 `ablating`，否则"消融"变成空话 | 本轮裁决 |
 
-## 3. 实测证据（`node scripts/eval-offline.js`，HEAD `15090aa`，Node v24.19.0）
+## 3. 实测证据（`node scripts/eval-offline.js`，Node v24.19.0）
 
-三轮各用独立 `BLUEBIRD_DATA_DIR`（safety 指标读事件聚合，混跑会互相污染），`BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS=3`，分层选 `dev,val` 共 10 例：
+三轮各用独立 `BLUEBIRD_DATA_DIR`（safety 指标读事件聚合，混跑会互相污染），`BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS=3`，分层选 `dev,val` 共 10 例。
+同一组数字在提交前工作树（基点 `15090aa`）与提交后干净树（`c5807e1`）各跑一次，两轮结果逐项一致（生产 `identity` 均为 `c030ca6e…c4a31`；配置身份刻意不含 `codeCommit`）：
 
 ```
 [EVIDENCE] eval-matrix {"reference":{"id":"production","identity":"c030ca6e…c4a31"},
