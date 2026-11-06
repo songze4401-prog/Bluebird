@@ -291,6 +291,11 @@ function begin({ agentId, taskId, stepId, toolName, args, attempt = 1, now } = {
     errorCode: null,
     result: null,
     resultOmitted: false,
+    // §7「重复副作用率」的原料：真实执行成功了几次。复用已有结果的路径不会再调
+    // finish，所以这个计数只会被真执行抬高——它和 attempt 不同，attempt 是"第几次发起"，
+    // 本字段是"第几次真的把副作用做出去了"。旧记录没有该字段，读取端按 unknown 处理，
+    // 不回填（回填等于伪造历史执行次数）。
+    executions: 0,
   };
 
   store.ops[opKey] = entry;
@@ -341,6 +346,11 @@ function finish(opKey, { status, resultDigest = null, result, errorCode = null, 
     entry.result = null;
     entry.resultOmitted = false;
     entry.resultDigest = resultDigest === null ? null : String(resultDigest);
+  }
+  if (status === 'succeeded') {
+    // 旧记录没有 executions 字段时按 0 起算：这一次成功就是第 1 次真实执行。
+    entry.executions = (Number.isFinite(Number(entry.executions)) ? Number(entry.executions) : 0) + 1;
+    entry.lastExecutedAt = iso(now);
   }
 
   write(store);
