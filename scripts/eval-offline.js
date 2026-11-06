@@ -18,6 +18,12 @@
  *   node scripts/eval-offline.js --leak-scan=prompt.txt [--mark-leak=true]           # 泄漏扫描
  *   node scripts/eval-offline.js --audience=optimizer                                 # 只出可给被优化方看的报告
  *
+ * §7 八项质量指标（只读既有存储，不写）：
+ *   node scripts/eval-offline.js --indicators=true
+ *   node scripts/eval-offline.js --indicators=true --parallel-single=prod.json --parallel-team=cand.json
+ *   node scripts/eval-offline.js --indicators=true --require-indicators=over_decomposition,failure_recovery
+ *       # 显式要求某几项必须有数时，缺数退出码 1（真实评测轮用；默认 unknown 不拦）
+ *
  * 隔离纪律：每个 comparator 的 safety 指标读的是任务事件聚合，同目录混跑会互相污染；
  * 一次进程一次比较对象，快照用不同 --out 区分，缺省目录每次跑前清空。
  * 重规划余地来自既有 BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS（默认 1，钳位 1–3）；
@@ -43,6 +49,11 @@ const baseline = require('../server/agents/eval-baseline');
 const strategyVersion = require('../server/agents/strategy-version');
 const comparators = require('../server/agents/eval-comparators');
 const tiers = require('../server/agents/eval-tiers');
+const indicators = require('../server/agents/eval-indicators');
+const artifactStore = require('../server/agents/artifact-store');
+const opLedger = require('../server/agents/op-ledger');
+const approvals = require('../server/agents/approvals');
+const manifest = require('../server/agents/manifest');
 
 function parseArgs(argv) {
   const args = {};
@@ -172,6 +183,71 @@ function leakMode(args) {
   return hits.length ? 1 : 0;
 }
 
+/**
+ * §7 八项质量指标的实数据汇总。只读既有存储（任务、事件、账本、审批、产物），
+ * 不写任何东西——指标的意义就在于它和实际执行事实同源。
+ *
+ * 快照参数（`--parallel-single=` / `--parallel-team=`）是并行耗时收益的唯一来源：
+ * 没有成对的单跑/组队快照时这一项就是 unknown，脚本不会替它编一个 0。
+ */
+function indicatorsMode(args) {
+  const tasksModule = require('../server/agents/tasks');
+  const all = tasksModule.allTasks();
+  const botIds = Array.from(new Set(
+    [all.map(task => task.botId), manifest.listManifests().map(item => item.botId)]
+      .reduce((sum, list) => sum.concat(list.filter(Boolean)), ['memory', 'researcher', 'executor', 'reviewer'])
+  ));
+  const events = [];
+  const approvalsList = [];
+  for (const botId of botIds) {
+    try {
+      events.push(...tasksModule.listEvents(botId, { limit: Number(args['event-limit'] || 500) }));
+    } catch (_) {
+      // 单个 Bot 的事件读不到不影响整体：未知就是未知，不猜。
+    }
+    try {
+      approvalsList.push(...approvals.listApprovals(botId, { limit: Number(args['approval-limit'] || 200) }));
+    } catch (_) {
+      /* 同上 */
+    }
+  }
+  const artifactsByProducer = new Map();
+  for (const artifact of artifactStore.all()) {
+    const key = String(artifact && artifact.taskId ? artifact.taskId : '');
+    if (!key) continue;
+    const list = artifactsByProducer.get(key) || [];
+    list.push(artifact);
+    artifactsByProducer.set(key, list);
+  }
+  const view = indicators.computeAll({
+    tasks: all,
+    events,
+    ops: Object.values(opLedger.read().ops || {}),
+    approvals: approvalsList,
+    singleSnapshot: args['parallel-single'] ? baseline.readSnapshot(path.resolve(REPO_ROOT, args['parallel-single'])) : null,
+    teamSnapshot: args['parallel-team'] ? baseline.readSnapshot(path.resolve(REPO_ROOT, args['parallel-team'])) : null,
+    verifyRefs: refs => artifactStore.verifyRefsReadable(refs),
+    artifactLookup: id => artifactStore.get(id),
+    // §16 的证据链一半钉在产物上（共享结论/交付物的 provenanceRefs），只看任务字段会把
+    // 真实 e2e 判成零证据，所以这里按产生任务把产物分组一起注入。
+    artifactsOfTask: taskId => artifactsByProducer.get(String(taskId || '')) || [],
+  });
+  const requiredUnknown = args['require-indicators']
+    ? listArg(args['require-indicators']).filter(name => {
+      const item = view.indicators.find(row => row.name === name);
+      return !item || item.known !== true;
+    })
+    : [];
+  console.log(`[EVIDENCE] eval-indicators ${JSON.stringify(view)}`);
+  // 默认不因 unknown 失败：全新仓库没有样本时 unknown 是事实。
+  // 只有显式要求"这几项必须有数"（真实评测轮）时，缺数才拦。
+  if (requiredUnknown.length) {
+    console.error(`[EVIDENCE] eval-indicators-required-missing ${JSON.stringify({ indicators: requiredUnknown })}`);
+    return 1;
+  }
+  return 0;
+}
+
 function run(args) {
   freshDataDir();
   if (args['strategy-version']) {
@@ -298,6 +374,7 @@ function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.compare) return compare(args);
   if (args.matrix) return matrix(args);
+  if (args.indicators) return indicatorsMode(args);
   if (args['rotation-plan']) return rotationMode(args);
   if (args['leak-scan']) return leakMode(args);
   return run(args);
@@ -318,6 +395,7 @@ module.exports = {
   defaultOutPath,
   comparatorFromArgs,
   configFromArgs,
+  indicatorsMode,
   listArg,
   run,
   compare,

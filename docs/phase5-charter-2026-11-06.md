@@ -76,8 +76,8 @@ A-12 的判据是「管理评审记录（非代码测试）」，属 Owner 产�
 | 轮次 | 分支 | 范围 | 状态 | 验收证据 |
 |---|---|---|---|---|
 | P5-A 第 1 轮 | `p5a/eval-tiers-and-comparators-2026-11-06` | §14 四分层 + 泄漏/轮换退役 + 五类比较对象 + 配置记录身份 + CLI 矩阵与门禁 | **完成（本地全门禁绿，已推送分支，未开 PR）** | `tests/agent-eval-tiers.test.js` 6 项、`tests/agent-eval-comparators.test.js` 6 项；覆盖率门 `backend=2333/2333`、`109/109` 文件、`failed=0`；实测输出见 `docs/phase5a-eval-tiers-and-comparators.md` §3 |
-| P5-A 第 2 轮 | — | §7 八项指标（过度拆解率、并行耗时收益、失败恢复率、重复副作用率、证据完整率、来源独立性、Reviewer 检出率、审批命中率与误拦截率） | 未开始 | 指标口径必须复用 `eval-metrics` 既有事件/成本读法，不建第二套 |
+| P5-A 第 2 轮 | `p5a/quality-indicators-2026-11-07` | §7 八项指标（过度拆解率、并行耗时收益、失败恢复率、重复副作用率、证据完整率、来源独立性、Reviewer 检出率、审批命中率与误拦截率）+ `--indicators` 入口 + 为使重复副作用率可算而新增的 `op-ledger.executions` 埋点 | 完成（112/112 测试文件、backend 2357/2357、runner 2135/2135、前端 188/188、五门禁退出码 0） | `tests/agent-eval-indicators.test.js` 10 项；两份语料逐行数字与本轮发现的四处假数（§16 证据挂在产物、冲突裁决换 `verification.conflict`、`row()` 吞字段、空账本 unknown 归因写错）见 `docs/phase5a-quality-indicators-2026-11-07.md` §3、§4 |
 | P5-B 第 1 轮 | `p5b/throttle-breaker-storm-2026-11-07`（基于 P5-A 分支，栈式依赖） | §26 四维限流阈值 + Provider 三态熔断（滑动窗口/半开探测/确定性错误不计故障率）+ 风暴五条细则并接入重试裁决点 | 完成（110/110 测试文件、backend 2341/2341、前端 188/188、五门禁退出码 0；PR 未开） | `tests/agent-throttle-breaker-storm.test.js` 8 项；阈值实测校正记录与边界见 `docs/phase5b-throttle-breaker-storm-2026-11-07.md` §2、§4 |
 | P5-B 第 2 轮 | 同上分支 | 工具网关与路由侧的熔断阻断、三域错误码分类与默认方向、`limitsSnapshot` 观测、风暴拒绝事件真的落账 | 完成（并修掉第 1 轮两处静默缺陷：`replan.storm_denied` 不在 `EVENT_TYPES`、`rulesHit` 数组被 `safePayload` 丢弃） | `tests/agent-circuit-enforcement.test.js` 6 项，见 `docs/phase5b-throttle-breaker-storm-2026-11-07.md` §3 第 4–6 条 |
 
-P5-A 遗留（需外部条件，不在上述轮次内）：台账 A-07 的 `0 → 0.5` 回填要等 PR #59（同文件改写汇总块）合并后单独执行；`--leak-scan` 接入 CI 门禁属 CI 变更，需与 PR 同轮；真实模型对照轮次要等 LongCat 额度。
+P5-A 遗留（需外部条件，不在上述轮次内）：`--leak-scan` 接入 CI 门禁属 CI 变更，需与 PR 同轮；真实模型对照轮次要等 LongCat 额度；§7 指标里 `over_decomposition`/`duplicate_side_effect`/`reviewer_detection`/审批两率的真实分布同样要等真实模型轮次（现两份语料只能出 5 项数，见 `docs/phase5a-quality-indicators-2026-11-07.md` §5.1）。台账 A-07/B-07 的 `0 → 0.5` 回填不受这些限制，PR #59/#60/#61 合并后按行级重算脚本单独一轮执行。
