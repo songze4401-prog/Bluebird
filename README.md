@@ -60,6 +60,7 @@ CI (`.github/workflows/ci.yml`) runs TypeScript, lint, the fixed evaluations, an
 ## Documentation
 
 - `AGENTS.md` — architecture, data safety, commands, tests, and rules. This is the primary engineering reference.
+- `docs/phase5-charter-2026-11-06.md` — Phase 5 立项书：Notion v1.0 未实现项的交付包拆分、每轮验收定义、轮数估算（14–20 轮，中位 16）与里程碑对应的台账预期状态。
 - `docs/handover-2026-11-03.md` — handover snapshot: current baseline, what P1–P6 actually proves, unverified/blocked items with evidence, hard constraints, and the acceptance command chain.
 - `docs/persona-custom-prompt.md` — the user-authored persona text: field contract, priority order, untrusted-text handling, and validation error codes.
 - `docs/unified-retrieval.md` — unified semantic retrieval/knowledge index: contracts, source connectors, hybrid pipeline, API, limits, verified/blocked capabilities.
