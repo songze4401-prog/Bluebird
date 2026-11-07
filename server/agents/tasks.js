@@ -133,6 +133,8 @@ const EVENT_TYPES = Object.freeze([
   'handoff.context_rebuilt',
   // P5-D / §17 FM-6：重试耗尽且无可交付部分结果时请求决策（只记计数与短码）。
   'task.decision_requested',
+  // P5-E / §13：七因子风险评估（只记等级、是否缺信息升级与策略版本，不记因子明细正文）。
+  'risk.assessed',
 ]);
 
 const SAFE_PAYLOAD_KEYS = new Set([
@@ -258,6 +260,10 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'partialCount',
   'partialArtifactIds',
   'decisionRequested',
+  // P5-E / §13：七因子风险评估标量（等级、缺信息升级、策略版本与审校抬升标记）。
+  'level',
+  'escalated',
+  'requiresReviewRaised',
 ]);
 
 let taskCache = null;

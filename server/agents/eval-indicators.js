@@ -1,9 +1,10 @@
 /* global module */
 /**
- * P5-A 第 2 轮（Notion §7）：八项质量指标。
+ * P5-A 第 2 轮（Notion §7）八项质量指标 + P5-E（§13）补漏检率独立成行。
  *
  * 原文要求 Runtime 的评测必须覆盖：过度拆解率、并行耗时收益、失败恢复率、
- * 重复副作用率、证据完整率、来源独立性、Reviewer 检出率、审批命中率与误拦截率。
+ * 重复副作用率、证据完整率、来源独立性、Reviewer 检出率、审批命中率与误拦截率；
+ * §13 另点名「漏检率」，P5-E 起与检出率互为补数、独立成行（reviewer_miss_rate）。
  *
  * 三条硬约束（与 Phase 0 / §2.4 一致，违反就等于造了第二套口径）：
  *  1. **只读既有事实来源**：任务与 run 历史（tasks）、事件（tasks.listEvents）、
@@ -17,7 +18,9 @@
  * 并行耗时收益刻意允许负数：组队比单跑更慢是真实结论，不是要修的显示问题。
  */
 
-const INDICATOR_POLICY_VERSION = 'p7-indicators-v1';
+// v2（P5-E / §13）：漏检率（reviewer_miss_rate）独立成行，与检出率互补；
+// 指标名单变了就升版本，不让同一版本号指向两份名单。
+const INDICATOR_POLICY_VERSION = 'p7-indicators-v2';
 
 const INDICATOR_NAMES = Object.freeze([
   'over_decomposition',
@@ -27,6 +30,7 @@ const INDICATOR_NAMES = Object.freeze([
   'evidence_completeness',
   'source_independence',
   'reviewer_detection',
+  'reviewer_miss_rate',
   'approval_precision',
 ]);
 
@@ -338,6 +342,23 @@ function reviewerDetection({ events = [] } = {}) {
             : '样本里没有机械校验不通过的用例，或有不带 deterministicOk/verdict 的裁决事件')
         : null,
     }),
+    // P5-E / §13：漏检率单独成行（FN / (TP+FN)），与检出率互为补数——原文点名
+    // 「漏检率与误拦截率」，此前只有检出率，误拦截率在审批侧 falseBlockRate。
+    missRate: row({
+      name: 'reviewer_miss_rate',
+      label: 'Reviewer 漏检率',
+      definition: '机械校验判定为有问题的样本中，Reviewer 给出 pass（漏检）的占比（FN / (TP+FN)）；与 reviewer_detection 互为补数，独立成行满足 §13 指标名',
+      source: 'verification.verdict 与 verification.conflict 事件的 deterministicOk 与 verdict 字段',
+      numerator: problems.length - caught.length,
+      denominator: problems.length,
+      unknown: unclassified,
+      confusion,
+      caveat: problems.length === 0
+        ? (rows.length === 0
+            ? '样本里没有验证裁决事件'
+            : '样本里没有机械校验不通过的用例，或有不带 deterministicOk/verdict 的裁决事件')
+        : null,
+    }),
     confusion,
   };
 }
@@ -430,6 +451,7 @@ function computeAll({
     evidence,
     independence,
     detection.detection,
+    detection.missRate,
     approvalsView.hitRate,
     approvalsView.falseBlockRate,
   ];

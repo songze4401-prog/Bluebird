@@ -35,10 +35,10 @@ function lookupWith(map) {
 
 test('a. 八项齐全且缺数据时一律 unknown，绝不回落成 0', () => {
   const empty = indicators.computeAll({});
-  assert.equal(empty.policyVersion, 'p7-indicators-v1');
-  assert.equal(empty.indicators.length, 9, '八项里审批占两行（命中率 + 误拦截率）');
+  assert.equal(empty.policyVersion, 'p7-indicators-v2');
+  assert.equal(empty.indicators.length, 10, '九项里审批占两行（命中率 + 误拦截率），P5-E 补漏检率独立成行');
   const names = empty.indicators.map(item => item.name);
-  for (const required of ['over_decomposition', 'parallel_time_gain', 'failure_recovery', 'duplicate_side_effect', 'evidence_completeness', 'source_independence', 'reviewer_detection', 'approval_precision']) {
+  for (const required of ['over_decomposition', 'parallel_time_gain', 'failure_recovery', 'duplicate_side_effect', 'evidence_completeness', 'source_independence', 'reviewer_detection', 'reviewer_miss_rate', 'approval_precision']) {
     assert.ok(names.includes(required), `缺少指标 ${required}`);
   }
   for (const item of empty.indicators) {
@@ -48,9 +48,9 @@ test('a. 八项齐全且缺数据时一律 unknown，绝不回落成 0', () => {
     assert.ok(typeof item.definition === 'string' && item.definition.length > 8);
     assert.ok(typeof item.source === 'string' && item.source.length > 4, `${item.name} 必须写清数据来源`);
   }
-  assert.equal(empty.summary.total, 9);
+  assert.equal(empty.summary.total, 10);
   assert.equal(empty.summary.known, 0);
-  assert.equal(empty.summary.unknownNames.length, 9);
+  assert.equal(empty.summary.unknownNames.length, 10);
   // 每项都要说清"缺什么才能算"，否则报告只会留下一排 unknown。
   assert.ok(empty.indicators.every(item => item.known || (item.caveat && item.caveat.length > 4)));
 });
@@ -364,10 +364,10 @@ test('h. 聚合与只读保证：指标不改传入数据，汇总如实标出 u
   });
   assert.equal(JSON.stringify({ tasks, events: [], approvals: [] }), snapshot, 'computeAll 必须只读');
   assert.equal(result.at, new Date(N).toISOString());
-  // 这份样本能算出 6 项；Reviewer 检出率（没有机械校验不通过的样本）与审批两率（没有审批记录）
-  // 必须是 unknown——这正是"不拿 0 冒充结论"的落点。
+  // 这份样本能算出 6 项；Reviewer 检出率与漏检率（没有机械校验不通过的样本，两者同分母
+  // 同为 unknown）与审批两率（没有审批记录）必须是 unknown——这正是"不拿 0 冒充结论"的落点。
   assert.equal(result.summary.known, 6);
-  assert.equal(result.summary.unknown, 3);
+  assert.equal(result.summary.unknown, 4);
   assert.deepEqual(
     result.indicators.filter(item => item.known).map(item => item.name).sort(),
     [
@@ -381,7 +381,7 @@ test('h. 聚合与只读保证：指标不改传入数据，汇总如实标出 u
   );
   assert.deepEqual(
     result.indicators.filter(item => !item.known).map(item => item.name).sort(),
-    ['approval_false_block', 'approval_precision', 'reviewer_detection'].sort()
+    ['approval_false_block', 'approval_precision', 'reviewer_detection', 'reviewer_miss_rate'].sort()
   );
   assert.equal(result.indicators.find(item => item.name === 'parallel_time_gain').value, 400 / 900);
   assert.equal(result.indicators.find(item => item.name === 'failure_recovery').value, 1);
@@ -546,8 +546,8 @@ test('j. CLI：--indicators 出九行指标与 unknown 清单，--require-indica
   const defaultRun = run(dir, ['--indicators=true']);
   assert.equal(defaultRun.status, 0, defaultRun.stderr);
   const view = parse(defaultRun);
-  assert.equal(view.indicators.length, 9);
-  assert.equal(view.policyVersion, 'p7-indicators-v1');
+  assert.equal(view.indicators.length, 10);
+  assert.equal(view.policyVersion, 'p7-indicators-v2');
   assert.ok(view.summary.unknownNames.length >= 5, '空仓库里大部分指标应当是 unknown');
   for (const item of view.indicators) {
     if (!item.known) assert.equal(item.value, null, `${item.name} 的未知值必须是 null`);

@@ -31,6 +31,8 @@ const crashHook = require('./crash-hook');
 const opLedger = require('./op-ledger');
 const workflowStore = require('./workflow-store');
 const fencing = require('./fencing');
+const riskPolicy = require('./risk-policy');
+const { HIGH_RISK_TASK_TYPES } = require('./autonomy-policy');
 const { createCleanupScheduler } = require('./orphan-scheduler');
 const verificationLoop = require('./verification-loop');
 const stormSuppression = require('./storm-suppression');
@@ -1223,6 +1225,43 @@ async function runTask(taskId) {
     for (const item of listToolMetadata()) {
       if (item && item.name) toolMeta[item.name] = item;
     }
+
+    // P5-E（§13）：七因子风险评估。等级只由服务端信号计算（工具风险标签、
+    // 任务类型、来源污点），Agent 没有任何自报等级的输入口（不得自行降级）。
+    // 结果落 risk.assessed 审计。runtime 只对**工具级 R3**（声明了 high_risk
+    // 风险标签的工具）只升不降地打开独立审校；任务类型驱动的 R3（如
+    // action.execute）的强制审校属于验证强度分发，接入点在 autonomy-policy
+    //（Phase 4 受控开关，默认关闭）——在 runtime 无条件打开会把一整类任务
+    // 悄悄改道转人工，那是 Owner 决策，不是本轮权限。
+    const liveTaskForRisk = tasks.getRawTask(task.taskId) || task;
+    const toolRiskLabels = (Array.isArray(task.allowedTools) ? task.allowedTools : []).map(
+      name => (toolMeta[name] && toolMeta[name].risk) || 'unknown'
+    );
+    const riskAssessment = riskPolicy.assessRisk({
+      highRiskTaskType: HIGH_RISK_TASK_TYPES.has(task.taskType),
+      taskType: task.taskType,
+      toolRisks: toolRiskLabels,
+      taintLabels: artifactStore.readTaintLabels(liveTaskForRisk),
+    });
+    // 只认工具标签里显式的 high_risk；任务类型驱动的 R3（action.execute 等）
+    // 不在 runtime 抬审校（理由见上）。
+    const reviewRaised =
+      toolRiskLabels.includes('high_risk') && task.requiresReview !== true;
+    if (reviewRaised) {
+      tasks.updateTask(task.taskId, { requiresReview: true });
+    }
+    safeEvent(
+      task.botId,
+      'risk.assessed',
+      {
+        level: riskAssessment.level,
+        escalated: riskAssessment.escalated,
+        requiresReviewRaised: reviewRaised,
+        policyVersion: riskAssessment.policyVersion,
+        missingKeys: riskAssessment.missingFactors.join(','),
+      },
+      { taskId: task.taskId, runId, sessionId: task.sessionId || null }
+    );
     const authorizer = createToolAuthorizer({
       allowedTools: task.allowedTools,
       // §16：每次工具调用前重新读取任务的来源链与污点（跨 Agent 读取可能在

@@ -1,9 +1,9 @@
 {
   "version": 1,
   "updateRule": "新增/删除 tests/*.test.js 或改变用例数时，必须在同一变更中更新 files、backendTotal、nodeTestSuiteTotal、runnerTotal、frontend；不得只改总数或删除条目。nodeTestSuiteFiles 只包含由 node --test 七套命令执行的文件；runnerFiles 包含 CI 自定义 runner 逐文件执行的 108 个条目（format 为 node 的 68 个走 node --test 单文件、custom 的 40 个直接执行脚本，两者都按单文件退出码判定）。CI 清单必须覆盖所有 files 条目，verify-test-coverage.js 会检查。文档里的所有计数由 scripts/sync-doc-counts.js 从本文件生成，不要手工改数字。",
-  "backendTotal": 2390,
+  "backendTotal": 2398,
   "nodeTestSuiteTotal": 222,
-  "runnerTotal": 2168,
+  "runnerTotal": 2176,
   "frontend": {
     "suites": 22,
     "tests": 188
@@ -126,7 +126,8 @@
     "profile-p5",
     "profile-audit-p6",
     "notion-ledger-scan",
-    "agent-failure-modes-p5d"
+    "agent-failure-modes-p5d",
+    "agent-risk-policy"
   ],
   "files": {
     "api": {
@@ -707,6 +708,11 @@
     "agent-failure-modes-p5d": {
       "format": "node",
       "count": 10,
+      "runner": true
+    },
+    "agent-risk-policy": {
+      "format": "node",
+      "count": 8,
       "runner": true
     }
   }
