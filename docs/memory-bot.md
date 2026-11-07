@@ -146,7 +146,7 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 | POST | `/agents/:botId/credentials` | 加密保存/替换 Key，返回 keyHint |
 | POST | `/agents/:botId/credentials/verify` | 真实 `/models` 探测；不记录 Key |
 | DELETE | `/agents/:botId/credentials/:credentialId` | 删除 Key，并清空引用 |
-| POST/GET | `/agents/:botId/sessions` | 创建/列出 Bot 会话 |
+| POST/GET | `/agents/:botId/sessions` | 创建/列出 Bot 会话（列表只含 direct 会话；worker 会话是任务内部轨迹，不暴露） |
 | GET/DELETE | `/agents/:botId/sessions/:sessionId` | 读取/删除 Bot 会话 |
 | POST | `/agents/:botId/chat` | 非流式直接对话 |
 | POST | `/agents/:botId/chat/stream` | SSE；真实 token delta + 工具/状态事件 |
