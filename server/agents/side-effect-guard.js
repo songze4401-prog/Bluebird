@@ -13,8 +13,13 @@
  *     blocked（side_effect_*），任务由 runtime 收口为 recovery 等人工核对。
  *
  * 只有 failed 允许原地重试：同 opKey、attempt+1，不产生第二行同键记录。
+ *
+ * §20 第 349 步（FM-4）：传入 fencingToken 时，每次 before 先校验写入资格，
+ * 过期/撤销/读不出代次一律 blocked，且**不写账本意图行**——被拦的调用副作用一次都没做，
+ * 留一行 started 会让下次同键调用被误判成"可能已执行"。
  */
 const ledger = require('./op-ledger');
+const fencing = require('./fencing');
 
 const SIDE_EFFECT_UNKNOWN = 'side_effect_unknown';
 const LEDGER_UNAVAILABLE = 'side_effect_ledger_unavailable';
@@ -39,7 +44,7 @@ function splitOverride(args) {
   return { args: rest, override };
 }
 
-function createSideEffectGuard({ agentId, taskId } = {}) {
+function createSideEffectGuard({ agentId, taskId, fencingToken = null } = {}) {
   if (typeof agentId !== 'string' || agentId.length === 0) {
     throw new TypeError('[side-effect] agentId 必须是非空字符串');
   }
@@ -49,6 +54,9 @@ function createSideEffectGuard({ agentId, taskId } = {}) {
 
   // null 表示正常；一旦非空，本次运行已不可继续，必须转 recovery。
   let blockedCode = null;
+  // §20 第 349 步：代次被取代/撤销是确定性拒绝（副作用一次都没做），
+  // 与"结果不确定"分开记，调用方据此落审计并收口成终态而不是 recovery。
+  let fencingDenial = null;
 
   function block(code) {
     if (!blockedCode) blockedCode = code;
@@ -60,6 +68,10 @@ function createSideEffectGuard({ agentId, taskId } = {}) {
       return blockedCode;
     },
 
+    get denial() {
+      return fencingDenial;
+    },
+
     blocked() {
       return Boolean(blockedCode);
     },
@@ -69,6 +81,16 @@ function createSideEffectGuard({ agentId, taskId } = {}) {
     /** 返回 {mode:'execute'|'reuse'|'blocked', opKey, result?, resultDigest?} */
     before({ toolName, args, override = null } = {}) {
       if (blockedCode) return { mode: 'blocked', code: blockedCode, opKey: null };
+
+      // 资格判定在账本 begin 之前：过期代次连"意图行"都不该留下，
+      // 否则一次被拦的调用会在账本里变成 started，下次同键调用被误判成"可能已执行"。
+      if (fencingToken) {
+        const verdict = fencing.verify({ taskId, token: fencingToken });
+        if (!verdict.ok) {
+          fencingDenial = verdict;
+          return block(verdict.code);
+        }
+      }
 
       let opKey = null;
       try {

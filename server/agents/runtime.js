@@ -29,11 +29,21 @@ const { createSideEffectGuard } = require('./side-effect-guard');
 const crashHook = require('./crash-hook');
 const opLedger = require('./op-ledger');
 const workflowStore = require('./workflow-store');
+const fencing = require('./fencing');
 const { createCleanupScheduler } = require('./orphan-scheduler');
 const verificationLoop = require('./verification-loop');
 const stormSuppression = require('./storm-suppression');
 const throttlePolicy = require('./throttle-policy');
 const circuitBreaker = require('./circuit-breaker');
+
+// §20 第 349 步：这四种码表示"本实例已经没有写入资格"。
+// 旧运行据此只退出、不改写任务状态——归属权已归持有当前代次的那次运行。
+const FENCING_AUTHORITY_CODES = new Set([
+  fencing.STALE_GENERATION,
+  fencing.FENCING_REVOKED,
+  fencing.TOKEN_INVALID,
+  fencing.TOKEN_MISSING,
+]);
 
 const MAX_USER_MESSAGE = 4000;
 const HISTORY_MESSAGES = 24;
@@ -107,6 +117,8 @@ function decideFailureDisposition({
   // 副作用结果不确定（账本 started/unknown）：不能重试也不能当 failed → recovery。
   const sideEffectFailure =
     typeof errorCode === 'string' && errorCode.startsWith('side_effect_');
+  // 代次存储不可用：读不出谁有写入资格，需人工/启动对账，不是终态失败。
+  const fencingUnavailable = errorCode === 'fencing_unavailable';
   const hasSideEffects =
     Array.isArray(allowedTools) && allowedTools.includes('memory_remember');
   const retryable =
@@ -117,7 +129,7 @@ function decideFailureDisposition({
     attempts < maxAttempts;
   const status = cancelled
     ? 'cancelled'
-    : sideEffectFailure || artifactFailure
+    : sideEffectFailure || artifactFailure || fencingUnavailable
       ? 'recovery'
       : timedOut
         ? 'timed_out'
@@ -135,11 +147,12 @@ function decideFailureDisposition({
     retryable,
     status,
     errorCode,
-    // A-10 / §17：把本次失败归到九类之一（无法归类为 null），
+    // A-10 / §17：把本次失败归到失败模式清单之一（无法归类为 null），
     // 事件与监控直接消费该字段，不在别处重复判定。
     failureMode: classifyFailureMode({ errorCode }),
     artifactFailure,
     sideEffectFailure,
+    fencingUnavailable,
     timedOut,
     cancelled,
     attempts,
@@ -235,6 +248,33 @@ function recordStormDenial({ task, runId = null, errorCode, disposition, stormGa
       policyVersion: stormGate.policyVersion || '',
     },
     { taskId: task.taskId, runId, sessionId: task.sessionId }
+  );
+}
+
+/**
+ * §20 第 349 步：产物落盘与结果提交前的写入资格判定。
+ * 与副作用闸门同一份令牌、同一个判定函数，但审计 phase 不同——
+ * "工具被拦"与"产物/结果被拦"是两个落点，混在一个事件里就分不清旧 Worker 死在哪一步。
+ */
+function assertWriteAuthority({ task, token, runId = null, phase }) {
+  const verdict = fencing.verify({ taskId: task.taskId, token });
+  if (verdict.ok) return verdict;
+  safeEvent(
+    task.botId,
+    'plan.fencing_denied',
+    {
+      errorCode: verdict.code,
+      heldGeneration: verdict.heldGeneration,
+      currentGeneration: verdict.currentGeneration,
+      policyVersion: verdict.policyVersion,
+      phase,
+    },
+    { taskId: task.taskId, runId, sessionId: task.sessionId }
+  );
+  throw new AgentError(
+    verdict.code,
+    '写入资格已失效（代次被取代或撤销），产物与结果已阻止落盘',
+    409
   );
 }
 
@@ -500,6 +540,8 @@ async function execute({
   onToolDenied = null,
   // 收口 C：预授权作用域（只对 failOpenEligible 工具生效）
   failOpen = null,
+  // §20 第 349 步：本次运行的写入资格令牌（由 runTask 铸造，只留在内存）。
+  fencingToken = null,
   runId: runIdOverride = null,
   stream = false,
   onDelta = null,
@@ -522,7 +564,7 @@ async function execute({
   // P2：只有委派任务接幂等账本；主控直聊没有 taskId，不产生任何账本行。
   const sideEffectGuard =
     taskId && mode === 'delegated_task'
-      ? createSideEffectGuard({ agentId: botId, taskId })
+      ? createSideEffectGuard({ agentId: botId, taskId, fencingToken })
       : null;
   let lastRound = 0;
   let progressToolCalls = 0;
@@ -672,6 +714,28 @@ async function execute({
 
   // 副作用结果不确定优先于取消/超时：已经发生的写操作不能因为任务超时就当没发生。
   if (sideEffectGuard && sideEffectGuard.blocked()) {
+    // 代次被取代/撤销是确定性拒绝：副作用一次都没做，不能按"结果不确定"转 recovery。
+    const denial = sideEffectGuard.denial;
+    if (denial) {
+      safeEvent(
+        botId,
+        'plan.fencing_denied',
+        {
+          errorCode: denial.code,
+          heldGeneration: denial.heldGeneration,
+          currentGeneration: denial.currentGeneration,
+          policyVersion: denial.policyVersion,
+          phase: 'side_effect',
+          mode,
+        },
+        { taskId, runId, sessionId }
+      );
+      throw new AgentError(
+        denial.code,
+        '写入资格已失效（代次被取代或撤销），副作用已阻止执行',
+        409
+      );
+    }
     throw new AgentError(
       sideEffectGuard.status || 'side_effect_unknown',
       '副作用结果不确定，转入 recovery 等待人工核对',
@@ -858,6 +922,8 @@ async function runTask(taskId) {
   const runId = `run_${crypto.randomUUID()}`;
   let deadlineExceeded = false;
   let leaseLost = false;
+  // 代次被取代/撤销：本实例不再拥有任务，不再改写它的状态与租约。
+  let authorityLost = false;
   let deadlineTimer = null;
   let heartbeatTimer = null;
 
@@ -922,6 +988,26 @@ async function runTask(taskId) {
       ownerId: WORKER_OWNER_ID,
       ttlMs: LEASE_TTL_MS,
     });
+    // §20 第 349 步：本次运行的写入资格在这里铸造，之后只留在内存里。
+    // 租约易主或计划迁移后的新运行会铸出更高代次，旧 Worker 手里的旧令牌随即失效。
+    // 刻意不让 Worker 重新读盘"领当前令牌"——那等于让旧 Worker 自己给自己续资格。
+    const fencingToken = fencing.issue({
+      taskId: task.taskId,
+      planId: task.planId || null,
+      planVersion: task.planVersion === undefined ? null : task.planVersion,
+      runId,
+    });
+    safeEvent(
+      task.botId,
+      'plan.fencing_issued',
+      {
+        generation: fencingToken.generation,
+        planId: fencingToken.planId,
+        planVersion: fencingToken.planVersion,
+        policyVersion: fencingToken.policyVersion,
+      },
+      { taskId: task.taskId, runId, sessionId: task.sessionId }
+    );
     tasks.recordRunStart(task.taskId, {
       runId,
       attempt: (Number.isInteger(task.attempts) ? task.attempts : 0) + 1,
@@ -1131,6 +1217,7 @@ async function runTask(taskId) {
       mode: 'delegated_task',
       signal: controller.signal,
       toolAuthorizer: authorizer,
+      fencingToken,
       // 作用域取自任务记录（planId/planVersion 是创建时冻结的），
       // 老任务缺这两个字段时如实传 null——判定侧会拒绝而不是当成"无计划继续跑"。
       failOpen: {
@@ -1181,6 +1268,10 @@ async function runTask(taskId) {
     if (!summary) {
       throw emptyReplyError(result.stopReason);
     }
+
+    // §20 第 349 步：模型执行期间可能已换代（计划迁移 / 租约易主后新运行启动）。
+    // 产物落盘前再判一次资格，过期即拒绝，一个产物都不落。
+    assertWriteAuthority({ task, token: fencingToken, runId, phase: 'artifact_persist' });
 
     // ③ §11 第 1 步：先把产物落盘并拿到 artifactRef（含 version），
     // 再在第 2/3 步把引用与状态一起提交。落盘失败会抛 artifact_*，由 catch 转 retry/recovery。
@@ -1437,6 +1528,9 @@ async function runTask(taskId) {
 
     // §11 第 2/3 步：进入 completed 前，任务记录已持有产物引用；校验门禁在
     // transitionTask 内执行，状态与 result 同一次落盘（stateVersion 同一次 +1）。
+    // 独立审校可能等了数十秒，期间同样可能换代，因此提交前再判一次；
+    // 此时被拒会留下 pending-commit 产物，由既有 scanPendingCommits 收敛（不新增恢复路径）。
+    assertWriteAuthority({ task, token: fencingToken, runId, phase: 'result_commit' });
     artifactCommit.completeTask(task.taskId, {
       completedAt: finalResult.finishedAt,
       result: finalResult,
@@ -1488,6 +1582,14 @@ async function runTask(taskId) {
         { status: latest.status, errorCode: 'task_lease_held', mode: 'retry' },
         { taskId: task.taskId, sessionId: task.sessionId }
       );
+      return;
+    }
+
+    // §20 第 349 步：写入资格已归别人（换代或撤销），本实例只退出、不改写任务状态。
+    // 与 task_lease_held 同口径——旧运行不是任务的主人，它的失败不能把新运行改成失败。
+    // 拒绝事件已由 assertWriteAuthority / execute() 的闸门分支落过，不重复记。
+    if (error && FENCING_AUTHORITY_CODES.has(error.code)) {
+      authorityLost = true;
       return;
     }
 
@@ -1644,17 +1746,44 @@ async function runTask(taskId) {
   } finally {
     if (deadlineTimer) clearTimeout(deadlineTimer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
-    activeRuns.delete(task.taskId);
+    // 同一任务可能已有新一代次的运行在跑：只清自己的控制器，别把新运行从取消表里摘掉。
+    if (activeRuns.get(task.taskId) === controller) activeRuns.delete(task.taskId);
     // B-06：未经 settle 的预留必须释放（失败/取消/提前返回/抛错的所有路径）。
     releaseReservation();
     // 租约只在本次运行结束时释放；释放失败由过期机制兜底。
+    // 资格已归别人时不解租：同进程的 ownerId 相同，贸然释放会把新运行的租约一并清掉。
     try {
       const finalTask = tasks.getRawTask(task.taskId);
-      if (finalTask && finalTask.lease) {
+      if (!authorityLost && finalTask && finalTask.lease) {
         tasks.releaseLease(task.taskId);
       }
     } catch (_) {
       // 忽略释放失败，避免影响任务终态。
+    }
+    // §20 第 349 步：任务已终态即收回写入资格——取消/完成后仍在跑的旧 Worker
+    // 不能再落副作用。撤销失败不反转任务终态，下一次启动对账会补撤。
+    try {
+      const finalTask = tasks.getRawTask(task.taskId);
+      if (finalTask && tasks.isTerminalStatus(finalTask.status)) {
+        const revoked = fencing.revoke({
+          taskId: task.taskId,
+          reason: `task_terminal:${finalTask.status}`,
+        });
+        if (revoked && revoked.changed) {
+          safeEvent(
+            task.botId,
+            'plan.fencing_revoked',
+            {
+              generation: revoked.generation,
+              reason: revoked.revokeReason,
+              policyVersion: fencing.FENCING_POLICY_VERSION,
+            },
+            { taskId: task.taskId, runId, sessionId: task.sessionId }
+          );
+        }
+      }
+    } catch (_) {
+      // 代次存储不可用时副作用判定本身已 fail-closed，这里不再放大成启动失败。
     }
     // Worker 会话生命周期收口：状态由 Task 状态投影，未知值在投影函数内记日志后回退 closed。
     try {
@@ -1813,6 +1942,79 @@ function ensureOrphanScheduler() {
   return orphanScheduler;
 }
 
+/**
+ * §20 第 349 步（恢复侧）：启动时对账代次存储。
+ * - 读得回来：计数器原样保留（绝不重建，重建等于让旧令牌复活），
+ *   终态任务的令牌补撤一次（上次可能死在终态写入与撤销之间）。
+ * - 读不回来 / 代次回退：所有非终态任务一律 recovery + fencing_unavailable，
+ *   与 plan_store_corrupted 同一口径——把损坏局部化，而不是假装没有代次判定。
+ */
+function convergeFencingTokens({ now = Date.now() } = {}) {
+  const summary = {
+    available: true,
+    storeCorrupted: false,
+    counter: 0,
+    records: 0,
+    active: 0,
+    revoked: 0,
+    sealed: 0,
+    failed: 0,
+    failedTaskIds: [],
+  };
+
+  let state = null;
+  try {
+    state = fencing.recover();
+  } catch (_) {
+    state = null;
+  }
+
+  if (!state) {
+    summary.available = false;
+    summary.storeCorrupted = true;
+    for (const task of tasks.allTasks()) {
+      if (!task || tasks.isTerminalStatus(task.status)) continue;
+      const result = tasks.forcePlanRecovery(task.taskId, {
+        errorCode: fencing.FENCING_UNAVAILABLE,
+        now,
+      });
+      if (!result.changed) continue;
+      summary.failed += 1;
+      summary.failedTaskIds.push(task.taskId);
+      safeEvent(
+        task.botId,
+        'task.uncertain',
+        {
+          status: 'recovery',
+          errorCode: fencing.FENCING_UNAVAILABLE,
+          phase: 'fencing',
+        },
+        { taskId: task.taskId }
+      );
+    }
+    return summary;
+  }
+
+  summary.counter = state.counter;
+  summary.records = state.records;
+  summary.active = state.active;
+  summary.revoked = state.revoked;
+  for (const task of tasks.allTasks()) {
+    if (!task || !tasks.isTerminalStatus(task.status)) continue;
+    try {
+      const revoked = fencing.revoke({
+        taskId: task.taskId,
+        reason: `task_terminal:${task.status}`,
+        now,
+      });
+      if (revoked && revoked.changed) summary.sealed += 1;
+    } catch (_) {
+      // 单个任务补撤失败不影响其余对账；副作用判定本身读不到记录即拒绝。
+    }
+  }
+  return summary;
+}
+
 function initializeTaskQueue() {
   try {
     tasks.flushEventOutbox();
@@ -1826,6 +2028,13 @@ function initializeTaskQueue() {
     planSummary = convergeWorkflowPlans();
   } catch (_) {
     planSummary = null;
+  }
+  // 代次对账与计划解析同级：读不出代次就无法判断谁还有写入资格，先 fail-closed。
+  let fencingSummary = null;
+  try {
+    fencingSummary = convergeFencingTokens();
+  } catch (_) {
+    fencingSummary = null;
   }
   // 单进程部署：启动时不存在仍存活的其他 Worker，旧租约一律视为过期。
   // 多 Worker 场景由调用方传入存活 owner 集合，未过期的租约保持 running。
@@ -1905,6 +2114,7 @@ function initializeTaskQueue() {
     concurrency: TASK_CONCURRENCY,
     sealedOps: sealedOps.length,
     plans: planSummary,
+    fencing: fencingSummary,
     artifactScan: artifactScan
       ? {
           scanned: artifactScan.scanned,
@@ -1944,6 +2154,7 @@ function limitsSnapshot({ now = Date.now() } = {}) {
       policy: throttlePolicy.policySnapshot(),
       breaker: circuitBreaker.snapshot({ now }),
       storm: stormSuppression.status({ now }),
+      fencing: fencing.snapshot(),
     };
   } catch (error) {
     return { available: false, reason: String(error.message || error).slice(0, 200), at: new Date(now).toISOString() };
@@ -1997,6 +2208,7 @@ module.exports = {
   runTask,
   initializeTaskQueue,
   convergeWorkflowPlans,
+  convergeFencingTokens,
   getQueueStats,
   allowedToolsFor,
   buildPolicy,

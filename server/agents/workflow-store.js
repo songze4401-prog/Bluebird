@@ -35,6 +35,7 @@ const crypto = require('crypto');
 const { writeFileAtomicSync } = require('../atomic-write');
 const { AgentError } = require('./errors');
 const opLedger = require('./op-ledger');
+const fencing = require('./fencing');
 const crashHook = require('./crash-hook');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
@@ -1167,6 +1168,10 @@ function recordMigrationAudit({ planId, fromVersion, toVersion, migrations = [],
 /**
  * 端到端迁移入口：先 appendVersion（唯一版本分配器），再按新版本规划迁移并写审计。
  * 不修改任务文件——任务侧如何落新 planVersion 由调用方复用既有 pinRef/updateTask。
+ *
+ * §20 第 349 步：迁移同时换代次。migrated 的任务重新签发（旧 Worker 的令牌立即过期），
+ * cancelled / revalidated 的旧资格收回；continued（running/waiting_approval/recovery
+ * 保持原版本）不动令牌——§10 明确它们继续持有原代次的写入资格。
  */
 function migratePlanVersion({
   plan,
@@ -1196,7 +1201,13 @@ function migratePlanVersion({
     migrations: summary.migrations,
     now,
   });
-  return { ...summary, saved };
+  const fencingSummary = fencing.applyMigration({
+    planId: saved.planId,
+    toVersion: saved.planVersion,
+    migrations: summary.migrations,
+    now,
+  });
+  return { ...summary, saved, fencing: fencingSummary };
 }
 
 /**
