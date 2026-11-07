@@ -17,6 +17,7 @@ const resultDelivery = require('./result-delivery');
 const mainSessions = require('../sessions');
 const approvals = require('./approvals');
 const permissions = require('./permissions');
+const improvements = require('./improvement-loop');
 const { resolveUserId } = require('../user-scope');
 const { describeAgentError } = require('./errors');
 
@@ -49,6 +50,8 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
       pathName.startsWith('/agent-tasks/') ||
       pathName === '/agent-approvals' ||
       pathName.startsWith('/agent-approvals/') ||
+      pathName === '/agent-improvements' ||
+      pathName.startsWith('/agent-improvements/') ||
       pathName === '/agent-results' ||
       pathName.startsWith('/agent-results/');
     if (!isAgentPath) return next();
@@ -348,6 +351,133 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
     '/agents/:botId/permissions',
     route(async (req, res) => {
       res.json({ permission: permissions.getPermissionProfile(req.params.botId) });
+    })
+  );
+
+  // ---- P5-G / §2.6：受控自我改进闭环的生产入口（HTTP）----
+  // 链路：POST 创建提案（起草）→ POST evaluate（离线评测）→ POST approve（仅
+  // local-owner，鉴权层保证）→ POST release（灰度比例）→ POST rollback-check。
+  // 全部经 Bearer 鉴权（上方中间件按前缀拦截）；审计走既有 auditAction。
+  router.get(
+    '/agent-improvements',
+    route(async (req, res) => {
+      res.json({
+        improvements: improvements.listProposals({
+          status: typeof req.query.status === 'string' ? req.query.status : null,
+          limit: req.query.limit,
+        }),
+      });
+    })
+  );
+
+  router.get(
+    '/agent-improvements/:proposalId',
+    route(async (req, res) => {
+      const proposal = improvements.getProposal(req.params.proposalId);
+      if (!proposal) {
+        return res.status(404).json({ error: '提案不存在', code: 'improvement_not_found' });
+      }
+      res.json({ proposal });
+    })
+  );
+
+  router.post(
+    '/agent-improvements',
+    route(async (req, res) => {
+      const body = req.body || {};
+      const proposal = improvements.createProposal({
+        category: body.category,
+        target: body.target,
+        reason: body.reason,
+        evidenceRefs: body.evidenceRefs,
+        proposedChange: body.proposedChange,
+        botId: body.botId,
+      });
+      audit(req, 'agent.improvement.propose', {
+        target: 'agent_improvement',
+        reason: proposal.category,
+      });
+      res.status(201).json({ proposal });
+    })
+  );
+
+  router.post(
+    '/agent-improvements/draft-from-failures',
+    route(async (req, res) => {
+      const summary = improvements.draftFromRecentFailures({
+        eventsLimit: Number(req.body && req.body.eventsLimit) || undefined,
+        botIds: req.body && Array.isArray(req.body.botIds) ? req.body.botIds : undefined,
+      });
+      audit(req, 'agent.improvement.draft', { target: 'agent_improvement' });
+      res.json(summary);
+    })
+  );
+
+  router.post(
+    '/agent-improvements/:proposalId/evaluate',
+    route(async (req, res) => {
+      const body = req.body || {};
+      const proposal = improvements.evaluateProposal({
+        proposalId: req.params.proposalId,
+        suitePaths: Array.isArray(body.suitePaths) ? body.suitePaths : null,
+        baseTime: body.baseTime,
+      });
+      audit(req, 'agent.improvement.evaluate', { target: 'agent_improvement', reason: proposal.category });
+      res.json({ proposal });
+    })
+  );
+
+  router.post(
+    '/agent-improvements/:proposalId/approve',
+    route(async (req, res) => {
+      // 单用户实例：鉴权通过的调用方即 local-owner（与审批路由同一模型）。
+      const proposal = improvements.approveProposal({
+        proposalId: req.params.proposalId,
+        actor: permissions.SINGLE_USER_ACTOR,
+      });
+      audit(req, 'agent.improvement.approve', { target: 'agent_improvement', reason: proposal.category });
+      res.json({ proposal });
+    })
+  );
+
+  router.post(
+    '/agent-improvements/:proposalId/reject',
+    route(async (req, res) => {
+      const proposal = improvements.rejectProposal({
+        proposalId: req.params.proposalId,
+        actor: permissions.SINGLE_USER_ACTOR,
+        reason: req.body && req.body.reason,
+      });
+      audit(req, 'agent.improvement.reject', {
+        target: 'agent_improvement',
+        result: 'denied',
+        reason: proposal.category,
+      });
+      res.json({ proposal });
+    })
+  );
+
+  router.post(
+    '/agent-improvements/:proposalId/release',
+    route(async (req, res) => {
+      const proposal = improvements.releaseProposal({
+        proposalId: req.params.proposalId,
+        grayRatio: req.body && req.body.grayRatio,
+      });
+      audit(req, 'agent.improvement.release', { target: 'agent_improvement', reason: proposal.category });
+      res.json({ proposal });
+    })
+  );
+
+  router.post(
+    '/agent-improvements/:proposalId/rollback-check',
+    route(async (req, res) => {
+      const result = improvements.checkAutoRollback({ proposalId: req.params.proposalId });
+      audit(req, 'agent.improvement.rollback_check', {
+        target: 'agent_improvement',
+        result: result.rolledBack ? 'rolled_back' : 'checked',
+      });
+      res.json(result);
     })
   );
 

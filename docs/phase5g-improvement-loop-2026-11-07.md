@@ -53,7 +53,18 @@
 - 新增 `tests/agent-improvement-loop.test.js`（7 项）；基线 backend `2403 → 2410`、runner `2181 → 2188`、文件 `118 → 119`；`sync-doc-counts.js` 已同步。
 - 门禁：run-tests 119 文件全过；verify-test-coverage `backend=2410/2410 runner=2188/2188 nodeSuite=222/222 frontend=188/188`；其余门禁退出码 0。
 
-## 5. 已知限制与后续
+## 5. 边界修正（2026-11-07 评审后同轮修复，均已验证）
+
+评审发现三处缺陷，全部修复并补用例（`tests/agent-improvement-loop.test.js` 7 → 11 项）：
+
+1. **闭环没有生产入口**（原实现只有测试调用）：已接三处入口——
+   - HTTP：`/agent-improvements` 路由族（列表/详情/创建/评测/批准/否决/发布/回归检查/从失败起草，Bearer 鉴权，能力登记 `agent-improvements`，路由 104/族 21）；
+   - 周期调度器：`createImprovementScheduler`（镜像 orphan-scheduler 模式：启动跑一次 + 每小时周期、单飞防重入、失败只记账、timer unref；`BLUEBIRD_IMPROVEMENT_LOOP_INTERVAL_MS=0` 停用），挂进 `runtime.initializeTaskQueue` 启动链；起草带开放提案去重守卫（不制造提案垃圾），released 提案自动进回归检查；
+   - 调度器只做两件安全方向的事：起草（永远等人工批准）与回滚（fail-safe 方向）；批准/发布永远等人工。
+2. **checkAutoRollback 缺省路径拿发布数字自比**：改为缺省**重跑评测**——`evaluateProposal` 把评测输入（suitePaths/baseTime）随提案落档，回滚检查缺省用同一输入重跑 candidate 一侧对照发布前基线（`reportSource: 'fresh_evaluation'`），发布之后才出现的退化也能被发现；调用方显式传 report 时用调用方数字。
+3. **禁止自改清单精确匹配可绕过**：改为**逐段归一 + 词边界前缀 + 别名**——路径任一段（`server/agents/permissions.js` 的 `permissions`）、单复数/别名（`permission`/`secret`/`budget`）、版本后缀（`permissions.v2`/`credentials-v2`）都命中；判定顺序为先对原始输入判禁、再叶段归一（顺序反了会把 `audit/X` 归一成 `x` 漏判——修复过程中真实踩到并修正）；合法模块（`autonomy-policy`/`eval-suite`/`auditor-notes`）不误伤。
+
+## 6. 已知限制与后续
 
 1. **「真实数据驱动」的 Phase 4 退出判据仍未满足**：闭环的评测数字来自离线 stub 评测集；「相对基线可重复改善」需要真实模型轮次（外部依赖 §9.2）。P5-G 交付的是闭环机制与安全边界，不是退出判据。
 2. 六类提案中提示词模板/评测集/工作流配置的**应用面**尚未接到具体运行时消费点（提案→评测→批准→灰度链路真实，release 后对 autonomy 机制的实际生效通过 strategy 版本位表达）；把提示词模板变成可热更的消费点属后续轮次。

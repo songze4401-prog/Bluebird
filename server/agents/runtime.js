@@ -34,6 +34,7 @@ const fencing = require('./fencing');
 const riskPolicy = require('./risk-policy');
 const { HIGH_RISK_TASK_TYPES } = require('./autonomy-policy');
 const { createCleanupScheduler } = require('./orphan-scheduler');
+const improvementLoop = require('./improvement-loop');
 const verificationLoop = require('./verification-loop');
 const stormSuppression = require('./storm-suppression');
 const throttlePolicy = require('./throttle-policy');
@@ -2257,6 +2258,18 @@ function initializeTaskQueue() {
   } catch (_) {
     orphanCleanup = null;
   }
+  // P5-G：自我改进闭环的生产节奏——启动 + 每小时一次（unref，不阻进程退出，
+  // 可用 BLUEBIRD_IMPROVEMENT_LOOP_INTERVAL_MS=0 停用）：失败模式起草
+  //（带开放提案去重）+ 已发布提案的回归检查（缺省重跑评测对照基线）。
+  // 失败只记账不崩服务；提案的批准/发布永远等人工，调度器只做起草与安全方向回滚。
+  let improvementScheduler = null;
+  try {
+    improvementScheduler = improvementLoop
+      .createImprovementScheduler()
+      .start({ runOnStart: true });
+  } catch (_) {
+    improvementScheduler = null;
+  }
   scheduleTaskQueue();
   return {
     recovered: recovered.recovered,
@@ -2267,6 +2280,7 @@ function initializeTaskQueue() {
     sealedOps: sealedOps.length,
     plans: planSummary,
     fencing: fencingSummary,
+    improvementLoop: improvementScheduler ? { started: true } : { started: false },
     artifactScan: artifactScan
       ? {
           scanned: artifactScan.scanned,

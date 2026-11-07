@@ -29,6 +29,9 @@ Expo ships breaking changes every SDK release. APIs you remember are likely rena
 | `索引状态 / 来源 / 检索 / 摄取 / 同步 / 重建 / 向量回填` | 统一检索 | 无 | 统一检索由 Agent 的 knowledge_search 工具在后台使用，没有独立的检索界面。 |
 | `监控元信息 GET /monitoring/meta` | 系统监控 | 无 | 元信息只供排查使用，监控页不展示。 |
 | `指标序列 GET /monitoring/metrics` | 系统监控 | 无 | 指标接口可用，监控页只读总览与 Trace，没有指标曲线。 |
+| `提案列表 / 详情 / 创建（POST /agent-improvements）` | 改进提案（P5-G 自我改进闭环） | 无 | P5-G 闭环的生产入口之一：提案创建即进入 draft，评测与发布是显式后续步骤；禁止自改清单在服务端校验。 |
+| `评测 / 人工批准 / 否决 / 发布（灰度）/ 回归检查` | 改进提案（P5-G 自我改进闭环） | 无 | approve/reject 仅 local-owner（单用户鉴权模型）；release 落 improvement:<id> 策略版本与灰度比例；rollback-check 缺省用提案评测输入重跑 candidate 对照发布前基线。 |
+| `POST /agent-improvements/draft-from-failures 从失败模式事件起草` | 改进提案（P5-G 自我改进闭环） | 无 | 与周期调度器同一实现（draftFromRecentFailures），带开放提案去重守卫。 |
 <!-- /sync:api-capabilities -->
 - Frontend state ownership (state-layering pass — **`App.tsx` is composition + routing only, ~300 lines; do not put chat logic back into it**):
   - `hooks/useChatSession.ts` — owns `messages` / `loadingHistory` / `loadingOlder` / `sending` / `continuing` / `mood` and the whole send / continue / load-history / load-older / clear / recall orchestration. Send and "continue" share one internal `runChat` runner; the only differences (error bubble vs. Alert) are callbacks. Both paths snapshot `sessionId` at request entry and both are mutually exclusive (a send is refused while a continuation is in flight and vice versa).
@@ -198,7 +201,7 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-119 files, 2410 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
+119 files, 2414 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
 node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js tests/monitoring.test.js   # node:test suites (222)
@@ -313,7 +316,7 @@ node tests/notion-ledger-scan.test.js      # 8 — ledger row-level tally guards
 node tests/agent-failure-modes-p5d.test.js # 10
 node tests/agent-risk-policy.test.js       # 8
 node tests/agent-approval-owner-rota.test.js # 5
-node tests/agent-improvement-loop.test.js  # 7
+node tests/agent-improvement-loop.test.js  # 11
 ```
 
 - Seven `node:test` suites plus 112 direct-runner entries. `memory` / `emotion` declare `{ concurrency: 1 }` on every `describe` because suites within a file share one data file (the corruption-recovery case renames it to `.corrupt`); `sticker-markers` and `streaming-segments` are pure functions with no shared state; `context-engine.test.js` keeps its own breaker state clean via `beforeEach` reset. The 112 direct-runner entries consist of 40 custom-`check()` scripts plus 72 `node:test` files invoked one file at a time; exit codes are authoritative, and there is no single TAP aggregate across all 112 (each `node:test` file emits its own `ℹ tests/pass/fail`). `context-engine-e2e.test.js` proves the context runtime is always-on (setting `BLUEBIRD_CONTEXT_ENGINE=0` changes nothing), flips `BLUEBIRD_AGENT_TOOLS` per group, and exits at the end (no cross-file state).

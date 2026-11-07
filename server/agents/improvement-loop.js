@@ -42,6 +42,9 @@ const IMPROVEMENT_CATEGORIES = Object.freeze([
 
 // 禁止自改清单（§2.6）：这些模块的策略与配置不在可提案范围。
 // 键是提案 target.module 的判定名；值是「为什么不能改」的短语（进审计）。
+// 匹配用归一化 + 词边界前缀（见 isForbiddenTargetModule），不是精确字符串——
+// `permissions.v2` / `permission` / `server/agents/permissions.js` 这类变体
+// 必须同样命中，否则清单可被改名绕过。
 const FORBIDDEN_TARGETS = Object.freeze({
   permissions: '权限策略',
   credentials: '密钥',
@@ -50,6 +53,77 @@ const FORBIDDEN_TARGETS = Object.freeze({
   audit: '审计机制',
   'release-authority': '生产发布权限',
 });
+
+// 常见别名/单复数归一到清单键。
+const TARGET_ALIASES = Object.freeze({
+  permission: 'permissions',
+  credential: 'credentials',
+  secret: 'credentials',
+  secrets: 'credentials',
+  budget: 'agent-limits',
+  'cost-tracker': 'agent-limits',
+  'agent-limits-config': 'agent-limits',
+  'approval-policy': 'approvals',
+  'approval-rules': 'approvals',
+  'audit-log': 'audit',
+  'audit-policy': 'audit',
+  'release-permission': 'release-authority',
+  'production-release': 'release-authority',
+});
+
+/**
+ * 目标模块名归一：去路径取末段、去扩展名、去版本后缀（-v2/.v2/@3）、
+ * 小写、套别名。归一后的名字同时用于判定与落库（原始输入另存 moduleRaw 留审计）。
+ */
+function normalizeTargetModule(raw) {
+  let name = String(raw || '').trim().toLowerCase();
+  name = name.split(/[\\/]/).pop() || name;
+  name = name.replace(/\.(js|ts|json|cjs|mjs)$/i, '');
+  name = name.replace(/[.@-]v\d+$/i, '');
+  name = name.trim();
+  if (TARGET_ALIASES[name]) name = TARGET_ALIASES[name];
+  return name;
+}
+
+/** 单段归一（路径逐段判定用）：去扩展名/版本后缀 + 别名。 */
+function normalizeSegment(segment) {
+  let name = String(segment || '').trim().toLowerCase();
+  name = name.replace(/\.(js|ts|json|cjs|mjs)$/i, '');
+  name = name.replace(/[.@-]v\d+$/i, '');
+  name = name.trim();
+  if (TARGET_ALIASES[name]) name = TARGET_ALIASES[name];
+  return name;
+}
+
+/** 路径逐段判定：任一段（含别名/版本变体）命中清单键即禁止。 */
+function forbiddenSegment(raw) {
+  const segments = String(raw || '')
+    .toLowerCase()
+    .split(/[\\/]/)
+    .map(normalizeSegment)
+    .filter(Boolean);
+  for (const name of segments) {
+    const hit = Object.keys(FORBIDDEN_TARGETS).find(
+      key =>
+        name === key ||
+        name.startsWith(`${key}.`) ||
+        name.startsWith(`${key}/`) ||
+        name.startsWith(`${key}:`) ||
+        name.startsWith(`${key}-`)
+    );
+    if (hit) return { key: hit, segment: name };
+  }
+  return null;
+}
+
+/**
+ * 禁止判定：归一后等于清单键，或以「键 + 词边界（. / : -）」开头。
+ * 词边界避免误伤：`auditor-notes` 不因 `audit` 命中（audit. 才算），
+ * 但 `approvals-next` 属于审批规则变体，命中。
+ */
+function isForbiddenTargetModule(raw) {
+  return forbiddenSegment(raw) !== null;
+}
 
 const STATUS_TRANSITIONS = Object.freeze({
   draft: ['evaluated', 'rejected'],
@@ -130,18 +204,29 @@ function assertTransition(from, to) {
 /** 禁止自改清单：服务端校验，创建与发布两侧都查。 */
 function assertProposalTarget(target) {
   const { AgentError } = require('./errors');
-  const module = String((target && target.module) || '').trim();
-  if (!module) {
+  const raw = String((target && target.module) || '').trim();
+  if (!raw) {
     throw new AgentError('improvement_target_missing', '提案必须声明 target.module', 400);
   }
-  if (FORBIDDEN_TARGETS[module]) {
+  // 先对**原始输入**判禁（逐段 + 词边界前缀 + 别名），再做叶段归一——
+  // 顺序反了会把 audit/X 归一成 x 后漏判。
+  const hit = forbiddenSegment(raw);
+  if (hit) {
     throw new AgentError(
       'improvement_forbidden_target',
-      `${module}（${FORBIDDEN_TARGETS[module]}）在禁止自改清单内，不能成为提案目标`,
+      `${raw}（${FORBIDDEN_TARGETS[hit.key]}）在禁止自改清单内，不能成为提案目标`,
       403
     );
   }
-  return module;
+  const module = normalizeTargetModule(raw);
+  if (isForbiddenTargetModule(module)) {
+    throw new AgentError(
+      'improvement_forbidden_target',
+      `${module}（${FORBIDDEN_TARGETS[module] || '禁止自改清单'}）在禁止自改清单内，不能成为提案目标`,
+      403
+    );
+  }
+  return { module, raw };
 }
 
 function recordEvent(botId, eventType, payload, context = {}) {
@@ -171,7 +256,8 @@ function createProposal({
       400
     );
   }
-  const module = assertProposalTarget(target);
+  const asserted = assertProposalTarget(target);
+  const module = asserted.module;
   const cleanReason = typeof reason === 'string' ? reason.trim() : '';
   if (!cleanReason) {
     throw new AgentError('improvement_reason_missing', '提案必须写明理由（basis）', 400);
@@ -182,7 +268,11 @@ function createProposal({
     proposalId: `imp_${crypto.randomUUID()}`,
     policyVersion: IMPROVEMENT_POLICY_VERSION,
     category,
-    target: { module, configKey: String((target && target.configKey) || '').slice(0, 120) },
+    target: {
+      module,
+      moduleRaw: asserted.raw,
+      configKey: String((target && target.configKey) || '').slice(0, 120),
+    },
     reason: cleanReason.slice(0, 500),
     evidenceRefs: (Array.isArray(evidenceRefs) ? evidenceRefs : [])
       .map(item => String(item).slice(0, 160))
@@ -243,6 +333,67 @@ function draftFromFailureModes({ events = [], botId = null, target = null, reaso
 }
 
 /**
+ * 生产入口（定时器/路由共用）：跨 bot 聚合最近的失败模式事件并起草。
+ * 去重守卫：同一失败模式已有未否决的提案（draft/evaluated/approved/released）
+ * 时不重复起草——定时器每小时跑一次，没有这条守卫会制造提案垃圾。
+ */
+function draftFromRecentFailures({ eventsLimit = 500, botIds = null } = {}) {
+  const { listManifests } = require('./manifest');
+  const ids = Array.isArray(botIds) && botIds.length
+    ? botIds
+    : listManifests().map(item => item.botId);
+  const events = [];
+  for (const botId of ids) {
+    try {
+      events.push(...tasks.listEvents(botId, { limit: eventsLimit }));
+    } catch (_) {
+      // 单 bot 事件读取失败不阻塞其它 bot 的聚合。
+    }
+  }
+  // 只看最近的失败/恢复事件（带 failureMode 标签的那些）。
+  const failureEvents = events.filter(
+    event => event && event.payload && event.payload.failureMode
+  );
+  if (!failureEvents.length) {
+    return { drafted: null, skipped: 'no_failure_signals', scannedEvents: events.length };
+  }
+  const dominant = dominantFailureMode(failureEvents);
+  const open = listProposals({ status: null, limit: 200 }).find(
+    item =>
+      item.status !== 'rejected' &&
+      item.status !== 'rolled_back' &&
+      item.reason.includes(dominant.mode)
+  );
+  if (open) {
+    return {
+      drafted: null,
+      skipped: 'open_proposal_exists',
+      dominantMode: dominant.mode,
+      openProposalId: open.proposalId,
+      scannedEvents: events.length,
+    };
+  }
+  const drafted = draftFromFailureModes({ events: failureEvents });
+  return {
+    drafted,
+    skipped: drafted ? null : 'below_threshold',
+    dominantMode: dominant ? dominant.mode : null,
+    scannedEvents: events.length,
+  };
+}
+
+function dominantFailureMode(events) {
+  const counts = {};
+  for (const event of events) {
+    const mode = event && event.payload && event.payload.failureMode;
+    if (!mode || !classifyFailureMode({ failureMode: mode })) continue;
+    counts[mode] = (counts[mode] || 0) + 1;
+  }
+  const ranked = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  return ranked.length ? { mode: ranked[0][0], count: ranked[0][1] } : null;
+}
+
+/**
  * 沙箱/离线评测：production 与 candidate 两个比较对象各跑一遍评测集，
  * 用 eval-metrics 统一口径算 delta 与安全计数。本步骤不改任何运行时状态。
  */
@@ -275,6 +426,9 @@ function evaluateProposal({ proposalId, suitePaths = null, baseTime = evalRunner
   record.evaluation = {
     policyVersion: IMPROVEMENT_POLICY_VERSION,
     suite: beforeRun.suite,
+    // 评测输入随结果落档：发布后的回归检查缺省用同一份输入重跑 candidate，
+    // 保证「发布之后才出现的退化」也能被发现（见 checkAutoRollback）。
+    inputs: { suitePaths: suitePaths || null, baseTime },
     before: { metrics: before.metrics, safety: before.safety },
     after: { metrics: after.metrics, safety: after.safety },
     delta,
@@ -390,7 +544,7 @@ function releaseProposal({ proposalId, grayRatio = 1 } = {}) {
  * 即回滚策略版本并把提案标记 rolled_back。currentReport 由调用方传入
  * （生产路径来自 evaluateProposal 同一套评测），本函数只做阈值判定与执行。
  */
-function checkAutoRollback({ proposalId, report = null } = {}) {
+function checkAutoRollback({ proposalId, report = null, fresh = null } = {}) {
   const { AgentError } = require('./errors');
   const state = load();
   const record = state.proposals[String(proposalId || '')];
@@ -402,10 +556,27 @@ function checkAutoRollback({ proposalId, report = null } = {}) {
   if (!evaluation) {
     throw new AgentError('improvement_evaluation_missing', '提案缺少评估记录，无法判定回归', 409);
   }
-  const current = report || {
-    metrics: evaluation.after.metrics,
-    safety: evaluation.after.safety,
-  };
+  // 缺省路径必须重新跑评测（用提案自己的评测输入重跑 candidate 一侧），
+  // 拿「当前代码/配置」的数字对照发布前基线——拿发布时的数字和自己比
+  // 永远发现不了发布之后的退化。
+  let reportSource = 'caller_report';
+  let current = report;
+  if (!current) {
+    if (fresh && typeof fresh === 'function') {
+      current = fresh();
+    } else {
+      // 评测输入随提案落档；缺省（默认套件）也可重跑——runSuite 对空路径取默认评测集。
+      const inputs = evaluation.inputs || {};
+      const rerun = evalRunner.runSuite({
+        suitePaths: Array.isArray(inputs.suitePaths) ? inputs.suitePaths : null,
+        baseTime: inputs.baseTime,
+        comparator: 'candidate',
+      });
+      const metrics = evalMetrics.computeMetrics({ suite: rerun.suite, results: rerun.results });
+      current = { metrics: metrics.metrics, safety: metrics.safety };
+    }
+    reportSource = 'fresh_evaluation';
+  }
   const safetyCounters = ['approvalBypass', 'failClosedHits', 'unauthorizedDenied', 'deadLetters'];
   const regressedCounters = safetyCounters.filter(
     name => (current.safety[name] || 0) > (evaluation.before.safety[name] || 0)
@@ -422,6 +593,7 @@ function checkAutoRollback({ proposalId, report = null } = {}) {
     return {
       rolledBack: false,
       policyVersion: AUTO_ROLLBACK_POLICY_VERSION,
+      reportSource,
       successDelta,
       regressedCounters,
       reasons,
@@ -447,9 +619,110 @@ function checkAutoRollback({ proposalId, report = null } = {}) {
   return {
     rolledBack: true,
     policyVersion: AUTO_ROLLBACK_POLICY_VERSION,
+    reportSource,
     successDelta,
     regressedCounters,
     reasons,
+  };
+}
+
+// ---- P5-G 生产入口：周期调度器（起草 + 已发布提案的回归检查）----
+const DEFAULT_SCHEDULER_INTERVAL_MS = 60 * 60 * 1000;
+
+function schedulerIntervalFromEnv() {
+  const raw = Number(process.env.BLUEBIRD_IMPROVEMENT_LOOP_INTERVAL_MS);
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_SCHEDULER_INTERVAL_MS;
+  return Math.max(60000, Math.floor(raw));
+}
+
+/**
+ * 周期调度器：与 orphan-scheduler 同一套模式（启动跑一次 + 周期跑、
+ * 单飞防重入、失败只记账不崩服务、timer unref 不阻进程退出）。
+ * 环境变量 BLUEBIRD_IMPROVEMENT_LOOP_INTERVAL_MS=0 可显式停用。
+ */
+function createImprovementScheduler({
+  intervalMs = schedulerIntervalFromEnv(),
+  logger = console,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+  now = () => Date.now(),
+} = {}) {
+  const stats = {
+    runs: 0,
+    draftsCreated: 0,
+    rollbacksTriggered: 0,
+    failures: 0,
+    lastRunAt: null,
+    lastError: null,
+    running: false,
+    started: false,
+    intervalMs,
+  };
+  let timer = null;
+
+  function runOnce() {
+    if (stats.running) {
+      stats.skipped = (stats.skipped || 0) + 1;
+      return { skipped: true };
+    }
+    stats.running = true;
+    const summary = { drafts: null, rollbackChecks: [] };
+    try {
+      // 1) 失败模式起草（去重守卫在 draftFromRecentFailures 内）。
+      const draft = draftFromRecentFailures({});
+      summary.drafts = draft;
+      if (draft && draft.drafted) stats.draftsCreated += 1;
+      // 2) 所有 released 提案跑一次回归检查（缺省重跑评测）。
+      for (const item of listProposals({ status: 'released', limit: 50 })) {
+        try {
+          const result = checkAutoRollback({ proposalId: item.proposalId });
+          summary.rollbackChecks.push({ proposalId: item.proposalId, ...result });
+          if (result.rolledBack) stats.rollbacksTriggered += 1;
+        } catch (error) {
+          // 单个提案的检查失败不阻塞其它提案（如缺可重跑输入）。
+          summary.rollbackChecks.push({
+            proposalId: item.proposalId,
+            error: (error && error.code) || 'check_failed',
+          });
+        }
+      }
+      stats.runs += 1;
+      stats.lastRunAt = new Date(now()).toISOString();
+      return summary;
+    } catch (error) {
+      stats.failures += 1;
+      stats.lastError = (error && error.message) || String(error);
+      logger.warn(`[improvement-loop] scheduler run failed: ${stats.lastError}`);
+      return { error: stats.lastError };
+    } finally {
+      stats.running = false;
+    }
+  }
+
+  return {
+    start({ runOnStart = false } = {}) {
+      if (stats.started) return { ...stats, timer: 'already_started' };
+      if (intervalMs <= 0) {
+        stats.started = true;
+        return { ...stats, disabled: true };
+      }
+      stats.started = true;
+      if (runOnStart) runOnce();
+      timer = setTimer(() => {
+        runOnce();
+      }, intervalMs);
+      if (typeof timer.unref === 'function') timer.unref();
+      return { ...stats };
+    },
+    runOnce,
+    stats() {
+      return { ...stats };
+    },
+    stop() {
+      if (timer) clearTimer(timer);
+      timer = null;
+      stats.started = false;
+    },
   };
 }
 
@@ -473,6 +746,12 @@ function clone(value) {
 }
 
 module.exports = {
+  normalizeTargetModule,
+  isForbiddenTargetModule,
+  draftFromRecentFailures,
+  createImprovementScheduler,
+  schedulerIntervalFromEnv,
+  DEFAULT_SCHEDULER_INTERVAL_MS,
   IMPROVEMENT_POLICY_VERSION,
   AUTO_ROLLBACK_POLICY_VERSION,
   AUTO_ROLLBACK_THRESHOLDS,
