@@ -12,8 +12,9 @@
 const TASK_ID_RE =
   /\btask_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 // 只匹配"本轮任务的状态声明"，不匹配"怎么看任务 ID"这类说明性文字。
+// 派发动词必须带任务对象（任务 / 子 agent / bot），避免"把垃圾扔了"这类误报。
 const DISPATCH_CLAIM_RE =
-  /(?:扔了|派了|派出去了?|已派发|派发成功|已交给|已转给|进了?队列|进入队列|在队列|队列里|还在排|排着|queued)/i;
+  /(?:扔了|派了|派出去了?|已派发|派发成功|已交给|已转给)[^。！？\n]{0,12}(?:任务|子\s*agent|memory\s*bot|记忆\s*bot|agent)|(?:进了?队列|进入队列|在队列|队列里|还在排|排着|queued)/i;
 const DEFAULT_TERMINAL = new Set([
   'completed',
   'failed',
