@@ -1,6 +1,14 @@
 # Bluebird
 
-Bluebird（云岫）是一个单用户、本地优先的个人 AI 陪伴应用：Expo / React Native 客户端 + 本机 Express API + 本地 JSON/图片数据目录。它没有云端多租户、数据库或微服务；会话、长期记忆、情绪、人格、在线状态、模型配置和附件都保存在运行 API 的机器上。
+**Personal Agent Platform｜个人智能体平台**
+
+*An Extensible Intelligence System for Personal Autonomy.*
+
+> Bluebird is a personal agent platform designed to build persistent, collaborative, and extensible AI systems.
+
+Bluebird 是一个以统一智能体运行时为核心的个人 AI 基础设施，融合长期记忆、专业 Agent 协作、任务编排、模型路由与工具执行，构建具有持续上下文、任务执行和能力扩展能力的个人智能系统。
+
+当前实现为单用户、本地优先架构：Expo / React Native 客户端 + 本机 Express API + 本地 JSON/图片数据目录。它没有云端多租户、数据库或微服务；会话、长期记忆、情绪、人格、在线状态、模型配置和附件都保存在运行 API 的机器上。
 
 首期专业 Agent 为 Memory Bot：独立 Manifest/Registry/配置、AES-256-GCM 加密凭证、独立 Bot 会话、直接对话与主控委派共用 Runtime、任务/事件 API 和真实工作台。实现边界与未完成项见 [`docs/memory-bot.md`](docs/memory-bot.md)。
 
