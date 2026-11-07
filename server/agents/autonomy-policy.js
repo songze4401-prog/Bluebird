@@ -10,6 +10,7 @@
  */
 const strategyVersion = require('./strategy-version');
 const { listManifests } = require('./manifest');
+const riskPolicy = require('./risk-policy');
 
 const ACTIVE_VERSION = 'p4-autonomy-v1';
 const HIGH_RISK_TASK_TYPES = new Set(['action.execute', 'memory.write']);
@@ -158,17 +159,49 @@ function decideReplan({ task = {}, errorCode = null, maxAttempts = 1, tokenBudge
   };
 }
 
-/** 验证强度：高风险 → 审校；更高风险 + 证据不足 → 审批。复用既有 requiresReview/审批门。 */
-function verificationStrength({ taskType, riskLevel = null, evidenceStrength = 'strong' } = {}) {
+/**
+ * 验证强度（P5-E 升级为 §13 七因子路由）：等级由 risk-policy.assessRisk 按
+ * 七因子取最高、缺信息升一级得出，验证组合查最低验证矩阵；证据不足只把
+ * R3 的「审批」位真正触发，绝不降低任何门槛。
+ * 输出保持既有契约字段（requiresReview/requiresApproval/reason），新增
+ * level/assessment/verification 供 §13 聚合与评测消费。
+ */
+function verificationStrength({
+  taskType,
+  riskLevel = null,
+  evidenceStrength = 'strong',
+  toolRisks = null,
+  taintLabels = null,
+  externalSideEffects = null,
+  failureCost = null,
+} = {}) {
   const active = isEnabled();
   const highRisk = riskLevel ? riskLevel === 'high' : HIGH_RISK_TASK_TYPES.has(taskType);
-  const requiresReview = highRisk;
-  const requiresApproval = highRisk && evidenceStrength === 'weak';
+  const assessment = riskPolicy.assessRisk({
+    highRiskTaskType: highRisk,
+    taskType,
+    toolRisks,
+    taintLabels,
+    externalSideEffects,
+    // 证据不足按「失败代价高」进入七因子（缺证据的结果更不可信，代价更高）；
+    // 这是既有「high && weak → approval」语义的因子化表达，不是新口径。
+    failureCost: evidenceStrength === 'weak' ? 'high' : failureCost,
+  });
+  const verification = riskPolicy.minimumVerification(assessment.level);
+  const requiresReview = verification.independentReview;
+  const requiresApproval = verification.approvalOnWeakEvidence && evidenceStrength === 'weak';
   return {
     enabled: active,
     requiresReview,
     requiresApproval,
-    reason: requiresApproval ? 'high_risk_weak_evidence' : requiresReview ? 'high_risk' : 'low_risk',
+    reason: requiresApproval
+      ? 'high_risk_weak_evidence'
+      : requiresReview
+        ? `risk_level_${assessment.level}`
+        : `risk_level_${assessment.level}`,
+    level: assessment.level,
+    assessment,
+    verification,
   };
 }
 
@@ -180,4 +213,5 @@ module.exports = {
   plan,
   decideReplan,
   verificationStrength,
+  riskPolicy,
 };
