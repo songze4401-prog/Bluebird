@@ -1,6 +1,6 @@
 # Phase 5 立项书：Notion v1.0 未实现项收口（2026-11-06）
 
-> 输入：`docs/notion-delivery-ledger-2026-11-04.md` 的 25 条清单（当前 `16 / 7 / 2`）与「§17 失败模式原文对齐」节的 FM-1…FM-6。
+> 输入：`docs/notion-delivery-ledger-2026-11-04.md` 的 25 条清单（立项时 `16 / 7 / 2`；2026-11-07 第七次勘误后为 `16 / 9 / 0`，见 §5 末段）与「§17 失败模式原文对齐」节的 FM-1…FM-6。
 > 原文基准：Notion `Bluebird Agent Runtime｜混合式多 Agent 目标架构 v1.0`（§0–§30），代码基准 `main` = `5b240f1`（树 `bc0055d`）。
 > 立项口径：一轮 = 一个可验证交付（分支 + PR + 用例 + 基线计数 + 文档同步 + CI 全绿 + 台账状态复判）。
 
@@ -80,7 +80,10 @@ A-12 的判据是「管理评审记录（非代码测试）」，属 Owner 产�
 | P5-B 第 1 轮 | `p5b/throttle-breaker-storm-2026-11-07`（基于 P5-A 分支，栈式依赖） | §26 四维限流阈值 + Provider 三态熔断（滑动窗口/半开探测/确定性错误不计故障率）+ 风暴五条细则并接入重试裁决点 | 完成（110/110 测试文件、backend 2341/2341、前端 188/188、五门禁退出码 0；PR 未开） | `tests/agent-throttle-breaker-storm.test.js` 8 项；阈值实测校正记录与边界见 `docs/phase5b-throttle-breaker-storm-2026-11-07.md` §2、§4 |
 | P5-B 第 2 轮 | 同上分支 | 工具网关与路由侧的熔断阻断、三域错误码分类与默认方向、`limitsSnapshot` 观测、风暴拒绝事件真的落账 | 完成（并修掉第 1 轮两处静默缺陷：`replan.storm_denied` 不在 `EVENT_TYPES`、`rulesHit` 数组被 `safePayload` 丢弃） | `tests/agent-circuit-enforcement.test.js` 6 项，见 `docs/phase5b-throttle-breaker-storm-2026-11-07.md` §3 第 4–6 条 |
 | P5-B 第 3 轮第 1 项 | `p5b/gate-overhead-benchmark-2026-11-07` | 闸门开/关开销本地基准（零外部依赖）：三态 A `gateOn` / B `decideNoPersist` / C `gateOff` 归因、可比性硬规则（任一态拒绝或样本不足则三项增量为 `null`）、组件级 µs 分解、慢上游 200ms 对照、默认任务并发 2 的单独补测 | 完成（113/113 测试文件、backend 2364/2364、runner 2142/2142、前端 188/188、五门禁退出码 0） | `tests/agent-gate-overhead-bench.test.js` 7 项；主运行与对照实测数字、四处归因结论、异步/合并写的崩溃丢租约取舍、基准自身五条限制与并发 2 档负判定增量的噪声披露见 `docs/phase5b-throttle-breaker-storm-2026-11-07.md` §5（含 §5.7） |
+| 台账回填轮（A-07/B-07） | `docs/ledger-a07-b07-backfill-2026-11-07` | A-07 与 B-07 由 `0` 改判 `0.5`（旧值与历次勘误全部保留，行内写清残余缺口）；新增行级重算脚本 `scripts/scan-notion-ledger.js` 与 8 项口径守卫，汇总刷新为 `1`=16 / `0.5`=9 / `0`=0；表 3 第 6 行、§17 的 FM-6 两处与结论段按已落地事实改写；四份文档里已失效的「等 PR #59 合并」措辞改为已执行 | 完成（114/114 测试文件、backend 2372/2372、nodeSuite 222/222、runner 2150/2150、前端 188/188、五门禁退出码 0；`scan-notion-ledger.js --check` 退出码 0） | `tests/notion-ledger-scan.test.js` 8 项（a 状态形态、b 解析不出即抛错、c 25 行归位、d 结构损坏 fail-closed、e 只取最后一条新值且「（无）」不当编号、f 四类不一致、g 真台账必须自洽、h CLI 与篡改汇总非零退出）；重算输出与对账结论见台账汇总块第七次勘误 bullet |
 
 P5-B 第 3 轮**未做**的一项：§26 要求的「按基线测量后设定阈值」仍需真实供应商压测数据（外部依赖，等 LongCat 额度），本轮的本地桩基准只回答闸门自身值多少钱，不回答阈值该定多少，见 `docs/phase5b-throttle-breaker-storm-2026-11-07.md` §5.5。
 
-P5-A 遗留（需外部条件，不在上述轮次内）：`--leak-scan` 接入 CI 门禁属 CI 变更，需与 PR 同轮；真实模型对照轮次要等 LongCat 额度；§7 指标里 `over_decomposition`/`duplicate_side_effect`/`reviewer_detection`/审批两率的真实分布同样要等真实模型轮次（现两份语料只能出 5 项数，见 `docs/phase5a-quality-indicators-2026-11-07.md` §5.1）。台账 A-07/B-07 的 `0 → 0.5` 回填不受这些限制，PR #59/#60/#61 合并后按行级重算脚本单独一轮执行。
+M1「消灭 0 分」的实际分布与 §3 估算不同：2026-11-07 台账第七次勘误后为 `1`=16 / `0.5`=9 / `0`=0（估算写的是 18/7/0）。差异有两处来源——2026-11-06 第六次勘误把 A-08 与 A-13 由 1.0 回退 0.5（§15 的轮值与责任人分配、§20 十三步里的 fencing 与发布审批未落地），以及 A-07/B-07 本轮只到 0.5 而非 1.0（真实模型证据与压测标定属 §4 的 1/2 外部前提）。**0 分项确已消灭，M1 的目标达成；「18 项满分」没有达成**，M2–M4 的估算需按此重排。按本节口径不改上文估算，只在此记录实测差异。
+
+P5-A 遗留（需外部条件，不在上述轮次内）：`--leak-scan` 接入 CI 门禁属 CI 变更，需与 PR 同轮；真实模型对照轮次要等 LongCat 额度；§7 指标里 `over_decomposition`/`duplicate_side_effect`/`reviewer_detection`/审批两率的真实分布同样要等真实模型轮次（现两份语料只能出 5 项数，见 `docs/phase5a-quality-indicators-2026-11-07.md` §5.1）。台账 A-07/B-07 的 `0 → 0.5` 回填不受这些外部条件限制：原先的同文件冲突顾虑（PR #59 正在改写汇总块）已随 #59/#60/#61/#62/#63 全部合并解除，回填已在 `docs/ledger-a07-b07-backfill-2026-11-07` 这一轮按行级重算脚本 `scripts/scan-notion-ledger.js` 执行完毕（口径：逐行切第 5 列状态、取最后一个 `→` 之后的值，无法识别即抛错；与汇总块最后一条「新值」bullet 双向对账，`--check` 不一致退出码 1）。
