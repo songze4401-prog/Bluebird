@@ -129,6 +129,10 @@ const EVENT_TYPES = Object.freeze([
   'plan.fencing_issued',
   'plan.fencing_denied',
   'plan.fencing_revoked',
+  // P5-D / §17 FM-2：必需约束从已验证引用重建成功（只记键名与引用 id，不记正文）。
+  'handoff.context_rebuilt',
+  // P5-D / §17 FM-6：重试耗尽且无可交付部分结果时请求决策（只记计数与短码）。
+  'task.decision_requested',
 ]);
 
 const SAFE_PAYLOAD_KEYS = new Set([
@@ -239,6 +243,21 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'generation',
   'heldGeneration',
   'currentGeneration',
+  // P5-D / §17 FM：失败模式命名化的事件标量（全部扁平，数组先 join 成字符串）。
+  // FM-3：委派权限放大被拒（只记父任务 id 与越界工具名，不记参数正文）。
+  'security',
+  'parentTaskId',
+  'escalatedTools',
+  // FM-2：必需约束缺失/重建审计（只记键名列表与引用 id，不记正文）。
+  'requiredKeys',
+  'missingKeys',
+  'rebuilt',
+  'rebuiltFrom',
+  // FM-6：部分结果交付与请求决策（只记计数、产物 id 列表与短码）。
+  'partial',
+  'partialCount',
+  'partialArtifactIds',
+  'decisionRequested',
 ]);
 
 let taskCache = null;
@@ -608,6 +627,10 @@ function publicTask(task, { includeResult = true } = {}) {
     parentUserId: task.parentUserId || null,
     priority: task.priority || 'normal',
     contextRef: task.contextRef || null,
+    // FM-2：必需约束键名（只读）。null 表示委派方未声明必需约束。
+    requiredContextKeys: Array.isArray(task.requiredContextKeys)
+      ? [...task.requiredContextKeys]
+      : null,
     idempotencyKey: task.idempotencyKey || null,
     route: task.route ? clone(task.route) : null,
     budget: task.budget ? clone(task.budget) : null,
@@ -1023,6 +1046,9 @@ function createTask({
   deadlineMs = 60000,
   priority = 'normal',
   contextRef = null,
+  // FM-2 交接上下文丢失（§17）：委派方声明的必需约束/决策键名。
+  // 执行入口按 context（JSON 对象）与 contextRef（已验证产物）核对，缺失即阻断。
+  requiredContextKeys = null,
   idempotencyKey = null,
   route = null,
   budget = null,
@@ -1058,6 +1084,19 @@ function createTask({
   const cleanContext = typeof context === 'string' ? context.trim() : '';
   if (cleanContext.length > CONTEXT_MAX) {
     throw new AgentError('invalid_task', '任务上下文过长');
+  }
+  // FM-2：必需约束键名归一化（去重、去空白，单键上限 60 字，总数上限 12）。
+  const cleanRequiredContextKeys = Array.isArray(requiredContextKeys)
+    ? [
+        ...new Set(
+          requiredContextKeys
+            .filter(key => typeof key === 'string' && key.trim())
+            .map(key => key.trim().slice(0, 60))
+        ),
+      ]
+    : null;
+  if (cleanRequiredContextKeys && cleanRequiredContextKeys.length > 12) {
+    throw new AgentError('invalid_task', 'requiredContextKeys 数量超限');
   }
   const cleanSession =
     typeof workerSessionId === 'string' && workerSessionId.trim()
@@ -1233,6 +1272,29 @@ function createTask({
   if (parentTask) {
     agentLimits.assertDelegationAllowed(cleanParentTaskId, tasks.tasks);
   }
+  // FM-3 委派链权限逐跳放大（§17）：子任务的权限必须落在父任务授权的交集内。
+  // 父任务未显式声明 allowedTools（等于 Manifest 全量白名单）时不额外收窄；
+  // 父任务收窄过而子任务声明了父任务没有的工具 → fail-closed 拒绝且零落盘
+  //（此时任务尚未创建，安全事件由调用方（router/route 层）记 route.rejected）。
+  if (parentTask && allowedTools !== null && Array.isArray(parentTask.allowedTools)) {
+    const parentAuthorized = new Set(parentTask.allowedTools);
+    const escalated = tools.filter(name => !parentAuthorized.has(name));
+    if (escalated.length) {
+      throw new AgentError(
+        'delegation_permission_escalation',
+        '子任务 allowedTools 超出父任务授权交集（§17 FM-3）',
+        403,
+        { parentTaskId: cleanParentTaskId, escalatedTools: escalated.join(',') }
+      );
+    }
+  }
+  // FM-3：父任务收窄过而子任务未声明 allowedTools 时，默认授权也必须落在
+  // 父任务授权交集内——不能靠「不声明」拿到父任务没有的工具。收窄后为空
+  // 表示该子任务不授权任何工具（fail-closed，不拒绝创建）。
+  if (parentTask && allowedTools === null && Array.isArray(parentTask.allowedTools)) {
+    const parentAuthorized = new Set(parentTask.allowedTools);
+    tools = tools.filter(name => parentAuthorized.has(name));
+  }
   const effectiveRunId =
     cleanRunId || (parentTask && parentTask.budgetRunId ? parentTask.budgetRunId : null);
   if (parentTask) {
@@ -1294,6 +1356,7 @@ function createTask({
     context: cleanContext,
     priority: cleanPriority,
     contextRef: cleanContextRef,
+    requiredContextKeys: cleanRequiredContextKeys,
     idempotencyKey: cleanIdempotencyKey,
     route: cleanRoute,
     budget: cleanBudget,
@@ -1642,6 +1705,11 @@ function updateTask(taskId, patch = {}) {
   if (patch.runId !== undefined) task.runId = patch.runId;
   if (patch.runStartedAt !== undefined) task.runStartedAt = patch.runStartedAt;
   if (patch.heartbeatAt !== undefined) task.heartbeatAt = patch.heartbeatAt;
+  // FM-1（§17）：角色漂移重路由时收窄上下文——runtime 只允许在重试路径里
+  // 传字符串（置空或缩短），不给任何其他调用方扩大或改写语义的空间。
+  if (patch.context !== undefined) {
+    task.context = String(patch.context ?? '').slice(0, CONTEXT_MAX);
+  }
   // 旧任务/直接建任务可能没有 Worker 会话：运行开始时补建并回填，
   // 只允许从空值变为实际会话，不允许改写已存在的会话身份。
   if (

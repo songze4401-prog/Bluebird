@@ -20,7 +20,8 @@ const artifactCommit = require('./artifact-commit');
 const approvals = require('./approvals');
 const orchestrator = require('./orchestrator');
 const conflictRecordModule = require('./conflict-record');
-const { AgentError } = require('./errors');
+const manifestRegistry = require('./manifest');
+const { AgentError, classifyFailureMode } = require('./errors');
 
 const REVIEWER_BOT_ID = 'reviewer';
 const REVIEW_CAPABILITY = 'review.verify';
@@ -28,6 +29,28 @@ const REVIEW_TASK_TYPE = 'review.verify';
 const REVIEW_GOAL_MAX = 2000;
 const REVIEW_CONTENT_MAX = 1200;
 const REVIEW_EVIDENCE_MAX = 8;
+
+// FM-1 角色漂移：结果对象允许的字段 = normalizeWorkerResult 统一 schema 的并集。
+// 出现白名单之外的键，说明输出越出了任务契约声明的 schema（§17 FM-1 的 schema 半边）。
+const RESULT_SCHEMA_FIELDS = Object.freeze([
+  'status',
+  'summary',
+  'artifacts',
+  'evidence',
+  'toolSteps',
+  'changes',
+  'requiresConfirmation',
+  'requiresApproval',
+  'errorCode',
+  'rounds',
+  'stopReason',
+  'model',
+  'runId',
+  'finishedAt',
+  'neverStarted',
+  'blockedBy',
+  'usage',
+]);
 
 // 确定性验证错误码：每个都对应一类机械失败，直接写入任务 errorCode。
 const VERIFY_CODES = Object.freeze({
@@ -38,6 +61,8 @@ const VERIFY_CODES = Object.freeze({
   hash: 'verification_hash_mismatch',
   evidence: 'verification_evidence_invalid',
   provenance: 'verification_provenance_broken',
+  // FM-1 角色漂移：输出越出 Manifest 声明的职责与 schema。
+  roleDrift: 'verification_role_drift',
 });
 
 // 裁决结果码（非确定性校验码）。
@@ -256,6 +281,62 @@ function verifyDeterministic({ taskId = null, result = null, now = Date.now() } 
     }
   }
 
+  // FM-1 角色漂移（§17）：输出越出 Manifest 声明的职责与 schema。
+  // 只做确定性核对：botId 必须在注册表内、taskType 必须在受理范围、
+  // allowedTools 必须落在 Manifest 白名单内、结果字段必须落在统一 schema 内。
+  // taskId 缺省（纯函数调用）时跳过本项——运行期调用恒带 taskId。
+  if (taskId) {
+    const driftTask = tasks.getRawTask(taskId);
+    if (!driftTask) {
+      failures.push(
+        failure('role_scope', VERIFY_CODES.roleDrift, '任务不存在，无法核对职责边界')
+      );
+    } else {
+      const driftManifest = manifestRegistry.getManifest(driftTask.botId);
+      if (!driftManifest) {
+        failures.push(
+          failure('role_scope', VERIFY_CODES.roleDrift, `botId 不在 Manifest 注册表 ${driftTask.botId}`)
+        );
+      } else {
+        if (!driftManifest.acceptedTaskTypes.includes(driftTask.taskType)) {
+          failures.push(
+            failure(
+              'role_scope',
+              VERIFY_CODES.roleDrift,
+              `taskType 越出 Manifest 受理范围 ${driftTask.taskType}`
+            )
+          );
+        }
+        const allow = new Set(driftManifest.toolAllowlist);
+        const tools = Array.isArray(driftTask.allowedTools) ? driftTask.allowedTools : [];
+        const overflowTools = tools.filter(name => !allow.has(name));
+        if (overflowTools.length) {
+          failures.push(
+            failure(
+              'role_scope',
+              VERIFY_CODES.roleDrift,
+              `allowedTools 越出 Manifest 白名单 ${overflowTools.join(',')}`
+            )
+          );
+        }
+      }
+      if (result_) {
+        const overflowKeys = Object.keys(result_).filter(
+          key => !RESULT_SCHEMA_FIELDS.includes(key)
+        );
+        if (overflowKeys.length) {
+          failures.push(
+            failure(
+              'role_scope',
+              VERIFY_CODES.roleDrift,
+              `结果字段越出 schema ${overflowKeys.join(',')}`
+            )
+          );
+        }
+      }
+    }
+  }
+
   if (
     faultInjection &&
     faultInjection.deterministic &&
@@ -276,6 +357,7 @@ function verifyDeterministic({ taskId = null, result = null, now = Date.now() } 
     'hash_match',
     'evidence_resolvable',
     'provenance_intact',
+    'role_scope',
     'fault_injection',
   ];
   const checks = checkNames.map(name => ({
@@ -1053,6 +1135,10 @@ function requestHumanApproval({
 }
 
 function auditResolution({ producerTask, deterministic, review, resolution, runId = null }) {
+  // FM-5（§17）：裁决审计带上失败模式分类——同源偏差（review 侧短码
+  // verification_review_not_independent 等）经 classifyFailureMode 统一命名，
+  // 事件流可以直接按 §17 类别聚合，不用再翻 resolution 细节。
+  const resolutionCode = (resolution && resolution.errorCode) || '';
   const payload = {
     verdict: review && review.decision ? review.decision : 'needs_human',
     reviewTaskId: review && review.reviewTaskId ? review.reviewTaskId : null,
@@ -1061,6 +1147,9 @@ function auditResolution({ producerTask, deterministic, review, resolution, runI
     conflict: Boolean(resolution && resolution.outcome === 'conflict'),
     decision: resolution ? resolution.outcome : 'needs_human',
     checkCode: (deterministic && deterministic.errorCode) || '',
+    ...(resolutionCode
+      ? { failureMode: classifyFailureMode({ errorCode: resolutionCode }) || '' }
+      : {}),
   };
   audit(
     producerTask.botId,
