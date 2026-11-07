@@ -591,6 +591,37 @@ function createRouter(overrides = {}) {
       };
     }
 
+    // FM-3 委派链权限逐跳放大（§17）：在计划落盘**之前**就做父子授权交集
+    // 预检——拒绝即零副作用（不建任务、不留孤儿计划），并记 route.rejected
+    // 安全事件。父任务不存在/字段校验仍由 Task Store 兜底（纵深防御）。
+    const routeParentTaskId = normalizeString(input.parentTaskId) || null;
+    if (routeParentTaskId && Array.isArray(normalized.allowedTools)) {
+      const parentForScope = taskStore.getTask(routeParentTaskId);
+      if (
+        parentForScope &&
+        Array.isArray(parentForScope.allowedTools) &&
+        parentForScope.allowedTools.length
+      ) {
+        const parentAuthorized = new Set(parentForScope.allowedTools);
+        const escalatedTools = normalized.allowedTools.filter(
+          name => !parentAuthorized.has(name)
+        );
+        if (escalatedTools.length) {
+          writeRouteEvent(appendEvent, agentId, 'route.rejected', decision, {
+            priority: normalized.priority,
+            security: 'delegation_permission_escalation',
+            parentTaskId: routeParentTaskId,
+          });
+          throw new AgentError(
+            'delegation_permission_escalation',
+            '子任务 allowedTools 超出父任务授权交集（§17 FM-3）',
+            403,
+            { parentTaskId: routeParentTaskId, escalatedTools: escalatedTools.join(',') }
+          );
+        }
+      }
+    }
+
     let workerSessionId = normalizeString(context.workerSessionId) || null;
     if (workerSessionId) {
       const meta = sessionStore.getSession(agentId, workerSessionId);
@@ -643,6 +674,11 @@ function createRouter(overrides = {}) {
       goal: normalized.goal,
       context: normalized.context || '',
       contextRef: normalized.contextRef,
+      // FM-2：必需约束键名原样交给 Task Store 归一化与执行入口核对。
+      requiredContextKeys:
+        Array.isArray(input.requiredContextKeys) && input.requiredContextKeys.length
+          ? input.requiredContextKeys
+          : null,
       allowedTools: normalized.allowedTools,
       deadlineMs: normalized.deadlineMs,
       priority: normalized.priority,

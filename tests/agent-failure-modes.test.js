@@ -67,9 +67,9 @@ function assertModeAndAction(errorCode, expectedMode, expectedAction) {
   return disposition;
 }
 
-test('A-10 清单：失败模式齐全、处置动作合法（P5-C 起为原九类 + FM-4 plan_version_race）', () => {
+test('A-10 清单：失败模式齐全、处置动作合法（P5-D 起为原九类 + FM-4 + FM-1/2/3/5 四类）', () => {
   const modes = Object.values(errors.FAILURE_MODES);
-  assert.strictEqual(modes.length, 10);
+  assert.strictEqual(modes.length, 14);
   for (const mode of modes) {
     const disposition = errors.failureModeDisposition(mode);
     assert.ok(disposition, `${mode} 必须有处置`);

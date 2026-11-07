@@ -17,7 +17,8 @@ const dependencies = require('./dependencies');
 const workerScope = require('./worker-scope');
 const resultDelivery = require('./result-delivery');
 const deadLetter = require('./dead-letter');
-const { projectWorkerContext } = require('./context-projection');
+const { projectWorkerContext, validateHandoff } = require('./context-projection');
+const artifactStore = require('./artifact-store');
 const { normalizeWorkerResult } = require('./worker-result');
 const { createToolAuthorizer } = require('./tool-gateway');
 const { listToolMetadata } = require('../agent-runtime');
@@ -119,17 +120,23 @@ function decideFailureDisposition({
     typeof errorCode === 'string' && errorCode.startsWith('side_effect_');
   // 代次存储不可用：读不出谁有写入资格，需人工/启动对账，不是终态失败。
   const fencingUnavailable = errorCode === 'fencing_unavailable';
+  // FM-1 角色漂移（§17）：越界输出已被确定性校验拒绝，重路由前先缩小上下文
+  //（由收口路径处理）；无副作用任务允许在 attempts 上限内重跑。
+  const roleDriftFailure = errorCode === 'verification_role_drift';
+  // FM-2 交接上下文丢失（§17）：必需约束未传递，Worker 未启动 → recovery，
+  // 由人工补齐或从已验证引用重建后恢复，不能盲目重跑。
+  const handoffFailure = errorCode === 'handoff_context_missing';
   const hasSideEffects =
     Array.isArray(allowedTools) && allowedTools.includes('memory_remember');
   const retryable =
     !cancelled &&
     !sideEffectFailure &&
     !hasSideEffects &&
-    (artifactFailure || RETRYABLE_MODEL_ERROR_CODES.includes(errorCode)) &&
+    (artifactFailure || roleDriftFailure || RETRYABLE_MODEL_ERROR_CODES.includes(errorCode)) &&
     attempts < maxAttempts;
   const status = cancelled
     ? 'cancelled'
-    : sideEffectFailure || artifactFailure || fencingUnavailable
+    : sideEffectFailure || artifactFailure || fencingUnavailable || handoffFailure
       ? 'recovery'
       : timedOut
         ? 'timed_out'
@@ -179,6 +186,32 @@ function boundPlanDigest(task = {}) {
   } catch (error) {
     // 计划读不回时不猜哈希：其余四条细则照常生效。
     return null;
+  }
+}
+
+// FM-6（§17）：收口时收集本任务可交付的部分结果——只认产物存储里归属本任务、
+// 仍可读（active/pending-commit/committed）的记录。交付的是引用列表 + 缺口披露，
+// 绝不把未完成内容伪装成完成；读存储失败按空处理（维持空 summary 旧口径）。
+function collectPartialOutcome(taskId) {
+  if (!taskId) return [];
+  try {
+    return artifactStore
+      .all()
+      .filter(
+        item =>
+          item &&
+          item.taskId === taskId &&
+          item.id &&
+          ['active', 'pending-commit', 'committed'].includes(item.status)
+      )
+      .slice(0, 20)
+      .map(item => ({
+        kind: String(item.kind || ''),
+        id: String(item.id),
+        ...(Number.isInteger(item.version) ? { version: item.version } : {}),
+      }));
+  } catch (_) {
+    return [];
   }
 }
 
@@ -1144,9 +1177,46 @@ async function runTask(taskId) {
     }
 
     // ---- execute：只投影任务所需的摘要/引用/授权数据 ----
-    const config = require('./config').getRuntimeConfig(task.botId);
-    const projection = projectWorkerContext({
+    // FM-2 交接上下文丢失（§17）：委派方声明了必需约束（requiredContextKeys）
+    // 而 context/contextRef 都承载不了时，阻断执行——Worker 不启动、模型零调用，
+    // 任务按 disposition 走 recovery；缺失键能从 contextRef 已验证产物重建时
+    // 放行并留 handoff.context_rebuilt 审计。
+    const handoff = validateHandoff({
       task,
+      resolveContextRef: ref => artifactStore.readContent(String(ref)),
+    });
+    if (!handoff.ok) {
+      throw new AgentError(
+        'handoff_context_missing',
+        `必需约束未传递（§17 FM-2）：${handoff.missing.join(',')}`,
+        409,
+        {
+          requiredKeys: handoff.requiredKeys.join(','),
+          missingKeys: handoff.missing.join(','),
+        }
+      );
+    }
+    if (handoff.rebuilt) {
+      safeEvent(
+        task.botId,
+        'handoff.context_rebuilt',
+        {
+          rebuilt: true,
+          rebuiltFrom: handoff.rebuiltFrom,
+          requiredKeys: handoff.requiredKeys.join(','),
+        },
+        { taskId: task.taskId, runId, sessionId: task.sessionId || null }
+      );
+    }
+    const config = require('./config').getRuntimeConfig(task.botId);
+    // FM-2：从已验证引用重建出的约束必须真的进入 Worker 上下文，否则「重建放行」
+    // 只是放行、模型仍看不到约束值。这里只改本次投影用的一份副本，不回写任务记录
+    //（原 context 保持原样，审计以 handoff.context_rebuilt 为准）。
+    const projectionTask = handoff.rebuilt
+      ? { ...task, context: JSON.stringify(handoff.rebuiltObject) }
+      : task;
+    const projection = projectWorkerContext({
+      task: projectionTask,
       systemPrompt: config.prompt.systemPrompt,
     });
     const toolMeta = {};
@@ -1370,7 +1440,11 @@ async function runTask(taskId) {
           review = {
             decision: 'needs_human',
             valid: false,
-            code: 'review_unavailable',
+            // FM-5（§17）：保留真实短码（如 verification_review_not_independent），
+            // 让同源偏差经 resolveConflict → resolution.errorCode 进入统一命名与
+            // 处置路由（classifyFailureMode → verification_source_bias），
+            // 而不是被泛化成 review_unavailable 丢掉分类依据。
+            code: (error && error.code) || 'review_unavailable',
             evidence: [],
             reviewTaskId: null,
           };
@@ -1670,6 +1744,16 @@ async function runTask(taskId) {
         finishedAt: nowIso(),
       });
       const retried = tasks.setRetry(task.taskId, { errorCode });
+      // FM-1（§17）：角色漂移重路由前先缩小上下文——丢弃本次越界输出所依据的
+      // 自由文本 context，只保留 goal 与已验证引用（contextRef 不受影响），
+      // 迫使下一次运行回到 Manifest 声明的职责边界内重新作答。
+      if (disposition.failureMode === 'role_drift') {
+        try {
+          tasks.updateTask(task.taskId, { context: '' });
+        } catch (_) {
+          // 收窄失败不阻止重试本身；下一次运行仍受确定性校验约束。
+        }
+      }
       safeEvent(
         task.botId,
         'task.recovered',
@@ -1692,9 +1776,17 @@ async function runTask(taskId) {
 
     const status = disposition.status;
     // 统一结果 schema：失败/取消/超时也落一份结果，而不是 result: null。
+    // FM-6（§17）：达上限/被风暴判据收口时交付部分结果并披露缺口，而不是空
+    // summary——部分结果只引用产物存储里归属本任务、仍可读的记录；没有可交付
+    // 部分结果且本次失败本可重试（被风暴判据或 attempt 上限拦下）时，
+    // 落 task.decision_requested 请求决策，不留静默终态。
+    const partialRefs = collectPartialOutcome(task.taskId);
     const failureResult = normalizeWorkerResult({
       status,
-      summary: '',
+      summary: partialRefs.length
+        ? `任务未完成（${errorCode}）：已交付 ${partialRefs.length} 项部分结果，缺口与未完成原因见 errorCode 与审计事件（§17 FM-6）。`
+        : '',
+      artifacts: partialRefs,
       errorCode,
       runId,
       finishedAt: nowIso(),
@@ -1739,10 +1831,31 @@ async function runTask(taskId) {
       {
         status,
         errorCode,
+        ...(partialRefs.length ? { partial: true, partialCount: partialRefs.length } : {}),
         ...(disposition.failureMode ? { failureMode: disposition.failureMode } : {}),
       },
       { taskId: task.taskId, runId, sessionId: task.sessionId }
     );
+    if (!partialRefs.length && status === 'failed' && !cancelled && !timedOut) {
+      const retryBlocked =
+        attempts >= maxAttempts || (stormGate && stormGate.allowed === false);
+      if (retryBlocked) {
+        // FM-6：没有可交付的部分结果且重试已被判据拦下——请求决策而不是静默终态。
+        safeEvent(
+          task.botId,
+          'task.decision_requested',
+          {
+            status,
+            errorCode,
+            attempts,
+            maxAttempts,
+            decisionRequested: true,
+            ...(disposition.failureMode ? { failureMode: disposition.failureMode } : {}),
+          },
+          { taskId: task.taskId, runId, sessionId: task.sessionId }
+        );
+      }
+    }
   } finally {
     if (deadlineTimer) clearTimeout(deadlineTimer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);

@@ -158,7 +158,13 @@ function describeAgentError(error) {
 // 原文未给处置映射的条目按既有语义落表，标注为「本仓库裁决」。
 // v2：P5-C 第 1 轮补入 FM-4 plan_version_race（代次被取代/撤销仍尝试写副作用），
 // 处置表内容变了就升版本，不让同一版本号指向两份不同的表。
-const FAILURE_MODE_POLICY_VERSION = 'failure-modes-v2';
+// v3：P5-D 补入原文点名、此前未命名未检测的四类：FM-1 role_drift（角色漂移）、
+// FM-2 handoff_context_lost（交接上下文丢失）、FM-3 delegation_privilege_escalation
+// （委派链权限逐跳放大）、FM-5 verification_source_bias（验证器同源偏差）。
+// FM-4 已由 v2 覆盖；FM-6 重规划风暴的熔断/停止重规划由 P5-B 落地，
+// 「部分结果交付/请求决策」接线在 runtime.js 终态收口，复用 budget_exhausted/
+// 既有分类，不新增键。
+const FAILURE_MODE_POLICY_VERSION = 'failure-modes-v3';
 const FAILURE_MODES = Object.freeze({
   dependency_cycle: 'dependency_cycle',
   dependency_deadlock: 'dependency_deadlock',
@@ -170,6 +176,10 @@ const FAILURE_MODES = Object.freeze({
   budget_exhausted: 'budget_exhausted',
   approval_stall: 'approval_stall',
   plan_version_race: 'plan_version_race',
+  role_drift: 'role_drift',
+  handoff_context_lost: 'handoff_context_lost',
+  delegation_privilege_escalation: 'delegation_privilege_escalation',
+  verification_source_bias: 'verification_source_bias',
 });
 const FAILURE_MODE_LABELS = Object.freeze({
   dependency_cycle: '依赖图成环（§17，图环检测）',
@@ -182,6 +192,12 @@ const FAILURE_MODE_LABELS = Object.freeze({
   budget_exhausted: 'Token/调用预算耗尽（§17）',
   approval_stall: '人工审批悬挂/超时（§17）',
   plan_version_race: '计划版本竞争：旧代次仍尝试写副作用（§17 FM-4，fencing token）',
+  role_drift: '角色漂移：输出越出 Manifest 声明的职责与 schema（§17 FM-1）',
+  handoff_context_lost: '交接上下文丢失：必需约束或决策未传递（§17 FM-2）',
+  delegation_privilege_escalation:
+    '委派链权限逐跳放大：子任务权限超出父任务授权交集（§17 FM-3）',
+  verification_source_bias:
+    '验证器同源偏差：Reviewer 与 Producer 共享错误来源（§17 FM-5）',
 });
 // 默认处置（本仓库裁决要点见注释）：
 // - dependency_cycle/deadlock：无法靠重试自愈 → 终态 failed；
@@ -191,7 +207,15 @@ const FAILURE_MODE_LABELS = Object.freeze({
 // - plan_version_race（FM-4）：代次已被取代或撤销，副作用一次都没做 → 终态 failed；
 //   任务本身的归属由持有当前代次的那一次运行决定，runtime 不在旧运行里改写它的状态；
 // - budget_exhausted：硬限制，不可重试 → 终态 failed；
-// - approval_stall：不自动批准 → 升级审批（复用 review.escalate）。
+// - approval_stall：不自动批准 → 升级审批（复用 review.escalate）；
+// - role_drift（FM-1）：拒绝越界输出后缩小上下文重路由（retry，受 attempts 上限约束，
+//   耗尽即终态 failed）；
+// - handoff_context_lost（FM-2）：必需约束未传递，阻断执行转 recovery，
+//   从已验证引用（contextRef 产物）重建后由恢复路径放行；
+// - delegation_privilege_escalation（FM-3）：创建期 fail-closed 拒绝且零落盘，
+//   分类为 terminal 供监控聚合（真实路径在 tasks.createTask 抛错，任务不创建）；
+// - verification_source_bias（FM-5）：同源 Reviewer 不采信、转人工
+//   （复用 waiting_approval + review.escalate，不自动批准）。
 const FAILURE_MODE_DISPOSITIONS = Object.freeze({
   dependency_cycle: Object.freeze({
     action: 'terminal',
@@ -263,6 +287,34 @@ const FAILURE_MODE_DISPOSITIONS = Object.freeze({
     errorCode: 'stale_generation',
     escalationOperation: null,
   }),
+  role_drift: Object.freeze({
+    action: 'retry',
+    retryable: true,
+    status: null,
+    errorCode: 'role_drift_reroute',
+    escalationOperation: null,
+  }),
+  handoff_context_lost: Object.freeze({
+    action: 'recovery',
+    retryable: false,
+    status: 'recovery',
+    errorCode: 'handoff_context_missing',
+    escalationOperation: null,
+  }),
+  delegation_privilege_escalation: Object.freeze({
+    action: 'terminal',
+    retryable: false,
+    status: 'failed',
+    errorCode: 'delegation_permission_escalation',
+    escalationOperation: null,
+  }),
+  verification_source_bias: Object.freeze({
+    action: 'escalate',
+    retryable: false,
+    status: 'waiting_approval',
+    errorCode: 'verification_source_bias_escalated',
+    escalationOperation: 'review.escalate',
+  }),
 });
 
 /**
@@ -303,6 +355,20 @@ function classifyFailureMode(signals = {}) {
   if (/budget_exceeded/.test(text)) return FAILURE_MODES.budget_exhausted;
   if (/approval_(expired|stalled|escalated|overdue)/.test(text)) {
     return FAILURE_MODES.approval_stall;
+  }
+  // FM-1：角色漂移（verification 的 role_scope 检查与运行期重路由都落这个短码族）。
+  if (/role_drift|role_scope/.test(text)) return FAILURE_MODES.role_drift;
+  // FM-2：交接上下文丢失（必需约束未传递；重建失败也归这类，交 recovery）。
+  if (/handoff_context_missing|handoff_context_lost/.test(text)) {
+    return FAILURE_MODES.handoff_context_lost;
+  }
+  // FM-3：委派链权限逐跳放大（创建期拒绝，任务不落盘）。
+  if (/delegation_permission_escalation|delegation_privilege_escalation/.test(text)) {
+    return FAILURE_MODES.delegation_privilege_escalation;
+  }
+  // FM-5：验证器同源偏差（审校不独立/裁决主体越权都属「共享错误来源」）。
+  if (/verification_review_not_independent|verification_source_bias|arbiter_(not_independent|scope_exceeded)/.test(text)) {
+    return FAILURE_MODES.verification_source_bias;
   }
   return null;
 }

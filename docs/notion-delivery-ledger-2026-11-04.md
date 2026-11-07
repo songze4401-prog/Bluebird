@@ -940,15 +940,15 @@ a 默认关闭（`p4-default` 不组队、`route=null`、无 policy 字段）；
 
 | §17 原文失败模式 | 原文检测信号与默认处置 | 代码对应 | 判定 |
 |---|---|---|---|
-| 角色漂移 | 输出超出 Manifest 职责或 schema；拒绝结果、缩小上下文、重新路由 | `errors.js` 的 `FAILURE_MODES` 无该键，也无「越界输出触发重路由」的路径 | 缺（FM-1） |
-| 交接上下文丢失 | 必需约束或决策未传递；阻断执行并从已验证引用重建 | 无该键；context-projection 与 worker-scope 只负责投影，不校验必需约束是否缺失 | 缺（FM-2） |
-| 委派链权限逐跳放大 | 子任务权限超出父任务授权交集；Gateway 拒绝并记录安全事件 | 只有 `router.js:84` 的「Agent 运行配置与 Manifest 交集」本级校验；无父子授权交集判定 | 缺（FM-3） |
+| 角色漂移 | 输出超出 Manifest 职责或 schema；拒绝结果、缩小上下文、重新路由 | 2026-11-07 已落地（P5-D，分支 `p5d/failure-modes-naming-2026-11-07`）：`verification-loop.js` 确定性校验加 `role_scope` 检查（任务存在 / Manifest 注册 / taskType 受理 / allowedTools 白名单 / 结果字段 ⊆ 统一 schema），失败码 `verification_role_drift` → `errors.js` `role_drift`（v3）→ retryable，重试前 `runtime.js` 将自由文本 context 置空（只留 goal 与已验证引用，`updateTask` 受控通道）并留 `task.recovered`；`planGate` reject 保证越界输出不产出成功结果。用例 `tests/agent-failure-modes-p5d.test.js`（检测四态 + 真实 `runTask` 重路由） | 命中（FM-1） |
+| 交接上下文丢失 | 必需约束或决策未传递；阻断执行并从已验证引用重建 | 2026-11-07 已落地（P5-D，同分支）：`context-projection.js` 加纯函数 `validateHandoff`（`requiredContextKeys` 由 createTask 归一化声明，context JSON 对象或 contextRef 已验证产物承载，纯文本 fail-closed）；`runtime.js` 投影前调用，缺失即 `handoff_context_missing` → recovery，Worker 不启动、模型零调用；可从引用重建时放行并落 `handoff.context_rebuilt` 审计。用例：纯函数五态 + 真实 `runTask`（缺失不启动 / 重建放行留审计） | 命中（FM-2） |
+| 委派链权限逐跳放大 | 子任务权限超出父任务授权交集；Gateway 拒绝并记录安全事件 | 2026-11-07 已落地（P5-D，同分支）：`tasks.createTask` 加父子授权交集判定（父收窄而子显式越权 → 403 `delegation_permission_escalation` 零落盘；子省略声明 → 默认授权收窄到交集内），`router.dispatch` 在计划落盘前做同一前置拦截并写 `route.rejected` 安全事件（`security`/`parentTaskId`/`escalatedTools` 入白名单）；Gateway 运行期 `task_tool_denied` 判定不变（两层互不替代）。用例：父窄子宽拒绝零落盘 / 继承收窄 / 交集内放行 | 命中（FM-3） |
 | 产物依赖死锁 | Artifact 等待图成环或无可推进节点；冻结节点、报告环路、重规划 | `dependency_deadlock`、`dependency_cycle` 加 `dependencies.validateGraph`（Kahn）与委派、lineage 环检测（`c87b61a`） | 命中（信号源是任务依赖图，非 artifact 等待图） |
 | 计划版本竞争 | 旧 plan 尝试提交新副作用；fencing token 拒绝过期代次 | 2026-11-07 已落地（P5-C 第 1 轮）：`server/agents/fencing.js` 代次签发/持久化/撤销（五类拒绝码，计数器不重建）；`side-effect-guard.js` 在账本 `begin` 前校验（被拦不留意图行）；`runtime.js` 运行开始签发、产物落盘与结果提交前各判一次、终态撤销、启动对账（`convergeFencingTokens`）；`errors.js` 补 `plan_version_race`（FM-4）。用例 `tests/agent-fencing.test.js` a–h 覆盖旧代次被拒/新代次放行/迁移映射/重启对账 | 命中（FM-4） |
 | 重复副作用 | 同一逻辑动作重复请求；幂等去重并对账 | `duplicate_execution` 加 `op-ledger` 幂等账本 | 命中 |
-| 验证器同源偏差 | Reviewer 与 Producer 共享错误来源；提升独立性或转人工 | 功能已在：`verification-loop.js:354/394/401` 判 `producer.botId === REVIEWER_BOT_ID` 并给 `verification_review_not_independent`，`:69` 独立与非独立计分，`:627 isIndependentReviewEvidence`；但该模式未进入 `FAILURE_MODES` 命名与处置表 | 部分命中（FM-5） |
+| 验证器同源偏差 | Reviewer 与 Producer 共享错误来源；提升独立性或转人工 | 功能已在：`verification-loop.js:354/394/401` 判 `producer.botId === REVIEWER_BOT_ID` 并给 `verification_review_not_independent`，`:69` 独立与非独立计分，`:627 isIndependentReviewEvidence`。2026-11-07 补命名与处置（P5-D，同分支）：`errors.js` 加 `verification_source_bias`（v3，escalate → waiting_approval + review.escalate），`runtime.js` 的 openReview catch 保留真实短码（不再泛化成 `review_unavailable`）使其经 `resolution.errorCode` 进 `classifyFailureMode`，`auditResolution` 审计事件带 `failureMode` 分类；`planGate` 对同源偏差落人工审批。用例：同源自查 409 / 分类 escalate / `planGate` 转人工不静默通过 | 命中（FM-5） |
 | 事件乱序 / 重放 | 版本倒退、重复终态事件；aggregate version 校验、幂等处理 | `event_out_of_order` 加事件投递幂等键（`479bfd9`）与 `stateVersion` CAS | 命中 |
-| 预算耗尽 / 重规划风暴 | 重试或委派持续消耗预算；熔断、停止重规划、交付部分结果或请求决策 | `budget_exhausted` 名义命中。2026-11-07 更新（PR #61，合并 `a23e00e`）：熔断与停止重规划已落地——`circuit-breaker.js` 三域三态 + `storm-suppression.js` 五条细则，接入点在 `runtime.js:1559-1560` 的 `admitRetryAttempt()` 与 `:1587-1589` 的 `recordStormDenial()`；仍无「交付部分结果或请求决策」路径：风暴拒绝后走既有终态收口，`normalizeWorkerResult` 的 `summary` 为空串（`runtime.js:1593-1599`），`server/` 内 `partialResult`/`requestDecision` 零命中 | 部分命中（FM-6；缺口由「无熔断、无风暴判据」收窄为「无部分结果交付/请求决策」） |
+| 预算耗尽 / 重规划风暴 | 重试或委派持续消耗预算；熔断、停止重规划、交付部分结果或请求决策 | `budget_exhausted` 名义命中。2026-11-07 更新（PR #61，合并 `a23e00e`）：熔断与停止重规划已落地——`circuit-breaker.js` 三域三态 + `storm-suppression.js` 五条细则，接入点在 `runtime.js` 的 `admitRetryAttempt()` 与 `recordStormDenial()`。2026-11-07 补部分结果交付（P5-D，同分支）：终态收口加 `collectPartialOutcome`——有归属本任务且仍可读（active/pending-commit/committed）的产物时，失败结果 `summary` 带缺口披露、`artifacts` 带引用、事件带 `partialCount`；无可交付且重试被 attempt 上限或风暴判据拦下时落 `task.decision_requested` 事件。验证失败路径的产物仍按既有 `invalidateArtifactRefs` 拒绝，不入部分结果。用例：两段提交中断（persist 后 completeTask 失败）→ 收口 result 带 pending-commit 产物与缺口披露；模型层失败无可交付 → `task.decision_requested` | 命中（FM-6） |
 
 结论（2026-11-06）：代码九个键里有 5 个（`stale_lease`、`artifact_chain_broken`、`partial_commit`、`approval_stall` 及重复计入的 `dependency_cycle`）是仓库自选补充，而原文点名的 6 类只有 1 类（FM-5）以功能形式存在、其余未命名亦未检测。A-10 由 1.0 改判 0.5。
 
@@ -956,15 +956,17 @@ a 默认关闭（`p4-default` 不组队、`route=null`、无 policy 字段）；
 
 结论更新（2026-11-07 第二次，P5-C 第 1 轮）：FM-4 的计划版本竞争已由 fencing token 补上（见上表、A-01 与 A-13 行的 2026-11-07 补充，用例 `tests/agent-fencing.test.js` a–h），6 类里有功能实现的变为 3 类（FM-4、FM-5、FM-6）；FM-1/2/3 仍缺、FM-5 仍未进 `FAILURE_MODES`、FM-6 仍缺部分结果交付，故 **A-10 维持 0.5**。
 
+结论更新（2026-11-07 第三次，P5-D）：FM-1/2/3 的检测、命名与处置已补齐，FM-5 已进 `FAILURE_MODES`（v3，escalate），FM-6 补「交付部分结果并披露缺口 / 请求决策」，`tests/agent-failure-modes-p5d.test.js` 10 项覆盖检测与越界用例——**本表证据取自分支 `p5d/failure-modes-naming-2026-11-07`（基线 main = `0638358`）**。按 §3.2「判行证据只能来自 main」，A-10 的复判（0.5 → 1.0）在合并后用 main 上的五门禁与测试结果做；本行此间维持 0.5，不提前改判。
+
 ### 缺口编号与验收判据（可直接派工）
 
 | 编号 | 原文要求 | 建议落点 | 验收判据 |
 |---|---|---|---|
-| FM-1 角色漂移 | 检测输出是否越出 Manifest 声明的职责与 schema，处置为拒绝结果、缩小上下文、重新路由 | `verification-loop.js` 的确定性校验加 `FAILURE_MODES` 新键与处置路由 | 用例覆盖：越界输出被拒且触发重路由，不产出成功结果 |
-| FM-2 交接上下文丢失 | 必需约束或决策未传递时阻断执行，并从已验证引用重建 | `context-projection.js` 加 `FAILURE_MODES` 新键 | 用例覆盖：缺必需约束的任务不启动；重建后恢复且留审计 |
-| FM-3 委派链权限逐跳放大 | 子任务权限必须落在父任务授权交集内，越权由 Gateway 拒绝并记安全事件 | `router.js` 与 `tool-gateway.js` 的委派入口加 `worker-scope` 令牌签发 | 用例覆盖：父任务窄、子任务宽时拒绝且零副作用 |
+| FM-1 角色漂移 | 检测输出是否越出 Manifest 声明的职责与 schema，处置为拒绝结果、缩小上下文、重新路由 | 已交付（2026-11-07，P5-D）：`verification-loop.js` `role_scope` 检查 + `errors.js` `role_drift`（v3）+ `runtime.js` 重路由前缩上下文 | 已覆盖：越界输出被拒且触发重路由，不产出成功结果（`tests/agent-failure-modes-p5d.test.js`，含真实 `runTask` 注入） |
+| FM-2 交接上下文丢失 | 必需约束或决策未传递时阻断执行，并从已验证引用重建 | 已交付（2026-11-07，P5-D）：`context-projection.js` `validateHandoff` + `runtime.js` 投影前阻断 + `handoff.context_rebuilt` 审计 | 已覆盖：缺必需约束的任务不启动（recovery、零模型调用）；重建后恢复且留审计（同上测试文件） |
+| FM-3 委派链权限逐跳放大 | 子任务权限必须落在父任务授权交集内，越权由 Gateway 拒绝并记安全事件 | 已交付（2026-11-07，P5-D）：`tasks.createTask` 父子授权交集（choke point）+ `router.dispatch` 计划落盘前前置拦截并写 `route.rejected` 安全事件 | 已覆盖：父任务窄、子任务宽时拒绝且零副作用；省略声明继承收窄（同上测试文件） |
 | FM-4 计划版本竞争与 fencing | 旧 plan 提交新副作用必须由 fencing token 拒绝过期代次 | 已交付（2026-11-07，P5-C 第 1 轮）：`server/agents/fencing.js` 代次签发 + `side-effect-guard.js` 写入前置校验 + `runtime.js` 产物/结果提交前校验与终态撤销 | 用例覆盖：过期代次的副作用写入被拒并记审计（`plan.fencing_denied`）；新代次正常；真实 `runTask` 签发/撤销；迁移映射换发/收回/保持 |
-| FM-5 验证器同源偏差命名化 | 把已有的独立性判定纳入统一命名与处置（提升独立性或转人工） | `errors.js` 新增键并在 `agent-runtime.js` 处置表落 `escalate` | 用例覆盖：同源 Reviewer 触发转人工而非静默通过 |
-| FM-6 重规划风暴判据 | 熔断、停止重规划、交付部分结果或请求决策；配合 §26 的收益声明、等价计划拒绝、冷却窗口、diff 判据、禁止新建 run 规避 | 已落地（2026-11-07，PR #61）：冷却窗口与指纹去重在 `storm-suppression.js`（记账键 `task:<taskId>`、`new_run_evade` 专项），收益与 diff 判据在同模块 `checkImprovementClaim()`/`stepKeysOf()`，阻断面在 `model-adapter.js`、`agent-runtime.js`、`router.js` 三处；**剩余落点**：`runtime.js:1593-1599` 的终态收口需加「部分结果交付或请求决策」分支（现 `summary` 为空串） | 已覆盖：相同 `errorFingerprint` + 相同 `planDigest` 连续失败被拒（`tests/agent-throttle-breaker-storm.test.js` f、h）。**未覆盖**：达上限交付部分结果并披露——需新增用例断言失败终态的 `result` 带已完成节点产物与缺口披露，而不是空 `summary` |
+| FM-5 验证器同源偏差命名化 | 把已有的独立性判定纳入统一命名与处置（提升独立性或转人工） | 已交付（2026-11-07，P5-D）：`errors.js` 加 `verification_source_bias`（escalate → waiting_approval + review.escalate），`runtime.js` 保留真实短码经 `resolution.errorCode` 进分类，`auditResolution` 审计带 `failureMode` | 已覆盖：同源 Reviewer 触发转人工而非静默通过（`tests/agent-failure-modes-p5d.test.js`） |
+| FM-6 重规划风暴判据 | 熔断、停止重规划、交付部分结果或请求决策；配合 §26 的收益声明、等价计划拒绝、冷却窗口、diff 判据、禁止新建 run 规避 | 已落地（2026-11-07，PR #61）：冷却窗口与指纹去重在 `storm-suppression.js`，收益与 diff 判据在同模块 `checkImprovementClaim()`/`stepKeysOf()`，阻断面在 `model-adapter.js`、`agent-runtime.js`、`router.js` 三处；**2026-11-07 补齐（P5-D）**：`runtime.js` 终态收口加 `collectPartialOutcome`——部分结果交付与 `task.decision_requested` 请求决策 | 已覆盖：相同 `errorFingerprint` + 相同 `planDigest` 连续失败被拒（`tests/agent-throttle-breaker-storm.test.js` f、h）；达上限交付部分结果并披露 / 无可交付时请求决策（`tests/agent-failure-modes-p5d.test.js`，失败终态 `result` 带已完成产物与缺口披露，不再空 `summary`） |
 
 本表同时是「未完整模块清单」的落点依据：§13 的七因子路由记 A-06，§14 的五类比较对象与分层记 A-07，§18 的收益门槛与阶段占比记 A-11，§26 的四维限流与三态 breaker 记 B-07，§15 的轮值与责任人记 A-08 与 B-11。
