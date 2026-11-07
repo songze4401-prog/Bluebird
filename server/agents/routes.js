@@ -243,7 +243,13 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
   router.get(
     '/agents/:botId/sessions',
     route(async (req, res) => {
-      res.json({ sessions: sessions.listSessions(req.params.botId) });
+      // 这是 direct 用户的对话列表。worker 会话是任务内部轨迹：详情端点对
+      // 已归属会话只认服务端签发的作用域令牌（direct 调用方拿不到 → 401），
+      // 若列出来，用户选中就只会得到「读取会话失败」。
+      const list = sessions
+        .listSessions(req.params.botId)
+        .filter(item => item.scope !== 'worker' && !item.owner);
+      res.json({ sessions: list });
     })
   );
 

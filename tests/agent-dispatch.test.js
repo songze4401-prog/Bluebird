@@ -455,6 +455,19 @@ test('委派意图识别：显式请求命中，否定/元问题/旧任务回看
   assert.ok(
     detectExplicitDelegation('上次没查成，这次让记忆机器人重新查一下')
   );
+
+  // 代词指代：最近上下文提到过机器人时，"让她总结会话"同样成立。
+  const botContext = '刚才 memory_remember 没被解析，记忆库里没有东西。';
+  assert.equal(
+    detectExplicitDelegation('修了，再扔一边，让她总结会话', {
+      contextText: botContext,
+    }).taskType,
+    'memory.explain'
+  );
+  // 没有机器人上下文、或是否定句，代词不触发，避免误判普通对话。
+  assert.equal(detectExplicitDelegation('修了，再扔一边，让她总结会话'), null);
+  assert.equal(detectExplicitDelegation('别让她查', { contextText: botContext }), null);
+  assert.equal(detectExplicitDelegation('她是谁', { contextText: botContext }), null);
 });
 
 test('显式子 agent 请求：模型不主动调用工具时，运行时仍真实派发', async () => {

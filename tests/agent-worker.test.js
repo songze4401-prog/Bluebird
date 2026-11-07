@@ -1108,6 +1108,32 @@ test('HTTP 回归：direct 会话与缺失会话的既有行为不变', async ()
   assert.ok(Array.isArray(listJson.sessions));
 });
 
+test('HTTP 列表：direct 对话列表不暴露 worker 会话，列出的会话均可直接读取', async () => {
+  const direct = sessions.createSession('memory', { title: '列表 direct' });
+  const worker = sessions.createSession('memory', { title: '列表 worker', scope: 'worker' });
+  const unattached = sessions.createSession('memory', {
+    title: '列表 worker 未归属',
+    scope: 'worker',
+  });
+  const task = makeTask({ goal: '列表隔离任务' });
+  openScope(task.taskId, worker.id, 'run_list_scope');
+
+  const response = await fetch(`${agentApiBase}/agents/memory/sessions`);
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  const ids = payload.sessions.map(item => item.id);
+
+  assert.ok(ids.includes(direct.id), 'direct 会话应出现在列表中');
+  assert.ok(!ids.includes(worker.id), '已归属的 worker 会话不应出现在列表中');
+  assert.ok(!ids.includes(unattached.id), '未归属的 worker 会话同样不应出现');
+
+  // 列表与详情可读性必须一致：列表里出现的每个会话，direct 调用方都能读。
+  for (const id of ids) {
+    const detail = await getSessionHttp(id);
+    assert.equal(detail.status, 200, `列表中的会话 ${id} 应可直接读取`);
+  }
+});
+
 // ---- H2. 共享产物访问控制（Phase 2 第 1 项） ----
 // 证据边界：同一进程 + 库级调用（未新增 HTTP 路由），令牌为服务端签发。
 

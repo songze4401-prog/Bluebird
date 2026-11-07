@@ -104,6 +104,11 @@ function hangingCompletion(options) {
 }
 
 const agentRuntime = require(path.join(SERVER, 'agent-runtime.js'));
+const { parseTextualToolCalls } = require(path.join(SERVER, 'textual-tool-calls.js'));
+const { auditTaskClaims } = require(path.join(SERVER, 'task-claim-guard.js'));
+
+// 每次探针调用记录 seq：正文封装解析出的调用必须真的执行到 handler。
+const probeSeqs = [];
 
 agentRuntime.registerTool({
   name: 'guard_probe',
@@ -113,15 +118,34 @@ agentRuntime.registerTool({
     properties: { seq: { type: 'number' } },
   },
   validate: args => ({ ok: true, args: args && typeof args === 'object' ? args : {} }),
-  handler: async args => ({
-    ok: true,
-    summary: 'probe',
-    seq: args && args.seq,
-  }),
+  handler: async args => {
+    probeSeqs.push(args && args.seq);
+    return {
+      ok: true,
+      summary: 'probe',
+      seq: args && args.seq,
+    };
+  },
   readOnly: true,
   risk: 'read',
   timeoutMs: 2000,
 });
+
+// 与线上观测到的形态一致（全角 ｜）。也用于构造半角变体。
+function dsmlEnvelope(calls, bar = '｜｜') {
+  const lines = [`<${bar}DSML${bar} calls>`];
+  for (const call of calls) {
+    lines.push(`<${bar}DSML${bar} invoke name="${call.name}">`);
+    for (const [key, value] of Object.entries(call.args || {})) {
+      lines.push(
+        `<${bar}DSML${bar} parameter name="${key}" string="true">${String(value)}</${bar}DSML${bar} parameter>`
+      );
+    }
+    lines.push(`</${bar}DSML${bar} invoke>`);
+  }
+  lines.push(`</${bar}DSML${bar} calls>`);
+  return lines.join('\n');
+}
 
 function policyWith(budgets = {}) {
   return {
@@ -166,6 +190,159 @@ test('P2-05：轮次上限按 policy 的 maxRounds 判定，不用全局 MAX_ROU
     true,
     '按 policy 的 maxRounds=2 跑满两轮，应判定为到达轮次上限'
   );
+});
+
+// ---- 正文工具调用封装（DSML）：只认严格结构，解析结果必须真执行 ----
+
+test('正文工具调用封装：严格解析、兼容半角分隔符，残缺封装一律拒绝', () => {
+  assert.equal(parseTextualToolCalls('普通模型回复'), null);
+  assert.equal(parseTextualToolCalls(''), null);
+  assert.equal(parseTextualToolCalls(null), null);
+
+  const fullWidth = parseTextualToolCalls(
+    `提交如下：\n\n${dsmlEnvelope([{ name: 'guard_probe', args: { seq: 3 } }])}\n\n以上。`
+  );
+  assert.ok(fullWidth, '完整封装应被解析');
+  assert.equal(fullWidth.text, '提交如下：\n\n\n\n以上。');
+  assert.equal(fullWidth.calls.length, 1);
+  assert.equal(fullWidth.calls[0].function.name, 'guard_probe');
+  assert.deepEqual(JSON.parse(fullWidth.calls[0].function.arguments), { seq: '3' });
+
+  const halfWidth = parseTextualToolCalls(
+    dsmlEnvelope([{ name: 'guard_probe', args: { seq: 4 } }], '||')
+  );
+  assert.ok(halfWidth, '半角分隔符同样应被解析');
+  assert.equal(halfWidth.calls.length, 1);
+
+  // 残缺：只有开标签 / 只有外层没有 invoke / 没闭合 —— 一律 null，不改写正文。
+  assert.equal(parseTextualToolCalls('<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="x">'), null);
+  assert.equal(parseTextualToolCalls('<｜｜DSML｜｜ calls>\n</｜｜DSML｜｜ calls>'), null);
+  assert.equal(
+    parseTextualToolCalls(
+      '<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="guard_probe">\n</｜｜DSML｜｜ calls>'
+    ),
+    null
+  );
+});
+
+test('正文工具调用封装：末轮不下发 tools 仍执行解析出的调用，回复不含标记', async () => {
+  probeSeqs.length = 0;
+  let finalRequest = null;
+
+  modelResponder = body => {
+    const hasToolResult = (body.messages || []).some(m => m.role === 'tool');
+    if (!hasToolResult) return toolCallCompletion('guard_probe', { seq: 1 });
+
+    finalRequest = body;
+    return textCompletion(
+      `检索完成，下面提交候选记忆。\n\n${dsmlEnvelope([
+        { name: 'guard_probe', args: { seq: 2 } },
+      ])}`
+    );
+  };
+
+  const outcome = await agentRuntime.runAgentTurn({
+    messages: [{ role: 'user', content: '先检索再提交' }],
+    sessionId: 's-textual-final',
+    policy: policyWith({ maxRounds: 2 }),
+  });
+
+  assert.equal(outcome.rounds, 2);
+  assert.ok(finalRequest, '应捕获到末轮请求');
+  assert.equal(finalRequest.tools, undefined, '末轮不得下发 tools');
+  assert.deepEqual(probeSeqs, [1, 2], '末轮正文封装里的调用必须真的执行');
+  assert.equal(outcome.toolSteps.length, 2, '两次探针都应记入 toolSteps');
+  assert.equal(outcome.rawReply, '检索完成，下面提交候选记忆。');
+  assert.ok(!outcome.rawReply.includes('DSML'), '交付正文不得残留封装标记');
+});
+
+test('正文工具调用封装：普通轮次解析后照常进入下一轮并回传工具结果', async () => {
+  probeSeqs.length = 0;
+  let secondRequest = null;
+
+  modelResponder = body => {
+    const hasToolResult = (body.messages || []).some(m => m.role === 'tool');
+    if (!hasToolResult) {
+      return textCompletion(`先查一下。\n\n${dsmlEnvelope([
+        { name: 'guard_probe', args: { seq: 7 } },
+      ])}`);
+    }
+    secondRequest = body;
+    return textCompletion('已写入。');
+  };
+
+  const outcome = await agentRuntime.runAgentTurn({
+    messages: [{ role: 'user', content: '查完再写' }],
+    sessionId: 's-textual-normal',
+    policy: policyWith({ maxRounds: 3 }),
+  });
+
+  assert.equal(outcome.rounds, 2);
+  assert.deepEqual(probeSeqs, [7]);
+  assert.equal(outcome.rawReply, '已写入。');
+  assert.ok(
+    secondRequest && secondRequest.messages.some(m => m.role === 'tool'),
+    '下一轮请求应包含 tool 结果消息'
+  );
+});
+
+// ---- 回复里的任务声明核对：不许把编造的任务 ID / 排队状态当事实交付 ----
+
+test('任务声明核对：未知任务 ID 替换为「不存在」并追加系统校验说明', () => {
+  const reply =
+    '扔了，返回了任务 ID：`task_4c6f4dbb-18a4-4d8d-9a53-9d5f6b0e2a71`，状态 queued。';
+  const out = auditTaskClaims(reply, {
+    lookupTask: () => null,
+    listSessionTasks: () => [],
+    dispatchedThisTurn: false,
+  });
+
+  assert.equal(out.violations[0].kind, 'unknown_task_id');
+  assert.ok(!out.reply.includes('task_4c6f4dbb'), '未知 ID 不得原样交付');
+  assert.ok(out.reply.includes('task_（不存在）'));
+  assert.ok(out.reply.includes('系统校验'));
+});
+
+test('任务声明核对：已知任务 ID 原样保留；无据排队声明才追加说明', () => {
+  const known = 'task_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const okReply = `任务 ${known} 已进入队列。`;
+  const ok = auditTaskClaims(okReply, {
+    lookupTask: id => (id === known ? { status: 'queued' } : null),
+    listSessionTasks: () => [],
+    dispatchedThisTurn: false,
+  });
+  assert.deepEqual(ok.violations, []);
+  assert.equal(ok.reply, okReply);
+
+  const now = Date.parse('2026-11-07T16:36:00Z');
+
+  // 会话里既无活跃任务、也无 10 分钟内新任务：排队声明无据。
+  const stale = auditTaskClaims('队列里是个 queued，没转 completed。', {
+    lookupTask: () => null,
+    listSessionTasks: () => [],
+    dispatchedThisTurn: false,
+    now,
+  });
+  assert.equal(stale.violations[0].kind, 'dispatch_without_task');
+  assert.ok(stale.reply.includes('系统校验'));
+
+  // 会话里有正在跑的任务：不误报。
+  const benign = auditTaskClaims('队列里是个 queued。', {
+    lookupTask: () => null,
+    listSessionTasks: () => [{ status: 'running', createdAt: '2026-11-07T16:30:00Z' }],
+    dispatchedThisTurn: false,
+    now,
+  });
+  assert.deepEqual(benign.violations, []);
+
+  // 本轮真的派发了：即便任务尚未写入列表，也不追加说明。
+  const justDispatched = auditTaskClaims('已派发，状态 queued。', {
+    lookupTask: () => null,
+    listSessionTasks: () => [],
+    dispatchedThisTurn: true,
+    now,
+  });
+  assert.deepEqual(justDispatched.violations, []);
 });
 
 test('P2-06：连续工具调用不会在外部 AbortSignal 上累积监听器', async () => {

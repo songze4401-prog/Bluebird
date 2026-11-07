@@ -1,8 +1,7 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Alert,
   Clipboard,
-  ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -41,6 +40,23 @@ function InlineContent({
   );
 }
 
+// 代码块默认最多展示的行数。超过即折叠并提供「展开全部」：
+// 模型偶尔会吐很长的 JSON/日志，不设上限会把整个聊天视口占满，
+// 看起来像「页面划不动」。
+const COLLAPSED_CODE_LINES = 16;
+
+/** 去掉尾部空白行并算出折叠信息（纯函数，便于单测）。 */
+export function prepareCodeBlock(raw: string): {
+  text: string;
+  lineCount: number;
+  collapsible: boolean;
+} {
+  const text = String(raw || '').replace(/[\s\u0085\u2028\u2029]+$/, '');
+  const lineCount = text ? text.split('\n').length : 0;
+
+  return { text, lineCount, collapsible: lineCount > COLLAPSED_CODE_LINES };
+}
+
 function CodeBlock({
   block,
   styles,
@@ -48,6 +64,9 @@ function CodeBlock({
   block: Extract<MarkdownBlock, { type: 'code' }>;
   styles: ReturnType<typeof createStyles>;
 }) {
+  const [expanded, setExpanded] = useState(false);
+  const prepared = useMemo(() => prepareCodeBlock(block.code), [block.code]);
+
   const copy = () => {
     try {
       Clipboard.setString(block.code);
@@ -56,6 +75,11 @@ function CodeBlock({
       Alert.alert('复制失败', '当前设备无法访问剪贴板。');
     }
   };
+
+  const collapsed = prepared.collapsible && !expanded;
+  const visibleText = collapsed
+    ? prepared.text.split('\n').slice(0, COLLAPSED_CODE_LINES).join('\n')
+    : prepared.text;
 
   return (
     <View style={styles.codeBlock}>
@@ -70,15 +94,25 @@ function CodeBlock({
           <Text style={styles.copyText}>复制</Text>
         </TouchableOpacity>
       </View>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.codeScroll}
-      >
+      {/* 刻意不用横向 ScrollView：嵌套滚动会在 Android 上吞掉外层列表的
+          纵向手势，代码块一长就「划不动」。这里让文本在气泡宽度内换行。 */}
+      <View style={styles.codeBody}>
         <Text selectable style={styles.codeText}>
-          {block.code}
+          {visibleText}
         </Text>
-      </ScrollView>
+      </View>
+      {prepared.collapsible && (
+        <TouchableOpacity
+          onPress={() => setExpanded(value => !value)}
+          activeOpacity={0.65}
+          accessibilityLabel={expanded ? '收起代码' : '展开代码'}
+          style={styles.codeToggle}
+        >
+          <Text style={styles.codeToggleText}>
+            {expanded ? '收起' : `展开全部（${prepared.lineCount} 行）`}
+          </Text>
+        </TouchableOpacity>
+      )}
     </View>
   );
 }
@@ -98,7 +132,7 @@ export function MarkdownMessage({
   const blocks = useMemo(() => parseMarkdown(content), [content]);
 
   return (
-    <View style={styles.root}>
+    <View style={styles.root} testID="markdown-root">
       {blocks.map((block, index) => {
         if (block.type === 'code') {
           return (
@@ -165,6 +199,11 @@ const createStyles = (theme: Theme) =>
     root: {
       marginTop: 10,
       gap: 12,
+      // 父级 assistantColumn 是 alignItems:'flex-start'，根容器若不占满宽就会
+      // shrink-to-fit；列表行里 flex:1 的文本将按「不定宽」测量，Android 上测量与
+      // 布局两次宽度不一致会少算换行行高，下一块（段落）就压住列表末行。
+      // 占满宽让行宽在测量/布局两趟一致，行高才正确。
+      alignSelf: 'stretch',
     },
     paragraph: {
       color: theme.chatText,
@@ -261,7 +300,7 @@ const createStyles = (theme: Theme) =>
       color: theme.textSecondary,
       fontSize: 11,
     },
-    codeScroll: {
+    codeBody: {
       padding: 12,
     },
     codeText: {
@@ -269,5 +308,16 @@ const createStyles = (theme: Theme) =>
       fontFamily: 'monospace',
       fontSize: 13,
       lineHeight: 20,
+    },
+    codeToggle: {
+      paddingVertical: 10,
+      alignItems: 'center',
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: theme.border,
+    },
+    codeToggleText: {
+      color: theme.accent,
+      fontSize: 12,
+      fontWeight: '600',
     },
   });
