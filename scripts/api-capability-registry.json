@@ -2,10 +2,26 @@
   "version": 1,
   "note": "后端能力与前端消费者的登记册。scripts/verify-api-capabilities.js 会核对：路由是否都登记、登记的路由是否真的存在、标 ui 的能力是否真有前端消费者、标 api-only 的能力是否确实没有前端消费者。api-only 的能力不会被下线——它们是对外可用的 API，只是本仓库没有做界面。",
   "routers": [
-    { "file": "server/index.js", "mount": "", "mountExpr": "app.get('/'" },
-    { "file": "server/agents/routes.js", "mount": "", "mountExpr": "app.use(createAgentRouter" },
-    { "file": "server/retrieval/routes.js", "mount": "/retrieval", "mountExpr": "app.use('/retrieval'" },
-    { "file": "server/monitoring/routes.js", "mount": "/monitoring", "mountExpr": "app.use('/monitoring'" }
+    {
+      "file": "server/index.js",
+      "mount": "",
+      "mountExpr": "app.get('/'"
+    },
+    {
+      "file": "server/agents/routes.js",
+      "mount": "",
+      "mountExpr": "app.use(createAgentRouter"
+    },
+    {
+      "file": "server/retrieval/routes.js",
+      "mount": "/retrieval",
+      "mountExpr": "app.use('/retrieval'"
+    },
+    {
+      "file": "server/monitoring/routes.js",
+      "mount": "/monitoring",
+      "mountExpr": "app.use('/monitoring'"
+    }
   ],
   "families": [
     {
@@ -32,13 +48,17 @@
           "name": "会话列表",
           "probe": "API_PATHS.sessions",
           "ui": true,
-          "consumers": ["hooks/useSessionList.ts"]
+          "consumers": [
+            "hooks/useSessionList.ts"
+          ]
         },
         {
           "name": "单会话读取 / 删除",
           "probe": "API_PATHS.session(",
           "ui": true,
-          "consumers": ["hooks/useSessionActions.ts"]
+          "consumers": [
+            "hooks/useSessionActions.ts"
+          ]
         }
       ]
     },
@@ -51,7 +71,9 @@
           "name": "历史分页读取 / 清空 / 撤回",
           "probe": "API_PATHS.history",
           "ui": true,
-          "consumers": ["hooks/useChatSession.ts"]
+          "consumers": [
+            "hooks/useChatSession.ts"
+          ]
         }
       ]
     },
@@ -64,7 +86,9 @@
           "name": "图片上传 / 读取 / 删除",
           "probe": "API_PATHS.uploads",
           "ui": true,
-          "consumers": ["lib/uploads.ts"],
+          "consumers": [
+            "lib/uploads.ts"
+          ],
           "note": "选图 → 上传的上层流程在 hooks/useAttachments.ts，它调用 lib/uploads.ts 的 uploadImage。"
         }
       ]
@@ -92,7 +116,9 @@
           "name": "仓库列表 / 上传 / 收藏 / 搜索 / 删除",
           "probe": "API_PATHS.stickerRepo",
           "ui": true,
-          "consumers": ["lib/uploads.ts"]
+          "consumers": [
+            "lib/uploads.ts"
+          ]
         }
       ]
     },
@@ -129,7 +155,9 @@
           "name": "记忆读取 / 审计视图 / 删除 / 按会话清理 / 确认 / 驳回 / 归档 / 写入尝试",
           "probe": "API_PATHS.memory",
           "ui": true,
-          "consumers": ["components/MemoryCenterScreen.tsx"]
+          "consumers": [
+            "components/MemoryCenterScreen.tsx"
+          ]
         },
         {
           "name": "待确认候选 GET /memory/pending",
@@ -149,14 +177,18 @@
           "name": "画像读取 GET /profile",
           "probe": "API_PATHS.profile",
           "ui": true,
-          "consumers": ["components/MemoryCenterScreen.tsx"],
+          "consumers": [
+            "components/MemoryCenterScreen.tsx"
+          ],
           "note": "P6 Memory Center 画像页；从 memory.json 派生，includeInactive 可查看历史。"
         },
         {
           "name": "画像反馈 POST /profile/feedback",
           "probe": "API_PATHS.profileFeedback",
           "ui": true,
-          "consumers": ["components/MemoryCenterScreen.tsx"],
+          "consumers": [
+            "components/MemoryCenterScreen.tsx"
+          ],
           "note": "Memory Center 画像页的确认/否认/纠正；feedbackId 幂等，结果写审计。"
         }
       ]
@@ -170,7 +202,9 @@
           "name": "读取情绪",
           "probe": "API_PATHS.emotion",
           "ui": true,
-          "consumers": ["hooks/useChatSession.ts"]
+          "consumers": [
+            "hooks/useChatSession.ts"
+          ]
         }
       ]
     },
@@ -183,7 +217,9 @@
           "name": "上报 / 读取快照",
           "probe": "API_PATHS.presenceReport",
           "ui": true,
-          "consumers": ["lib/presence.ts"]
+          "consumers": [
+            "lib/presence.ts"
+          ]
         }
       ]
     },
@@ -196,7 +232,9 @@
           "name": "读取 / 保存人格",
           "probe": "API_PATHS.persona",
           "ui": true,
-          "consumers": ["components/ControlPanelScreen.tsx"]
+          "consumers": [
+            "components/ControlPanelScreen.tsx"
+          ]
         }
       ]
     },
@@ -209,7 +247,10 @@
           "name": "读取 / 保存 / 重置策略",
           "probe": "API_PATHS.agentPolicy",
           "ui": true,
-          "consumers": ["components/ControlPanelScreen.tsx", "components/AgentToolsScreen.tsx"]
+          "consumers": [
+            "components/ControlPanelScreen.tsx",
+            "components/AgentToolsScreen.tsx"
+          ]
         }
       ]
     },
@@ -222,7 +263,10 @@
           "name": "非流式 / 流式对话",
           "probe": "API_PATHS.chat",
           "ui": true,
-          "consumers": ["hooks/useChatSession.ts", "lib/stream.ts"]
+          "consumers": [
+            "hooks/useChatSession.ts",
+            "lib/stream.ts"
+          ]
         }
       ]
     },
@@ -235,13 +279,17 @@
           "name": "Bot 列表",
           "probe": "API_PATHS.agents",
           "ui": true,
-          "consumers": ["components/AgentTeamScreen.tsx"]
+          "consumers": [
+            "components/AgentTeamScreen.tsx"
+          ]
         },
         {
           "name": "Bot 配置 / 凭证 / 会话 / 事件 / 审批 / 对话",
           "probe": "API_PATHS.agentConfig(",
           "ui": true,
-          "consumers": ["components/MemoryBotScreen.tsx"]
+          "consumers": [
+            "components/MemoryBotScreen.tsx"
+          ]
         },
         {
           "name": "Bot 权限查看 GET /agents/:botId/permissions",
@@ -261,7 +309,9 @@
           "name": "审批通过 / 驳回 / 执行",
           "probe": "API_PATHS.agentApprovalApprove",
           "ui": true,
-          "consumers": ["components/MemoryBotScreen.tsx"]
+          "consumers": [
+            "components/MemoryBotScreen.tsx"
+          ]
         }
       ]
     },
@@ -274,7 +324,10 @@
           "name": "任务列表 / 详情 / 创建",
           "probe": "API_PATHS.agentTasks",
           "ui": true,
-          "consumers": ["components/TasksPanel.tsx", "components/MemoryBotScreen.tsx"]
+          "consumers": [
+            "components/TasksPanel.tsx",
+            "components/MemoryBotScreen.tsx"
+          ]
         },
         {
           "name": "取消任务 POST /agent-tasks/:taskId/cancel",
@@ -294,7 +347,9 @@
           "name": "结果事件流 GET /agent-results/stream",
           "probe": "API_PATHS.agentResultsStream",
           "ui": true,
-          "consumers": ["lib/agent-results-stream.ts"]
+          "consumers": [
+            "lib/agent-results-stream.ts"
+          ]
         }
       ]
     },
@@ -321,7 +376,9 @@
           "name": "总览 / Trace / 事件 / 审计 / 工具 / 模型 / 告警 / 健康",
           "probe": "API_PATHS.monitoringOverview",
           "ui": true,
-          "consumers": ["components/MonitoringScreen.tsx"]
+          "consumers": [
+            "components/MonitoringScreen.tsx"
+          ]
         },
         {
           "name": "监控元信息 GET /monitoring/meta",
@@ -336,6 +393,34 @@
           "ui": false,
           "consumers": [],
           "note": "指标接口可用，监控页只读总览与 Trace，没有指标曲线。"
+        }
+      ]
+    },
+    {
+      "id": "agent-improvements",
+      "title": "改进提案（P5-G 自我改进闭环）",
+      "prefix": "/agent-improvements",
+      "capabilities": [
+        {
+          "name": "提案列表 / 详情 / 创建（POST /agent-improvements）",
+          "probe": "'/agent-improvements'",
+          "ui": false,
+          "consumers": [],
+          "note": "P5-G 闭环的生产入口之一：提案创建即进入 draft，评测与发布是显式后续步骤；禁止自改清单在服务端校验。"
+        },
+        {
+          "name": "评测 / 人工批准 / 否决 / 发布（灰度）/ 回归检查",
+          "probe": "'/agent-improvements/'.concat",
+          "ui": false,
+          "consumers": [],
+          "note": "approve/reject 仅 local-owner（单用户鉴权模型）；release 落 improvement:<id> 策略版本与灰度比例；rollback-check 缺省用提案评测输入重跑 candidate 对照发布前基线。"
+        },
+        {
+          "name": "POST /agent-improvements/draft-from-failures 从失败模式事件起草",
+          "probe": "'/agent-improvements/draft-from-failures'",
+          "ui": false,
+          "consumers": [],
+          "note": "与周期调度器同一实现（draftFromRecentFailures），带开放提案去重守卫。"
         }
       ]
     }
