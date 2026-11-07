@@ -42,7 +42,7 @@
 - 委派方在任务上声明 `requiredContextKeys`（createTask 归一化：去重去空白、单键 ≤60 字、总数 ≤12）；
 - 承载位置两处：`task.context`（JSON 对象字符串）与 `task.contextRef`（已验证产物，正文为 JSON 对象）；
 - 纯文本 context 无法承载具名约束：声明了必需键而两处都给不出 → **fail-closed 判缺失**，不靠猜；
-- 缺失键能从 contextRef 产物补齐 → 重建放行，runtime 落 `handoff.context_rebuilt` 审计（新事件类型，payload 只含键名与引用 id）；
+- 缺失键能从 contextRef 产物补齐 → 重建放行，runtime 落 `handoff.context_rebuilt` 审计（新事件类型，payload 只含键名与引用 id）；**重建出的约束会合并进本次投影用的 context 副本**（`必要上下文` 一行），保证 Worker 真的看到约束值，而不是只拿到一个读不到的引用 id；原任务记录不回写，审计以事件为准；
 - runtime 在投影之前调 `validateHandoff`：缺失即抛 `handoff_context_missing`，Worker 不启动、模型零调用，按 recovery 收口。
 
 ### 3.3 FM-3：`tasks.js` 创建期父子授权交集（choke point）+ `router.js` 前置拦截

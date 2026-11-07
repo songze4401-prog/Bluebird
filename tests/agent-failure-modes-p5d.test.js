@@ -91,10 +91,13 @@ async function waitForStatus(taskId, statuses, timeoutMs = 15000) {
 
 let providerServer = null;
 let providerCallSeq = 0;
+// 记录每次模型请求的 messages，用于证明「重建出的约束真的进了 Worker 上下文」。
+let providerMessages = [];
 
 async function setupProvider(mode = 'text') {
   if (providerServer) providerServer.close();
   providerCallSeq = 0;
+  providerMessages = [];
   providerServer = http.createServer((req, res) => {
     let body = '';
     req.on('data', chunk => {
@@ -106,6 +109,12 @@ async function setupProvider(mode = 'text') {
         res.writeHead(status, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(payload));
       };
+      try {
+        const parsed = JSON.parse(body);
+        providerMessages.push(Array.isArray(parsed.messages) ? parsed.messages : []);
+      } catch (_) {
+        // 非 JSON 请求体（例如被上游拦下）不参与断言。
+      }
       // mode=rate_limit：恒 429，模拟模型调用层失败（无任何产物落盘）。
       if (mode === 'rate_limit') {
         reply(429, { error: { message: 'rate limited', type: 'rate_limit' } });
@@ -452,6 +461,13 @@ test('P5-D FM-2 真实链路：缺失键从已验证引用重建后放行并留 
   );
   assert.ok(rebuiltEvent, '重建必须留 handoff.context_rebuilt 审计');
   assert.strictEqual(rebuiltEvent.payload.rebuiltFrom, ctx.id);
+  // 「重建」必须让约束值真的进入 Worker 上下文，而不只是放行 + 记审计。
+  const workerPrompt = providerMessages.flat().map(item => item.content || '').join('\n');
+  assert.match(
+    workerPrompt,
+    /使用已验证的 A1 结论/,
+    '重建出的约束值必须出现在模型请求里（否则 Worker 仍看不到约束）'
+  );
 });
 
 // ---- f. FM-5：同源偏差命名化与转人工 ----

@@ -90,7 +90,9 @@ function validateHandoff({ task, resolveContextRef = null } = {}) {
       const refKeys = new Set(Object.keys(refObject));
       const stillMissing = missing.filter(key => !refKeys.has(key));
       if (stillMissing.length < missing.length) {
-        rebuiltObject = {};
+        // 重建结果必须含「context 里原有的键 + 从引用补到的键」：
+        // 只回传补到的那几个键，调用方投影时会把原本就有的约束丢掉。
+        rebuiltObject = { ...(contextObject || {}) };
         for (const key of required) {
           if (refKeys.has(key)) rebuiltObject[key] = refObject[key];
         }

@@ -1209,8 +1209,14 @@ async function runTask(taskId) {
       );
     }
     const config = require('./config').getRuntimeConfig(task.botId);
+    // FM-2：从已验证引用重建出的约束必须真的进入 Worker 上下文，否则「重建放行」
+    // 只是放行、模型仍看不到约束值。这里只改本次投影用的一份副本，不回写任务记录
+    //（原 context 保持原样，审计以 handoff.context_rebuilt 为准）。
+    const projectionTask = handoff.rebuilt
+      ? { ...task, context: JSON.stringify(handoff.rebuiltObject) }
+      : task;
     const projection = projectWorkerContext({
-      task,
+      task: projectionTask,
       systemPrompt: config.prompt.systemPrompt,
     });
     const toolMeta = {};
