@@ -236,14 +236,14 @@ test('A-08 申诉规则：仅 Owner、需理由、仅被拒记录、超 24h 窗�
   );
 });
 
-test('A-08 审批负载：按风险/动作/等待时长可查询，性能指标留位不填数值', () => {
+test('A-08 审批负载：按风险/动作/等待时长可查询；P5-F 起指标从记录实算', () => {
   const before = approvals.approvalQueueDistribution({ botId: 'memory' });
   const m1 = makeMergeApproval();
   const m2 = makeMergeApproval();
   const a1 = makeArchiveApproval();
   const after = approvals.approvalQueueDistribution({ botId: 'memory' });
 
-  assert.strictEqual(after.policyVersion, 'approval-workload-v1');
+  assert.strictEqual(after.policyVersion, 'approval-workload-v2');
   assert.strictEqual(after.totalPending, before.totalPending + 3);
   assert.ok(after.byRiskLevel.R2 >= before.byRiskLevel.R2 + 2);
   assert.ok(after.byRiskLevel.R3 >= before.byRiskLevel.R3 + 1);
@@ -253,11 +253,21 @@ test('A-08 审批负载：按风险/动作/等待时长可查询，性能指标�
   assert.strictEqual(bucketSum, after.totalPending);
   assert.ok(after.oldestWaitMs >= 0);
 
-  // 指标数值需压测：只留字段位，必须为 null / 明确来源。
-  assert.strictEqual(after.metrics.source, 'requires_load_test');
+  // P5-F（approval-workload-v2）：分位与 SLA 达成率从记录实算；无样本时
+  // 如实 null + caveat，绝不填估算值。
+  assert.strictEqual(after.metrics.source, 'computed_from_records');
   for (const key of ['throughputPerHour', 'slaComplianceRate', 'p50WaitMs', 'p95WaitMs']) {
-    assert.strictEqual(after.metrics[key], null, `${key} 不得填估算值`);
+    const value = after.metrics[key];
+    assert.ok(
+      value === null || (typeof value === 'number' && Number.isFinite(value)),
+      `${key} 只能是 null（无样本）或实算数值，不得填估算值`
+    );
+    if (value === null) {
+      assert.ok(after.metrics.caveat && after.metrics.caveat.length > 4, `${key} 为 null 必须带 caveat`);
+    }
   }
+  assert.ok(Number.isInteger(after.metrics.sampleCount));
+  assert.ok('byAssignee' in after, 'P5-F 起按责任人分布待处理量');
 
   // 按等待时长过滤：把 created 记录按 2 小时后的时间点读，应落入 gte2h。
   const later = approvals.approvalQueueDistribution({
