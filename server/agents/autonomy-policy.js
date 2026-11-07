@@ -26,8 +26,28 @@ const REQUIRED_CAPABILITIES = {
   'memory.write': ['memory.write'],
 };
 
+// P5-G：策略版本位——Phase 4 的 p4-autonomy-v1 与改进闭环发布的版本
+//（improvement:<proposalId>）都是「激活位」；p4-default 等其余版本默认关闭。
+function isPolicyActive(state) {
+  if (state.enabled === false) return false;
+  return state.version === ACTIVE_VERSION || String(state.version || '').startsWith('improvement:');
+}
+
 function isEnabled(state = strategyVersion.get()) {
-  return state.enabled !== false && state.version === ACTIVE_VERSION;
+  return isPolicyActive(state);
+}
+
+/**
+ * P5-G：按实体的开关判定——策略总开关与版本位照旧，灰度由 strategy 状态
+ * 的 gray 比例决定（分桶函数来自 improvement-loop，确定性哈希）。
+ * 没有灰度配置时与 isEnabled 同义；实体不在桶内按「策略对该实体关闭」处理。
+ */
+function isEnabledFor(entityId) {
+  const state = strategyVersion.get();
+  if (!isPolicyActive(state)) return false;
+  return strategyVersion.isEnabledFor(entityId, {
+    isInBucket: (id, ratio) => require('./improvement-loop').isInBucket(id, ratio),
+  });
 }
 
 function requiredCapabilities(taskType) {
@@ -209,6 +229,7 @@ module.exports = {
   ACTIVE_VERSION,
   HIGH_RISK_TASK_TYPES,
   isEnabled,
+  isEnabledFor,
   requiredCapabilities,
   plan,
   decideReplan,

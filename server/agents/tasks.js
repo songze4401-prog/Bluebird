@@ -135,6 +135,12 @@ const EVENT_TYPES = Object.freeze([
   'task.decision_requested',
   // P5-E / §13：七因子风险评估（只记等级、是否缺信息升级与策略版本，不记因子明细正文）。
   'risk.assessed',
+  // P5-G / §2.6：受控自我改进闭环的审计事件（提案/评测/批准/发布/回滚）。
+  'improvement.proposed',
+  'improvement.evaluated',
+  'improvement.approved',
+  'improvement.released',
+  'improvement.rolled_back',
 ]);
 
 const SAFE_PAYLOAD_KEYS = new Set([
@@ -266,6 +272,9 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'requiresReviewRaised',
   // P5-F / §15：审批责任队列（分配与升级重派的责任人 id，不含正文）。
   'assignee',
+  // P5-G / §2.6：提案 id 与目标名（module:configKey），扁平标量。
+  'proposalId',
+  'target',
 ]);
 
 let taskCache = null;
