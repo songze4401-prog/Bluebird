@@ -264,6 +264,8 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'level',
   'escalated',
   'requiresReviewRaised',
+  // P5-F / §15：审批责任队列（分配与升级重派的责任人 id，不含正文）。
+  'assignee',
 ]);
 
 let taskCache = null;

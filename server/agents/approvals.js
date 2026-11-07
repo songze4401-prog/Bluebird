@@ -122,6 +122,30 @@ const APPEAL_MAX_TIMES = 1;
 const APPEAL_ALLOWED_ACTORS = Object.freeze([permissions.SINGLE_USER_ACTOR]);
 const APPEAL_DECISIONS = Object.freeze(['overturn', 'uphold']);
 
+// P5-F / §15：审批责任人与轮值。原文要求「轮值与责任人分配」；单用户实例的
+// 合法轮值池默认只有 local-owner，但机制必须真实存在——轮值游标持久化、
+// 逐条分配、升级重派到下一位——不能因为池子小就不建。改动必须升版本。
+const APPROVAL_ASSIGNEE_POLICY_VERSION = 'approval-assignee-v1';
+let assigneeRota = Object.freeze([permissions.SINGLE_USER_ACTOR]);
+function setAssigneeRotaForTests(rota) {
+  const list = Array.isArray(rota) ? rota : [];
+  const cleaned = [...new Set(list.map(item => String(item || '').trim()).filter(Boolean))];
+  if (!cleaned.length) {
+    throw new AgentError('invalid_assignee_rota', '轮值池不能为空', 400);
+  }
+  assigneeRota = Object.freeze(cleaned);
+}
+
+/** 轮值取下一位：游标持久化在审批存储里，重启不重置；exclude 用于升级重派。 */
+function nextAssignee(state, { exclude = null } = {}) {
+  const cursor = Number.isInteger(state.assigneeCursor) ? state.assigneeCursor : 0;
+  const pool = assigneeRota.filter(item => item !== exclude);
+  const effective = pool.length ? pool : assigneeRota;
+  const assignee = effective[cursor % effective.length];
+  state.assigneeCursor = cursor + 1;
+  return assignee;
+}
+
 // Phase 3 第 1 项：验证闭环的"人工审批门"。
 // 这两个操作的执行不触碰记忆/外部副作用，因此不走 memoryService 参数校验与
 // 权限白名单；但仍复用同一条审批记录、riskLevel/expiresAt/SLA 与超时语义：
@@ -311,6 +335,10 @@ function publicApproval(record) {
       : { attempts: 0, lastError: null, lastAttemptAt: null, nextRetryAt: null, exhausted: false },
     requestedBy: record.requestedBy,
     requestedAt: record.requestedAt,
+    // P5-F / §15：责任人与轮值（创建时分配、升级时重派）。旧记录缺字段读作 null。
+    assignee: record.assignee || null,
+    assigneePolicyVersion: record.assigneePolicyVersion || null,
+    assigneeReassignedFrom: record.assigneeReassignedFrom || null,
     decidedBy: record.decidedBy || null,
     decidedAt: record.decidedAt || null,
     executedBy: record.executedBy || null,
@@ -920,6 +948,13 @@ function escalateApproval(
   record.escalationSource = String(source || 'manual').slice(0, 40);
   record.escalatedBy = String(actor || 'system').slice(0, 80);
   if (typeof reason === 'string') record.escalationReason = reason.slice(0, 200);
+  // P5-F / §15：升级即重派——原责任人未响应，轮值取下一位（池子里只有他
+  // 一人时保持原责任人，并如实记录）。幂等性由上方 request === 'escalated'
+  // 的早退保证：重派只在首次升级发生一次。
+  const previousAssignee = record.assignee || null;
+  const reassigned = nextAssignee(current, { exclude: previousAssignee });
+  record.assignee = reassigned;
+  record.assigneeReassignedFrom = previousAssignee;
   save();
   recordEvent(
     record.botId,
@@ -932,6 +967,7 @@ function escalateApproval(
       mode: 'approval',
       failureMode: 'approval_stall',
       source: record.escalationSource,
+      assignee: record.assignee || '',
     },
     { approvalId: record.approvalId, taskId: record.taskId, sessionId: record.sessionId }
   );
@@ -1132,6 +1168,10 @@ function createApproval({
     requestedBy:
       requestedBy === 'user' || requestedBy === 'agent' ? requestedBy : 'agent',
     requestedAt: now,
+    // P5-F / §15：责任人与轮值分配（创建时按轮值游标落一名责任人；
+    // 升级时重派，见 escalateApproval）。旧记录缺该字段读作 null。
+    assignee: nextAssignee(current),
+    assigneePolicyVersion: APPROVAL_ASSIGNEE_POLICY_VERSION,
     decidedBy: null,
     decidedAt: null,
     executedBy: null,
@@ -1174,6 +1214,7 @@ function createApproval({
       status: 'pending',
       taskType: operation,
       mode: 'approval',
+      assignee: record.assignee || '',
     },
     { approvalId: record.approvalId, taskId: requestTaskId, sessionId: requestSessionId }
   );
@@ -1511,12 +1552,16 @@ function approvalQueueDistribution({ botId = null, now = Date.now() } = {}) {
   );
   const byRiskLevel = { R2: 0, R3: 0, unknown: 0 };
   const byOperation = {};
+  const byAssignee = { unassigned: 0 };
   const waitingBuckets = { lt5m: 0, lt30m: 0, lt2h: 0, gte2h: 0 };
   let oldestWaitMs = 0;
   for (const item of pending) {
     const riskLevel = typeof item.riskLevel === 'string' ? item.riskLevel : 'unknown';
     byRiskLevel[riskLevel] = (byRiskLevel[riskLevel] || 0) + 1;
     byOperation[item.operation] = (byOperation[item.operation] || 0) + 1;
+    // P5-F / §15：按责任人的待处理量；旧记录没有 assignee，如实在 unassigned 里。
+    const assignee = typeof item.assignee === 'string' && item.assignee ? item.assignee : 'unassigned';
+    byAssignee[assignee] = (byAssignee[assignee] || 0) + 1;
     const requestedAt = Date.parse(item.requestedAt || '');
     const waitMs = Number.isFinite(requestedAt) ? Math.max(0, now - requestedAt) : 0;
     if (waitMs < 5 * 60 * 1000) waitingBuckets.lt5m += 1;
@@ -1525,22 +1570,83 @@ function approvalQueueDistribution({ botId = null, now = Date.now() } = {}) {
     else waitingBuckets.gte2h += 1;
     if (waitMs > oldestWaitMs) oldestWaitMs = waitMs;
   }
+
+  // P5-F / §15 + §18（A-08/A-11）：等待时长分位与 SLA 达成率直接从审批记录算出，
+  // 不再留 requires_load_test 空位。口径（本仓库裁决，改动升版本）：
+  //  - 样本 = 有 decidedAt 的**裁决**记录（approved/rejected/expired/escalated；
+  //    cancelled 不是对事项的裁决，不入分母）；
+  //  - 等待时长 = decidedAt - requestedAt；分位是样本分位点（近似值，如实标注）；
+  //  - SLA 达成率只对有 SLA 的等级（R2 有 slaMs）计算；R3 无 SLA，单独计数
+  //    不进分母——把"没有期限"算成"达成"会虚高。
+  const decidedScope = botId
+    ? item => item.botId === botId
+    : () => true;
+  const decided = Object.values(current.approvals).filter(
+    item =>
+      decidedScope(item) &&
+      item.status !== 'pending' &&
+      typeof item.decidedAt === 'string' &&
+      Date.parse(item.decidedAt) > 0 &&
+      requestStatusOf(item) !== 'cancelled'
+  );
+  const waits = decided
+    .map(item => Date.parse(item.decidedAt) - Date.parse(item.requestedAt || item.decidedAt))
+    .filter(ms => Number.isFinite(ms) && ms >= 0)
+    .sort((a, b) => a - b);
+  const percentile = (sorted, ratio) => {
+    if (!sorted.length) return null;
+    const index = Math.min(sorted.length - 1, Math.ceil(sorted.length * ratio) - 1);
+    return sorted[Math.max(0, index)];
+  };
+  const p50WaitMs = percentile(waits, 0.5);
+  const p95WaitMs = percentile(waits, 0.95);
+
+  const withSla = decided.filter(item => {
+    const view = slaViewOf(item);
+    return view.riskLevel === 'R2' && Number.isInteger(view.slaMs);
+  });
+  const withinSla = withSla.filter(item => {
+    const view = slaViewOf(item);
+    return Date.parse(item.decidedAt) - Date.parse(item.requestedAt) <= view.slaMs;
+  });
+  const slaComplianceRate = withSla.length ? withinSla.length / withSla.length : null;
+
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const decidedLastDay = decided.filter(
+    item => now - Date.parse(item.decidedAt) <= DAY_MS
+  ).length;
+  const throughputPerHour = decidedLastDay > 0 ? decidedLastDay / 24 : null;
+
+  const noSamples = waits.length === 0;
   return {
-    // 原文 §15 只写「审批吞吐」，未定义指标口径；数值需压测，留位不填。
-    policyVersion: 'approval-workload-v1',
+    // v2（P5-F / §15 + §18）：分位与 SLA 达成率改为从记录实算；样本不足如实 null。
+    policyVersion: 'approval-workload-v2',
     generatedAt: nowIso(now),
     botId: botId || null,
     totalPending: pending.length,
     byRiskLevel,
     byOperation,
+    byAssignee,
     waitingBuckets,
     oldestWaitMs,
     metrics: {
-      source: 'requires_load_test',
-      throughputPerHour: null,
-      slaComplianceRate: null,
-      p50WaitMs: null,
-      p95WaitMs: null,
+      source: 'computed_from_records',
+      sampleCount: waits.length,
+      // 近似分位：直接取排位样本点，不是插值；样本少时波动大，读数须带 caveat。
+      p50WaitMs,
+      p95WaitMs,
+      slaComplianceRate,
+      slaSampleCount: withSla.length,
+      slaNotApplicable: decided.filter(item => {
+        const view = slaViewOf(item);
+        return !(view.riskLevel === 'R2' && Number.isInteger(view.slaMs));
+      }).length,
+      throughputPerHour,
+      caveat: noSamples
+        ? '样本里还没有已裁决的审批记录，等待分位与 SLA 达成率不可算'
+        : waits.length < 5
+          ? '裁决样本不足 5 条，分位波动大，只作参考'
+          : null,
     },
   };
 }
@@ -1937,6 +2043,8 @@ module.exports = {
   batchDecide,
   appealApproval,
   resolveAppeal,
+  setAssigneeRotaForTests,
+  APPROVAL_ASSIGNEE_POLICY_VERSION,
   approvalQueueDistribution,
   requestStatusOf,
   mergedStateOf,
