@@ -105,6 +105,7 @@ function hangingCompletion(options) {
 
 const agentRuntime = require(path.join(SERVER, 'agent-runtime.js'));
 const { parseTextualToolCalls } = require(path.join(SERVER, 'textual-tool-calls.js'));
+const { auditTaskClaims } = require(path.join(SERVER, 'task-claim-guard.js'));
 
 // 每次探针调用记录 seq：正文封装解析出的调用必须真的执行到 handler。
 const probeSeqs = [];
@@ -283,6 +284,65 @@ test('正文工具调用封装：普通轮次解析后照常进入下一轮并�
     secondRequest && secondRequest.messages.some(m => m.role === 'tool'),
     '下一轮请求应包含 tool 结果消息'
   );
+});
+
+// ---- 回复里的任务声明核对：不许把编造的任务 ID / 排队状态当事实交付 ----
+
+test('任务声明核对：未知任务 ID 替换为「不存在」并追加系统校验说明', () => {
+  const reply =
+    '扔了，返回了任务 ID：`task_4c6f4dbb-18a4-4d8d-9a53-9d5f6b0e2a71`，状态 queued。';
+  const out = auditTaskClaims(reply, {
+    lookupTask: () => null,
+    listSessionTasks: () => [],
+    dispatchedThisTurn: false,
+  });
+
+  assert.equal(out.violations[0].kind, 'unknown_task_id');
+  assert.ok(!out.reply.includes('task_4c6f4dbb'), '未知 ID 不得原样交付');
+  assert.ok(out.reply.includes('task_（不存在）'));
+  assert.ok(out.reply.includes('系统校验'));
+});
+
+test('任务声明核对：已知任务 ID 原样保留；无据排队声明才追加说明', () => {
+  const known = 'task_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const okReply = `任务 ${known} 已进入队列。`;
+  const ok = auditTaskClaims(okReply, {
+    lookupTask: id => (id === known ? { status: 'queued' } : null),
+    listSessionTasks: () => [],
+    dispatchedThisTurn: false,
+  });
+  assert.deepEqual(ok.violations, []);
+  assert.equal(ok.reply, okReply);
+
+  const now = Date.parse('2026-11-07T16:36:00Z');
+
+  // 会话里既无活跃任务、也无 10 分钟内新任务：排队声明无据。
+  const stale = auditTaskClaims('队列里是个 queued，没转 completed。', {
+    lookupTask: () => null,
+    listSessionTasks: () => [],
+    dispatchedThisTurn: false,
+    now,
+  });
+  assert.equal(stale.violations[0].kind, 'dispatch_without_task');
+  assert.ok(stale.reply.includes('系统校验'));
+
+  // 会话里有正在跑的任务：不误报。
+  const benign = auditTaskClaims('队列里是个 queued。', {
+    lookupTask: () => null,
+    listSessionTasks: () => [{ status: 'running', createdAt: '2026-11-07T16:30:00Z' }],
+    dispatchedThisTurn: false,
+    now,
+  });
+  assert.deepEqual(benign.violations, []);
+
+  // 本轮真的派发了：即便任务尚未写入列表，也不追加说明。
+  const justDispatched = auditTaskClaims('已派发，状态 queued。', {
+    lookupTask: () => null,
+    listSessionTasks: () => [],
+    dispatchedThisTurn: true,
+    now,
+  });
+  assert.deepEqual(justDispatched.violations, []);
 });
 
 test('P2-06：连续工具调用不会在外部 AbortSignal 上累积监听器', async () => {

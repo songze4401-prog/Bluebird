@@ -201,7 +201,7 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-119 files, 2418 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
+119 files, 2420 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
 node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js tests/monitoring.test.js   # node:test suites (222)
@@ -299,7 +299,7 @@ node tests/agent-crash-injection.test.js   # 4 — real SIGKILL crash injection 
 node tests/agent-cycle-detection.test.js   # 6 — §17 delegation and artifact-lineage cycle detection with a readable cycle path: wired into the delegation entry and artifact persist path, cycles are rejected before any write, and legal chains pass
 node tests/agent-watchdog.test.js          # 26 — watchdog health classification, action planning with whitelist/cooldown/breaker, intake pause and resume, offline recovery, escalation, audit fields, dry-run, external supervisor restart drill
 node tests/monitoring-api.test.js          # 38 — monitoring API + real HTTP/context/agent/SSE/persistence instrumentation (model SDK stubbed)
-node tests/agent-runtime-guards.test.js    # 7 — agent runtime guards: cross-session MERGE dedupe scope, task deadlineMs, policy maxRounds, abort-listener cleanup
+node tests/agent-runtime-guards.test.js    # 9 — agent runtime guards: cross-session MERGE dedupe scope, task deadlineMs, policy maxRounds, abort-listener cleanup
 node tests/agent-run-limits.test.js        # 4 — §25 persisted hard limits: delegation depth 2, two replans per run (task-level counts also recorded), three run retries; counts survive restart and retries never reset them
 node tests/agent-storage-limits.test.js    # 2 — agent event outbox hard cap, overflow accounting (drop_oldest) and outbox recovery
 node tests/memory-observability.test.js    # 10 — memory retrieval funnel (candidates/returned/injected), filter reason breakdown (expired/superseded/archived/pending/low-relevance), injected token attribution vs char count, sent-content hash, provider-vs-stub usage labeling and token reconciliation

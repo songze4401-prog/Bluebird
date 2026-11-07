@@ -11,6 +11,8 @@ const { createRetrievalRouter } = require('./retrieval/routes');
 const { createAgentRouter } = require('./agents/routes');
 const agentRuntime = require('./agents/runtime');
 const agentApprovals = require('./agents/approvals');
+const agentTasks = require('./agents/tasks');
+const { auditTaskClaims } = require('./task-claim-guard');
 
 // 生产级可观测性：独立模块 + 只读查询 API。记录失败绝不影响主业务；
 // BLUEBIRD_MONITORING=0 可关闭，前端会显示 disabled 而不是健康。
@@ -374,6 +376,32 @@ const AGENT_STOP_MESSAGES = Object.freeze({
 });
 function agentStopReply(reason) {
   return AGENT_STOP_MESSAGES[reason] || 'Agent 已停止。';
+}
+
+// 交付前核对回复里的任务声明：模型可能声称"已派发/已排队/给出了任务 ID"，
+// 但本轮并没有真实调用 delegate_to_bot。未知任务 ID 替换为「不存在」并追加
+// 系统校验说明，避免把编造的排队状态当成事实交付给用户。
+function auditChatReply(rawReply, ctx, toolSteps) {
+  const verdict = auditTaskClaims(rawReply, {
+    lookupTask: id => agentTasks.getTask(id),
+    listSessionTasks: () =>
+      agentTasks.listTasks('memory', {
+        parentSessionId: ctx.sessionId,
+        limit: 50,
+      }),
+    dispatchedThisTurn: Array.isArray(toolSteps)
+      ? toolSteps.some(step => step && step.name === 'delegate_to_bot' && step.ok === true)
+      : false,
+  });
+
+  if (verdict.violations.length) {
+    console.warn(
+      `[agent-claim-guard] session=${ctx.sessionId}` +
+        ` violations=${verdict.violations.map(item => item.kind).join(',')}`
+    );
+  }
+
+  return verdict.reply;
 }
 
 // 多模态图片模块：上传校验 / 存储 / 读取 / 表情包索引
@@ -3421,6 +3449,8 @@ app.post('/chat', requireAuth, async (req, res) => {
       throw new Error('模型没有返回有效内容');
     }
 
+    rawReply = auditChatReply(rawReply, ctx, toolSteps);
+
     const result = completeChatTurn({
       ctx,
       rawReply,
@@ -3921,6 +3951,14 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
 
   // 缓冲里剩余的非标签内容放行（若有半截标签说明模型输出截断，
   // done 事件的权威文本仍由 stripMoodTags 全量清洗兜底）
+  const beforeClaimCheck = rawReply;
+  rawReply = auditChatReply(rawReply, ctx, toolSteps);
+  if (rawReply !== beforeClaimCheck) {
+    // 校验说明是服务端追加的纯文本，直接作为末段 delta 让用户当场看到，
+    // done 事件里的权威文本同样是修正后的内容。
+    sendEvent({ type: 'delta', content: rawReply.slice(beforeClaimCheck.length) });
+  }
+
   const tail = stripper.flush();
   if (tail) sendEvent({ type: 'delta', content: tail });
 

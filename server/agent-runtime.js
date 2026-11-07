@@ -1103,7 +1103,15 @@ async function runAgentTurn({
     !(typeof isClientGone === 'function' && isClientGone()) &&
     Date.now() - startedAt <= maxTotalMs
   ) {
-    const intent = detectExplicitDelegation(userText);
+    const intent = detectExplicitDelegation(userText, {
+      // 代词指代（"让她总结"）需要最近一轮助手正文作为上下文；
+      // 只取最近两条助手消息，避免把久远话题误当成当前委派对象。
+      contextText: (Array.isArray(messages) ? messages : [])
+        .filter(item => item && item.role === 'assistant' && typeof item.content === 'string')
+        .slice(-2)
+        .map(item => item.content)
+        .join('\n'),
+    });
 
     if (intent) {
       if (

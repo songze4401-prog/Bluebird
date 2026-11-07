@@ -33,6 +33,25 @@ const ACTION_AFTER_RE = new RegExp(
   String.raw`${TARGET_SOURCE}[^。！？\n]{0,16}(?:帮我|帮忙|去|查|找|看看|检索|搜索|整理|处理|解释|说明|分析|回顾|总结|delegate|search|explain|check|handle)`,
   'i'
 );
+
+// 代词指代：用户常说"让她/他/它总结"，目标称谓在上文里。
+// 仅当最近上下文确实提到过机器人时才把代词当目标，避免误判普通对话。
+const PRONOUN_SOURCE = String.raw`(?:她|他|它|ta|TA)`;
+const PRONOUN_ACTION_RE = new RegExp(
+  String.raw`(?:让|叫|派(?:给|遣)?|交给|转给|扔给|扔|发给|请)[^。！？\n]{0,10}${PRONOUN_SOURCE}` +
+    '|' +
+    String.raw`${PRONOUN_SOURCE}[^。！？\n]{0,10}(?:帮我|帮忙|去|查|找|看看|检索|搜索|整理|处理|解释|说明|分析|回顾|总结|记住|存|写|跑|做)`,
+  'i'
+);
+const PRONOUN_NEGATION_RE = new RegExp(
+  String.raw`(?:不要|不用|不需要|无需|不必|别|禁止|不准|不能)[^。！？\n]{0,12}${PRONOUN_SOURCE}`,
+  'i'
+);
+const BOT_CONTEXT_RE = new RegExp(
+  String.raw`(?:记忆\s*机器人|记忆\s*bot|memory\s*bot|memorybot|子\s*agent|子代理|sub\s*-?\s*agent|memory_remember|记忆库)`,
+  'i'
+);
+
 const META_QUESTION_RE = /(?:是什么|是啥|能做什么|能干什么|怎么用|如何用|怎么工作|干什么的|有什么区别)/;
 const PAST_REFERENCE_RE = /(?:上次|之前|刚才|刚刚|昨天|前天|早先)/;
 const FRESH_ACTION_RE = /(?:这次|现在|重新|再|帮我|帮忙|去)/;
@@ -40,17 +59,28 @@ const EXPLAIN_RE = /(?:解释|说明|为什么|为何|怎么回事|依据|来源
 
 const GOAL_MAX_CHARS = 2000;
 
-function detectExplicitDelegation(text) {
+function detectExplicitDelegation(text, { contextText = '' } = {}) {
   const raw = typeof text === 'string' ? text.trim() : '';
 
   if (!raw) return null;
-  if (!TARGET_RE.test(raw)) return null;
-  if (NEGATION_RE.test(raw)) return null;
 
-  const strong = STRONG_ACTION_RE.test(raw);
-  const actionable = strong || LOOSE_ACTION_RE.test(raw) || ACTION_AFTER_RE.test(raw);
+  const explicitTarget = TARGET_RE.test(raw);
+  // 代词指代只在最近上下文提到过机器人时成立；否定句不触发。
+  const pronounTarget =
+    !explicitTarget &&
+    BOT_CONTEXT_RE.test(String(contextText || '')) &&
+    PRONOUN_ACTION_RE.test(raw) &&
+    !PRONOUN_NEGATION_RE.test(raw);
 
-  if (!actionable) return null;
+  if (!explicitTarget && !pronounTarget) return null;
+  if (explicitTarget && NEGATION_RE.test(raw)) return null;
+
+  const strong = explicitTarget ? STRONG_ACTION_RE.test(raw) : true;
+  const actionable =
+    explicitTarget &&
+    (strong || LOOSE_ACTION_RE.test(raw) || ACTION_AFTER_RE.test(raw));
+
+  if (!pronounTarget && !actionable) return null;
   if (META_QUESTION_RE.test(raw) && !strong) return null;
   if (PAST_REFERENCE_RE.test(raw) && !FRESH_ACTION_RE.test(raw)) return null;
 
