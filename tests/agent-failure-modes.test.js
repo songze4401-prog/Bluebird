@@ -67,9 +67,9 @@ function assertModeAndAction(errorCode, expectedMode, expectedAction) {
   return disposition;
 }
 
-test('A-10 清单：九类失败模式齐全且处置动作合法', () => {
+test('A-10 清单：失败模式齐全、处置动作合法（P5-C 起为原九类 + FM-4 plan_version_race）', () => {
   const modes = Object.values(errors.FAILURE_MODES);
-  assert.strictEqual(modes.length, 9);
+  assert.strictEqual(modes.length, 10);
   for (const mode of modes) {
     const disposition = errors.failureModeDisposition(mode);
     assert.ok(disposition, `${mode} 必须有处置`);
@@ -79,7 +79,7 @@ test('A-10 清单：九类失败模式齐全且处置动作合法', () => {
     );
     assert.ok(errors.FAILURE_MODE_LABELS[mode], `${mode} 必须有中文清单项`);
   }
-  // 九类各自的默认处置（本仓库裁决口径）。
+  // 各类的默认处置（本仓库裁决口径）。
   assert.strictEqual(errors.failureModeDisposition('dependency_cycle').action, 'terminal');
   assert.strictEqual(errors.failureModeDisposition('dependency_deadlock').action, 'terminal');
   assert.strictEqual(errors.failureModeDisposition('event_out_of_order').action, 'recovery');
@@ -89,6 +89,15 @@ test('A-10 清单：九类失败模式齐全且处置动作合法', () => {
   assert.strictEqual(errors.failureModeDisposition('partial_commit').action, 'recovery');
   assert.strictEqual(errors.failureModeDisposition('budget_exhausted').action, 'terminal');
   assert.strictEqual(errors.failureModeDisposition('approval_stall').action, 'escalate');
+  // FM-4：旧代次仍尝试写 → 确定性拒绝，终态 failed，且不可重试。
+  assert.strictEqual(
+    errors.classifyFailureMode({ errorCode: 'stale_generation' }),
+    'plan_version_race'
+  );
+  assert.strictEqual(errors.failureModeDisposition('plan_version_race').action, 'terminal');
+  assert.strictEqual(errors.failureModeDisposition('plan_version_race').retryable, false);
+  // 存储不可用不是版本竞争，不归入 FM-4（由恢复流程处理）。
+  assert.strictEqual(errors.classifyFailureMode({ errorCode: 'fencing_unavailable' }), null);
 });
 
 test('A-10 dependency_cycle：真实依赖图校验拒绝环 → 终态', () => {

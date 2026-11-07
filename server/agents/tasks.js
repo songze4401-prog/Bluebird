@@ -125,6 +125,10 @@ const EVENT_TYPES = Object.freeze([
   'tool.policy_decision',
   // §26 第 4 项：重规划被风暴判据收口成终态时留痕（只记规则名、计数与计划摘要）。
   'replan.storm_denied',
+  // §20 第 349 步 / FM-4：代次签发、写入资格被拒、资格撤销（只记 id、代次与短码）。
+  'plan.fencing_issued',
+  'plan.fencing_denied',
+  'plan.fencing_revoked',
 ]);
 
 const SAFE_PAYLOAD_KEYS = new Set([
@@ -228,6 +232,13 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'replanCount',
   'retryAfterMs',
   'planDigest',
+  // FM-4：代次判定的原料全是扁平标量（计划指针 + 持有/当前代次）。
+  // 不加进白名单就会被 safePayload 静默丢掉，事件只剩一个空壳。
+  'planId',
+  'planVersion',
+  'generation',
+  'heldGeneration',
+  'currentGeneration',
 ]);
 
 let taskCache = null;

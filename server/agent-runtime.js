@@ -632,13 +632,19 @@ async function executeToolCall(name, rawArgs, context) {
     }
 
     if (verdict.mode === 'blocked') {
+      // 三类拒绝的语义不同，不能共用一句"账本不可用"：
+      // unknown=可能已执行、fencing=资格失效、其余=账本本身不可用。
+      const fencingBlocked = String(verdict.code || '').startsWith('fencing_') ||
+        verdict.code === 'stale_generation';
       const blocked = {
         ok: false,
         code: verdict.code,
         error:
           verdict.code === 'side_effect_unknown'
             ? '该副作用可能已执行，已转入 recovery 等待人工核对'
-            : '幂等账本不可用，副作用已阻止执行',
+            : fencingBlocked
+              ? '写入资格已失效（代次被取代或撤销），副作用已阻止执行'
+              : '幂等账本不可用，副作用已阻止执行',
       };
       monitor.complete({
         ok: false,

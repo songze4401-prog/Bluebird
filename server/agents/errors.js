@@ -152,11 +152,13 @@ function describeAgentError(error) {
   };
 }
 
-// A-10 / §17：九类失败模式的可编码清单（中间件/编排层统一口径）。
+// A-10 / §17：失败模式的可编码清单（中间件/编排层统一口径）。
 // 这里只做「识别 + 默认处置」的纯函数，不引入新状态：
 // 处置动作只允许 retry / recovery / terminal / escalate，复用既有状态与审批门禁。
 // 原文未给处置映射的条目按既有语义落表，标注为「本仓库裁决」。
-const FAILURE_MODE_POLICY_VERSION = 'failure-modes-v1';
+// v2：P5-C 第 1 轮补入 FM-4 plan_version_race（代次被取代/撤销仍尝试写副作用），
+// 处置表内容变了就升版本，不让同一版本号指向两份不同的表。
+const FAILURE_MODE_POLICY_VERSION = 'failure-modes-v2';
 const FAILURE_MODES = Object.freeze({
   dependency_cycle: 'dependency_cycle',
   dependency_deadlock: 'dependency_deadlock',
@@ -167,6 +169,7 @@ const FAILURE_MODES = Object.freeze({
   partial_commit: 'partial_commit',
   budget_exhausted: 'budget_exhausted',
   approval_stall: 'approval_stall',
+  plan_version_race: 'plan_version_race',
 });
 const FAILURE_MODE_LABELS = Object.freeze({
   dependency_cycle: '依赖图成环（§17，图环检测）',
@@ -178,12 +181,15 @@ const FAILURE_MODE_LABELS = Object.freeze({
   partial_commit: '提交中断或半写（§17）',
   budget_exhausted: 'Token/调用预算耗尽（§17）',
   approval_stall: '人工审批悬挂/超时（§17）',
+  plan_version_race: '计划版本竞争：旧代次仍尝试写副作用（§17 FM-4，fencing token）',
 });
 // 默认处置（本仓库裁决要点见注释）：
 // - dependency_cycle/deadlock：无法靠重试自愈 → 终态 failed；
 // - event_out_of_order/artifact_chain_broken/partial_commit：需对账或重建 → recovery；
 // - duplicate_execution：幂等丢弃重复结果 → 终态（completed，保留首次结果）；
 // - stale_lease：失去租约后结果不可信 → 终态 failed（沿用 runtime 现状）；
+// - plan_version_race（FM-4）：代次已被取代或撤销，副作用一次都没做 → 终态 failed；
+//   任务本身的归属由持有当前代次的那一次运行决定，runtime 不在旧运行里改写它的状态；
 // - budget_exhausted：硬限制，不可重试 → 终态 failed；
 // - approval_stall：不自动批准 → 升级审批（复用 review.escalate）。
 const FAILURE_MODE_DISPOSITIONS = Object.freeze({
@@ -250,6 +256,13 @@ const FAILURE_MODE_DISPOSITIONS = Object.freeze({
     errorCode: 'approval_stalled',
     escalationOperation: 'review.escalate',
   }),
+  plan_version_race: Object.freeze({
+    action: 'terminal',
+    retryable: false,
+    status: 'failed',
+    errorCode: 'stale_generation',
+    escalationOperation: null,
+  }),
 });
 
 /**
@@ -275,6 +288,11 @@ function classifyFailureMode(signals = {}) {
   }
   if (/task_lease_lost|lease_expired|stale_lease/.test(text)) {
     return FAILURE_MODES.stale_lease;
+  }
+  // FM-4：代次被取代/撤销后仍尝试写。fencing_unavailable 是存储不可用（需对账，
+  // 不是版本竞争），刻意不入这一类——与 plan_store_corrupted 一样交给恢复流程。
+  if (/stale_generation|fencing_revoked|fencing_token_(invalid|missing)|plan_version_race/.test(text)) {
+    return FAILURE_MODES.plan_version_race;
   }
   if (/recovery_artifact_reference_broken|artifact_chain_broken/.test(text)) {
     return FAILURE_MODES.artifact_chain_broken;
