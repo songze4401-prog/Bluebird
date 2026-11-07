@@ -7,7 +7,9 @@
  *
  * 执行安全硬约束：
  * - 轮数硬上限：一次 Agent 流程最多 MAX_ROUNDS 次模型调用，末轮强制
- *   不带 tools 收尾——模型再想调用工具也没有机会，从结构上杜绝无限循环；
+ *   不带 tools 收尾——模型再想调用工具也没有机会，从结构上杜绝无限循环。
+ *   例外：模型把调用写成正文封装（见 textual-tool-calls.js）时，末轮仍会
+ *   执行解析出的调用（工具预算内）并用剩余正文收尾，不追加模型轮次；
  * - 工具超时硬边界：Promise.race + AbortController。超时即 abort 通知
  *   handler 停止后台工作并立即返回 timeout 结果，不是"停止等待"而已；
  *   handler 迟到的 resolve/reject 被显式吞掉，不会变成 unhandled rejection；
@@ -38,6 +40,7 @@ const delegateToBotTool = require('./tool-dispatch-bot');
 const { truncateText } = require('./text-utils');
 const { buildPolicyInstruction } = require('./agent-policy');
 const { detectExplicitDelegation } = require('./delegation-intent');
+const { parseTextualToolCalls } = require('./textual-tool-calls');
 
 const FORCED_DELEGATION_INSTRUCTION = `
 【服务端已执行子 agent 委派】
@@ -1233,8 +1236,22 @@ async function runAgentTurn({
       completion.choices[0] &&
       completion.choices[0].message;
 
-    const toolCalls =
+    const nativeToolCalls =
       message && Array.isArray(message.tool_calls) ? message.tool_calls : [];
+    // 模型偶发把工具调用写成正文封装（DeepSeek 系 DSML）：只在本次运行
+    // 确有工具时解析；解析出的调用与原生 tool_calls 走同一套执行闸门。
+    const textual =
+      !nativeToolCalls.length && requestSpecs.length > 0
+        ? parseTextualToolCalls(message && message.content)
+        : null;
+    const toolCalls = nativeToolCalls.length
+      ? nativeToolCalls
+      : textual
+        ? textual.calls
+        : [];
+    const assistantContent = textual
+      ? textual.text
+      : message && message.content;
     const finishReason =
       completion &&
       completion.choices &&
@@ -1261,15 +1278,34 @@ async function runAgentTurn({
     // 不向路由层抛 TypeError。
     if (!toolCalls.length) {
       rawReply =
-        message && typeof message.content === 'string' ? message.content : '';
+        typeof assistantContent === 'string' ? assistantContent : '';
       if (toolBudgetReached) stopReason = 'tool_call_budget';
       break;
     }
 
     if (isFinalRound) {
-      // 末轮本就未带 tools；防御：仍返回 tool_calls 时只收文本，不进下一轮
+      // 末轮本就不下发 tools。模型仍可能以正文封装明确要求调用（textual），
+      // 之前会被静默当成最终文本丢掉、任务却标记 completed。这里只在工具
+      // 预算内执行解析出的调用，再用剩余正文收尾——不追加模型轮次。
+      // 原生 tool_calls 出现在末轮仍是服务商无视约束的异常，维持只收文本。
+      if (textual) {
+        const executable = toolCalls
+          .map(normalizeToolCall)
+          .slice(0, Math.max(0, maxToolCalls - toolCallCount));
+
+        for (const normalized of executable) {
+          if (typeof isClientGone === 'function' && isClientGone()) break;
+          if (Date.now() - startedAt > maxTotalMs) break;
+          if (toolCallCount >= maxToolCalls) break;
+
+          await performToolCall(normalized, round);
+
+          if (consecutiveFailures >= 2) break;
+        }
+      }
+
       rawReply =
-        message && typeof message.content === 'string' ? message.content : '';
+        typeof assistantContent === 'string' ? assistantContent : '';
       if (toolBudgetReached) stopReason = 'tool_call_budget';
       break;
     }
@@ -1290,7 +1326,7 @@ async function runAgentTurn({
       tagModelMessage(
         {
           role: 'assistant',
-          content: message.content == null ? null : message.content,
+          content: assistantContent == null ? null : assistantContent,
           tool_calls: executableCalls,
         },
         `assistant-tool-call:${round}`
