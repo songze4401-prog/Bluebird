@@ -132,7 +132,7 @@ export function MarkdownMessage({
   const blocks = useMemo(() => parseMarkdown(content), [content]);
 
   return (
-    <View style={styles.root}>
+    <View style={styles.root} testID="markdown-root">
       {blocks.map((block, index) => {
         if (block.type === 'code') {
           return (
@@ -199,6 +199,11 @@ const createStyles = (theme: Theme) =>
     root: {
       marginTop: 10,
       gap: 12,
+      // 父级 assistantColumn 是 alignItems:'flex-start'，根容器若不占满宽就会
+      // shrink-to-fit；列表行里 flex:1 的文本将按「不定宽」测量，Android 上测量与
+      // 布局两次宽度不一致会少算换行行高，下一块（段落）就压住列表末行。
+      // 占满宽让行宽在测量/布局两趟一致，行高才正确。
+      alignSelf: 'stretch',
     },
     paragraph: {
       color: theme.chatText,

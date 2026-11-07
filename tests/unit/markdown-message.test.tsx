@@ -65,4 +65,27 @@ describe('MarkdownMessage', () => {
     await user.press(screen.getByLabelText('收起代码'));
     await waitFor(() => expect(screen.queryByText(/line-20/)).toBeNull());
   });
+
+  // 回归：列表末行换行后曾与紧随的段落重叠。根容器在 alignItems:'flex-start'
+  // 的父级里若 shrink-to-fit，行内 flex:1 文本按不定宽测量会少算行高。这里锁定
+  // 根容器占满宽（alignSelf:'stretch'），并确认「列表 + 无空行紧随段落」各自成块。
+  it('列表与紧随段落各自成块，根容器占满宽以避免末行重叠', async () => {
+    await render(
+      <MarkdownMessage
+        theme={theme}
+        content={
+          '能看到的东西大概就这些：\n\n' +
+          '- 咱俩的聊天记录\n' +
+          '- 检索你有没有说过什么、查文档或者代码的工具\n' +
+          '再往下具体的东西就不展开讲了。'
+        }
+      />
+    );
+
+    expect(screen.getByText('检索你有没有说过什么、查文档或者代码的工具')).toBeTruthy();
+    expect(screen.getByText('再往下具体的东西就不展开讲了。')).toBeTruthy();
+
+    const root = screen.getByTestId('markdown-root');
+    expect(root.props.style.alignSelf).toBe('stretch');
+  });
 });
