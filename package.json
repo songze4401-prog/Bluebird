@@ -1,6 +1,7 @@
 {
   "name": "bluebird",
   "version": "0.4.1",
+  "description": "Personal agent platform — persistent, collaborative, and extensible AI systems. 个人智能体平台：以统一智能体运行时为核心的个人 AI 基础设施。",
   "main": "index.ts",
   "engines": {
     "node": ">=22"
