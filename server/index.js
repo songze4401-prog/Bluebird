@@ -3168,6 +3168,9 @@ function scheduleMemoryExtraction(
           status: outcome.written ? 'success' : 'skipped',
           written: outcome.written === true,
           reason: outcome.written ? null : outcome.reason,
+          channel: 'extraction',
+          decision: outcome.decision || null,
+          detail: outcome.detail || null,
         });
 
         logDataEvent({

@@ -10,6 +10,7 @@
  */
 const { applyCandidate } = require('./memory');
 const { textLength } = require('./text-utils');
+const monitoring = require('./monitoring');
 
 const LIMITS = Object.freeze({
   contentMax: 100,
@@ -182,6 +183,15 @@ const definition = Object.freeze({
 
   async handler(args, context = {}) {
     if (!context.sessionId || !context.userText) {
+      // 缺来源上下文的调用也要留痕：Phase 0 观测显示 Agent 通道此前完全
+      // 不可见（0 条写入事件），无从回答「调用失败是否被吞」。
+      monitoring.recordMemoryWrite({
+        action: 'none',
+        status: 'skipped',
+        written: false,
+        reason: 'ungrounded_source',
+        channel: 'agent_tool',
+      });
       return {
         ok: false,
         code: 'ungrounded_source',
@@ -221,6 +231,18 @@ const definition = Object.freeze({
         signal: context.signal,
       }
     );
+
+    // 写入结果与抽取通道对齐：统一落 memory.write.completed（含 channel/decision），
+    // 只带短码与数值，不带记忆正文；status 沿用监控枚举（成功/跳过），
+    // 待确认由 decision=needs_confirmation 区分，不新造 status 值。
+    monitoring.recordMemoryWrite({
+      action: result.action || 'none',
+      status: result.written ? 'success' : 'skipped',
+      written: result.written === true,
+      reason: result.written ? null : result.reason || null,
+      channel: 'agent_tool',
+      decision: result.decision || null,
+    });
 
     if (result.decision === 'reject') {
       return {
