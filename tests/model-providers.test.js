@@ -1187,7 +1187,6 @@ async function main() {
     { url: 'ftp://api.example.com/v1', label: '非 http 协议' },
     { url: 'not-a-url', label: '非法 URL' },
     { url: 'http://metadata.google.internal/v1', label: '云元数据主机名' },
-    { url: 'http://this-host-does-not-exist.invalid/v1', label: '无法解析的域名' },
   ];
   for (const c of ssrfCases) {
     let blocked = false;
@@ -1203,6 +1202,31 @@ async function main() {
     }
     check(`SSRF 拦截：${c.label}`, blocked, c.url);
   }
+
+  // 「无法解析的域名」必须 fail-closed。沙箱 DNS 会把 .invalid 解析成 sink 地址
+  // （实测指向 198.18.0.52），依赖环境 DNS 会让用例在本地假失败；这里与下面的
+  // 调用期 DNS 复验同一手法，注入 ENOTFOUND 确定性地走守卫的解析失败分支——
+  // CI 的正常 DNS 环境同样走这一分支，断言强度不降。
+  const ssrfDns = require('dns');
+  const originalSsrfLookup = ssrfDns.promises.lookup;
+  let unresolvableBlocked = false;
+  ssrfDns.promises.lookup = async () => {
+    const error = new Error('getaddrinfo ENOTFOUND this-host-does-not-exist.invalid');
+    error.code = 'ENOTFOUND';
+    throw error;
+  };
+  try {
+    await adapter.assertPublicUrl('http://this-host-does-not-exist.invalid/v1');
+  } catch (error) {
+    unresolvableBlocked = Boolean(error && error.kind === 'bad_request');
+  } finally {
+    ssrfDns.promises.lookup = originalSsrfLookup;
+  }
+  check(
+    'SSRF 拦截：无法解析的域名',
+    unresolvableBlocked,
+    'http://this-host-does-not-exist.invalid/v1'
+  );
 
   const publicOk = await adapter.assertPublicUrl('http://93.184.216.34/v1');
   check('公网 IP 字面量放行', publicOk && publicOk.addresses.includes('93.184.216.34'));
