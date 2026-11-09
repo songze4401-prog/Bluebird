@@ -155,6 +155,8 @@ const NOTES = {
     'agent event outbox hard cap, overflow accounting (drop_oldest) and outbox recovery',
   'memory-observability':
     'memory retrieval funnel (candidates/returned/injected), filter reason breakdown (expired/superseded/archived/pending/low-relevance), injected token attribution vs char count, sent-content hash, provider-vs-stub usage labeling and token reconciliation',
+  'memory-observation-ledger':
+    'observation ledger (Phase 2 minimal): hash-only low-confidence observations, independent-session counting, 500-cap eviction, corruption isolation, processMemory reject integration',
   'context-trace-verify':
     'end-to-end context trace: sent content hash recomputed from what the stub provider actually received, and stub usage labeled usage_source=stub (never counted as real provider usage)',
   'memory-user-scope':

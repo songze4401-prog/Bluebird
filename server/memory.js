@@ -59,6 +59,7 @@ const {
   semanticCapability,
 } = require('./memory-semantic');
 const { getInstanceUserId } = require('./user-scope');
+const memoryObservationLedger = require('./memory-observation-ledger');
 
 // 数据目录可通过 BLUEBIRD_DATA_DIR 覆盖：测试用临时目录，避免碰到真实数据。
 // 未设置时与 sessions.js / emotion.js 保持一致，落在 server/data/。
@@ -1300,6 +1301,14 @@ inferred 只有当你从用户原话归纳出用户没有直接说出的结论�
     const minConfidence = explicitIntent ? 0.6 : 0.85;
 
     if (!Number.isFinite(confidence) || confidence < minConfidence) {
+      // Phase 2 观察台账（Notion 提案原则 3：有价值但证据不足先观察，不无痕丢弃）：
+      // 只记录内容哈希、会话与短码，绝不存正文；晋升语义留待后续轮次单独评审。
+      memoryObservationLedger.observe({
+        content,
+        sessionId,
+        reason: 'low_confidence',
+        confidence,
+      });
       return skip('low_confidence', { confidence });
     }
 
