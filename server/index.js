@@ -3171,6 +3171,7 @@ function scheduleMemoryExtraction(
           channel: 'extraction',
           decision: outcome.decision || null,
           detail: outcome.detail || null,
+          observerMode: outcome.observerMode || null,
         });
 
         logDataEvent({

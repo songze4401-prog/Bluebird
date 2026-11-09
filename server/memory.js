@@ -315,6 +315,22 @@ function shouldProcessMemory(message) {
   return MEMORY_TRIGGER.test(text);
 }
 
+// ---- 观察模式（Phase 1 自动观察闭环）----
+// trigger（默认）：维持触发词 + 跨消息意图门控的历史行为。
+// every_turn：每条用户消息（非续写）都尝试一次提取，不再依赖记忆口令；
+//   提取输入截到 EXTRACT_INPUT_MAX 码点控成本（真实评测校准前先定 2000，TBD）。
+// 回滚 = 不设置 BLUEBIRD_MEMORY_OBSERVER（或设为 trigger）。env 每次写入时读取，
+// 与 BLUEBIRD_MEMORY_EVIDENCE_POLICY 同一口径：改 .env 后重启后端生效。
+const OBSERVER_TRIGGER = 'trigger';
+const OBSERVER_EVERY_TURN = 'every_turn';
+const EXTRACT_INPUT_MAX = 2000;
+
+function getObserverMode(env = process.env) {
+  return String(env.BLUEBIRD_MEMORY_OBSERVER || '').trim() === OBSERVER_EVERY_TURN
+    ? OBSERVER_EVERY_TURN
+    : OBSERVER_TRIGGER;
+}
+
 // ---- 拒写原因（可观测）----
 // 每条被拒的候选都带一个稳定短码，一路回传给调用方并落到结构化日志，
 // 不再只留一行「Memory skipped」把三种成因混成一件事。
@@ -1966,9 +1982,11 @@ async function attemptMemoryWrite(client, message, sessionId = null, options = {
 
   const text = String(message || '').trim();
 
-  // 本条是否值得尝试提取：上一条留下的待记忆意图，或本条自带触发词。
-  // 先同步消费掉意图，避免并发消息重复使用同一次意图。
-  const shouldTryMemory = pendingMemoryIntent || shouldProcessMemory(text);
+  // 观察模式：every_turn 下每轮都尝试提取（不再依赖触发词）；trigger 维持历史门控。
+  // pendingMemoryIntent 的跨消息意图两种模式都同步消费，避免并发重复使用同一次意图。
+  const observerMode = getObserverMode();
+  const shouldTryMemory =
+    observerMode === OBSERVER_EVERY_TURN ? Boolean(text) : pendingMemoryIntent || shouldProcessMemory(text);
   pendingMemoryIntent = false;
 
   if (!shouldTryMemory) {
@@ -1977,7 +1995,21 @@ async function attemptMemoryWrite(client, message, sessionId = null, options = {
     return outcome;
   }
 
-  const extracted = await extractMemory(client, text, true, sessionId, options);
+  // every_turn 的成本护栏：超长消息只把前 EXTRACT_INPUT_MAX 码点交给抽取器
+  // （sourceQuote 接地与内容校验都在这份输入上进行）；trigger 模式维持 500 上限不变。
+  const extractionText =
+    observerMode === OBSERVER_EVERY_TURN && text.length > EXTRACT_INPUT_MAX
+      ? Array.from(text).slice(0, EXTRACT_INPUT_MAX).join('')
+      : text;
+  outcome.observerMode = observerMode;
+
+  const extracted = await extractMemory(
+    client,
+    extractionText,
+    true,
+    sessionId,
+    options
+  );
 
   if (!extracted.entry) {
     outcome.reason = extracted.reason;
@@ -5173,6 +5205,9 @@ module.exports = {
   searchMemories,
   processMemory,
   applyCandidate,
+  getObserverMode,
+  OBSERVER_EVERY_TURN,
+  EXTRACT_INPUT_MAX,
   clearMemories,
   clearSessionMemories,
   recallMemoryBySourceQuote,

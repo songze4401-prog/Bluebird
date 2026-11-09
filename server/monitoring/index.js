@@ -1488,6 +1488,7 @@ function recordMemoryWrite({
   channel = null,
   decision = null,
   detail = null,
+  observerMode = null,
 } = {}) {
   if (!ACTIVE) return;
   try {
@@ -1512,6 +1513,7 @@ function recordMemoryWrite({
         reason: reason || null,
         channel: channel || null,
         decision: decision || null,
+        observer_mode: observerMode || null,
         anchor_score: numeric(d.anchorScore),
         keyword_hits: numeric(d.keywordHits),
         keyword_total: numeric(d.keywordTotal),

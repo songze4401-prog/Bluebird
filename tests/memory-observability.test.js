@@ -461,6 +461,7 @@ test('写入监控：channel/decision/数值细节入事件，白名单外键与
     reason: 'ungrounded_content',
     channel: 'extraction',
     decision: 'reject',
+    observerMode: 'every_turn',
     detail: { anchorScore: 0.04, keywordHits: 1, keywordTotal: 3, note: '不该出现' },
   });
 
@@ -477,6 +478,7 @@ test('写入监控：channel/decision/数值细节入事件，白名单外键与
 
   assert.ok(evt, '带富属性的写入事件应落库');
   assert.equal(evt.attributes.decision, 'reject');
+  assert.equal(evt.attributes.observer_mode, 'every_turn');
   assert.equal(evt.attributes.anchor_score, 0.04);
   assert.equal(evt.attributes.keyword_hits, 1);
   assert.equal(evt.attributes.keyword_total, 3);
