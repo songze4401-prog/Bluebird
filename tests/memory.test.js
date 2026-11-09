@@ -656,3 +656,74 @@ describe('观察模式（Phase 1 BLUEBIRD_MEMORY_OBSERVER）', SERIAL, () => {
     }
   });
 });
+
+describe('抽取瞬态重试（B3）', SERIAL, () => {
+  // 按脚本逐次返回的假 client：数组元素为 Error/类错误对象时抛出，否则作为补全返回
+  function scriptClient(replies) {
+    const state = { calls: 0 };
+    const client = {
+      chat: {
+        completions: {
+          create: async () => {
+            const reply = replies[Math.min(state.calls, replies.length - 1)];
+            state.calls++;
+            if (reply instanceof Error) throw reply;
+            if (reply && typeof reply === 'object' && reply.kind) throw reply;
+            return { choices: [{ message: { content: reply } }] };
+          },
+        },
+      },
+    };
+    return { client, state };
+  }
+
+  test('connection 类瞬态错误重试一次后成功写入', async () => {
+    await quiesce();
+    seed([]);
+    const { client, state } = scriptClient([
+      { kind: 'connection' },
+      validReply(),
+    ]);
+    const outcome = await memory.processMemory(client, '我叫宋泽');
+    assert.equal(state.calls, 2, '瞬态错误应恰好重试一次');
+    assert.equal(outcome.written, true);
+    assert.equal(memory.getMemories().length, 1);
+  });
+
+  test('auth 类确定性错误不重试', async () => {
+    await quiesce();
+    seed([]);
+    const { client, state } = scriptClient([{ kind: 'auth' }]);
+    // 既有契约：extractMemory 外层 catch 把模型错误转成 skip('model_error')，
+    // 不上抛——断言落点是否写入与调用次数，而非 rejection。
+    const outcome = await memory.processMemory(client, '我叫宋泽');
+    assert.equal(outcome.written, false);
+    assert.equal(outcome.reason, 'model_error');
+    assert.equal(state.calls, 1, '确定性错误不消耗第二次调用');
+    assert.deepEqual(memory.getMemories(), []);
+  });
+
+  test('连续瞬态错误只重试一次（有界）', async () => {
+    await quiesce();
+    seed([]);
+    const { client, state } = scriptClient([
+      { kind: 'timeout' },
+      { kind: 'timeout' },
+    ]);
+    const outcome = await memory.processMemory(client, '我叫宋泽');
+    assert.equal(state.calls, 2, '重试上限为 2 次尝试');
+    assert.equal(outcome.written, false);
+    assert.equal(outcome.reason, 'model_error');
+    assert.deepEqual(memory.getMemories(), []);
+  });
+
+  test('空返回（{}）不重试：那是模型的结论，不翻倍成本', async () => {
+    await quiesce();
+    seed([]);
+    const { client, state } = scriptClient(['{}', validReply()]);
+    const outcome = await memory.processMemory(client, '记住我叫宋泽');
+    assert.equal(state.calls, 1, '空返回不应触发重试');
+    assert.equal(outcome.reason, 'no_content');
+    assert.deepEqual(memory.getMemories(), []);
+  });
+});

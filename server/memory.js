@@ -1164,24 +1164,32 @@ async function extractMemory(client, message, force = false, sessionId = null, o
       `[AI call] memory-extraction session=${sessionId || 'default'} at=${new Date().toISOString()}`
     );
 
-    const auxiliary = monitoring.beginAuxiliaryModel({
-      providerId: 'deepseek',
-      modelId: 'deepseek-chat',
-      kind: 'memory_extract',
-      sessionRef: monitoring.sessionRefFor(sessionId),
-    });
-
+    // B3：瞬时模型错误（timeout/connection/server）单次有界重试，退避 400ms。
+    // 确定性错误（auth/bad_request 等）与空返回（{} → no_content）不重试：
+    // 前者重试也不会变好，后者是模型的真实结论，翻倍成本没有收益。
+    // 每次尝试都是独立的 auxiliary 埋点，重试在监控里可见。
+    const TRANSIENT_EXTRACT_KINDS = new Set(['timeout', 'connection', 'server']);
+    const EXTRACT_MAX_ATTEMPTS = 2;
     let completion;
-    try {
-      completion = await client.chat.completions.create(
-        {
-          model: 'deepseek-chat',
-          temperature: 0,
-          max_tokens: 300,
-          messages: [
-            {
-              role: 'system',
-              content: `
+    let extractAttempts = 0;
+    for (;;) {
+      extractAttempts += 1;
+      const auxiliary = monitoring.beginAuxiliaryModel({
+        providerId: 'deepseek',
+        modelId: 'deepseek-chat',
+        kind: 'memory_extract',
+        sessionRef: monitoring.sessionRefFor(sessionId),
+      });
+      try {
+        completion = await client.chat.completions.create(
+          {
+            model: 'deepseek-chat',
+            temperature: 0,
+            max_tokens: 300,
+            messages: [
+              {
+                role: 'system',
+                content: `
 你是一个长期记忆提取器。
 
 只从用户原话中提取明确、稳定、值得跨会话保存的信息。
@@ -1211,31 +1219,39 @@ keywords 提取 3-5 个与这条记忆直接相关的具体关键词或同义词
 sourceQuote 必须来自用户原话。
 inferred 只有当你从用户原话归纳出用户没有直接说出的结论时才为 true；直接复述用户原话时为 false。
 `.trim(),
-            },
-            {
-              role: 'user',
-              content: message,
-            },
-          ],
-        },
-        {
-          timeout: 15000,
-        }
-      );
+              },
+              {
+                role: 'user',
+                content: message,
+              },
+            ],
+          },
+          {
+            timeout: 15000,
+          }
+        );
 
-      auxiliary.complete({
-        status: 'success',
-        usage: completion && completion.usage ? completion.usage : null,
-      });
-    } catch (error) {
-      auxiliary.complete({
-        status: error && error.kind === 'timeout' ? 'timeout' : 'failed',
-        errorCode:
-          error && (error.kind || error.code)
-            ? error.kind || error.code
-            : 'model_error',
-      });
-      throw error;
+        auxiliary.complete({
+          status: 'success',
+          usage: completion && completion.usage ? completion.usage : null,
+        });
+        break;
+      } catch (error) {
+        const kind = String(
+          (error && (error.kind || error.code)) || 'model_error'
+        );
+        auxiliary.complete({
+          status: error && error.kind === 'timeout' ? 'timeout' : 'failed',
+          errorCode: kind,
+        });
+        if (
+          !TRANSIENT_EXTRACT_KINDS.has(kind) ||
+          extractAttempts >= EXTRACT_MAX_ATTEMPTS
+        ) {
+          throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, 400));
+      }
     }
 
     const raw =

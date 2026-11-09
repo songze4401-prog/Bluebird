@@ -284,6 +284,9 @@ function loadModule(name) {
 let PORT = 0;
 
 async function main() {
+  // 本地 stub 默认 keepAliveTimeout（5s）掐掉的空闲连接会被 SDK（maxRetries:0）
+  // 复用后连接失败——抬高服务端空闲超时，杜绝这条竞态（同 memory-bot）。
+  mockServer.keepAliveTimeout = 30000;
   await new Promise(resolve => mockServer.listen(0, '127.0.0.1', resolve));
   const MOCK_PORT = mockServer.address().port;
   const MOCK_BASE = `http://127.0.0.1:${MOCK_PORT}`;
