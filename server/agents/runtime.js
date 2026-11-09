@@ -335,6 +335,25 @@ function recordWorkerOutcome(botId, ok, errorCode) {
   }
 }
 
+// retrying 退避到期时的补调度定时器。setRetry / 派发退避发生后，任务被
+// nextQueuedTask 的 retryAt 过滤挡在队外，若此刻队列里没有其它可派发任务，
+// 立即触发的那次 scheduleTaskQueue 取不到队、之后也没有任何事件再来"撞醒"
+// 调度器——退避到期后队列就此卡死（活性缺陷，队列活性回归测试锁定）。
+// 这里按 retryAt 装载一次性定时器兜底；unref 保证不阻止进程正常退出。
+const retryPumpTimers = new Set();
+
+function armRetryPump(retryAtIso) {
+  const at = Date.parse(retryAtIso);
+  if (!Number.isFinite(at)) return;
+  const delayMs = Math.max(50, at - Date.now() + 50);
+  const timer = setTimeout(() => {
+    retryPumpTimers.delete(timer);
+    scheduleTaskQueue();
+  }, delayMs);
+  retryPumpTimers.add(timer);
+  if (typeof timer.unref === 'function') timer.unref();
+}
+
 function scheduleTaskQueue() {
   if (scheduling) return;
   scheduling = true;
@@ -361,9 +380,11 @@ function scheduleTaskQueue() {
                 phase: 'dispatch',
                 errorCode: (error && error.code) || 'agent_task_failed',
               });
-              tasks.updateTask(next.taskId, {
-                retryAt: new Date(Date.now() + dispatch.retryAtMs).toISOString(),
-              });
+              const retryAtIso = new Date(
+                Date.now() + dispatch.retryAtMs
+              ).toISOString();
+              tasks.updateTask(next.taskId, { retryAt: retryAtIso });
+              armRetryPump(retryAtIso);
             } else {
               tasks.transitionTask(next.taskId, {
                 to: 'failed',
@@ -1784,6 +1805,9 @@ async function runTask(taskId) {
         finishedAt: nowIso(),
       });
       const retried = tasks.setRetry(task.taskId, { errorCode });
+      // 退避到期时补一次调度（见 armRetryPump 注释）——否则队列里没有其它
+      // 可派发任务时，retrying 任务永远等不到下一次运行。
+      armRetryPump(retried.retryAt);
       // FM-1（§17）：角色漂移重路由前先缩小上下文——丢弃本次越界输出所依据的
       // 自由文本 context，只保留 goal 与已验证引用（contextRef 不受影响），
       // 迫使下一次运行回到 Manifest 声明的职责边界内重新作答。
