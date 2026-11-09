@@ -1,6 +1,6 @@
 # Bluebird 项目全景架构图
 
-> 扫描基线：`main` @ `87f81fa`（2026-11-01，含 PR #50 记忆链路改动）。
+> 扫描基线：`main` @ `0a61e9f`（2026-11-08，PR #72 品牌定位合并提交）。
 > 本文件只做结构梳理，不修改业务代码。
 
 ## 图例
@@ -200,7 +200,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | 客户端 | `App.tsx`、`components/*`、`hooks/*`、`lib/api/*`、`lib/stream.ts`、`lib/agent-results-stream.ts` | 单入口聊天界面；Modal 页面（记忆中心、Agent Team、任务、监控、模型、主题）；REST + SSE 网络层 | 已实现；**移动真机未验证**（Expo Web/RNTL 为准） |
 | HTTP 边界 | `server/index.js`、`single-instance.js`、`api-configs.js` | Bearer 鉴权、CORS 白名单、限流、受控 JSON 错误、单实例锁、路由族 | 已实现 |
-| 对话与上下文 | `prepareChatRequest`、`server/context/*`、`agent-runtime.js`、`agent-policy.js`、`model-adapter.js` | 上下文编排（历史/摘要/记忆/知识/裁剪/trace）、工具循环、策略、Provider 调用 | 已实现；视觉评测为 3 次多数制，非保证 |
+| 对话与上下文 | `prepareChatRequest`、`server/context/*`、`agent-runtime.js`、`agent-policy.js`、`model-adapter.js`、`textual-tool-calls.js`、`task-claim-guard.js`、`delegation-intent.js` | 上下文编排（历史/摘要/记忆/知识/裁剪/trace）、工具循环、策略、Provider 调用、正文工具调用解析、回复任务声明核对、显式委派检测 | 已实现；视觉评测为 3 次多数制，非保证 |
 | 记忆系统 | `memory.js`、`memory-decision.js`、`memory-lifecycle.js`、`memory-semantic.js`、`memory-service.js`、`tool-memory-*.js`、`agents/approvals.js` | 记忆 CRUD、生命周期、候选决策、检索打分、维护审批 | 已实现；**语义层是概念词典，不是神经向量** |
 | 统一检索 | `server/retrieval/*`、`tool-knowledge-search.js` | 五源连接器、BM25/精确/向量融合、RRF、重排、查询契约、派生索引 | 已实现；外部 Embedding/Reranker **生产端点未验证** |
 | Agent Runtime | `server/agents/*`、`scripts/bluebird-watchdog.js`、`scripts/bluebird-supervisor.js` | Router、Task Contract、租约/状态机、Worker、工具网关、结果投递、Watchdog/Supervisor | 四阶段已实现；checkpoint 不可续跑、多进程未启用、OS 调度未安装 |
