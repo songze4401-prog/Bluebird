@@ -1480,13 +1480,27 @@ function recordTask({
   }
 }
 
-function recordMemoryWrite({ action = 'none', status = 'success', written = false, reason = null } = {}) {
+function recordMemoryWrite({
+  action = 'none',
+  status = 'success',
+  written = false,
+  reason = null,
+  channel = null,
+  decision = null,
+  detail = null,
+  observerMode = null,
+} = {}) {
   if (!ACTIVE) return;
   try {
     metrics.increment('memory_writes_total', {
       action: action || 'none',
       status,
     });
+    // detail 只收白名单里的数值分量（锚点分 / 关键词覆盖 / 置信度）：
+    // 正文、原话、关键词文本一律不进监控属性，白名单外的键直接丢弃。
+    const numeric = value =>
+      typeof value === 'number' && Number.isFinite(value) ? value : null;
+    const d = detail && typeof detail === 'object' ? detail : {};
     recordEvent({
       event_name: EVENTS.MEMORY_WRITE_COMPLETED,
       component: 'memory',
@@ -1497,6 +1511,13 @@ function recordMemoryWrite({ action = 'none', status = 'success', written = fals
         action,
         written: written === true,
         reason: reason || null,
+        channel: channel || null,
+        decision: decision || null,
+        observer_mode: observerMode || null,
+        anchor_score: numeric(d.anchorScore),
+        keyword_hits: numeric(d.keywordHits),
+        keyword_total: numeric(d.keywordTotal),
+        confidence: numeric(d.confidence),
       },
     });
   } catch (_) {

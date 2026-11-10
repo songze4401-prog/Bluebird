@@ -78,6 +78,13 @@ function toolCall(name, args) {
 }
 
 const providerServer = http.createServer((req, res) => {
+  // 'refuse' 模式：直接掐断 socket，模拟瞬态连接失败——SDK（maxRetries:0）会把
+  // 它归类为 model_connection（在 RETRYABLE_MODEL_ERROR_CODES 内），供队列活性
+  // 回归测试驱动一次「失败 → retrying 退避 → 自动补调度」的完整回路。
+  if (providerMode === 'refuse') {
+    if (res.socket) res.socket.destroy();
+    return;
+  }
   const auth = req.headers.authorization || '';
   if (req.method === 'GET' && req.url === '/v1/models') {
     seenAuth.push(auth);
@@ -233,6 +240,12 @@ let apiServer;
 let apiBase;
 
 test.before(async () => {
+  // 本地 stub 的默认 keepAliveTimeout（5s）会在子测试间隙掐掉空闲 keep-alive 连接；
+  // model-adapter 的 openai SDK 是 maxRetries:0，复用到一条已被服务端掐死的 socket
+  // 会直接以 model_connection 失败，并进一步让排队任务退避到 retrying——其余任务
+  // 完成后无人再触发调度，队列就此卡死（memory-bot/agent-worker 偶发的根因）。
+  // 把服务端空闲超时抬到测试时长之上，杜绝这条竞态。
+  providerServer.keepAliveTimeout = 30000;
   await new Promise(resolve => providerServer.listen(0, '127.0.0.1', resolve));
   providerPort = providerServer.address().port;
 
@@ -708,6 +721,52 @@ test('持久任务队列：并发限制、失败隔离与重启恢复', async ()
   runtime.startTask(afterFailure.taskId);
   assert.equal((await waitForTask(afterFailure.taskId)).status, 'completed');
   providerMode = 'text';
+});
+
+test('队列活性：唯一任务瞬态失败进 retrying 后，退避到期必须被自动补调度', async () => {
+  // 回归背景：run 期瞬态失败走 setRetry（retryAt=+1s×attempts）后直接收尾；
+  // 立即触发的 scheduleTaskQueue 会因 retryAt 未到而取不到队，若此刻队列里
+  // 没有其它任务，退避到期后没有任何定时器再触发调度——队列就此卡死。
+  // 修复：进入 retrying 时按 retryAt 装载一次性补调度定时器（armRetryPump）。
+  // retrying 只在 BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS>1 时可达（默认 1 直接 failed），
+  // 因此本用例显式把上限抬到 2。
+  const prevMaxAttempts = process.env.BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS;
+  process.env.BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS = '2';
+  try {
+    providerMode = 'refuse';
+    const solo = tasks.createTask({
+      botId: 'memory',
+      taskType: 'memory.search',
+      goal: '瞬态失败自动重试',
+      allowedTools: ['memory_search'],
+      deadlineMs: 20000,
+    });
+    runtime.startTask(solo.taskId);
+
+    // 等第一次失败落进 retrying（model_connection 在 maxAttempts=2 下允许一次退避重试）
+    const deadline = Date.now() + 8000;
+    let first = tasks.getTask(solo.taskId);
+    while (Date.now() < deadline) {
+      first = tasks.getTask(solo.taskId);
+      if (first && first.status === 'retrying') break;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.equal(first && first.status, 'retrying', '首次失败应进入 retrying 退避');
+
+    // 退避窗口内恢复 stub，之后不再有任何手动 startTask/scheduleTaskQueue——
+    // 任务必须由补调度定时器自行拉起并完成。
+    providerMode = 'text';
+    const done = await waitForTask(solo.taskId, 10000);
+    assert.equal(done.status, 'completed', '退避到期后必须被自动补调度并完成');
+    assert.ok(Number(done.attempts) >= 2, `应至少尝试两次，实际 ${done.attempts}`);
+  } finally {
+    if (prevMaxAttempts === undefined) {
+      delete process.env.BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS;
+    } else {
+      process.env.BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS = prevMaxAttempts;
+    }
+    providerMode = 'text';
+  }
 });
 
 test('HTTP API：鉴权由外层注入，配置/凭证/会话/任务均走真实接口', async () => {

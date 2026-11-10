@@ -35,6 +35,12 @@ const { retrieveMemory } = require(path.join(__dirname, '..', 'server', 'context
 const { config } = require(path.join(__dirname, '..', 'server', 'context', 'config.js'));
 const { estimateTokens, textLength } = require(path.join(__dirname, '..', 'server', 'text-utils.js'));
 const { getInstanceUserId } = require(path.join(__dirname, '..', 'server', 'user-scope.js'));
+const { definition: rememberTool } = require(path.join(
+  __dirname,
+  '..',
+  'server',
+  'tool-memory-remember.js'
+));
 
 const MEMORY_FILE = path.join(TMP, 'memory.json');
 const USER = getInstanceUserId();
@@ -443,4 +449,128 @@ test('模型调用埋点：桩 usage 记为 stub，不写入 provider 统计', (
   assert.equal(completed.length, 1);
   assert.equal(completed[0].attributes.usage_source, 'stub');
   assert.equal(completed[0].attributes.provider_kind, 'stub');
+});
+
+// ------------------------------------------------ 写入监控富属性（P1 前置）
+
+test('写入监控：channel/decision/数值细节入事件，白名单外键与文本不进', () => {
+  monitoring.recordMemoryWrite({
+    action: 'create',
+    status: 'skipped',
+    written: false,
+    reason: 'ungrounded_content',
+    channel: 'extraction',
+    decision: 'reject',
+    observerMode: 'every_turn',
+    detail: { anchorScore: 0.04, keywordHits: 1, keywordTotal: 3, note: '不该出现' },
+  });
+
+  const events = monitoring.getEvents({ from: 0, to: Date.now(), limit: 500 }).items;
+  const evt = [...events]
+    .reverse()
+    .find(
+      item =>
+        item.event_name === monitoring.EVENTS.MEMORY_WRITE_COMPLETED &&
+        item.attributes &&
+        item.attributes.channel === 'extraction' &&
+        item.attributes.reason === 'ungrounded_content'
+    );
+
+  assert.ok(evt, '带富属性的写入事件应落库');
+  assert.equal(evt.attributes.decision, 'reject');
+  assert.equal(evt.attributes.observer_mode, 'every_turn');
+  assert.equal(evt.attributes.anchor_score, 0.04);
+  assert.equal(evt.attributes.keyword_hits, 1);
+  assert.equal(evt.attributes.keyword_total, 3);
+  assert.equal(evt.attributes.note, undefined, '白名单外的键不得进入属性');
+  assert.equal(
+    JSON.stringify(evt.attributes).includes('不该出现'),
+    false,
+    '任何文本载荷不得进入写入监控属性'
+  );
+});
+
+test('写入监控：待确认不算失败（status=skipped，decision 区分语义）', () => {
+  monitoring.recordMemoryWrite({
+    action: 'create',
+    status: 'skipped',
+    written: false,
+    reason: 'single_preference_candidate',
+    channel: 'agent_tool',
+    decision: 'needs_confirmation',
+  });
+
+  const events = monitoring.getEvents({ from: 0, to: Date.now(), limit: 500 }).items;
+  const evt = [...events]
+    .reverse()
+    .find(
+      item =>
+        item.event_name === monitoring.EVENTS.MEMORY_WRITE_COMPLETED &&
+        item.attributes &&
+        item.attributes.channel === 'agent_tool' &&
+        item.attributes.decision === 'needs_confirmation'
+    );
+
+  assert.ok(evt, '待确认写入事件应落库');
+  assert.equal(evt.status, 'skipped', '监控 status 枚举沿用 skipped，不新造值');
+  assert.equal(evt.error_code, null, '待确认不是失败，不得标 error_code');
+  assert.equal(evt.attributes.reason, 'single_preference_candidate');
+});
+
+test('Agent 工具通道写入也进监控：成功与被拒都带 channel=agent_tool', async () => {
+  const ctx = {
+    sessionId: 'sess_obs_tool',
+    userText: '我家的猫叫糯糯，以后帮我记着',
+    userId: USER,
+  };
+
+  const ok = await rememberTool.handler(
+    {
+      content: '用户的猫名叫糯糯',
+      type: 'fact',
+      sourceQuote: '我家的猫叫糯糯',
+      keywords: ['猫', '糯糯'],
+      confidence: 0.92,
+    },
+    ctx
+  );
+  assert.equal(ok.ok, true, '接地充分的新增候选应可直接写入');
+
+  const rejected = await rememberTool.handler(
+    {
+      content: '用户有点累想睡觉',
+      type: 'preference',
+      sourceQuote: '有点累想睡觉',
+      confidence: 0.95,
+    },
+    // 临时状态用例必须有它自己的用户原话：接地门先于决策层，
+    // 复用上面猫句子的 userText 会被拦成 ungrounded_source 而不是 temporary_state。
+    { sessionId: 'sess_obs_tool', userText: '我有点累想睡觉', userId: USER }
+  );
+  assert.equal(rejected.ok, false, '临时状态必须被决策层拒绝');
+
+  const events = monitoring.getEvents({ from: 0, to: Date.now(), limit: 500 }).items;
+  const toolEvents = events.filter(
+    item =>
+      item.event_name === monitoring.EVENTS.MEMORY_WRITE_COMPLETED &&
+      item.attributes &&
+      item.attributes.channel === 'agent_tool'
+  );
+
+  assert.ok(
+    toolEvents.length >= 2,
+    `工具通道应至少落两条写入事件，实际 ${toolEvents.length}`
+  );
+
+  const written = toolEvents.find(item => item.attributes.written === true);
+  const skipped = toolEvents.find(
+    item =>
+      item.attributes.written === false && item.attributes.reason === 'temporary_state'
+  );
+
+  assert.ok(written, '成功写入应带 written=true');
+  assert.equal(written.attributes.decision, 'create');
+  assert.ok(skipped, '临时状态拒绝应带 reason=temporary_state');
+  assert.equal(skipped.attributes.decision, 'reject');
+  assert.equal(skipped.status, 'skipped');
 });

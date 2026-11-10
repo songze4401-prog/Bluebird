@@ -38,7 +38,7 @@
 | 工具调用 | `server/agent-runtime.js` `executeToolCall()` / `runAgentTurn()` | 请求 → 执行 → 成功/失败/超时/拒绝、去重、耗时、结果是否回传 |
 | 流式输出（SSE） | `server/index.js` `/chat/stream` → `recordSseStarted/Completed` | 建连/完成/中止/失败/拒绝、首 token、增量事件数、耗时 |
 | 会话落盘 | `server/index.js` `completeChatTurn()` → `monitoring.recordPersistence()`；`server/sessions.js` `appendMessagesDetailed()` | 写入成功/失败/跳过、消息数、裁剪数、耗时 |
-| 长期记忆写入 | `server/index.js` `scheduleMemoryExtraction()` → `monitoring.recordMemoryWrite()` | 动作、写入/跳过/失败、原因短码（不记录记忆正文） |
+| 长期记忆写入 | `server/index.js` `scheduleMemoryExtraction()`（channel=extraction）与 `server/tool-memory-remember.js`（channel=agent_tool）→ `monitoring.recordMemoryWrite()` | 动作、写入/跳过/失败、原因短码、决策动作（decision）、数值细节（锚点分/关键词覆盖/置信度）；不记录记忆正文 |
 | 数据清除/删除/配置变更 | `server/index.js` 各路由 `auditAction()` | 动作、对象类别、结果、操作者/会话哈希引用、原因 |
 | 备份状态 | `server/backup.js` `checkStatus()`（只读） | 最近成功时间、连续失败、同卷、灾难恢复等级；不触发备份 |
 | 前端控制台 | `components/MonitoringScreen.tsx`；入口 `components/SettingsDrawer.tsx` → `App.tsx` | 只读 API；独立工作区 |

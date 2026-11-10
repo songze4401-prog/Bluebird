@@ -161,6 +161,9 @@ test.before(async () => {
       json(res, 200, payload);
     });
   });
+  // 本地 stub 默认 keepAliveTimeout（5s）掐掉的空闲连接会被 SDK（maxRetries:0）
+  // 复用后以 model_connection 失败——抬高服务端空闲超时，杜绝这条竞态（同 memory-bot）。
+  providerServer.keepAliveTimeout = 30000;
   await new Promise(resolve => providerServer.listen(0, '127.0.0.1', resolve));
   providerBase = `http://127.0.0.1:${providerServer.address().port}/v1`;
 

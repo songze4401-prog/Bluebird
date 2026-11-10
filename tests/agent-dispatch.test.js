@@ -225,6 +225,10 @@ test.before(async () => {
       });
     });
   });
+  // 同 memory-bot/agent-worker：默认 keepAliveTimeout（5s）掐掉的空闲连接会被
+  // SDK（maxRetries:0）复用后连接失败；REPAIR_ROADMAP §6.7 记录的 agent-dispatch
+  // SSE 偶发与本修复同族，一并杜绝。
+  providerServer.keepAliveTimeout = 30000;
   await new Promise(resolve => providerServer.listen(0, '127.0.0.1', resolve));
   providerPort = providerServer.address().port;
   providerBase = `http://127.0.0.1:${providerPort}/v1`;

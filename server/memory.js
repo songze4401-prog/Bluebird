@@ -59,6 +59,7 @@ const {
   semanticCapability,
 } = require('./memory-semantic');
 const { getInstanceUserId } = require('./user-scope');
+const memoryObservationLedger = require('./memory-observation-ledger');
 
 // 数据目录可通过 BLUEBIRD_DATA_DIR 覆盖：测试用临时目录，避免碰到真实数据。
 // 未设置时与 sessions.js / emotion.js 保持一致，落在 server/data/。
@@ -313,6 +314,22 @@ function shouldProcessMemory(message) {
   if (!text || text.length > 500) return false;
 
   return MEMORY_TRIGGER.test(text);
+}
+
+// ---- 观察模式（Phase 1 自动观察闭环）----
+// trigger（默认）：维持触发词 + 跨消息意图门控的历史行为。
+// every_turn：每条用户消息（非续写）都尝试一次提取，不再依赖记忆口令；
+//   提取输入截到 EXTRACT_INPUT_MAX 码点控成本（真实评测校准前先定 2000，TBD）。
+// 回滚 = 不设置 BLUEBIRD_MEMORY_OBSERVER（或设为 trigger）。env 每次写入时读取，
+// 与 BLUEBIRD_MEMORY_EVIDENCE_POLICY 同一口径：改 .env 后重启后端生效。
+const OBSERVER_TRIGGER = 'trigger';
+const OBSERVER_EVERY_TURN = 'every_turn';
+const EXTRACT_INPUT_MAX = 2000;
+
+function getObserverMode(env = process.env) {
+  return String(env.BLUEBIRD_MEMORY_OBSERVER || '').trim() === OBSERVER_EVERY_TURN
+    ? OBSERVER_EVERY_TURN
+    : OBSERVER_TRIGGER;
 }
 
 // ---- 拒写原因（可观测）----
@@ -1148,24 +1165,32 @@ async function extractMemory(client, message, force = false, sessionId = null, o
       `[AI call] memory-extraction session=${sessionId || 'default'} at=${new Date().toISOString()}`
     );
 
-    const auxiliary = monitoring.beginAuxiliaryModel({
-      providerId: 'deepseek',
-      modelId: 'deepseek-chat',
-      kind: 'memory_extract',
-      sessionRef: monitoring.sessionRefFor(sessionId),
-    });
-
+    // B3：瞬时模型错误（timeout/connection/server）单次有界重试，退避 400ms。
+    // 确定性错误（auth/bad_request 等）与空返回（{} → no_content）不重试：
+    // 前者重试也不会变好，后者是模型的真实结论，翻倍成本没有收益。
+    // 每次尝试都是独立的 auxiliary 埋点，重试在监控里可见。
+    const TRANSIENT_EXTRACT_KINDS = new Set(['timeout', 'connection', 'server']);
+    const EXTRACT_MAX_ATTEMPTS = 2;
     let completion;
-    try {
-      completion = await client.chat.completions.create(
-        {
-          model: 'deepseek-chat',
-          temperature: 0,
-          max_tokens: 300,
-          messages: [
-            {
-              role: 'system',
-              content: `
+    let extractAttempts = 0;
+    for (;;) {
+      extractAttempts += 1;
+      const auxiliary = monitoring.beginAuxiliaryModel({
+        providerId: 'deepseek',
+        modelId: 'deepseek-chat',
+        kind: 'memory_extract',
+        sessionRef: monitoring.sessionRefFor(sessionId),
+      });
+      try {
+        completion = await client.chat.completions.create(
+          {
+            model: 'deepseek-chat',
+            temperature: 0,
+            max_tokens: 300,
+            messages: [
+              {
+                role: 'system',
+                content: `
 你是一个长期记忆提取器。
 
 只从用户原话中提取明确、稳定、值得跨会话保存的信息。
@@ -1195,31 +1220,39 @@ keywords 提取 3-5 个与这条记忆直接相关的具体关键词或同义词
 sourceQuote 必须来自用户原话。
 inferred 只有当你从用户原话归纳出用户没有直接说出的结论时才为 true；直接复述用户原话时为 false。
 `.trim(),
-            },
-            {
-              role: 'user',
-              content: message,
-            },
-          ],
-        },
-        {
-          timeout: 15000,
-        }
-      );
+              },
+              {
+                role: 'user',
+                content: message,
+              },
+            ],
+          },
+          {
+            timeout: 15000,
+          }
+        );
 
-      auxiliary.complete({
-        status: 'success',
-        usage: completion && completion.usage ? completion.usage : null,
-      });
-    } catch (error) {
-      auxiliary.complete({
-        status: error && error.kind === 'timeout' ? 'timeout' : 'failed',
-        errorCode:
-          error && (error.kind || error.code)
-            ? error.kind || error.code
-            : 'model_error',
-      });
-      throw error;
+        auxiliary.complete({
+          status: 'success',
+          usage: completion && completion.usage ? completion.usage : null,
+        });
+        break;
+      } catch (error) {
+        const kind = String(
+          (error && (error.kind || error.code)) || 'model_error'
+        );
+        auxiliary.complete({
+          status: error && error.kind === 'timeout' ? 'timeout' : 'failed',
+          errorCode: kind,
+        });
+        if (
+          !TRANSIENT_EXTRACT_KINDS.has(kind) ||
+          extractAttempts >= EXTRACT_MAX_ATTEMPTS
+        ) {
+          throw error;
+        }
+        await new Promise(resolve => setTimeout(resolve, 400));
+      }
     }
 
     const raw =
@@ -1268,6 +1301,14 @@ inferred 只有当你从用户原话归纳出用户没有直接说出的结论�
     const minConfidence = explicitIntent ? 0.6 : 0.85;
 
     if (!Number.isFinite(confidence) || confidence < minConfidence) {
+      // Phase 2 观察台账（Notion 提案原则 3：有价值但证据不足先观察，不无痕丢弃）：
+      // 只记录内容哈希、会话与短码，绝不存正文；晋升语义留待后续轮次单独评审。
+      memoryObservationLedger.observe({
+        content,
+        sessionId,
+        reason: 'low_confidence',
+        confidence,
+      });
       return skip('low_confidence', { confidence });
     }
 
@@ -1966,9 +2007,11 @@ async function attemptMemoryWrite(client, message, sessionId = null, options = {
 
   const text = String(message || '').trim();
 
-  // 本条是否值得尝试提取：上一条留下的待记忆意图，或本条自带触发词。
-  // 先同步消费掉意图，避免并发消息重复使用同一次意图。
-  const shouldTryMemory = pendingMemoryIntent || shouldProcessMemory(text);
+  // 观察模式：every_turn 下每轮都尝试提取（不再依赖触发词）；trigger 维持历史门控。
+  // pendingMemoryIntent 的跨消息意图两种模式都同步消费，避免并发重复使用同一次意图。
+  const observerMode = getObserverMode();
+  const shouldTryMemory =
+    observerMode === OBSERVER_EVERY_TURN ? Boolean(text) : pendingMemoryIntent || shouldProcessMemory(text);
   pendingMemoryIntent = false;
 
   if (!shouldTryMemory) {
@@ -1977,7 +2020,21 @@ async function attemptMemoryWrite(client, message, sessionId = null, options = {
     return outcome;
   }
 
-  const extracted = await extractMemory(client, text, true, sessionId, options);
+  // every_turn 的成本护栏：超长消息只把前 EXTRACT_INPUT_MAX 码点交给抽取器
+  // （sourceQuote 接地与内容校验都在这份输入上进行）；trigger 模式维持 500 上限不变。
+  const extractionText =
+    observerMode === OBSERVER_EVERY_TURN && text.length > EXTRACT_INPUT_MAX
+      ? Array.from(text).slice(0, EXTRACT_INPUT_MAX).join('')
+      : text;
+  outcome.observerMode = observerMode;
+
+  const extracted = await extractMemory(
+    client,
+    extractionText,
+    true,
+    sessionId,
+    options
+  );
 
   if (!extracted.entry) {
     outcome.reason = extracted.reason;
@@ -5173,6 +5230,9 @@ module.exports = {
   searchMemories,
   processMemory,
   applyCandidate,
+  getObserverMode,
+  OBSERVER_EVERY_TURN,
+  EXTRACT_INPUT_MAX,
   clearMemories,
   clearSessionMemories,
   recallMemoryBySourceQuote,

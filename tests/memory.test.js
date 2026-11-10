@@ -42,12 +42,13 @@ function seed(items) {
 
 /** 造一个可控的假 client：记录是否被调用，并按给定内容返回 */
 function fakeClient(replyContent) {
-  const state = { calls: 0 };
+  const state = { calls: 0, lastPayload: null };
   const client = {
     chat: {
       completions: {
-        create: async () => {
+        create: async payload => {
           state.calls++;
+          state.lastPayload = payload || null;
           if (replyContent instanceof Error) throw replyContent;
           return {
             choices: [{ message: { content: replyContent } }],
@@ -586,5 +587,143 @@ describe('落盘持久化（fsync，a5 回归防护）', SERIAL, () => {
       list.some(item => item.content === '用户喜欢爬山'),
       '记忆内容未正确落盘'
     );
+  });
+});
+
+describe('观察模式（Phase 1 BLUEBIRD_MEMORY_OBSERVER）', SERIAL, () => {
+  test('默认 trigger：无触发词不调用模型（锁住回退行为）', async () => {
+    await quiesce();
+    seed([]);
+    delete process.env.BLUEBIRD_MEMORY_OBSERVER;
+    const { client, state } = fakeClient(validReply());
+    await memory.processMemory(client, '今天天气真不错');
+    assert.equal(state.calls, 0, '默认必须维持触发词门控');
+    assert.equal(memory.getObserverMode(), 'trigger');
+  });
+
+  test('every_turn：无触发词也提取一次；空候选不写入', async () => {
+    await quiesce();
+    seed([]);
+    process.env.BLUEBIRD_MEMORY_OBSERVER = 'every_turn';
+    try {
+      const { client, state } = fakeClient('{}');
+      const outcome = await memory.processMemory(client, '今天天气真不错');
+      assert.equal(state.calls, 1, '每轮观察必须对普通消息发起提取');
+      // 模型返回 {} 会被 parseModelJson 解析成空对象 → 走 no_content；
+      // model_empty 只留给解析失败的返回（Phase 0 口径）。
+      assert.equal(outcome.reason, 'no_content');
+      assert.equal(outcome.written, false);
+      assert.equal(outcome.observerMode, 'every_turn');
+      assert.deepEqual(memory.getMemories(), []);
+    } finally {
+      delete process.env.BLUEBIRD_MEMORY_OBSERVER;
+    }
+  });
+
+  test('every_turn：提取成功照常写入', async () => {
+    await quiesce();
+    seed([]);
+    process.env.BLUEBIRD_MEMORY_OBSERVER = 'every_turn';
+    try {
+      const { client, state } = fakeClient(validReply());
+      await memory.processMemory(client, '我叫宋泽');
+      assert.equal(state.calls, 1);
+      const list = memory.getMemories();
+      assert.equal(list.length, 1);
+      assert.equal(list[0].content, '用户叫宋泽');
+    } finally {
+      delete process.env.BLUEBIRD_MEMORY_OBSERVER;
+    }
+  });
+
+  test('every_turn：超长输入截到 2000 码点再进抽取器', async () => {
+    await quiesce();
+    seed([]);
+    process.env.BLUEBIRD_MEMORY_OBSERVER = 'every_turn';
+    try {
+      const longText = '用户喜欢在雨天听爵士乐'.repeat(400); // 4800 码点
+      const { client, state } = fakeClient('{}');
+      await memory.processMemory(client, longText);
+      assert.equal(state.calls, 1);
+      const seen = String(state.lastPayload.messages[1].content);
+      assert.ok(
+        seen.length <= memory.EXTRACT_INPUT_MAX,
+        `抽取输入必须截断，实际 ${seen.length}`
+      );
+      assert.ok(longText.startsWith(seen), '截断必须是前缀截断');
+    } finally {
+      delete process.env.BLUEBIRD_MEMORY_OBSERVER;
+    }
+  });
+});
+
+describe('抽取瞬态重试（B3）', SERIAL, () => {
+  // 按脚本逐次返回的假 client：数组元素为 Error/类错误对象时抛出，否则作为补全返回
+  function scriptClient(replies) {
+    const state = { calls: 0 };
+    const client = {
+      chat: {
+        completions: {
+          create: async () => {
+            const reply = replies[Math.min(state.calls, replies.length - 1)];
+            state.calls++;
+            if (reply instanceof Error) throw reply;
+            if (reply && typeof reply === 'object' && reply.kind) throw reply;
+            return { choices: [{ message: { content: reply } }] };
+          },
+        },
+      },
+    };
+    return { client, state };
+  }
+
+  test('connection 类瞬态错误重试一次后成功写入', async () => {
+    await quiesce();
+    seed([]);
+    const { client, state } = scriptClient([
+      { kind: 'connection' },
+      validReply(),
+    ]);
+    const outcome = await memory.processMemory(client, '我叫宋泽');
+    assert.equal(state.calls, 2, '瞬态错误应恰好重试一次');
+    assert.equal(outcome.written, true);
+    assert.equal(memory.getMemories().length, 1);
+  });
+
+  test('auth 类确定性错误不重试', async () => {
+    await quiesce();
+    seed([]);
+    const { client, state } = scriptClient([{ kind: 'auth' }]);
+    // 既有契约：extractMemory 外层 catch 把模型错误转成 skip('model_error')，
+    // 不上抛——断言落点是否写入与调用次数，而非 rejection。
+    const outcome = await memory.processMemory(client, '我叫宋泽');
+    assert.equal(outcome.written, false);
+    assert.equal(outcome.reason, 'model_error');
+    assert.equal(state.calls, 1, '确定性错误不消耗第二次调用');
+    assert.deepEqual(memory.getMemories(), []);
+  });
+
+  test('连续瞬态错误只重试一次（有界）', async () => {
+    await quiesce();
+    seed([]);
+    const { client, state } = scriptClient([
+      { kind: 'timeout' },
+      { kind: 'timeout' },
+    ]);
+    const outcome = await memory.processMemory(client, '我叫宋泽');
+    assert.equal(state.calls, 2, '重试上限为 2 次尝试');
+    assert.equal(outcome.written, false);
+    assert.equal(outcome.reason, 'model_error');
+    assert.deepEqual(memory.getMemories(), []);
+  });
+
+  test('空返回（{}）不重试：那是模型的结论，不翻倍成本', async () => {
+    await quiesce();
+    seed([]);
+    const { client, state } = scriptClient(['{}', validReply()]);
+    const outcome = await memory.processMemory(client, '记住我叫宋泽');
+    assert.equal(state.calls, 1, '空返回不应触发重试');
+    assert.equal(outcome.reason, 'no_content');
+    assert.deepEqual(memory.getMemories(), []);
   });
 });
