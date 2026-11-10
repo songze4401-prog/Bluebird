@@ -1,14 +1,14 @@
 # Notion 提案《Bluebird 自动记忆系统》× 仓库现状映射（2026-11-10）
 
 依据：Notion 页面 `Bluebird-413a957523c281cfb44be2eaed1a3b34`（目标架构提案，§0-§13），
-对照 main `29fcc9b` + 本地分支栈（见 DELIVERY-NOTE-OVERNIGHT.md）。本文件只做结构梳理，
+对照 main `29fcc9b` + 本轮本地分支栈。本文件只做结构梳理，
 不重写已有决策；每条映射标注「已实现 / 部分 / 缺口」与证据位置。
 
 ## 0. 总览
 
 | 提案阶段 | 状态（2026-11-10） | 本地交付 |
 |---|---|---|
-| Phase 0 现状审计（只读） | **已完成** | `PHASE0-AUDIT-2026-11-09.md`（七条链路逐项核验 + 八个断点） |
+| Phase 0 现状审计（只读） | **已完成** | `docs/phase0-audit-2026-11-09.md`（七条链路逐项核验 + 八个断点） |
 | Phase 1 自动观察闭环 | **能力已落地（开关交付）** | `BLUEBIRD_MEMORY_OBSERVER=every_turn`（2843b51）；前置观测修补（0a9d2c7/d00015b） |
 | Phase 2 渐进式生命周期 | **最小闭环已落地** | 观察台账（hash-only，0006）；缺：observed 正式态、异步深整、晋升语义评审 |
 | Phase 3 召回与上下文调度 | **大半已存在** | Context Runtime v3 + P3 orchestrator；缺：used 态、阈值评测校准 |
