@@ -130,27 +130,39 @@ test('f. 对账：计数、名单、汇总自相矛盾与合计算式四类不�
   assert.match(totalMismatch.mismatches.join('\n'), /合计算式不成立/);
 });
 
-test('g. 真实台账：25 行齐备，行状态与最新汇总一致（CI 每次都跑这条）', () => {
+test('g. 真实台账：表 2（25 行）与表 4（C 系列 6 行）行状态与最新汇总都一致（CI 每次都跑）', () => {
   const text = fs.readFileSync(scan.LEDGER_FILE, 'utf8');
+  // 表 2（A/B 系列）。
   const result = scan.scanRows(text);
   assert.equal(result.total, 25);
   assert.equal(result.counts[1] + result.counts[0.5] + result.counts[0], 25);
-  const verdict = scan.compare(result, scan.parseSummary(text));
-  assert.deepEqual(verdict.mismatches, [], '台账行状态与汇总块必须一致');
+  const verdict = scan.compare(result, scan.parseSummary(text), scan.TABLE_DEFS[0]);
+  assert.deepEqual(verdict.mismatches, [], '表 2 行状态与汇总块必须一致');
   assert.equal(verdict.consistent, true);
+  // 表 4（C 系列，Orchestrator 工程）。
+  const table4 = scan.TABLE_DEFS[1];
+  const resultC = scan.scanRows(text, table4);
+  assert.equal(resultC.total, 6);
+  const verdictC = scan.compare(resultC, scan.parseSummary(text, table4), table4);
+  assert.deepEqual(verdictC.mismatches, [], '表 4 行状态与汇总块必须一致');
+  assert.equal(verdictC.consistent, true);
 });
 
-test('h. CLI：--check 对账、--json 可解析、参数写错与被改坏的台账都非零退出', () => {
+test('h. CLI：--check 双表对账、--json 可解析、参数写错与被改坏的台账都非零退出', () => {
   const run = args => spawnSync(process.execPath, [CLI, ...args], { cwd: REPO_ROOT, encoding: 'utf8', timeout: 60000 });
 
   const checked = run(['--check']);
   assert.equal(checked.status, 0, checked.stderr);
   assert.match(checked.stdout, /行状态与汇总一致/);
+  assert.match(checked.stdout, /\[表2\]/);
+  assert.match(checked.stdout, /\[表4\]/);
 
   const jsoned = run(['--json']);
   assert.equal(jsoned.status, 0, jsoned.stderr);
   const view = JSON.parse(jsoned.stdout);
-  assert.equal(view.rows.length, 25);
+  assert.equal(view.rows.length, 25, '顶层 rows 保持表 2（A/B 系列）向后兼容');
+  assert.equal(view.tables.length, 2);
+  assert.equal(view.tables[1].rows.length, 6);
   assert.equal(view.consistent, true);
 
   assert.equal(run(['--typo']).status, 1);
@@ -168,7 +180,71 @@ test('h. CLI：--check 对账、--json 可解析、参数写错与被改坏的�
     const bad = run(['--check', '--file', tampered]);
     assert.equal(bad.status, 1, '汇总被改坏必须非零退出');
     assert.match(bad.stdout, /计数不一致（1）/);
+
+    // 表 4 的汇总被改坏同样要非零退出（双表口径的独立对账）。
+    const tamperedC = path.join(dir, 'tampered-c.md');
+    const latestC = scan.parseSummary(text, scan.TABLE_DEFS[1]).line;
+    fs.writeFileSync(tamperedC, text.replace(latestC, latestC.replace(/`0` = \d+/, '`0` = 99')), 'utf8');
+    const badC = run(['--check', '--file', tamperedC]);
+    assert.equal(badC.status, 1, '表 4 汇总被改坏必须非零退出');
+    assert.match(badC.stdout, /\[表4\] 计数不一致（0）/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('i. 表 4（C 系列）：行级重算 fail-closed 与汇总解析按表独立', () => {
+  const cRow = (id, status) => `| ${id} | 条款 | 要点 | 证据 | ${status} | 记录 | 限定 |`;
+  const abRow = id => `| ${id} | 原文 | 待确认 | 依据 | 1 | 证据 | 下一步 |`;
+  const fixture = statuses => {
+    const abRows = scan.EXPECTED_IDS.map(abRow).join('\n');
+    const cRows = scan.C_IDS.map(id => cRow(id, statuses[id] || '1')).join('\n');
+    return [
+      '# 台账',
+      '## 表 2 · 25 行',
+      '',
+      '| 编号 | 原文 | 归属 | 依据 | 状态 | 证据 | 下一步 |',
+      '|---|---|---|---|---|---|---|',
+      abRows,
+      '',
+      '**汇总（勘误）**：',
+      `- 新值（最新）：\`1\` = ${scan.EXPECTED_IDS.length} 项（${scan.EXPECTED_IDS.join('、')}）；\`0.5\` = 0 项（无）；\`0\` = 0 项（无）。合计 ${scan.EXPECTED_IDS.length}+0+0=${scan.EXPECTED_IDS.length}。`,
+      '## 表 4 · Orchestrator 工程 C 系列',
+      '',
+      '| 编号 | 条款 | 判定要点 | 证据 | 状态 | 记录 | 限定 |',
+      '|---|---|---|---|---|---|---|',
+      cRows,
+      '',
+      '**汇总（首次建档）**：',
+      `- 新值（最新）：\`1\` = ${Object.values(statuses).filter(value => value === '1').length} 项（占位）；\`0.5\` = 0 项（无）；\`0\` = 0 项（无）。合计 0+0+0=0。`,
+    ].join('\n');
+  };
+
+  // 默认 scanRows（表 2 口径）只扫 A/B 行：表 4 必须显式按表扫描。
+  const doc = fixture({ 'C-05': '0' });
+  assert.equal(scan.scanRows(doc).total, 25, '表 2 扫描不受表 4 影响');
+  const resultC = scan.scanRows(doc, scan.TABLE_DEFS[1]);
+  assert.equal(resultC.total, 6);
+  assert.deepEqual(resultC.lists[0], ['C-05']);
+
+  // fail-closed：缺行 / 未登记编号 / C 行状态解析失败都要抛错。
+  assert.throws(
+    () => scan.scanRows(doc.replace(cRow('C-03', '1'), ''), scan.TABLE_DEFS[1]),
+    /缺少行：C-03/
+  );
+  assert.throws(
+    () =>
+      scan.scanRows(
+        doc.replace(cRow('C-06', '1'), `${cRow('C-06', '1')}\n${cRow('C-99', '1')}`),
+        scan.TABLE_DEFS[1]
+      ),
+    /出现未登记的编号/
+  );
+  assert.throws(
+    () => scan.scanRows(doc.replace(cRow('C-05', '0'), cRow('C-05', '待定')), scan.TABLE_DEFS[1]),
+    /无法识别的状态取值/
+  );
+  // 汇总解析按表独立：表 4 的汇总块在自己的小节里。
+  const summaryC = scan.parseSummary(doc, scan.TABLE_DEFS[1]);
+  assert.match(summaryC.label, /最新/);
 });
