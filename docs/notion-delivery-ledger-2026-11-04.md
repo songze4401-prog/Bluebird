@@ -975,3 +975,20 @@ a 默认关闭（`p4-default` 不组队、`route=null`、无 policy 字段）；
 | FM-6 重规划风暴判据 | 熔断、停止重规划、交付部分结果或请求决策；配合 §26 的收益声明、等价计划拒绝、冷却窗口、diff 判据、禁止新建 run 规避 | 已落地（2026-11-07，PR #61）：冷却窗口与指纹去重在 `storm-suppression.js`，收益与 diff 判据在同模块 `checkImprovementClaim()`/`stepKeysOf()`，阻断面在 `model-adapter.js`、`agent-runtime.js`、`router.js` 三处；**2026-11-07 补齐（P5-D）**：`runtime.js` 终态收口加 `collectPartialOutcome`——部分结果交付与 `task.decision_requested` 请求决策 | 已覆盖：相同 `errorFingerprint` + 相同 `planDigest` 连续失败被拒（`tests/agent-throttle-breaker-storm.test.js` f、h）；达上限交付部分结果并披露 / 无可交付时请求决策（`tests/agent-failure-modes-p5d.test.js`，失败终态 `result` 带已完成产物与缺口披露，不再空 `summary`） |
 
 本表同时是「未完整模块清单」的落点依据：§13 的七因子路由记 A-06，§14 的五类比较对象与分层记 A-07，§18 的收益门槛与阶段占比记 A-11，§26 的四维限流与三态 breaker 记 B-07，§15 的轮值与责任人记 A-08 与 B-11。
+
+## 表 4 · Orchestrator 工程 C 系列（2026-11-13 立项书轮次，6 行）
+
+> 口径：C 系列判分同三值制；来源为 `docs/orchestrator-charter-2026-11-13.md` 与各轮次文档（docs/orchestrator-r2/r3/r4-*.md）；**判 1.0 的行不许写缺口**；解析与对账由 `scripts/scan-notion-ledger.js` 双表口径执行（表 3 是既有阶段归属表，不参与判分对账）。
+
+| 编号 | 条款（立项书轮次） | 判定要点 | 仓库证据 | 状态 | 证据与勘误记录 | 限定 |
+|---|---|---|---|---|---|---|
+| C-01 | 计划编译器（轮 2） | schema/无环/≤8 节点；执行者由路由解析（模型 agent 名丢弃并审计）；同内容取出语义；纯编译不执行 | `server/agents/plan-compiler.js`（plan-compiler-v1）+ `POST/GET /agent-plans` + plan.proposed/compiled/rejected 事件 + STEP_KEYS 扩 agentId | 1 | PR #77（main = `2a22e1a`）：`tests/agent-plan-compiler.test.js` 10 例；能力登记随轮 3/4 增至 108 路由/23 族/16 仅 API | 编译器不执行任务；执行接线属 C-02 |
+| C-02 | DAG 执行与产物继承（轮 3） | 跨 Agent 依赖边仅 plan_pc_ 图放行（dag-v1）；拓扑序逐节点 dispatch（执行者=计划内解析结果、依赖=上游真实 taskId、幂等键防重入）；上游产物显式 share + 下游 context 注入 | `server/agents/orchestration-engine.js`（orchestration-engine-v1）+ runtime 三处终态钩子 + tasks.js dag-v1 放行 | 1 | PR #78（main = `f761619`）：`tests/agent-orchestration-engine.test.js` 9 例（跨 Agent 建任务/散装拒绝/产物继承/幂等重入） | 不自动重派；节点失败下游照旧判死，根结果 partial 列缺口 |
+| C-03 | 结果归约 + 审校门 + 发布门 + 根交付（轮 3） | 全节点终态才归约（单飞）；任一节点 R2+ → 聚合结论 openReview 独立审校，未过不交付（blocked_review）；publishGate 未批准不交付；根交付幂等（bot-result-<planId>） | 归约语义内置于 orchestration-engine + `resultDelivery.deliverPlanOutcome` + approvals plan.publish 收口回查 | 1 | PR #78：审校 pass→交付 / fail→blocked_review、发布门批准后根交付、partial neverStarted 如实入档均有用例 | awaiting_publish 为防御性不变量（门语义下正常流不可达）；聚合 conclusion 产物挂最后终态节点 |
+| C-04 | 主聊天接线（轮 4） | 计划块协议（bluebird-plan 围栏）；开关默认关闭=直答路径零行为差异；编译失败降级直答；剥块不进持久历史；响应/done 增 additive orchestration 回执 | `server/orchestration-chat.js`（orchestration-chat-v1）+ agent-policy.orchestration 开关 + index.js /chat 与 /chat/stream 接线 | 1 | PR #79：`tests/agent-chat-orchestration.test.js` 7 例（stub 捕获确认开启轮注入协议、关闭轮不注入；坏计划降级 + plan.rejected） | maxNodes 为声明位（编译器硬上限 8）；续写不接线 |
+| C-05 | 真实模型验收（轮 5） | 真实模型端到端：计划块产出率/编译通过率/端到端成功率/Token 成本留档 JSON | 未执行 | 0 | 2026-11-13：Owner 提供的 ak_ 钥匙 provider 归属无法从仓库配置确证（`server/.env` 不存在、无 LONGCAT 凭据），按立项书「不确证不动钥匙」挂 Owner 决策；轮次只留交接说明 | 钥匙仅在会话中传递，未落任何文件、未回显；确证端点后按 worked example 真实模式口径补验 |
+| C-06 | 编排工程收尾（轮 6） | 台账 C 系列建档 + 双表扫描口径 + handover v3 + 开关姿态文档 | 本表 + `scripts/scan-notion-ledger.js` 双表化 + `docs/handover-2026-11-13-orchestrator.md` | 1 | 随轮 6 收尾 PR 合并复判：`tests/notion-ledger-scan.test.js` 扩双表口径用例；handover v3 覆盖轮 1–4 全部接线点与开关姿态 | C-05 未闭环不影响 C-06（收尾=文档与口径，不含真实模型执行） |
+
+**汇总（以行级证据为准，历次勘误全部保留；最新为 2026-11-13 首次建档）：**
+
+- 新值（2026-11-13 首次建档，轮 1–4 合并（PR #76/#77/#78/#79）+ 轮 5 挂 Owner 决策 + 轮 6 随本提交复判，逐行状态由 `scripts/scan-notion-ledger.js` 双表口径重扫确认）：`1` = 5 项（C-01、C-02、C-03、C-04、C-06）；`0.5` = 0 项（无）；`0` = 1 项（C-05）。合计 5+0+1=6。

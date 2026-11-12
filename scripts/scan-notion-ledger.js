@@ -23,6 +23,19 @@ const EXPECTED_IDS = Object.freeze([
 const VALUES = Object.freeze([1, 0.5, 0]);
 const STATUS_COLUMN = 5;
 
+// 轮 6（Orchestrator 立项书）：台账扩展为双表对账——表 2（自动记忆系统 A/B 系列，
+// 25 行）+ 表 4（编排工程 C 系列；表 3 是既有的阶段归属表，不参与判分对账）。
+// 每个参与对账的表独立小节、独立汇总块、独立对账；行前缀与编号清单由
+// TABLE_DEFS 声明，解析规则（第 5 列、最后一个箭头之后的值、fail-closed）完全一致。
+const C_IDS = Object.freeze(
+  Array.from({ length: 6 }, (_, i) => `C-${String(i + 1).padStart(2, '0')}`)
+);
+
+const TABLE_DEFS = Object.freeze([
+  { key: '表2', heading: '## 表 2', stop: '**汇总', rowPattern: /^\|\s*[AB]-\d\d\s*\|/, ids: EXPECTED_IDS },
+  { key: '表4', heading: '## 表 4', stop: '**汇总', rowPattern: /^\|\s*C-\d\d\s*\|/, ids: C_IDS },
+]);
+
 function normalizeVerdict(token, context) {
   const text = String(token).trim();
   if (text === '1' || text === '1.0') return 1;
@@ -56,10 +69,10 @@ function tableSection(text, { heading = '## 表 2', stop = '**汇总' } = {}) {
   return lines.slice(start, end);
 }
 
-function scanRows(text) {
+function scanRows(text, table = TABLE_DEFS[0]) {
   const rows = [];
-  for (const line of tableSection(text)) {
-    if (!/^\|\s*[AB]-\d\d\s*\|/.test(line)) continue;
+  for (const line of tableSection(text, table)) {
+    if (!table.rowPattern.test(line)) continue;
     const columns = line.split('|').map(item => item.trim());
     const id = columns[1];
     if (columns.length <= STATUS_COLUMN) throw new Error(`${id} 行列数不足（${columns.length}），切不到第 5 列状态`);
@@ -72,15 +85,15 @@ function scanRows(text) {
     if (seen.has(row.id)) throw new Error(`编号重复：${row.id}`);
     seen.set(row.id, row);
   }
-  const missing = EXPECTED_IDS.filter(id => !seen.has(id));
+  const missing = table.ids.filter(id => !seen.has(id));
   if (missing.length) throw new Error(`缺少行：${missing.join('、')}`);
-  const extra = rows.map(row => row.id).filter(id => !EXPECTED_IDS.includes(id));
+  const extra = rows.map(row => row.id).filter(id => !table.ids.includes(id));
   if (extra.length) throw new Error(`出现未登记的编号：${extra.join('、')}`);
 
   const lists = { 1: [], 0.5: [], 0: [] };
-  for (const id of EXPECTED_IDS) lists[seen.get(id).value].push(id);
+  for (const id of table.ids) lists[seen.get(id).value].push(id);
   const counts = { 1: lists[1].length, 0.5: lists[0.5].length, 0: lists[0].length };
-  return { rows: EXPECTED_IDS.map(id => seen.get(id)), lists, counts, total: rows.length };
+  return { rows: table.ids.map(id => seen.get(id)), lists, counts, total: rows.length };
 }
 
 const SUMMARY_PATTERN = /`1`\s*=\s*(\d+)\s*项（([^）]*)）；`0\.5`\s*=\s*(\d+)\s*项（([^）]*)）；`0`\s*=\s*(\d+)\s*项（([^）]*)）/g;
@@ -95,8 +108,13 @@ function idList(text) {
 }
 
 /** 汇总块保留全部历史勘误行，对账只看最后一条「新值」。 */
-function parseSummary(text) {
-  const lines = String(text).split(/\r?\n/);
+function parseSummary(text, table = TABLE_DEFS[0]) {
+  // 非首表：先切出该表小节（从表标题到文末），汇总块在小节内解析。
+  const sectionSource =
+    table.heading && table.heading !== TABLE_DEFS[0].heading
+      ? String(text).slice(String(text).indexOf(table.heading))
+      : String(text);
+  const lines = sectionSource.split(/\r?\n/);
   const start = lines.findIndex(line => line.startsWith('**汇总'));
   if (start < 0) throw new Error('找不到汇总块（**汇总）');
   const end = lines.findIndex((line, i) => i > start && line.startsWith('## '));
@@ -121,7 +139,7 @@ function sameMembers(a, b) {
   return key(a) === key(b);
 }
 
-function compare(scan, summary) {
+function compare(scan, summary, table = TABLE_DEFS[0]) {
   const mismatches = [];
   for (const value of VALUES) {
     const key = String(value);
@@ -146,8 +164,16 @@ function compare(scan, summary) {
       mismatches.push(`合计算式不成立：${parts.join('+')}=${sum}，按计数应为 ${expected.join('+')}=${expected.reduce((a, b) => a + b, 0)}`);
     }
   }
-  if (scan.total !== EXPECTED_IDS.length) mismatches.push(`行数 ${scan.total}，应为 ${EXPECTED_IDS.length}`);
+  if (scan.total !== table.ids.length) mismatches.push(`行数 ${scan.total}，应为 ${table.ids.length}`);
   return { consistent: mismatches.length === 0, mismatches };
+}
+
+/** 单表验证：行级重算 + 汇总解析 + 对账。 */
+function verifyTable(text, table) {
+  const scan = scanRows(text, table);
+  const summary = parseSummary(text, table);
+  const verdict = compare(scan, summary, table);
+  return { scan, summary, verdict };
 }
 
 function parseArgs(argv = process.argv.slice(2)) {
@@ -173,19 +199,41 @@ function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   const file = args.file ? path.resolve(args.file) : LEDGER_FILE;
   const text = fs.readFileSync(file, 'utf8');
-  const scan = scanRows(text);
-  const summary = parseSummary(text);
-  const verdict = compare(scan, summary);
+  const results = TABLE_DEFS.map(table => ({ table: table.key, ...verifyTable(text, table) }));
+  const consistent = results.every(result => result.verdict.consistent);
 
   if (args.json) {
-    console.log(JSON.stringify({ file, counts: scan.counts, lists: scan.lists, rows: scan.rows.map(({ id, value, previous }) => ({ id, value, previous })), summary: { label: summary.label, counts: summary.counts }, ...verdict }, null, 2));
+    console.log(JSON.stringify({
+      file,
+      // 兼容旧消费者：rows/counts/lists 取表 2（A/B 系列）。
+      counts: results[0].scan.counts,
+      lists: results[0].scan.lists,
+      rows: results[0].scan.rows.map(({ id, value, previous }) => ({ id, value, previous })),
+      summary: { label: results[0].summary.label, counts: results[0].summary.counts },
+      ...results[0].verdict,
+      tables: results.map(result => ({
+        table: result.table,
+        counts: result.scan.counts,
+        lists: result.scan.lists,
+        rows: result.scan.rows.map(({ id, value, previous }) => ({ id, value, previous })),
+        summary: { label: result.summary.label, counts: result.summary.counts },
+        consistent: result.verdict.consistent,
+        mismatches: result.verdict.mismatches,
+      })),
+      consistent,
+    }, null, 2));
   } else {
     console.log(`台账行级重算：${path.relative(REPO_ROOT, file)}`);
-    for (const value of VALUES) console.log(`  ${value} = ${scan.counts[value]} 项（${scan.lists[value].join('、') || '无'}）`);
-    console.log(`  合计 ${scan.total} 行；最新汇总：${summary.label}`);
-    console.log(verdict.consistent ? '✔ 行状态与汇总一致' : `✘ 行状态与汇总不一致：\n  - ${verdict.mismatches.join('\n  - ')}`);
+    for (const result of results) {
+      console.log(`[${result.table}]`);
+      for (const value of VALUES) {
+        console.log(`  ${value} = ${result.scan.counts[value]} 项（${result.scan.lists[value].join('、') || '无'}）`);
+      }
+      console.log(`  合计 ${result.scan.total} 行；最新汇总：${result.summary.label}`);
+    }
+    console.log(consistent ? '✔ 行状态与汇总一致' : `✘ 行状态与汇总不一致：\n  - ${results.flatMap(result => result.verdict.mismatches.map(item => `[${result.table}] ${item}`)).join('\n  - ')}`);
   }
-  if (args.check && !verdict.consistent) return 1;
+  if (args.check && !consistent) return 1;
   return 0;
 }
 
@@ -198,4 +246,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { EXPECTED_IDS, VALUES, LEDGER_FILE, normalizeVerdict, parseStatusCell, scanRows, parseSummary, compare, parseArgs, main };
+module.exports = { EXPECTED_IDS, C_IDS, TABLE_DEFS, VALUES, LEDGER_FILE, normalizeVerdict, parseStatusCell, scanRows, parseSummary, compare, verifyTable, parseArgs, main };
