@@ -10,6 +10,7 @@ const retrieval = require('./retrieval');
 const { createRetrievalRouter } = require('./retrieval/routes');
 const { createAgentRouter } = require('./agents/routes');
 const agentRuntime = require('./agents/runtime');
+const orchestrationChat = require('./orchestration-chat');
 const agentApprovals = require('./agents/approvals');
 const agentTasks = require('./agents/tasks');
 const { auditTaskClaims } = require('./task-claim-guard');
@@ -339,6 +340,44 @@ const AGENT_NEW_IMAGE_NOTICE = '本次带图，已切换到视觉模型，工具
 // Agent 门控的唯一判定入口：reason 只用于诊断和用户提示，不改变互斥规则。
 // 优先级：总开关关闭 > 策略 answer_only > 本次新图 > 模型不支持 tools >
 // 策略没有可用工具 > 放行。策略不能绕过前三道既有门控。
+// 轮 4（Orchestrator）：编排开关开启时给模型追加计划块协议。能力清单由
+// Manifest 动态生成（capabilities ∩ acceptedTaskTypes 的并集），不硬编码。
+function orchestrationPromptAppendix(policy) {
+  if (!policy || !policy.orchestration || policy.orchestration.enabled !== true) {
+    return null;
+  }
+  try {
+    const { listManifests } = require('./agents/manifest');
+    const capabilities = [
+      ...new Set(
+        (Array.isArray(listManifests()) ? listManifests() : []).flatMap(agent =>
+          (Array.isArray(agent.capabilities) ? agent.capabilities : []).filter(
+            capability =>
+              Array.isArray(agent.acceptedTaskTypes) &&
+              agent.acceptedTaskTypes.includes(capability)
+          )
+        )
+      ),
+    ].sort();
+    return orchestrationChat.buildPromptAppendix(capabilities);
+  } catch (_) {
+    return null;
+  }
+}
+
+// 把协议说明并入首条 system 消息（不存在时插入）。返回新数组，不改入参。
+function withOrchestrationAppendix(messages, appendix) {
+  if (!appendix || !Array.isArray(messages) || !messages.length) return messages;
+  const first = messages[0];
+  const rest = messages.slice(1);
+  if (first && first.role === 'system') {
+    return [{ ...first, content: `${first.content}
+
+${appendix}` }, ...rest];
+  }
+  return [{ role: 'system', content: appendix }, ...messages];
+}
+
 function evaluateAgentGate({
   switchOn,
   toolsSupported,
@@ -3334,6 +3373,14 @@ app.post('/chat', requireAuth, async (req, res) => {
     });
     const agentOn = agentGate.allowed;
 
+    // 轮 4：编排开关开启且非续写 → 给模型追加计划块协议。
+    const orchestrationAppendix = agentOn && !ctx.isContinue
+      ? orchestrationPromptAppendix(ctx.agentPolicy)
+      : null;
+    if (orchestrationAppendix) {
+      ctx.requestMessages = withOrchestrationAppendix(ctx.requestMessages, orchestrationAppendix);
+    }
+
     if (ctx.contextTrace) {
       ctx.contextTrace.recordPolicy(ctx.agentPolicy, ctx.agentPolicyMeta, agentGate);
     }
@@ -3370,6 +3417,8 @@ app.post('/chat', requireAuth, async (req, res) => {
     let toolSteps = null;
     let agentOutcome = null;
     let agentReachedMaxRounds = false;
+    // 轮 4（Orchestrator）：编排回执（agent 分支外声明，直答路径恒为 null）。
+    let orchestrationMeta = null;
 
     if (agentOn) {
       const outcome = await runAgentTurn({
@@ -3405,6 +3454,30 @@ app.post('/chat', requireAuth, async (req, res) => {
           ` tools=${outcome.toolSteps.length}` +
           ` stop=${outcome.stopReason || 'none'}`
       );
+
+      // 轮 4（Orchestrator）：主聊天编排接线——开关开启且回复携带计划块时，
+      // 剥块 → 服务端编译 → 编排派发（父会话 = 当前聊天会话）；编译失败降级直答。
+      // 开关关闭或无块：零行为差异。（变量在 agent 分支外声明，供响应块引用）
+      if (!ctx.isContinue) {
+        const wired = orchestrationChat.wireOrchestration({
+          policy: ctx.agentPolicy,
+          reply: rawReply,
+          userText: ctx.userText,
+          userId: ctx.userId,
+          sessionId: ctx.sessionId,
+        });
+        rawReply = wired.reply;
+        orchestrationMeta = wired.orchestration;
+        if (
+          wired.reason !== 'dispatched' &&
+          wired.reason !== 'no_block' &&
+          wired.reason !== 'disabled'
+        ) {
+          console.warn(
+            `[orchestration-chat] not dispatched session=${ctx.sessionId} reason=${wired.reason}`
+          );
+        }
+      }
 
       // Context Engine trace 收尾：把真实工具调用结果写入 trace（结构化、可测试验证）
       if (ctx.contextTrace) {
@@ -3495,6 +3568,8 @@ app.post('/chat', requireAuth, async (req, res) => {
       sessionId: ctx.sessionId,
       // 新图触发了 Agent 工具互斥时给用户的提示（不落盘、不进历史）
       ...(agentGate.notice ? { agentNotice: agentGate.notice } : {}),
+      // 轮 4（Orchestrator）：编排回执（additive；未派发时缺省不出现该键）
+      ...(orchestrationMeta ? { orchestration: orchestrationMeta } : {}),
       // 记忆编排状态（阶段3 可观测性，additive）：标准契约状态 ok/empty/degraded/failed
       memoryState: ctx.contextMemoryState,
       memoryStatus: ctx.contextMemoryStatus,
@@ -3704,6 +3779,8 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   );
 
   let rawReply = '';
+  // 轮 4（Orchestrator）：编排回执元数据（done 事件 additive 字段）。
+  let streamOrchestrationMeta = null;
   // model 保持为「本次实际请求的模型」，不被上游回显覆盖；
   // upstreamModel 单独记录供应商响应里的 model（部分供应商会改写）。
   const model = ctx.modelId;
@@ -3758,6 +3835,13 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
       `[agent] tools enabled (stream) session=${ctx.sessionId}` +
         ` provider=${ctx.providerId} model=${ctx.modelId}`
     );
+  }
+
+  // 轮 4：编排开关开启且非续写 → 给模型追加计划块协议（与 /chat 同一协议）。
+  const orchestrationAppendix =
+    agentOn && !ctx.isContinue ? orchestrationPromptAppendix(ctx.agentPolicy) : null;
+  if (orchestrationAppendix) {
+    ctx.requestMessages = withOrchestrationAppendix(ctx.requestMessages, orchestrationAppendix);
   }
 
   try {
@@ -3823,9 +3907,33 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
           emitContextTrace(ctx);
         }
 
+        // 轮 4（Orchestrator）：与 /chat 同一编排接线（stream 侧剥块 + 回执）。
+        let orchestrationMeta = null;
+        if (!ctx.isContinue) {
+          const wired = orchestrationChat.wireOrchestration({
+            policy: ctx.agentPolicy,
+            reply: rawReply,
+            userText: ctx.userText,
+            userId: ctx.userId,
+            sessionId: ctx.sessionId,
+          });
+          rawReply = wired.reply;
+          orchestrationMeta = wired.orchestration;
+          if (
+            wired.reason !== 'dispatched' &&
+            wired.reason !== 'no_block' &&
+            wired.reason !== 'disabled'
+          ) {
+            console.warn(
+              `[orchestration-chat] not dispatched (stream) session=${ctx.sessionId} reason=${wired.reason}`
+            );
+          }
+        }
+
         // 最终文本经同一套情绪标签剥离后以 delta 发出
         const emit = stripper.push(rawReply);
         if (emit) sendEvent({ type: 'delta', content: emit });
+        streamOrchestrationMeta = orchestrationMeta;
       }
     } else {
       recordSentForContext(ctx);
@@ -4005,7 +4113,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   });
   finishSse('completed');
 
-  sendEvent({ type: 'done', ...result, ...(agentGate.notice ? { agentNotice: agentGate.notice } : {}), model, providerId: ctx.providerId, upstreamModel, modelRoute: ctx.modelRoute, sessionId: ctx.sessionId, memoryState: ctx.contextMemoryState, memoryStatus: ctx.contextMemoryStatus, requestId: ctx.requestId });
+  sendEvent({ type: 'done', ...result, ...(agentGate.notice ? { agentNotice: agentGate.notice } : {}), ...(streamOrchestrationMeta ? { orchestration: streamOrchestrationMeta } : {}), model, providerId: ctx.providerId, upstreamModel, modelRoute: ctx.modelRoute, sessionId: ctx.sessionId, memoryState: ctx.contextMemoryState, memoryStatus: ctx.contextMemoryStatus, requestId: ctx.requestId });
   res.end();
 
   scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments, {
