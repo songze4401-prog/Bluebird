@@ -129,6 +129,11 @@ const EVENT_TYPES = Object.freeze([
   'plan.fencing_issued',
   'plan.fencing_denied',
   'plan.fencing_revoked',
+  // P5-C2：修订闭环与发布门（只记计划指针、计数与原因码，不记节点正文）。
+  'plan.revision_created',
+  'plan.revision_storm_denied',
+  'plan.revision_skipped',
+  'plan.publish_requested',
   // P5-D / §17 FM-2：必需约束从已验证引用重建成功（只记键名与引用 id，不记正文）。
   'handoff.context_rebuilt',
   // P5-D / §17 FM-6：重试耗尽且无可交付部分结果时请求决策（只记计数与短码）。
@@ -248,6 +253,13 @@ const SAFE_PAYLOAD_KEYS = new Set([
   // 不加进白名单就会被 safePayload 静默丢掉，事件只剩一个空壳。
   'planId',
   'planVersion',
+  // P5-C2：修订闭环与发布门的事件标量（扁平；计划正文与产物正文永不入事件）。
+  'revisionId',
+  'rerunCount',
+  'toVersion',
+  'fromVersion',
+  'skipReason',
+  'deliveryArtifactId',
   'generation',
   'heldGeneration',
   'currentGeneration',
@@ -1075,6 +1087,9 @@ function createTask({
   parentUserId = null,
   planId = null,
   planVersion = null,
+  // P5-C2：计划节点映射（可选）。planner/编排批量入口按 stepKey 写入，修订闭环
+  // 靠它把失败任务映射回计划节点；散装任务为 null，行为不变。
+  stepKey = null,
   // B-06：父子覆盖与 Run 总闸门。runId 是「预算归属 Run」，与执行期每次 attempt
   // 重写的 task.runId 不同口径，因此单独落 budgetRunId。
   parentTaskId = null,
@@ -1245,6 +1260,10 @@ function createTask({
       throw new AgentError('invalid_task', 'planVersion 必须是正整数');
     }
   }
+  // P5-C2：stepKey 只随计划指针出现时有意义；单独出现也接受（内容寻址标识，
+  // 不携带权限语义），上限与计划 step 长度对齐。
+  const cleanStepKey =
+    typeof stepKey === 'string' && stepKey.trim() ? stepKey.trim().slice(0, 200) : null;
 
   // 同一 Agent 的相同幂等键返回既有任务，不重复创建、不重复入队。
   // Router 在建立 Worker 会话之前也会先查一次，避免产生空会话。
@@ -1382,6 +1401,7 @@ function createTask({
     // 因此不存在「任务先引用、计划后落盘」的窗口。null 表示该任务没有冻结计划。
     planId: cleanPlanId,
     planVersion: cleanPlanVersion,
+    stepKey: cleanStepKey,
     // B-06：预算归属与计量初值。reserved/used 只由 reserve/settle/release 改写。
     parentTaskId: cleanParentTaskId,
     budgetRunId: effectiveRunId,

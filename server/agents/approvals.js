@@ -178,6 +178,20 @@ const GATE_OPERATIONS = Object.freeze({
       'conflict',
     ]),
   }),
+  // P5-C2：对外发布门。唯一副作用是把已收口的结果交付到父会话（幂等通道）。
+  // R2 + 30 分钟 SLA：到期只标 overdue 并由既有收敛路径取消任务，绝不自动通过。
+  // 正文不进审批记录——待交付结果落 kind='delivery' 产物，这里只带引用标量。
+  'plan.publish': Object.freeze({
+    risk: 'medium',
+    allowedKeys: Object.freeze([
+      'producerTaskId',
+      'planId',
+      'planVersion',
+      'deliveryArtifactId',
+      'deliveryArtifactVersion',
+      'taskType',
+    ]),
+  }),
 });
 
 function gateOperation(operation) {
@@ -1700,6 +1714,37 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
   // 因此不进操作账本、不调用 memoryService；人工批准只表达"允许越过保守裁决"，
   // 任务按既有 completeApprovalTask 收口。拒绝走既有 decide() → cancelled。
   if (gate) {
+    // P5-C2：plan.publish 的批准即交付。交付动作（读回 delivery 产物 → 产物提交
+    // → 任务 completed → 幂等回写父会话）由 publish-gate 统一执行；失败按其
+    // 既有口径收口，审批记录停留 pending 可重试。
+    if (record.operation === 'plan.publish') {
+      const publishGate = require('./publish-gate');
+      const gateNow = nowIso();
+      const delivery = publishGate.deliverOnApproval(record, { actor, now: gateNow });
+      record.status = 'completed';
+      record.errorCode = null;
+      record.result = {
+        reason: 'ok',
+        gate: record.operation,
+        decision: 'publish_delivered',
+        artifactId: delivery.ref.id,
+      };
+      record.executedBy = String(actor || permissions.SINGLE_USER_ACTOR).slice(0, 80);
+      record.executedAt = gateNow;
+      save();
+      recordEvent(
+        record.botId,
+        'approval.resolved',
+        {
+          status: 'completed',
+          decision: 'publish_delivered',
+          taskType: record.operation,
+          mode: 'approval',
+        },
+        { approvalId: record.approvalId, taskId: record.taskId, sessionId: record.sessionId }
+      );
+      return publicApproval(record);
+    }
     const gateNow = nowIso();
     const gateResult = {
       reason: 'ok',

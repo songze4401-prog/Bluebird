@@ -670,6 +670,10 @@ function createRouter(overrides = {}) {
       workerSessionId,
       planId: workflowPlan.planId,
       planVersion: workflowPlan.planVersion,
+      // P5-C2：计划节点映射原样落库（缺省 null），修订闭环靠它定位缺证节点。
+      stepKey: typeof input.stepKey === 'string' && input.stepKey.trim()
+        ? input.stepKey.trim().slice(0, 200)
+        : null,
       taskType: decision.taskType,
       goal: normalized.goal,
       context: normalized.context || '',

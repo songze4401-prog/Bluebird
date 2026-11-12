@@ -96,8 +96,8 @@ function selectTemplate(goal) {
   );
 }
 
-function buildPlan(template, steps, goal) {
-  return {
+function buildPlan(template, steps, goal, publishGate) {
+  const plan = {
     intent: 'agent_task_graph',
     enabled: true,
     layers: Object.freeze({ history: false, retrieval: true, knowledge: false }),
@@ -109,6 +109,12 @@ function buildPlan(template, steps, goal) {
     budget: null,
     goalDigest: `sha256:${sha256(goal)}`,
   };
+  // P5-C2：发布门声明原样进入计划（workflow-store 校验形状；未声明不带键，
+  // digest 与既有计划一致）。
+  if (publishGate && typeof publishGate === 'object' && !Array.isArray(publishGate)) {
+    plan.publishGate = publishGate;
+  }
+  return plan;
 }
 
 /**
@@ -123,12 +129,16 @@ function plan(input = {}, store = workflowStore) {
   }
   const template = selectTemplate(goal);
   const steps = buildSteps(template, goal);
+  const publishGate =
+    input.publishGate && typeof input.publishGate === 'object' && !Array.isArray(input.publishGate)
+      ? input.publishGate
+      : null;
   const requestedPlanId =
     typeof input.planId === 'string' && input.planId.trim()
       ? input.planId.trim()
       : null;
   const planId = requestedPlanId || planIdFor(goal, template);
-  const normalized = store.validatePlan(buildPlan(template, steps, goal));
+  const normalized = store.validatePlan(buildPlan(template, steps, goal, publishGate));
   const digest = store.digestPlan(normalized);
 
   const state = store.read();
