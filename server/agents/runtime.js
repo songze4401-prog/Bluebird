@@ -36,6 +36,7 @@ const { HIGH_RISK_TASK_TYPES } = require('./autonomy-policy');
 const { createCleanupScheduler } = require('./orphan-scheduler');
 const improvementLoop = require('./improvement-loop');
 const planRevision = require('./plan-revision');
+const orchestrationEngine = require('./orchestration-engine');
 const verificationLoop = require('./verification-loop');
 const stormSuppression = require('./storm-suppression');
 const throttlePolicy = require('./throttle-policy');
@@ -1704,6 +1705,17 @@ async function runTask(taskId) {
       status: 'completed',
       result: finalResult,
     });
+    // 轮 3（Orchestrator）：成功收口也进编排引擎（产物显式共享给直接下游 +
+    // 全节点终态后归约）——与 catch 内失败收口同一入口，fail-safe。
+    if (task.planId && String(task.planId).startsWith('plan_pc_')) {
+      try {
+        orchestrationEngine
+          .onPlanTaskSettled({ taskId: task.taskId, status: 'completed' })
+          .catch(() => {});
+      } catch (_) {
+        // 引擎不可用不影响任务收口。
+      }
+    }
   } catch (error) {
     const latest = tasks.getRawTask(task.taskId);
     if (!latest || tasks.isTerminalStatus(latest.status)) return;
@@ -1951,6 +1963,19 @@ async function runTask(taskId) {
           { skipReason: (revisionError && revisionError.code) || 'revision_failed' },
           { taskId: task.taskId, runId, sessionId: task.sessionId }
         );
+      }
+    }
+
+    // 轮 3（Orchestrator）：编译器产物图（plan_pc_）的终态收口 → 编排引擎
+    //（产物显式共享给直接下游 + 全节点终态后归约/审校门/发布门/根交付）。
+    // fail-safe：引擎失败不改变任务终态；异步 fire-and-forget，错误只进日志。
+    if (latest.planId && String(latest.planId).startsWith('plan_pc_')) {
+      try {
+        orchestrationEngine
+          .onPlanTaskSettled({ taskId: task.taskId, status, errorCode })
+          .catch(() => {});
+      } catch (_) {
+        // 引擎不可用不影响任务收口。
       }
     }
   } finally {

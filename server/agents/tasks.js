@@ -138,6 +138,12 @@ const EVENT_TYPES = Object.freeze([
   'plan.proposed',
   'plan.compiled',
   'plan.rejected',
+  // 轮 3（Orchestrator）：编排执行引擎（只记计划指针、计数与原因码，不记正文）。
+  'orchestration.created',
+  'orchestration.artifact_shared',
+  'orchestration.awaiting_publish',
+  'orchestration.completed',
+  'orchestration.partial',
   // P5-D / §17 FM-2：必需约束从已验证引用重建成功（只记键名与引用 id，不记正文）。
   'handoff.context_rebuilt',
   // P5-D / §17 FM-6：重试耗尽且无可交付部分结果时请求决策（只记计数与短码）。
@@ -267,6 +273,11 @@ const SAFE_PAYLOAD_KEYS = new Set([
   // 轮 2（Orchestrator）：计划编译事件的扁平标量（节点数与被忽略的声明 agent 数）。
   'nodeCount',
   'declaredAgentCount',
+  // 轮 3（Orchestrator）：编排事件标量（共享目标/失败计数/挂起原因/风险等级）。
+  'toTaskId',
+  'failedCount',
+  'pendingReason',
+  'riskLevel',
   'generation',
   'heldGeneration',
   'currentGeneration',
@@ -1287,11 +1298,19 @@ function createTask({
       throw new AgentError('dependency_not_found', `依赖任务不存在：${depTaskId}`, 400);
     }
     if ((dep.agentId || dep.botId) !== resolvedAgentId) {
-      throw new AgentError(
-        'dependency_not_found',
-        `依赖任务不属于同一 Agent：${depTaskId}`,
-        400
-      );
+      // dag-v1（Orchestrator 立项书轮 3）：仅编译器产物图（planId 前缀 plan_pc_）
+      // 允许跨 Agent 依赖边——执行者由 plan-compiler 按路由解析，图整体受
+      // orchestration-engine 的拓扑序与归约约束；散装任务的同 Agent 约束
+      // 原样保留，委派深度/预算/父子授权交集全部不变。
+      const crossAgentAllowed =
+        cleanPlanId && typeof cleanPlanId === 'string' && cleanPlanId.startsWith('plan_pc_');
+      if (!crossAgentAllowed) {
+        throw new AgentError(
+          'dependency_not_found',
+          `依赖任务不属于同一 Agent：${depTaskId}`,
+          400
+        );
+      }
     }
   }
   const pruned =
@@ -2602,6 +2621,17 @@ function settleDependencies() {
       });
       settled.push({ taskId: task.taskId, errorCode, blockedBy });
       progressed = true;
+      // 轮 3（Orchestrator）：被依赖判死的编译器产物图节点同样进编排收口
+      //（归约要等它终态才能结算 partial）。fail-safe，异步 fire-and-forget。
+      if (task.planId && String(task.planId).startsWith('plan_pc_')) {
+        try {
+          require('./orchestration-engine')
+            .onPlanTaskSettled({ taskId: task.taskId, status: 'failed' })
+            .catch(() => {});
+        } catch (_) {
+          // 引擎不可用不影响依赖收敛。
+        }
+      }
     }
   }
 
