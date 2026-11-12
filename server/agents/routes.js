@@ -19,6 +19,7 @@ const approvals = require('./approvals');
 const permissions = require('./permissions');
 const improvements = require('./improvement-loop');
 const planCompiler = require('./plan-compiler');
+const orchestrationEngine = require('./orchestration-engine');
 const { resolveUserId } = require('../user-scope');
 const { describeAgentError } = require('./errors');
 
@@ -55,6 +56,8 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
       pathName.startsWith('/agent-improvements/') ||
       pathName === '/agent-plans' ||
       pathName.startsWith('/agent-plans/') ||
+      pathName === '/agent-orchestrations' ||
+      pathName.startsWith('/agent-orchestrations/') ||
       pathName === '/agent-results' ||
       pathName.startsWith('/agent-results/');
     if (!isAgentPath) return next();
@@ -390,6 +393,37 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
         return res.status(404).json({ error: '计划不存在', code: 'plan_not_found' });
       }
       res.json({ plan });
+    })
+  );
+
+  // ---- 轮 3（Orchestrator 立项书）：编排执行的生产入口（HTTP）----
+  // POST /agent-orchestrations：按编译产物图建任务（拓扑序、跨 Agent 边 dag-v1、
+  // 幂等重入）；GET /agent-orchestrations/:planId：编排记录读回。执行全走既有
+  // Runtime（租约/fencing/预算/审批不变）；Bearer 鉴权 + auditAction。
+  router.post(
+    '/agent-orchestrations',
+    route(async (req, res) => {
+      const body = req.body || {};
+      const result = orchestrationEngine.orchestrateDAG({
+        planId: typeof body.planId === 'string' ? body.planId : '',
+        definitions: Array.isArray(body.definitions) ? body.definitions : null,
+        parentSessionId: typeof body.parentSessionId === 'string' ? body.parentSessionId : null,
+        parentUserText: typeof body.parentUserText === 'string' ? body.parentUserText : '',
+        parentUserId: typeof body.parentUserId === 'string' ? body.parentUserId : null,
+      });
+      audit(req, 'agent.orchestration.create', { target: 'agent_orchestration' });
+      res.status(result.idempotent ? 200 : 201).json({ orchestration: result.orchestration, idempotent: result.idempotent });
+    })
+  );
+
+  router.get(
+    '/agent-orchestrations/:planId',
+    route(async (req, res) => {
+      const orchestration = orchestrationEngine.getOrchestration(req.params.planId);
+      if (!orchestration) {
+        return res.status(404).json({ error: '编排不存在', code: 'orchestration_not_found' });
+      }
+      res.json({ orchestration });
     })
   );
 

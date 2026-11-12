@@ -444,6 +444,27 @@
           "note": "同内容重编译走取出语义（created:false 不追加版本）；read-back 只暴露 workflow-store 冻结版本。"
         }
       ]
+    },
+    {
+      "id": "agent-orchestrations",
+      "title": "编排执行（Orchestrator 轮 3）",
+      "prefix": "/agent-orchestrations",
+      "capabilities": [
+        {
+          "name": "POST /agent-orchestrations 按编译产物图建任务（拓扑序/幂等重入）",
+          "probe": "'/agent-orchestrations'",
+          "ui": false,
+          "consumers": [],
+          "note": "orchestration-engine-v1：跨 Agent 依赖边仅放行 plan_pc_ 图（dag-v1）；执行全走既有 Runtime（租约/fencing/预算/审批不变）；产物共享与归约由 runtime 终态钩子驱动（fail-safe）。"
+        },
+        {
+          "name": "GET /agent-orchestrations/:planId 编排记录读回",
+          "probe": "'/agent-orchestrations/'.concat",
+          "ui": false,
+          "consumers": [],
+          "note": "状态机：running → completed/partial/awaiting_publish/blocked_review；根交付经 deliverPlanOutcome 幂等通道（bot-result-<planId>）。"
+        }
+      ]
     }
   ]
 }

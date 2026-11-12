@@ -209,6 +209,98 @@ function deliverTaskOutcome(taskOrId, {
   return { delivered: true, message };
 }
 
+/**
+ * 轮 3（Orchestrator）：编排根结果的幂等投递。消息 id = bot-result-<planId>，
+ * 与任务投递同一前缀与去重语义（命中既有消息不重复追加，只通知）。
+ * 编排没有任务记录可写 delivery 状态——幂等由「消息 id 已存在」判定承担。
+ */
+function deliverPlanOutcome({
+  planId,
+  botId = null,
+  parentSessionId = null,
+  status,
+  result = null,
+  errorCode = null,
+} = {}) {
+  if (!planId || !parentSessionId) {
+    return { delivered: false, reason: 'missing_target' };
+  }
+  const messageId = messageIdFor(planId);
+  let messages = null;
+  try {
+    messages = mainSessions.getMessages(parentSessionId);
+  } catch (_) {
+    messages = null;
+  }
+  const existing = Array.isArray(messages)
+    ? messages.find(message => message.id === messageId)
+    : null;
+  if (existing) {
+    notify({
+      type: 'result',
+      taskId: planId,
+      sessionId: parentSessionId,
+      status,
+      result: result || null,
+      errorCode,
+      message: existing,
+    });
+    return { delivered: true, alreadyDelivered: true, messageId, message: existing };
+  }
+  const lines = [
+    status === 'completed' ? '【编排任务完成】' : '【编排任务部分完成】',
+    `编排 ID：${planId}`,
+    `状态：${status}`,
+  ];
+  if (result && result.summary) lines.push(`汇总：${result.summary}`);
+  if (errorCode) lines.push(`错误码：${errorCode}`);
+  const content = lines.join('\n');
+  let appended = null;
+  try {
+    appended = mainSessions.appendMessages(parentSessionId, [
+      {
+        id: messageId,
+        role: 'assistant',
+        content,
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+  } catch (_) {
+    appended = null;
+  }
+  if (!appended) {
+    notify({
+      type: 'delivery_failed',
+      taskId: planId,
+      sessionId: parentSessionId,
+      errorCode: 'parent_session_write_failed',
+    });
+    return { delivered: false, reason: 'parent_session_write_failed' };
+  }
+  const message = appended[0];
+  try {
+    tasks.appendEvent({
+      botId: botId || 'memory',
+      eventType: 'task.delivery',
+      payload: { status, messageId, mode: 'plan_delivery', ...(errorCode ? { errorCode } : {}) },
+      correlationId: planId,
+      dedupeKey: `${planId}|${status}|${messageId}`,
+    });
+  } catch (_) {
+    // 投递已发生；事件失败不回滚。
+  }
+  notify({
+    type: 'result',
+    taskId: planId,
+    sessionId: parentSessionId,
+    status,
+    result: result || null,
+    errorCode,
+    message,
+  });
+  return { delivered: true, messageId, message };
+}
+
 function recoverPending() {
   let delivered = 0;
   let failed = 0;
@@ -279,6 +371,7 @@ function subscribe(listener) {
 module.exports = {
   messageIdFor,
   deliverTaskOutcome,
+  deliverPlanOutcome,
   recoverPending,
   snapshotForSession,
   subscribe,

@@ -1743,6 +1743,17 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
         },
         { approvalId: record.approvalId, taskId: record.taskId, sessionId: record.sessionId }
       );
+      // 轮 3：发布审批收口后回查编排——发布门要求全部命中节点批准完毕才根交付，
+      // 最后一条批准在这里触发归约重查（fail-safe，失败不影响审批结论）。
+      if (record.payload && record.payload.planId) {
+        try {
+          require('./orchestration-engine')
+            .maybeReducePlan(String(record.payload.planId))
+            .catch(() => {});
+        } catch (_) {
+          // 回查失败不改变审批结论。
+        }
+      }
       return publicApproval(record);
     }
     const gateNow = nowIso();
