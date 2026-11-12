@@ -18,6 +18,7 @@ const mainSessions = require('../sessions');
 const approvals = require('./approvals');
 const permissions = require('./permissions');
 const improvements = require('./improvement-loop');
+const planCompiler = require('./plan-compiler');
 const { resolveUserId } = require('../user-scope');
 const { describeAgentError } = require('./errors');
 
@@ -52,6 +53,8 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
       pathName.startsWith('/agent-approvals/') ||
       pathName === '/agent-improvements' ||
       pathName.startsWith('/agent-improvements/') ||
+      pathName === '/agent-plans' ||
+      pathName.startsWith('/agent-plans/') ||
       pathName === '/agent-results' ||
       pathName.startsWith('/agent-results/');
     if (!isAgentPath) return next();
@@ -357,6 +360,36 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
     '/agents/:botId/permissions',
     route(async (req, res) => {
       res.json({ permission: permissions.getPermissionProfile(req.params.botId) });
+    })
+  );
+
+  // ---- 轮 2（Orchestrator 立项书）：计划编译器的生产入口（HTTP）----
+  // 链路：POST /agent-plans 编译（纯服务端校验与落盘，不执行任务）→
+  // GET /agent-plans/:planId 读回 head 版本。执行者由路由解析（模型 agent 名
+  // 丢弃并审计）；plan.rejected 事件在编译失败时落审计。Bearer 鉴权 + auditAction。
+  router.post(
+    '/agent-plans',
+    route(async (req, res) => {
+      const body = req.body || {};
+      const compiled = planCompiler.compilePlan({
+        goal: typeof body.goal === 'string' ? body.goal : '',
+        mode: body.mode,
+        nodes: Array.isArray(body.nodes) ? body.nodes : [],
+        declaredAgents: Array.isArray(body.declaredAgents) ? body.declaredAgents : null,
+      });
+      audit(req, 'agent.plan.compile', { target: 'agent_plan' });
+      res.status(201).json({ plan: compiled });
+    })
+  );
+
+  router.get(
+    '/agent-plans/:planId',
+    route(async (req, res) => {
+      const plan = planCompiler.getCompiledPlan(req.params.planId);
+      if (!plan) {
+        return res.status(404).json({ error: '计划不存在', code: 'plan_not_found' });
+      }
+      res.json({ plan });
     })
   );
 

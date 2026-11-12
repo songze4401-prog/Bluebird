@@ -100,6 +100,9 @@ const STEP_KEYS = Object.freeze([
   'acceptanceDigest',
   'maxAgeMs',
   'dependsOnVersions',
+  // 轮 2（Orchestrator 立项书）：计划编译器解析出的执行者（可选；缺省缺字段 =
+  // 旧行为）。节点执行者由服务端按 taskType 路由解析后写入，不是模型声明。
+  'agentId',
 ]);
 const STEP_GOAL_MAX = 200;
 const STEP_DEPENDS_MAX = 8;
@@ -286,6 +289,9 @@ function assertStep(step, index) {
   }
   if (step.capability !== undefined) {
     assertString(`${where}.capability`, step.capability, { max: TOOL_NAME_MAX });
+  }
+  if (step.agentId !== undefined) {
+    assertString(`${where}.agentId`, step.agentId, { max: 80 });
   }
   if (step.taskType !== undefined) {
     assertString(`${where}.taskType`, step.taskType, { max: TOOL_NAME_MAX });

@@ -243,6 +243,19 @@ test('f. A 类：steps >32、单 step >1 KB、未知字段、非法类型均拒�
     () => store.createPlan({ plan: basePlan({ steps: [step({ label: 'L'.repeat(201) })] }) }),
     'plan_invalid'
   );
+  // 轮 2：step.agentId 可选字段——合法值接受并原样读回；非法类型/超长拒绝。
+  const agentStep = { ...step(), agentId: 'researcher' };
+  const withAgent = store.createPlan({ plan: basePlan({ steps: [agentStep] }) });
+  const readBack = store.getVersion(withAgent.planId, 1);
+  assert.strictEqual(readBack.plan.steps[0].agentId, 'researcher');
+  assertCode(
+    () => store.createPlan({ plan: basePlan({ steps: [{ ...step(), agentId: 42 }] }) }),
+    'plan_invalid'
+  );
+  assertCode(
+    () => store.createPlan({ plan: basePlan({ steps: [{ ...step(), agentId: 'a'.repeat(81) }] }) }),
+    'plan_invalid'
+  );
   // 32 条恰好通过。
   const ok = store.createPlan({ plan: basePlan({ steps: Array.from({ length: 32 }, () => step()) }) });
   assert.strictEqual(ok.planVersion, 1);
