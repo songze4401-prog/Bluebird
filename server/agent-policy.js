@@ -49,6 +49,13 @@ const DEFAULTS = Object.freeze({
     maxRounds: 3,
     maxTotalMs: 90000,
   }),
+  // 轮 4（Orchestrator 立项书）：主聊天编排开关。默认关闭 = 直答路径零行为差异；
+  // 开启后模型可在回复中携带 ```bluebird-plan 计划块，服务端剥块 → 编译 → 编排，
+  // 编译失败降级直答（fail-safe）。maxNodes 是服务端硬上限的收紧位（≤8）。
+  orchestration: Object.freeze({
+    enabled: false,
+    maxNodes: 8,
+  }),
 });
 
 const LIMITS = Object.freeze({
@@ -59,10 +66,11 @@ const LIMITS = Object.freeze({
   maxAllowedTools: MAX_ALLOWED_TOOLS,
 });
 
-const TOP_KEYS = new Set(['schemaVersion', 'mode', 'planning', 'tools', 'budgets']);
+const TOP_KEYS = new Set(['schemaVersion', 'mode', 'planning', 'tools', 'budgets', 'orchestration']);
 const PLANNING_KEYS = new Set(['generatePlan', 'stagedExecution', 'resultSummary']);
 const TOOL_KEYS = new Set(['allowedTools', 'maxToolCalls', 'maxReadOnlyRetries']);
 const BUDGET_KEYS = new Set(['maxRounds', 'maxTotalMs']);
+const ORCHESTRATION_KEYS = new Set(['enabled', 'maxNodes']);
 
 let cache = null;
 let lastRecovery = null;
@@ -197,6 +205,34 @@ function validatePolicy(input) {
     }
   }
 
+  // 轮 4：orchestration 为可选块（缺省 = 默认关闭），旧客户端 PUT 旧形状不受影响。
+  let orchestration = clone(DEFAULTS.orchestration);
+  if (input.orchestration !== undefined) {
+    if (!isPlainObject(input.orchestration)) {
+      errors.push('orchestration 必须是对象');
+    } else {
+      for (const key of unknownKeys(input.orchestration, ORCHESTRATION_KEYS)) {
+        errors.push(`未知字段：orchestration.${key}`);
+      }
+      if (typeof input.orchestration.enabled !== 'boolean') {
+        errors.push('orchestration.enabled 必须是布尔值');
+      }
+      if (
+        !Number.isInteger(input.orchestration.maxNodes) ||
+        input.orchestration.maxNodes < 1 ||
+        input.orchestration.maxNodes > 8
+      ) {
+        errors.push('orchestration.maxNodes 必须是 1-8 的整数');
+      }
+      if (!errors.length) {
+        orchestration = {
+          enabled: input.orchestration.enabled,
+          maxNodes: input.orchestration.maxNodes,
+        };
+      }
+    }
+  }
+
   if (errors.length) return { ok: false, errors };
 
   return {
@@ -218,6 +254,7 @@ function validatePolicy(input) {
         maxRounds: input.budgets.maxRounds,
         maxTotalMs: input.budgets.maxTotalMs,
       },
+      orchestration,
     },
   };
 }
