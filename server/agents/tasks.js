@@ -134,6 +134,10 @@ const EVENT_TYPES = Object.freeze([
   'plan.revision_storm_denied',
   'plan.revision_skipped',
   'plan.publish_requested',
+  // 轮 2（Orchestrator）：计划编译器的提出/编译/拒绝（只记计数与指针，不记节点正文）。
+  'plan.proposed',
+  'plan.compiled',
+  'plan.rejected',
   // P5-D / §17 FM-2：必需约束从已验证引用重建成功（只记键名与引用 id，不记正文）。
   'handoff.context_rebuilt',
   // P5-D / §17 FM-6：重试耗尽且无可交付部分结果时请求决策（只记计数与短码）。
@@ -260,6 +264,9 @@ const SAFE_PAYLOAD_KEYS = new Set([
   'fromVersion',
   'skipReason',
   'deliveryArtifactId',
+  // 轮 2（Orchestrator）：计划编译事件的扁平标量（节点数与被忽略的声明 agent 数）。
+  'nodeCount',
+  'declaredAgentCount',
   'generation',
   'heldGeneration',
   'currentGeneration',

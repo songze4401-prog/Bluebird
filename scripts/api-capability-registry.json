@@ -423,6 +423,27 @@
           "note": "与周期调度器同一实现（draftFromRecentFailures），带开放提案去重守卫。"
         }
       ]
+    },
+    {
+      "id": "agent-plans",
+      "title": "计划编译器（Orchestrator 轮 2）",
+      "prefix": "/agent-plans",
+      "capabilities": [
+        {
+          "name": "POST /agent-plans 计划编译（校验+落盘，不执行任务）",
+          "probe": "'/agent-plans'",
+          "ui": false,
+          "consumers": [],
+          "note": "plan-compiler-v1：节点 schema/DAG 无环/≤8 节点/执行者由路由解析（模型 agent 名丢弃并审计）；失败记 plan.rejected 后按既有错误契约返回。"
+        },
+        {
+          "name": "GET /agent-plans/:planId 读回 head 版本",
+          "probe": "'/agent-plans/'.concat",
+          "ui": false,
+          "consumers": [],
+          "note": "同内容重编译走取出语义（created:false 不追加版本）；read-back 只暴露 workflow-store 冻结版本。"
+        }
+      ]
     }
   ]
 }
