@@ -78,6 +78,8 @@ const PLAN_KEYS = Object.freeze([
   'allowedTools',
   'budget',
   'goalDigest',
+  // P5-C2：发布门声明（可选）。缺省不出现在归一化输出里——digest 对旧计划零影响。
+  'publishGate',
 ]);
 
 // Phase 1 交付物 1（Planner 侧）：在既有 step schema 上**增量**增加可执行编排字段。
@@ -414,6 +416,27 @@ function validatePlan(plan) {
     budget,
     goalDigest,
   };
+  // P5-C2 发布门：只在显式声明时进入归一化输出（null 与 undefined 同为缺省），
+  // 保证旧计划重新校验时 digest 不变。
+  if (plan.publishGate !== undefined && plan.publishGate !== null) {
+    const publishGate = plan.publishGate;
+    if (!isPlainObject(publishGate)) {
+      throw planError('plan_invalid', 'plan.publishGate 必须是纯对象');
+    }
+    if (typeof publishGate.required !== 'boolean') {
+      throw planError('plan_invalid', 'plan.publishGate.required 必须是布尔值');
+    }
+    if (
+      publishGate.taskType !== undefined &&
+      (typeof publishGate.taskType !== 'string' || publishGate.taskType.length > TOOL_NAME_MAX)
+    ) {
+      throw planError('plan_invalid', 'plan.publishGate.taskType 必须是不超过 64 字的字符串');
+    }
+    normalized.publishGate = {
+      required: publishGate.required,
+      ...(publishGate.taskType !== undefined ? { taskType: publishGate.taskType } : {}),
+    };
+  }
 
   const bytes = Buffer.byteLength(JSON.stringify(normalized), 'utf8');
   if (bytes > PLAN_MAX_BYTES) {

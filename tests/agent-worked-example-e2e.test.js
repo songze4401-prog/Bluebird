@@ -1,15 +1,17 @@
 /* global require, process, __dirname */
 /**
- * A-13 / §20（Owner 九步口径）：端到端 worked example 可重跑。
+ * A-13 / §20（十三步口径）：端到端 worked example 可重跑。
  *
- * 断言脚本真实跑完九步，并核对：
+ * 断言脚本真实跑完十三步，并核对：
  *  - 环境如实标注「非真实模型」；
  *  - 两个 Worker 并行窗口成立；
  *  - A1/B1 带来源/provenance/taint；
  *  - schema/引用/来源三类检查全过；
  *  - Reviewer 独立裁决冲突 C1 并写回 ConflictRecord；
  *  - 交付产物 provenance 链完整；
- *  - Token 取 provider 实际 usage，成本未采集（不估算）。
+ *  - Token 取 provider 实际 usage，成本未采集（不估算）；
+ *  - P5-C2：验证拒绝注入 → 修订 v2 + 只重跑缺证节点；重跑命中发布门
+ *    waiting_approval → 批准后幂等交付；对照场景拒绝 → fail-closed 不交付。
  */
 const fs = require('fs');
 const os = require('os');
@@ -21,28 +23,28 @@ const { execFileSync } = require('child_process');
 const ROOT = path.join(__dirname, '..');
 const SCRIPT = path.join(ROOT, 'scripts', 'run-worked-example.js');
 
-test('A-13 worked example：九步真跑、可复核、可重跑', { timeout: 120000 }, () => {
+test('A-13 worked example：十三步真跑、可复核、可重跑', { timeout: 180000 }, () => {
   const outFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-e2e-out-')), 'run.json');
   execFileSync(process.execPath, [SCRIPT, '--out', outFile], {
     cwd: ROOT,
     encoding: 'utf8',
-    timeout: 90000,
+    timeout: 150000,
   });
   const record = JSON.parse(fs.readFileSync(outFile, 'utf8'));
 
   // 环境必须如实标注，不能包装成真实端到端。
   assert.strictEqual(record.environment.realModel, false);
   assert.match(record.environment.note, /非真实模型/);
-  assert.strictEqual(record.stepCount, 9);
+  assert.strictEqual(record.stepCount, 13);
   assert.deepStrictEqual(
     record.steps.map(step => step.step),
-    [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
   );
 
-  // 九步内容齐全。
+  // 十三步内容齐全。
   const names = record.steps.map(step => step.name).join('|');
-  for (const keyword of ['Worker 并行研究', 'A1/B1', 'schema', '引用', '来源', 'Reviewer', '交付', 'trace']) {
-    assert.ok(names.includes(keyword), `九步缺少「${keyword}」`);
+  for (const keyword of ['Worker 并行研究', 'A1/B1', 'schema', '引用', '来源', 'Reviewer', '交付', 'trace', '修订', '发布门']) {
+    assert.ok(names.includes(keyword), `十三步缺少「${keyword}」`);
   }
 
   // 两个 Worker 真并行（事件窗口重叠）。
@@ -100,4 +102,25 @@ test('A-13 worked example：九步真跑、可复核、可重跑', { timeout: 12
     assert.ok(record.trace.eventIds[key].length > 0, `${key} 必须有事件 id`);
     assert.ok(record.trace.eventIds[key][0].eventId);
   }
+
+  // P5-C2 步骤 10–13：修订闭环 + 发布门。
+  const revisionStep = record.steps.find(item => item.step === 10);
+  assert.strictEqual(revisionStep.toVersion, 2, '修订必须追加 v2');
+  assert.strictEqual(revisionStep.rerunTaskIds.length, 1, '只重跑缺证节点');
+  assert.strictEqual(revisionStep.failedErrorCode, 'review_rejected');
+  assert.ok(revisionStep.revisionEventIds.length >= 1, 'plan.revision_created 必须落审计');
+
+  const gateStep = record.steps.find(item => item.step === 11);
+  assert.strictEqual(gateStep.commitState, 'pending-commit', '获批前 delivery 产物不得提交');
+  assert.strictEqual(gateStep.riskLevel, 'R2');
+
+  const approveStep = record.steps.find(item => item.step === 12);
+  assert.strictEqual(approveStep.stopReason, 'publish_gate');
+  assert.strictEqual(approveStep.commitState, 'committed', '批准后 delivery 产物必须提交');
+  assert.strictEqual(approveStep.duplicateRejected, true, '重复执行必须被拒绝');
+
+  const rejectStep = record.steps.find(item => item.step === 13);
+  assert.strictEqual(rejectStep.finalStatus, 'cancelled');
+  assert.strictEqual(rejectStep.errorCode, 'approval_rejected');
+  assert.strictEqual(rejectStep.commitState, 'pending-commit', '拒绝路径不交付');
 });

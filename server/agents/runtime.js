@@ -35,6 +35,7 @@ const riskPolicy = require('./risk-policy');
 const { HIGH_RISK_TASK_TYPES } = require('./autonomy-policy');
 const { createCleanupScheduler } = require('./orphan-scheduler');
 const improvementLoop = require('./improvement-loop');
+const planRevision = require('./plan-revision');
 const verificationLoop = require('./verification-loop');
 const stormSuppression = require('./storm-suppression');
 const throttlePolicy = require('./throttle-policy');
@@ -1665,6 +1666,16 @@ async function runTask(taskId) {
     // transitionTask 内执行，状态与 result 同一次落盘（stateVersion 同一次 +1）。
     // 独立审校可能等了数十秒，期间同样可能换代，因此提交前再判一次；
     // 此时被拒会留下 pending-commit 产物，由既有 scanPendingCommits 收敛（不新增恢复路径）。
+    // P5-C2 发布门：计划声明 publishGate 且命中本任务 → 交付先过审批。任务停在
+    // waiting_approval（复用既有审批语义，不新造状态）；产物留在 pending-commit，
+    // 由审批执行（deliverOnApproval）统一收口；拒绝/超时走既有取消路径——交付
+    // 永不发生（fail-closed）。raise 失败不阻断交付门（走正常 completed）由
+    // 调用方显式 fail-safe：此处让错误进 catch，按普通失败收口，不静默放行。
+    const publishGate = require('./publish-gate');
+    if (publishGate.gateForTask(task)) {
+      publishGate.requestPublishApproval({ task, finalResult, runId });
+      return;
+    }
     assertWriteAuthority({ task, token: fencingToken, runId, phase: 'result_commit' });
     artifactCommit.completeTask(task.taskId, {
       completedAt: finalResult.finishedAt,
@@ -1920,6 +1931,28 @@ async function runTask(taskId) {
         );
       }
     }
+
+    // P5-C2 修订闭环：验证拒绝导致的终态失败且有计划血缘 → 尝试修订（fail-safe：
+    // 修订失败不改变任务终态，只留 plan.revision_skipped 事件）。重跑集由
+    // plan-revision 按同计划 failed 任务（含被依赖判死的未启动下游）圈定。
+    if (
+      status === 'failed' &&
+      !cancelled &&
+      !timedOut &&
+      latest.planId &&
+      VERIFICATION_REJECT_CODES.has(errorCode)
+    ) {
+      try {
+        planRevision.createRevision({ failedTaskId: task.taskId, reason: errorCode, runId });
+      } catch (revisionError) {
+        safeEvent(
+          task.botId,
+          'plan.revision_skipped',
+          { skipReason: (revisionError && revisionError.code) || 'revision_failed' },
+          { taskId: task.taskId, runId, sessionId: task.sessionId }
+        );
+      }
+    }
   } finally {
     if (deadlineTimer) clearTimeout(deadlineTimer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -1992,6 +2025,14 @@ const PLAN_FAILURE_CODES = new Set([
   'plan_corrupt',
   'plan_store_corrupted',
   'plan_unavailable',
+]);
+
+// P5-C2：触发修订闭环的验证拒绝码 = 确定性验证码 + 审校裁决拒绝/冲突码。
+// needs_human 不在此列——它走审批，不是终态失败。
+const VERIFICATION_REJECT_CODES = new Set([
+  ...Object.values(verificationLoop.VERIFY_CODES),
+  verificationLoop.DECISION_CODES.reviewRejected,
+  verificationLoop.DECISION_CODES.conflict,
 ]);
 
 /**

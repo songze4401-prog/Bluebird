@@ -1,0 +1,1336 @@
+{
+  "policyVersion": "worked-example-v1",
+  "traceId": "trace_d406a995-0374-4fc8-b432-055a9b9cd315",
+  "stepCount": 13,
+  "environment": {
+    "provider": "local-http-stub",
+    "realModel": false,
+    "note": "非真实模型环境，仅验证链路与数据形态；Token 为 provider 返回的真实 usage。"
+  },
+  "startedAt": "2026-11-12T19:10:12.880Z",
+  "finishedAt": "2026-11-12T19:10:15.053Z",
+  "durationMs": 2173,
+  "parallel": true,
+  "taskIds": {
+    "workerA": "task_ca583a8a-1962-4c74-adcc-8ee585aa3b1a",
+    "workerB": "task_4bbae3a0-36b3-4469-be0f-0c991fc6e32f",
+    "reviewer": "task_583e9f1b-d8aa-43e8-ab38-82635053cc44"
+  },
+  "artifacts": {
+    "S1": {
+      "kind": "source",
+      "id": "art_52097ea504ea8c9ba8020c704b94a80a",
+      "version": 1,
+      "taskId": "task_ca583a8a-1962-4c74-adcc-8ee585aa3b1a",
+      "provenanceRefs": [],
+      "taintLabels": [
+        "unverified",
+        "web:vendor-a.example"
+      ],
+      "taintPolicyVersion": "taint-policy-v1",
+      "createdAt": "2026-11-12T19:10:13.533Z",
+      "contentHash": "f225822296726d0bfc84719e3288088e2da7f7a42c2bbabba3a78e6078dda2f0"
+    },
+    "S2": {
+      "kind": "source",
+      "id": "art_545f44543462b81f80559203b1fe9a07",
+      "version": 1,
+      "taskId": "task_4bbae3a0-36b3-4469-be0f-0c991fc6e32f",
+      "provenanceRefs": [],
+      "taintLabels": [
+        "unverified",
+        "web:vendor-a.example"
+      ],
+      "taintPolicyVersion": "taint-policy-v1",
+      "createdAt": "2026-11-12T19:10:13.542Z",
+      "contentHash": "e06d4919ba70f5190a364420e245226787cdca5e3f29dee327837d85d02a311e"
+    },
+    "A1": {
+      "kind": "conclusion",
+      "id": "art_9df94be60c77e90321fdc2e5d76f4fb7",
+      "version": 1,
+      "taskId": "task_ca583a8a-1962-4c74-adcc-8ee585aa3b1a",
+      "provenanceRefs": [
+        {
+          "kind": "source",
+          "id": "art_52097ea504ea8c9ba8020c704b94a80a",
+          "version": 1
+        }
+      ],
+      "taintLabels": [
+        "unverified",
+        "web:vendor-a.example"
+      ],
+      "taintPolicyVersion": "taint-policy-v1",
+      "createdAt": "2026-11-12T19:10:13.550Z",
+      "contentHash": "92e3a37e5156dd328c97dac1b4b973e025cc261ab74777f6247feb79d7e460a6"
+    },
+    "B1": {
+      "kind": "conclusion",
+      "id": "art_6aeaaff9f3fe31bf6ae0a8b911b749d1",
+      "version": 1,
+      "taskId": "task_4bbae3a0-36b3-4469-be0f-0c991fc6e32f",
+      "provenanceRefs": [
+        {
+          "kind": "source",
+          "id": "art_545f44543462b81f80559203b1fe9a07",
+          "version": 1
+        }
+      ],
+      "taintLabels": [
+        "unverified",
+        "web:vendor-a.example"
+      ],
+      "taintPolicyVersion": "taint-policy-v1",
+      "createdAt": "2026-11-12T19:10:13.559Z",
+      "contentHash": "18beee842698ed717fd6d68a8f7ea1049b88ace1720c5582db0e1e4132dec11b"
+    },
+    "delivery": {
+      "kind": "delivery",
+      "id": "art_9b3aa7a8ea717bafc75a34f509b04084",
+      "version": 1,
+      "taskId": "task_583e9f1b-d8aa-43e8-ab38-82635053cc44",
+      "provenanceRefs": [
+        {
+          "kind": "conclusion",
+          "id": "art_9df94be60c77e90321fdc2e5d76f4fb7",
+          "version": 1
+        },
+        {
+          "kind": "conclusion",
+          "id": "art_6aeaaff9f3fe31bf6ae0a8b911b749d1",
+          "version": 1
+        }
+      ],
+      "taintLabels": [
+        "review:adjudicated",
+        "unverified",
+        "web:vendor-a.example"
+      ],
+      "taintPolicyVersion": "taint-policy-v1",
+      "createdAt": "2026-11-12T19:10:13.907Z",
+      "contentHash": "e842e0351325e7c04fc774ee58c398889b459064ed9f41d069149ccb5d36379c"
+    }
+  },
+  "verification": {
+    "A1": {
+      "ok": true,
+      "errorCode": null
+    },
+    "B1": {
+      "ok": true,
+      "errorCode": null
+    }
+  },
+  "conflict": {
+    "conflictId": "conflict_75b27080193b2ba430598dcd93b8bc32",
+    "conflictType": "factual",
+    "candidateRefs": [
+      "art_9df94be60c77e90321fdc2e5d76f4fb7",
+      "art_6aeaaff9f3fe31bf6ae0a8b911b749d1"
+    ],
+    "evidenceRefs": [
+      "art_52097ea504ea8c9ba8020c704b94a80a",
+      "art_545f44543462b81f80559203b1fe9a07"
+    ],
+    "resolutionStatus": "resolved",
+    "resolutionMethod": "review",
+    "selectedCandidateRef": "art_9df94be60c77e90321fdc2e5d76f4fb7",
+    "rationale": "independent_review_pass",
+    "policyVersion": "conflict-rules-v1",
+    "arbitrationPolicyVersion": "conflict-arbitration-v1",
+    "evidenceOrder": [
+      {
+        "source": "reviewer",
+        "precedence": 2,
+        "authoritative": true,
+        "independent": true,
+        "ok": true
+      }
+    ]
+  },
+  "delivery": {
+    "kind": "delivery",
+    "id": "art_9b3aa7a8ea717bafc75a34f509b04084",
+    "version": 1
+  },
+  "usage": {
+    "runtimeUsage": {
+      "workerA": {
+        "prompt_tokens": 180,
+        "completion_tokens": 64,
+        "total_tokens": 244
+      },
+      "workerB": {
+        "prompt_tokens": 176,
+        "completion_tokens": 66,
+        "total_tokens": 242
+      },
+      "reviewer": {
+        "prompt_tokens": 320,
+        "completion_tokens": 88,
+        "total_tokens": 408
+      }
+    },
+    "providerUsage": {
+      "workerA": {
+        "prompt_tokens": 180,
+        "completion_tokens": 64,
+        "total_tokens": 244
+      },
+      "workerB": {
+        "prompt_tokens": 176,
+        "completion_tokens": 66,
+        "total_tokens": 242
+      },
+      "reviewer": {
+        "prompt_tokens": 320,
+        "completion_tokens": 88,
+        "total_tokens": 408
+      }
+    },
+    "resolved": {
+      "workerA": {
+        "prompt_tokens": 180,
+        "completion_tokens": 64,
+        "total_tokens": 244
+      },
+      "workerB": {
+        "prompt_tokens": 176,
+        "completion_tokens": 66,
+        "total_tokens": 242
+      },
+      "reviewer": {
+        "prompt_tokens": 320,
+        "completion_tokens": 88,
+        "total_tokens": 408
+      }
+    },
+    "totalTokens": 894,
+    "source": "provider_reported",
+    "cost": "未采集",
+    "costReason": "本地 HTTP stub provider 无计价口径，不估算成本。"
+  },
+  "latencyMs": {
+    "workerA": 500,
+    "workerB": 543,
+    "reviewer": 275
+  },
+  "steps": [
+    {
+      "step": 1,
+      "name": "准备本地 provider 与 Agent 配置",
+      "startedAt": "2026-11-12T19:10:12.918Z",
+      "durationMs": 38,
+      "environment": "local-http-stub（非真实模型）",
+      "providerId": "42b4d115-77c8-4227-849d-70ba6b6c2b02",
+      "bots": [
+        "researcher",
+        "reviewer"
+      ]
+    },
+    {
+      "step": 2,
+      "name": "两个 Worker 并行研究",
+      "startedAt": "2026-11-12T19:10:13.533Z",
+      "durationMs": 615,
+      "taskIds": [
+        "task_ca583a8a-1962-4c74-adcc-8ee585aa3b1a",
+        "task_4bbae3a0-36b3-4469-be0f-0c991fc6e32f"
+      ],
+      "sessions": [
+        "bs_3b86687a-9647-4181-bd4a-fddd8864bfa5",
+        "bs_c62344b6-8549-457c-9c7c-caf233115d5a"
+      ],
+      "parallel": true,
+      "eventWindows": {
+        "A": {
+          "accepted": "2026-11-12T19:10:13.027Z",
+          "completed": "2026-11-12T19:10:13.443Z"
+        },
+        "B": {
+          "accepted": "2026-11-12T19:10:13.120Z",
+          "completed": "2026-11-12T19:10:13.514Z"
+        },
+        "types": [
+          "task_ca583a8a-1962-4c74-adcc-8ee585aa3b1a:task.completed@2026-11-12T19:10:13.443Z",
+          "task_ca583a8a-1962-4c74-adcc-8ee585aa3b1a:task.accepted@2026-11-12T19:10:13.027Z",
+          "task_4bbae3a0-36b3-4469-be0f-0c991fc6e32f:task.completed@2026-11-12T19:10:13.514Z",
+          "task_4bbae3a0-36b3-4469-be0f-0c991fc6e32f:task.accepted@2026-11-12T19:10:13.120Z"
+        ]
+      },
+      "outputs": {
+        "A": {
+          "worker": "A",
+          "subject": "订阅价格",
+          "claim": {
+            "key": "monthly_price",
+            "value": "$99"
+          },
+          "source": {
+            "url": "https://vendor-a.example/pricing",
+            "retrievedAt": "2026-11-05T02:10:00.000Z",
+            "title": "Vendor A 官方定价页"
+          },
+          "uncertainty": "促销价可能随时调整"
+        },
+        "B": {
+          "worker": "B",
+          "subject": "订阅价格",
+          "claim": {
+            "key": "monthly_price",
+            "value": "$129"
+          },
+          "source": {
+            "url": "https://vendor-a.example/legacy-pricing",
+            "retrievedAt": "2026-10-26T09:00:00.000Z",
+            "title": "Vendor A 旧版定价页（缓存）"
+          },
+          "uncertainty": "页面可能已过期"
+        }
+      },
+      "eventIds": [
+        "evt_40edef32-cadd-43b8-a5f7-7bf4dfde087a",
+        "evt_41321da3-22df-4532-ad00-2c12ee0f4f1a",
+        "evt_f4f3e3fe-81ca-4b74-addc-f0ce8f3f6297",
+        "evt_2aee7718-e566-4629-970e-b6befa091a29"
+      ]
+    },
+    {
+      "step": 3,
+      "name": "各写 A1/B1（来源/时间/provenance/taint）",
+      "startedAt": "2026-11-12T19:10:13.567Z",
+      "durationMs": 34,
+      "artifacts": {
+        "S1": {
+          "kind": "source",
+          "id": "art_52097ea504ea8c9ba8020c704b94a80a",
+          "version": 1,
+          "taskId": "task_ca583a8a-1962-4c74-adcc-8ee585aa3b1a",
+          "provenanceRefs": [],
+          "taintLabels": [
+            "unverified",
+            "web:vendor-a.example"
+          ],
+          "taintPolicyVersion": "taint-policy-v1",
+          "createdAt": "2026-11-12T19:10:13.533Z",
+          "contentHash": "f225822296726d0bfc84719e3288088e2da7f7a42c2bbabba3a78e6078dda2f0"
+        },
+        "S2": {
+          "kind": "source",
+          "id": "art_545f44543462b81f80559203b1fe9a07",
+          "version": 1,
+          "taskId": "task_4bbae3a0-36b3-4469-be0f-0c991fc6e32f",
+          "provenanceRefs": [],
+          "taintLabels": [
+            "unverified",
+            "web:vendor-a.example"
+          ],
+          "taintPolicyVersion": "taint-policy-v1",
+          "createdAt": "2026-11-12T19:10:13.542Z",
+          "contentHash": "e06d4919ba70f5190a364420e245226787cdca5e3f29dee327837d85d02a311e"
+        },
+        "A1": {
+          "kind": "conclusion",
+          "id": "art_9df94be60c77e90321fdc2e5d76f4fb7",
+          "version": 1,
+          "taskId": "task_ca583a8a-1962-4c74-adcc-8ee585aa3b1a",
+          "provenanceRefs": [
+            {
+              "kind": "source",
+              "id": "art_52097ea504ea8c9ba8020c704b94a80a",
+              "version": 1
+            }
+          ],
+          "taintLabels": [
+            "unverified",
+            "web:vendor-a.example"
+          ],
+          "taintPolicyVersion": "taint-policy-v1",
+          "createdAt": "2026-11-12T19:10:13.550Z",
+          "contentHash": "92e3a37e5156dd328c97dac1b4b973e025cc261ab74777f6247feb79d7e460a6"
+        },
+        "B1": {
+          "kind": "conclusion",
+          "id": "art_6aeaaff9f3fe31bf6ae0a8b911b749d1",
+          "version": 1,
+          "taskId": "task_4bbae3a0-36b3-4469-be0f-0c991fc6e32f",
+          "provenanceRefs": [
+            {
+              "kind": "source",
+              "id": "art_545f44543462b81f80559203b1fe9a07",
+              "version": 1
+            }
+          ],
+          "taintLabels": [
+            "unverified",
+            "web:vendor-a.example"
+          ],
+          "taintPolicyVersion": "taint-policy-v1",
+          "createdAt": "2026-11-12T19:10:13.559Z",
+          "contentHash": "18beee842698ed717fd6d68a8f7ea1049b88ace1720c5582db0e1e4132dec11b"
+        }
+      }
+    },
+    {
+      "step": 4,
+      "name": "验证：schema 检查",
+      "startedAt": "2026-11-12T19:10:13.572Z",
+      "durationMs": 5,
+      "result": {
+        "A1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "result_shape",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "required_fields",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "artifact_refs",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "content_readable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "hash_match",
+              "ok": true,
+              "code": null
+            }
+          ]
+        },
+        "B1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "result_shape",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "required_fields",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "artifact_refs",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "content_readable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "hash_match",
+              "ok": true,
+              "code": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "step": 5,
+      "name": "验证：引用检查",
+      "startedAt": "2026-11-12T19:10:13.572Z",
+      "durationMs": 0,
+      "result": {
+        "A1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "refs_resolvable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "version_consistent",
+              "ok": true,
+              "code": null
+            }
+          ]
+        },
+        "B1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "refs_resolvable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "version_consistent",
+              "ok": true,
+              "code": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "step": 6,
+      "name": "验证：来源检查",
+      "startedAt": "2026-11-12T19:10:13.572Z",
+      "durationMs": 0,
+      "result": {
+        "A1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "evidence_resolvable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "provenance_intact",
+              "ok": true,
+              "code": null
+            }
+          ]
+        },
+        "B1": {
+          "ok": true,
+          "checks": [
+            {
+              "name": "evidence_resolvable",
+              "ok": true,
+              "code": null
+            },
+            {
+              "name": "provenance_intact",
+              "ok": true,
+              "code": null
+            }
+          ]
+        }
+      }
+    },
+    {
+      "step": 7,
+      "name": "Reviewer 对照来源裁决冲突 C1",
+      "startedAt": "2026-11-12T19:10:13.907Z",
+      "durationMs": 335,
+      "reviewTaskId": "task_583e9f1b-d8aa-43e8-ab38-82635053cc44",
+      "reviewerIndependent": true,
+      "verdict": {
+        "decision": "pass",
+        "valid": true,
+        "code": null,
+        "evidence": [
+          {
+            "kind": "conclusion",
+            "id": "art_9df94be60c77e90321fdc2e5d76f4fb7",
+            "version": 1
+          },
+          {
+            "kind": "conclusion",
+            "id": "art_6aeaaff9f3fe31bf6ae0a8b911b749d1",
+            "version": 1
+          }
+        ],
+        "reasons": [
+          "source_a_newer",
+          "source_b_cached_and_stale"
+        ],
+        "uncertainty": "两来源抓取时间相差 10 天，价格可能已变化",
+        "rawSummary": null
+      },
+      "conflict": {
+        "conflictId": "conflict_75b27080193b2ba430598dcd93b8bc32",
+        "conflictType": "factual",
+        "candidateRefs": [
+          "art_9df94be60c77e90321fdc2e5d76f4fb7",
+          "art_6aeaaff9f3fe31bf6ae0a8b911b749d1"
+        ],
+        "evidenceRefs": [
+          "art_52097ea504ea8c9ba8020c704b94a80a",
+          "art_545f44543462b81f80559203b1fe9a07"
+        ],
+        "resolutionStatus": "resolved",
+        "resolutionMethod": "review",
+        "selectedCandidateRef": "art_9df94be60c77e90321fdc2e5d76f4fb7",
+        "rationale": "independent_review_pass",
+        "policyVersion": "conflict-rules-v1",
+        "arbitrationPolicyVersion": "conflict-arbitration-v1",
+        "evidenceOrder": [
+          {
+            "source": "reviewer",
+            "precedence": 2,
+            "authoritative": true,
+            "independent": true,
+            "ok": true
+          }
+        ]
+      },
+      "eventIds": [
+        "evt_d8ff8680-071b-4f9f-b335-e636a173b43f",
+        "evt_734d833f-a578-4e50-a495-4921492bd780",
+        "evt_ecb530a5-b7d8-412c-93b4-70ee8bf24e47",
+        "evt_757801e1-bee7-4784-86c7-40aee84e47ce",
+        "evt_e0c90617-6361-4d61-b7ee-db2da9375fbc",
+        "evt_aa7b0bff-3bc4-41fa-9f86-2151ee840988",
+        "evt_b2a62dbe-f458-4a11-a0ef-439364488319",
+        "evt_11e97445-7faa-4e13-8ac9-f6732de013c2",
+        "evt_21cc1c2f-5548-4ccf-a6dd-e4a24b5b1ccf",
+        "evt_2c2583d2-cd2e-4530-8e08-57db04b0443c",
+        "evt_af14ddd6-b1fd-4691-b135-37cdb2bdf729",
+        "evt_f5f50015-54d1-45a7-b29f-53484c60b1ad",
+        "evt_d4721273-a2da-426e-b98e-043d623c6b74",
+        "evt_d2a377d3-b1c9-4161-b1ee-d3485941353a",
+        "evt_1dbced4c-11f6-47b5-a22d-a7dc3ace613e"
+      ]
+    },
+    {
+      "step": 8,
+      "name": "交付建议 + 来源 + 分歧处理 + 剩余不确定性",
+      "startedAt": "2026-11-12T19:10:13.919Z",
+      "durationMs": 12,
+      "deliveryRef": {
+        "kind": "delivery",
+        "id": "art_9b3aa7a8ea717bafc75a34f509b04084",
+        "version": 1
+      },
+      "provenanceChain": [
+        {
+          "kind": "delivery",
+          "id": "art_9b3aa7a8ea717bafc75a34f509b04084",
+          "version": 1
+        },
+        {
+          "kind": "conclusion",
+          "id": "art_9df94be60c77e90321fdc2e5d76f4fb7",
+          "version": 1
+        },
+        {
+          "kind": "source",
+          "id": "art_52097ea504ea8c9ba8020c704b94a80a",
+          "version": 1
+        },
+        {
+          "kind": "conclusion",
+          "id": "art_6aeaaff9f3fe31bf6ae0a8b911b749d1",
+          "version": 1
+        },
+        {
+          "kind": "source",
+          "id": "art_545f44543462b81f80559203b1fe9a07",
+          "version": 1
+        }
+      ],
+      "remainingUncertainty": [
+        "两来源抓取时间相差 10 天，价格可能已变化",
+        "促销价可能随时调整"
+      ]
+    },
+    {
+      "step": 9,
+      "name": "记录 trace / 事件 / Token / 延迟 / 成本",
+      "startedAt": "2026-11-12T19:10:13.919Z",
+      "durationMs": 0,
+      "traceId": "trace_d406a995-0374-4fc8-b432-055a9b9cd315",
+      "eventIds": {
+        "workerA": [
+          {
+            "eventId": "evt_12c4ca06-eb12-417d-9760-ff014cdcdf38",
+            "eventType": "verification.verdict",
+            "timestamp": "2026-11-12T19:10:13.900Z",
+            "status": "conflict"
+          },
+          {
+            "eventId": "evt_71ee0a80-330e-44b1-95b3-b05c34721fa3",
+            "eventType": "plan.fencing_revoked",
+            "timestamp": "2026-11-12T19:10:13.453Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_40edef32-cadd-43b8-a5f7-7bf4dfde087a",
+            "eventType": "task.completed",
+            "timestamp": "2026-11-12T19:10:13.443Z",
+            "status": "completed"
+          },
+          {
+            "eventId": "evt_c49040a1-94c9-41a7-aa31-31e6c3fa3ed8",
+            "eventType": "model.completed",
+            "timestamp": "2026-11-12T19:10:13.384Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_793fcc7e-6860-45fe-9c79-9f37090d54cc",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-12T19:10:13.351Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_d4fd4536-77ad-4d16-bcf0-53a4cc541b94",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-12T19:10:13.305Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_aa745214-02f3-4c62-b725-e947c78b7510",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-12T19:10:13.259Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_6870832c-a99e-436c-85b9-eb907157dd94",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-12T19:10:13.207Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_8b1b47d3-34bc-4f47-acfe-58e522c3b8c6",
+            "eventType": "worker.checkpoint",
+            "timestamp": "2026-11-12T19:10:13.091Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_0830727c-c5c5-40d3-b00c-30394673f69d",
+            "eventType": "model.requested",
+            "timestamp": "2026-11-12T19:10:13.080Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_0407ff56-1630-4bc8-a142-abb842f3f851",
+            "eventType": "worker.checkpoint",
+            "timestamp": "2026-11-12T19:10:13.068Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_3c33e7b1-a364-4987-b51f-db58110f21d6",
+            "eventType": "risk.assessed",
+            "timestamp": "2026-11-12T19:10:13.058Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_9c341320-e295-49b6-8073-efd761fb7800",
+            "eventType": "task.started",
+            "timestamp": "2026-11-12T19:10:13.049Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_41321da3-22df-4532-ad00-2c12ee0f4f1a",
+            "eventType": "task.accepted",
+            "timestamp": "2026-11-12T19:10:13.027Z",
+            "status": "accepted"
+          },
+          {
+            "eventId": "evt_8a5030b5-7183-4a4a-ba86-8d224e44d503",
+            "eventType": "plan.fencing_issued",
+            "timestamp": "2026-11-12T19:10:13.014Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_57f2b78d-9f87-4b37-b9e0-a032fe2a3b88",
+            "eventType": "task.created",
+            "timestamp": "2026-11-12T19:10:12.921Z",
+            "status": "queued"
+          }
+        ],
+        "workerB": [
+          {
+            "eventId": "evt_a5feb760-f7ff-4306-a9e8-833b8e75bfa0",
+            "eventType": "plan.fencing_revoked",
+            "timestamp": "2026-11-12T19:10:13.522Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_f4f3e3fe-81ca-4b74-addc-f0ce8f3f6297",
+            "eventType": "task.completed",
+            "timestamp": "2026-11-12T19:10:13.514Z",
+            "status": "completed"
+          },
+          {
+            "eventId": "evt_b0684d4a-e93f-4741-ac38-ae6d1514ec87",
+            "eventType": "model.completed",
+            "timestamp": "2026-11-12T19:10:13.469Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_617b5110-7b23-4c23-b8f9-4bf11c3d5d85",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-12T19:10:13.362Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_459fb9b2-c42f-49c3-9b8e-e6d6461d7b75",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-12T19:10:13.317Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_e3646f48-224a-4c1e-94e3-b69ab59b2461",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-12T19:10:13.271Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_778f9ce6-1b8c-4569-9580-8bcb212cf937",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-12T19:10:13.220Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_06233c04-3ffd-42b6-8694-88ab50233dd6",
+            "eventType": "worker.checkpoint",
+            "timestamp": "2026-11-12T19:10:13.177Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_1d808786-015f-4341-bf1b-7aa1efc02a3e",
+            "eventType": "model.requested",
+            "timestamp": "2026-11-12T19:10:13.167Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_ceebed97-433d-4967-a16e-1323717735f8",
+            "eventType": "worker.checkpoint",
+            "timestamp": "2026-11-12T19:10:13.158Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_d009b2ee-036b-4710-a992-6fc91280ab02",
+            "eventType": "risk.assessed",
+            "timestamp": "2026-11-12T19:10:13.147Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_79fb7011-2a17-4aee-93e4-b4d677a98c58",
+            "eventType": "task.started",
+            "timestamp": "2026-11-12T19:10:13.140Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_2aee7718-e566-4629-970e-b6befa091a29",
+            "eventType": "task.accepted",
+            "timestamp": "2026-11-12T19:10:13.120Z",
+            "status": "accepted"
+          },
+          {
+            "eventId": "evt_62724c37-83b4-45be-ae5d-cf7f975e7a90",
+            "eventType": "plan.fencing_issued",
+            "timestamp": "2026-11-12T19:10:13.108Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_ab4c1cc1-98bf-4569-bed2-b415fcdf4532",
+            "eventType": "task.created",
+            "timestamp": "2026-11-12T19:10:12.959Z",
+            "status": "queued"
+          }
+        ],
+        "reviewer": [
+          {
+            "eventId": "evt_d8ff8680-071b-4f9f-b335-e636a173b43f",
+            "eventType": "plan.fencing_revoked",
+            "timestamp": "2026-11-12T19:10:13.880Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_734d833f-a578-4e50-a495-4921492bd780",
+            "eventType": "task.completed",
+            "timestamp": "2026-11-12T19:10:13.870Z",
+            "status": "completed"
+          },
+          {
+            "eventId": "evt_ecb530a5-b7d8-412c-93b4-70ee8bf24e47",
+            "eventType": "model.completed",
+            "timestamp": "2026-11-12T19:10:13.824Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_757801e1-bee7-4784-86c7-40aee84e47ce",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-12T19:10:13.810Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_e0c90617-6361-4d61-b7ee-db2da9375fbc",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-12T19:10:13.761Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_aa7b0bff-3bc4-41fa-9f86-2151ee840988",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-12T19:10:13.716Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_b2a62dbe-f458-4a11-a0ef-439364488319",
+            "eventType": "worker.heartbeat",
+            "timestamp": "2026-11-12T19:10:13.675Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_11e97445-7faa-4e13-8ac9-f6732de013c2",
+            "eventType": "worker.checkpoint",
+            "timestamp": "2026-11-12T19:10:13.658Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_21cc1c2f-5548-4ccf-a6dd-e4a24b5b1ccf",
+            "eventType": "model.requested",
+            "timestamp": "2026-11-12T19:10:13.648Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_2c2583d2-cd2e-4530-8e08-57db04b0443c",
+            "eventType": "worker.checkpoint",
+            "timestamp": "2026-11-12T19:10:13.637Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_af14ddd6-b1fd-4691-b135-37cdb2bdf729",
+            "eventType": "risk.assessed",
+            "timestamp": "2026-11-12T19:10:13.627Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_f5f50015-54d1-45a7-b29f-53484c60b1ad",
+            "eventType": "task.started",
+            "timestamp": "2026-11-12T19:10:13.620Z",
+            "status": "running"
+          },
+          {
+            "eventId": "evt_d4721273-a2da-426e-b98e-043d623c6b74",
+            "eventType": "task.accepted",
+            "timestamp": "2026-11-12T19:10:13.600Z",
+            "status": "accepted"
+          },
+          {
+            "eventId": "evt_d2a377d3-b1c9-4161-b1ee-d3485941353a",
+            "eventType": "plan.fencing_issued",
+            "timestamp": "2026-11-12T19:10:13.587Z",
+            "status": null
+          },
+          {
+            "eventId": "evt_1dbced4c-11f6-47b5-a22d-a7dc3ace613e",
+            "eventType": "task.created",
+            "timestamp": "2026-11-12T19:10:13.575Z",
+            "status": "queued"
+          }
+        ]
+      },
+      "usage": {
+        "runtimeUsage": {
+          "workerA": {
+            "prompt_tokens": 180,
+            "completion_tokens": 64,
+            "total_tokens": 244
+          },
+          "workerB": {
+            "prompt_tokens": 176,
+            "completion_tokens": 66,
+            "total_tokens": 242
+          },
+          "reviewer": {
+            "prompt_tokens": 320,
+            "completion_tokens": 88,
+            "total_tokens": 408
+          }
+        },
+        "providerUsage": {
+          "workerA": {
+            "prompt_tokens": 180,
+            "completion_tokens": 64,
+            "total_tokens": 244
+          },
+          "workerB": {
+            "prompt_tokens": 176,
+            "completion_tokens": 66,
+            "total_tokens": 242
+          },
+          "reviewer": {
+            "prompt_tokens": 320,
+            "completion_tokens": 88,
+            "total_tokens": 408
+          }
+        },
+        "resolved": {
+          "workerA": {
+            "prompt_tokens": 180,
+            "completion_tokens": 64,
+            "total_tokens": 244
+          },
+          "workerB": {
+            "prompt_tokens": 176,
+            "completion_tokens": 66,
+            "total_tokens": 242
+          },
+          "reviewer": {
+            "prompt_tokens": 320,
+            "completion_tokens": 88,
+            "total_tokens": 408
+          }
+        },
+        "totalTokens": 894,
+        "source": "provider_reported"
+      },
+      "latencyMs": {
+        "workerA": 500,
+        "workerB": 543,
+        "reviewer": 275
+      },
+      "cost": "未采集",
+      "costReason": "本地 HTTP stub provider 无计价口径，不估算成本。"
+    },
+    {
+      "step": 10,
+      "name": "验证拒绝注入 → 缺证节点识别 → runtime 钩子自动修订（v2）",
+      "startedAt": "2026-11-12T19:10:14.327Z",
+      "durationMs": 408,
+      "planId": "plan_ee264b82-447b-4edc-8390-238088bcf124",
+      "failedTaskId": "task_e86a6554-c3f3-43bf-b255-52f972d55f93",
+      "failedErrorCode": "review_rejected",
+      "revisionId": "rev_de404572-e0bb-4715-86a2-0405a9aa8f1f",
+      "fromVersion": 1,
+      "toVersion": 2,
+      "rerunTaskIds": [
+        "task_1346217d-fd09-48f2-9280-fffe5efc68c4"
+      ],
+      "rerunStepKeys": [
+        "9b669fc07459260e7fd9c0b61850ee06d7217631273c53e98a8579aa4caf1087"
+      ],
+      "reusedArtifactIds": [
+        "art_b77088833870dcff575b45740e77c05c"
+      ],
+      "revisionEventIds": [
+        "evt_7a2026c2-5466-4948-a103-b8c1e7698c09"
+      ]
+    },
+    {
+      "step": 11,
+      "name": "重跑命中发布门 → waiting_approval（delivery 产物 pending-commit）",
+      "startedAt": "2026-11-12T19:10:14.647Z",
+      "durationMs": 320,
+      "rerunTaskId": "task_1346217d-fd09-48f2-9280-fffe5efc68c4",
+      "approvalId": "appr_6dd0e0ca-6dd4-4ffb-8b3e-b2789c0c0a9b",
+      "riskLevel": "R2",
+      "deliveryArtifactId": "art_f22f68038c87cad47e1118ad871eb28a",
+      "commitState": "pending-commit"
+    },
+    {
+      "step": 12,
+      "name": "批准 → 幂等交付（产物 committed + 任务 completed + 重复执行拒绝）",
+      "startedAt": "2026-11-12T19:10:14.695Z",
+      "durationMs": 48,
+      "approvalId": "appr_6dd0e0ca-6dd4-4ffb-8b3e-b2789c0c0a9b",
+      "deliveredTaskId": "task_1346217d-fd09-48f2-9280-fffe5efc68c4",
+      "stopReason": "publish_gate",
+      "deliveryArtifactId": "art_f22f68038c87cad47e1118ad871eb28a",
+      "commitState": "committed",
+      "duplicateRejected": true
+    },
+    {
+      "step": 13,
+      "name": "对照场景拒绝 → fail-closed（cancelled + 产物 pending-commit + 无 completed）",
+      "startedAt": "2026-11-12T19:10:15.053Z",
+      "durationMs": 358,
+      "taskId": "task_e5c22e9a-5dd4-48fa-aea6-be3d628dc32e",
+      "approvalId": "appr_a4d0bd4b-6a74-4ec2-b4f5-eee408287e6a",
+      "finalStatus": "cancelled",
+      "errorCode": "approval_rejected",
+      "deliveryArtifactId": "art_74303e44801a9f50609e8bbf560d2f94",
+      "commitState": "pending-commit"
+    }
+  ],
+  "trace": {
+    "traceId": "trace_d406a995-0374-4fc8-b432-055a9b9cd315",
+    "eventIds": {
+      "workerA": [
+        {
+          "eventId": "evt_12c4ca06-eb12-417d-9760-ff014cdcdf38",
+          "eventType": "verification.verdict",
+          "timestamp": "2026-11-12T19:10:13.900Z",
+          "status": "conflict"
+        },
+        {
+          "eventId": "evt_71ee0a80-330e-44b1-95b3-b05c34721fa3",
+          "eventType": "plan.fencing_revoked",
+          "timestamp": "2026-11-12T19:10:13.453Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_40edef32-cadd-43b8-a5f7-7bf4dfde087a",
+          "eventType": "task.completed",
+          "timestamp": "2026-11-12T19:10:13.443Z",
+          "status": "completed"
+        },
+        {
+          "eventId": "evt_c49040a1-94c9-41a7-aa31-31e6c3fa3ed8",
+          "eventType": "model.completed",
+          "timestamp": "2026-11-12T19:10:13.384Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_793fcc7e-6860-45fe-9c79-9f37090d54cc",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-12T19:10:13.351Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_d4fd4536-77ad-4d16-bcf0-53a4cc541b94",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-12T19:10:13.305Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_aa745214-02f3-4c62-b725-e947c78b7510",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-12T19:10:13.259Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_6870832c-a99e-436c-85b9-eb907157dd94",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-12T19:10:13.207Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_8b1b47d3-34bc-4f47-acfe-58e522c3b8c6",
+          "eventType": "worker.checkpoint",
+          "timestamp": "2026-11-12T19:10:13.091Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_0830727c-c5c5-40d3-b00c-30394673f69d",
+          "eventType": "model.requested",
+          "timestamp": "2026-11-12T19:10:13.080Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_0407ff56-1630-4bc8-a142-abb842f3f851",
+          "eventType": "worker.checkpoint",
+          "timestamp": "2026-11-12T19:10:13.068Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_3c33e7b1-a364-4987-b51f-db58110f21d6",
+          "eventType": "risk.assessed",
+          "timestamp": "2026-11-12T19:10:13.058Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_9c341320-e295-49b6-8073-efd761fb7800",
+          "eventType": "task.started",
+          "timestamp": "2026-11-12T19:10:13.049Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_41321da3-22df-4532-ad00-2c12ee0f4f1a",
+          "eventType": "task.accepted",
+          "timestamp": "2026-11-12T19:10:13.027Z",
+          "status": "accepted"
+        },
+        {
+          "eventId": "evt_8a5030b5-7183-4a4a-ba86-8d224e44d503",
+          "eventType": "plan.fencing_issued",
+          "timestamp": "2026-11-12T19:10:13.014Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_57f2b78d-9f87-4b37-b9e0-a032fe2a3b88",
+          "eventType": "task.created",
+          "timestamp": "2026-11-12T19:10:12.921Z",
+          "status": "queued"
+        }
+      ],
+      "workerB": [
+        {
+          "eventId": "evt_a5feb760-f7ff-4306-a9e8-833b8e75bfa0",
+          "eventType": "plan.fencing_revoked",
+          "timestamp": "2026-11-12T19:10:13.522Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_f4f3e3fe-81ca-4b74-addc-f0ce8f3f6297",
+          "eventType": "task.completed",
+          "timestamp": "2026-11-12T19:10:13.514Z",
+          "status": "completed"
+        },
+        {
+          "eventId": "evt_b0684d4a-e93f-4741-ac38-ae6d1514ec87",
+          "eventType": "model.completed",
+          "timestamp": "2026-11-12T19:10:13.469Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_617b5110-7b23-4c23-b8f9-4bf11c3d5d85",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-12T19:10:13.362Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_459fb9b2-c42f-49c3-9b8e-e6d6461d7b75",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-12T19:10:13.317Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_e3646f48-224a-4c1e-94e3-b69ab59b2461",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-12T19:10:13.271Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_778f9ce6-1b8c-4569-9580-8bcb212cf937",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-12T19:10:13.220Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_06233c04-3ffd-42b6-8694-88ab50233dd6",
+          "eventType": "worker.checkpoint",
+          "timestamp": "2026-11-12T19:10:13.177Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_1d808786-015f-4341-bf1b-7aa1efc02a3e",
+          "eventType": "model.requested",
+          "timestamp": "2026-11-12T19:10:13.167Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_ceebed97-433d-4967-a16e-1323717735f8",
+          "eventType": "worker.checkpoint",
+          "timestamp": "2026-11-12T19:10:13.158Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_d009b2ee-036b-4710-a992-6fc91280ab02",
+          "eventType": "risk.assessed",
+          "timestamp": "2026-11-12T19:10:13.147Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_79fb7011-2a17-4aee-93e4-b4d677a98c58",
+          "eventType": "task.started",
+          "timestamp": "2026-11-12T19:10:13.140Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_2aee7718-e566-4629-970e-b6befa091a29",
+          "eventType": "task.accepted",
+          "timestamp": "2026-11-12T19:10:13.120Z",
+          "status": "accepted"
+        },
+        {
+          "eventId": "evt_62724c37-83b4-45be-ae5d-cf7f975e7a90",
+          "eventType": "plan.fencing_issued",
+          "timestamp": "2026-11-12T19:10:13.108Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_ab4c1cc1-98bf-4569-bed2-b415fcdf4532",
+          "eventType": "task.created",
+          "timestamp": "2026-11-12T19:10:12.959Z",
+          "status": "queued"
+        }
+      ],
+      "reviewer": [
+        {
+          "eventId": "evt_d8ff8680-071b-4f9f-b335-e636a173b43f",
+          "eventType": "plan.fencing_revoked",
+          "timestamp": "2026-11-12T19:10:13.880Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_734d833f-a578-4e50-a495-4921492bd780",
+          "eventType": "task.completed",
+          "timestamp": "2026-11-12T19:10:13.870Z",
+          "status": "completed"
+        },
+        {
+          "eventId": "evt_ecb530a5-b7d8-412c-93b4-70ee8bf24e47",
+          "eventType": "model.completed",
+          "timestamp": "2026-11-12T19:10:13.824Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_757801e1-bee7-4784-86c7-40aee84e47ce",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-12T19:10:13.810Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_e0c90617-6361-4d61-b7ee-db2da9375fbc",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-12T19:10:13.761Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_aa7b0bff-3bc4-41fa-9f86-2151ee840988",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-12T19:10:13.716Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_b2a62dbe-f458-4a11-a0ef-439364488319",
+          "eventType": "worker.heartbeat",
+          "timestamp": "2026-11-12T19:10:13.675Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_11e97445-7faa-4e13-8ac9-f6732de013c2",
+          "eventType": "worker.checkpoint",
+          "timestamp": "2026-11-12T19:10:13.658Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_21cc1c2f-5548-4ccf-a6dd-e4a24b5b1ccf",
+          "eventType": "model.requested",
+          "timestamp": "2026-11-12T19:10:13.648Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_2c2583d2-cd2e-4530-8e08-57db04b0443c",
+          "eventType": "worker.checkpoint",
+          "timestamp": "2026-11-12T19:10:13.637Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_af14ddd6-b1fd-4691-b135-37cdb2bdf729",
+          "eventType": "risk.assessed",
+          "timestamp": "2026-11-12T19:10:13.627Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_f5f50015-54d1-45a7-b29f-53484c60b1ad",
+          "eventType": "task.started",
+          "timestamp": "2026-11-12T19:10:13.620Z",
+          "status": "running"
+        },
+        {
+          "eventId": "evt_d4721273-a2da-426e-b98e-043d623c6b74",
+          "eventType": "task.accepted",
+          "timestamp": "2026-11-12T19:10:13.600Z",
+          "status": "accepted"
+        },
+        {
+          "eventId": "evt_d2a377d3-b1c9-4161-b1ee-d3485941353a",
+          "eventType": "plan.fencing_issued",
+          "timestamp": "2026-11-12T19:10:13.587Z",
+          "status": null
+        },
+        {
+          "eventId": "evt_1dbced4c-11f6-47b5-a22d-a7dc3ace613e",
+          "eventType": "task.created",
+          "timestamp": "2026-11-12T19:10:13.575Z",
+          "status": "queued"
+        }
+      ]
+    }
+  }
+}

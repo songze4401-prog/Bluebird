@@ -257,7 +257,7 @@ function createOrchestrator(overrides = {}) {
       const dependsOn = (Array.isArray(definition.dependsOn) ? definition.dependsOn : []).map(
         ref => (created[ref] ? created[ref].taskId : ref)
       );
-      const payload = { ...definition, dependsOn };
+      const payload = { ...definition, dependsOn, stepKey: String(key) };
       delete payload.key;
       const result = orchestrate(
         { ...payload, ...(agentId ? { agentId } : {}) },

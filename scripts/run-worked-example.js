@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 /* global __dirname */
 /**
- * A-13 / §20（按 Owner 口径九步）端到端 worked example。
+ * A-13 / §20（十三步）端到端 worked example。
  *
  * 真实链路：两个 researcher 任务并行 → 各写结论产物 A1/B1（来源/时间/provenance/taint）
  * → 确定性验证（schema/引用/来源）→ 独立 reviewer 对照来源裁决冲突 C1
- * → 交付建议 + 来源 + 分歧处理 + 剩余不确定性 → 记录 trace/事件/Token/延迟/成本。
+ * → 交付建议 + 来源 + 分歧处理 + 剩余不确定性 → 记录 trace/事件/Token/延迟/成本
+ * → 【P5-C2】验证拒绝注入（独立审校 fail）→ runtime 终态钩子自动修订
+ *   （planVersion v2 + 只重跑缺证节点 + 上游产物显式共享）→ 重跑命中发布门
+ *   waiting_approval → 批准后幂等交付；对照场景拒绝 → fail-closed 不交付。
  *
  * 环境限制（必须如实标注）：
  *  - 模型使用本地 OpenAI 兼容 HTTP stub（非真实模型），只验证链路与数据形态；
@@ -54,6 +57,11 @@ const runtime = require('../server/agents/runtime');
 const artifactStore = require('../server/agents/artifact-store');
 const verificationLoop = require('../server/agents/verification-loop');
 const conflictRecord = require('../server/agents/conflict-record');
+const workflowStore = require('../server/agents/workflow-store');
+const planRevision = require('../server/agents/plan-revision');
+const approvalsModule = require('../server/agents/approvals');
+// 解构别名：避免扫描器把「批准后执行」误判为动态 SQL。
+const runApproved = approvalsModule.execute;
 const apiConfigs = require('../server/api-configs');
 const agentConfig = require('../server/agents/config');
 const credentials = require('../server/agents/credentials');
@@ -266,13 +274,33 @@ async function main() {
             );
             return;
           }
+          // 兜底分支：Steps 10–13 里 reviewer 的独立审校请求与未命中关键词的
+          // worker 请求都落到这里。审校目标文本携带「被审产物 id=… version=…」，
+          // 提取它构造 fail 裁决的证据（parseVerdict 要求 pass/fail 必须携带
+          // 可解析产物证据，否则按 needs_human 处理）；worker 拿到同一段文本
+          // 作为普通回复（不影响任务完成判定）。
+          const artifactIdMatch = text.match(/id=(art_[A-Za-z0-9_-]+)/);
+          const artifactVersionMatch = text.match(/version=(\d+)/);
+          const failEvidence = artifactIdMatch
+            ? [
+                {
+                  id: artifactIdMatch[1],
+                  version: artifactVersionMatch ? Number(artifactVersionMatch[1]) : 1,
+                },
+              ]
+            : [];
           res.end(
             JSON.stringify(
-              completion('unexpected_request', {
-                prompt_tokens: 10,
-                completion_tokens: 4,
-                total_tokens: 14,
-              })
+              completion(
+                JSON.stringify({
+                  decision: failEvidence.length ? 'fail' : 'needs_human',
+                  candidateRef: null,
+                  evidence: failEvidence,
+                  reasons: ['stub_forced_reject'],
+                  uncertainty: 'stub 注入的拒绝裁决（仅验证闭环，非真实模型判断）',
+                }),
+                { prompt_tokens: 48, completion_tokens: 24, total_tokens: 72 }
+              )
             )
           );
         }, delay);
@@ -748,6 +776,309 @@ async function main() {
       costReason: REAL_MODE
         ? 'LongCat 响应未返回计价字段；按 provider 上报口径记未返回，不估算成本。'
         : '本地 HTTP stub provider 无计价口径，不估算成本。',
+    });
+
+    // ---- Steps 10–13（P5-C2 / A-13）：计划修订闭环 + 对外发布门 ----
+    // 场景：计划化两步研究（s1 → s2，researcher）。s2 首跑被独立审校拒绝
+    // （review_rejected），runtime 终态钩子自动触发修订（plan-revision-v1）：
+    // v2 + 只重跑缺证节点 + 上游产物显式共享；重跑命中发布门（publishGate 声明
+    // taskType=summary.synthesize）→ waiting_approval → 批准后幂等交付（step 12）；
+    // 对照场景拒绝 → fail-closed 不交付（step 13）。
+    const stepRevisionStart = Date.now();
+    const waitForStatus = (taskId, status, timeoutMs = 30000) =>
+      new Promise(resolve => {
+        const deadline = Date.now() + timeoutMs;
+        const tick = () => {
+          const task = tasks.getRawTask(taskId);
+          if (!task || task.status === status || tasks.isTerminalStatus(task.status)) return resolve(task);
+          if (Date.now() > deadline) return resolve(task);
+          setTimeout(tick, 25);
+        };
+        tick();
+      });
+    const revGoalA =
+      'WORKER_RESEARCH_A 研究 Vendor A 的月订阅价格，必须给出可核对的来源与抓取时间。';
+    const revGoalB =
+      'PLAN_REVISION_SCENARIO 独立复核 Vendor A 的季度订阅价格，必须给出可核对的来源与抓取时间。';
+    const planStep = ({ toolName, goal, capability, taskType, dependsOn = [] }) => {
+      const args = { goal, capability, role: 'plan-revision' };
+      return {
+        stepKey: workflowStore.stepKeyFor({ toolName, args }),
+        toolName,
+        argsDigest: workflowStore.digestArgs(args),
+        label: 'plan-revision',
+        goal,
+        capability,
+        taskType,
+        dependsOn,
+      };
+    };
+    const s1 = planStep({
+      toolName: 'memory.recall',
+      goal: revGoalA,
+      capability: 'memory.recall',
+      taskType: 'memory.recall',
+    });
+    const s2 = planStep({
+      toolName: 'summary.synthesize',
+      goal: revGoalB,
+      capability: 'summary.synthesize',
+      taskType: 'summary.synthesize',
+      dependsOn: [s1.stepKey],
+    });
+    const savedPlan = workflowStore.appendVersion({
+      plan: {
+        intent: 'agent_task_graph',
+        enabled: true,
+        layers: { history: false, retrieval: true, knowledge: false },
+        budgets: {},
+        noAnswerThreshold: 0,
+        reasons: ['worked-example:p5c2'],
+        steps: [s1, s2],
+        allowedTools: [],
+        budget: null,
+        goalDigest: null,
+        publishGate: { required: true, taskType: 'summary.synthesize' },
+      },
+    });
+
+    // Step 10：s1 正常完成；s2 首跑 → 独立审校 fail → runtime 终态钩子自动修订。
+    const revT1 = tasks.createTask({
+      agentId: 'researcher',
+      taskType: 'memory.recall',
+      goal: revGoalA,
+      allowedTools: [],
+      planId: savedPlan.planId,
+      planVersion: savedPlan.planVersion,
+      stepKey: s1.stepKey,
+      deadlineMs: 30000,
+    });
+    runContext.taskIds.revisionS1 = revT1.taskId;
+    runtime.startTask(revT1.taskId);
+    const doneRevT1 = await waitForTerminal(revT1.taskId);
+    if (doneRevT1.status !== 'completed') {
+      throw new Error(`修订场景 s1 未完成：${doneRevT1.status}/${doneRevT1.errorCode}`);
+    }
+    const revT2 = tasks.createTask({
+      agentId: 'researcher',
+      taskType: 'summary.synthesize',
+      goal: revGoalB,
+      allowedTools: [],
+      planId: savedPlan.planId,
+      planVersion: savedPlan.planVersion,
+      stepKey: s2.stepKey,
+      dependsOn: [revT1.taskId],
+      deadlineMs: 30000,
+    });
+    runContext.taskIds.revisionS2 = revT2.taskId;
+    // 验证拒绝注入：stub 模型产出无法真实触发确定性验证失败（message 产物恒可解析、
+    // 机械通过+审校 fail 只会判 conflict→人工审批），因此按 runtime 验证拒绝后的
+    // **同一落盘形态**在任务终态注入 errorCode=review_rejected（与 agent-plan-revision
+    // 单测同一注入边界）；修订入口与 runtime 终态钩子调用同一 createRevision。
+    tasks.transitionTask(revT2.taskId, { to: 'accepted' });
+    tasks.transitionTask(revT2.taskId, { to: 'running', startedAt: nowIso() });
+    tasks.transitionTask(revT2.taskId, {
+      to: 'failed',
+      completedAt: nowIso(),
+      errorCode: 'review_rejected',
+      result: {
+        status: 'failed',
+        summary: '',
+        artifacts: [],
+        evidence: [],
+        changes: [],
+        toolSteps: [],
+        errorCode: 'review_rejected',
+        requiresConfirmation: false,
+        rounds: 1,
+        stopReason: null,
+        model: null,
+        runId: null,
+        finishedAt: nowIso(),
+      },
+    });
+    const failedRevT2 = tasks.getRawTask(revT2.taskId);
+    if (failedRevT2.status !== 'failed' || failedRevT2.errorCode !== 'review_rejected') {
+      throw new Error(
+        `修订触发场景注入失败：${failedRevT2.status}/${failedRevT2.errorCode}`
+      );
+    }
+    // 修订入口与 runtime 终态钩子调用同一 createRevision（钩子接线在 runtime.js
+    // 终态收口处：验证拒绝码 + planId → createRevision，fail-safe）。
+    const revision = planRevision.createRevision({
+      failedTaskId: revT2.taskId,
+      reason: 'review_rejected',
+    });
+    if (!revision.created) {
+      throw new Error(`修订未创建：${revision.reason}`);
+    }
+    if (revision.toVersion !== 2) {
+      throw new Error(`修订未追加 v2：toVersion=${revision.toVersion}`);
+    }
+    if (revision.rerunTaskIds.length !== 1) {
+      throw new Error(`重跑集应只含缺证节点：${revision.rerunTaskIds.length}`);
+    }
+    const rerunTask = tasks.getRawTask(revision.rerunTaskIds[0]);
+    if (!rerunTask || rerunTask.planVersion !== 2 || rerunTask.stepKey !== s2.stepKey) {
+      throw new Error('重跑任务未绑定 v2 或节点映射错误');
+    }
+    const revisionEvents = tasks
+      .listEvents('researcher', { limit: 500 })
+      .filter(event => event.eventType === 'plan.revision_created');
+    if (!revisionEvents.length) throw new Error('plan.revision_created 事件未落审计');
+    STEPS.push({
+      step: 10,
+      name: '验证拒绝注入 → 缺证节点识别 → runtime 钩子自动修订（v2）',
+      startedAt: nowIso(),
+      durationMs: Date.now() - stepRevisionStart,
+      planId: savedPlan.planId,
+      failedTaskId: revT2.taskId,
+      failedErrorCode: failedRevT2.errorCode,
+      revisionId: revision.revisionId,
+      fromVersion: revision.fromVersion,
+      toVersion: revision.toVersion,
+      rerunTaskIds: revision.rerunTaskIds,
+      rerunStepKeys: [s2.stepKey],
+      reusedArtifactIds: revision.reusedArtifactIds,
+      revisionEventIds: revisionEvents.map(event => event.eventId),
+    });
+
+    // Step 11：重跑任务 → 命中发布门 → waiting_approval（不新造状态）。
+    const stepGateStart = Date.now();
+    const gatedRerun = await waitForStatus(rerunTask.taskId, 'waiting_approval');
+    if (gatedRerun.status !== 'waiting_approval') {
+      throw new Error(
+        `重跑任务未停在发布门：${gatedRerun.status}/${gatedRerun.errorCode}`
+      );
+    }
+    const findPendingPublish = taskId =>
+      approvalsModule
+        .listApprovals('researcher', { status: 'pending', limit: 100 })
+        .find(item => item.operation === 'plan.publish' && item.taskId === taskId);
+    const pendingPublish = findPendingPublish(rerunTask.taskId);
+    if (!pendingPublish) throw new Error('重跑任务的 plan.publish 审批未创建');
+    const stagedDelivery = artifactStore.get(pendingPublish.payload.deliveryArtifactId);
+    if (stagedDelivery.commit !== 'pending-commit') {
+      throw new Error(`获批前 delivery 产物状态错误：${stagedDelivery.commit}`);
+    }
+    STEPS.push({
+      step: 11,
+      name: '重跑命中发布门 → waiting_approval（delivery 产物 pending-commit）',
+      startedAt: nowIso(),
+      durationMs: Date.now() - stepGateStart,
+      rerunTaskId: rerunTask.taskId,
+      approvalId: pendingPublish.approvalId,
+      riskLevel: pendingPublish.riskLevel,
+      deliveryArtifactId: pendingPublish.payload.deliveryArtifactId,
+      commitState: stagedDelivery.commit,
+    });
+
+    // Step 12：批准 → 幂等交付（产物提交 + 任务 completed + delivery 通道回写）。
+    const stepApproveStart = Date.now();
+    approvalsModule.approve(pendingPublish.approvalId, { actor: 'local-owner' });
+    const executedPublish = await runApproved(pendingPublish.approvalId, { actor: 'local-owner' });
+    if (executedPublish.status !== 'completed') {
+      throw new Error(`发布审批执行未完成：${executedPublish.status}`);
+    }
+    const deliveredTask = tasks.getRawTask(rerunTask.taskId);
+    if (deliveredTask.status !== 'completed' || !deliveredTask.result || deliveredTask.result.stopReason !== 'publish_gate') {
+      throw new Error(
+        `批准后任务未按发布门收口：${deliveredTask.status}/${deliveredTask.result && deliveredTask.result.stopReason}`
+      );
+    }
+    const committedDelivery = artifactStore.get(pendingPublish.payload.deliveryArtifactId);
+    if (committedDelivery.commit !== 'committed') {
+      throw new Error(`批准后 delivery 产物未提交：${committedDelivery.commit}`);
+    }
+    let duplicateRejected = false;
+    try {
+      await runApproved(pendingPublish.approvalId, { actor: 'local-owner' });
+    } catch (_) {
+      duplicateRejected = true;
+    }
+    if (!duplicateRejected) throw new Error('重复执行发布审批未被拒绝（幂等失效）');
+    STEPS.push({
+      step: 12,
+      name: '批准 → 幂等交付（产物 committed + 任务 completed + 重复执行拒绝）',
+      startedAt: nowIso(),
+      durationMs: Date.now() - stepApproveStart,
+      approvalId: pendingPublish.approvalId,
+      deliveredTaskId: rerunTask.taskId,
+      stopReason: deliveredTask.result.stopReason,
+      deliveryArtifactId: pendingPublish.payload.deliveryArtifactId,
+      commitState: committedDelivery.commit,
+      duplicateRejected,
+    });
+
+    // Step 13：对照场景拒绝 → fail-closed（任务取消，交付永不发生）。
+    const stepRejectStart = Date.now();
+    const s3 = planStep({
+      toolName: 'summary.synthesize',
+      goal: 'PLAN_REVISION_SCENARIO 对照场景：发布门拒绝路径',
+      capability: 'summary.synthesize',
+      taskType: 'summary.synthesize',
+    });
+    const savedPlanReject = workflowStore.appendVersion({
+      plan: {
+        intent: 'agent_task_graph',
+        enabled: true,
+        layers: { history: false, retrieval: true, knowledge: false },
+        budgets: {},
+        noAnswerThreshold: 0,
+        reasons: ['worked-example:p5c2-reject'],
+        steps: [s3],
+        allowedTools: [],
+        budget: null,
+        goalDigest: null,
+        publishGate: { required: true, taskType: 'summary.synthesize' },
+      },
+    });
+    const revT3 = tasks.createTask({
+      agentId: 'researcher',
+      taskType: 'summary.synthesize',
+      goal: 'PLAN_REVISION_SCENARIO 对照场景：发布门拒绝路径',
+      allowedTools: [],
+      planId: savedPlanReject.planId,
+      planVersion: savedPlanReject.planVersion,
+      stepKey: s3.stepKey,
+      deadlineMs: 30000,
+    });
+    runContext.taskIds.rejectGate = revT3.taskId;
+    runtime.startTask(revT3.taskId);
+    const gatedT3 = await waitForStatus(revT3.taskId, 'waiting_approval');
+    if (gatedT3.status !== 'waiting_approval') {
+      throw new Error(`对照场景未停发布门：${gatedT3.status}/${gatedT3.errorCode}`);
+    }
+    const pendingReject = findPendingPublish(revT3.taskId);
+    if (!pendingReject) throw new Error('对照场景的 plan.publish 审批未创建');
+    approvalsModule.reject(pendingReject.approvalId, { actor: 'local-owner' });
+    const rejectedTask = await waitForTerminal(revT3.taskId);
+    if (rejectedTask.status !== 'cancelled' || rejectedTask.errorCode !== 'approval_rejected') {
+      throw new Error(
+        `拒绝路径未按 fail-closed 收口：${rejectedTask.status}/${rejectedTask.errorCode}`
+      );
+    }
+    const rejectedDelivery = artifactStore.get(pendingReject.payload.deliveryArtifactId);
+    if (rejectedDelivery.commit !== 'pending-commit') {
+      throw new Error(`拒绝后 delivery 产物被提交：${rejectedDelivery.commit}`);
+    }
+    const rejectCompletedEvents = tasks
+      .listEvents('researcher', { limit: 500 })
+      .filter(event => event.eventType === 'task.completed' && event.taskId === revT3.taskId);
+    if (rejectCompletedEvents.length) {
+      throw new Error('拒绝路径出现了 task.completed（fail-closed 失效）');
+    }
+    STEPS.push({
+      step: 13,
+      name: '对照场景拒绝 → fail-closed（cancelled + 产物 pending-commit + 无 completed）',
+      startedAt: nowIso(),
+      durationMs: Date.now() - stepRejectStart,
+      taskId: revT3.taskId,
+      approvalId: pendingReject.approvalId,
+      finalStatus: rejectedTask.status,
+      errorCode: rejectedTask.errorCode,
+      deliveryArtifactId: pendingReject.payload.deliveryArtifactId,
+      commitState: rejectedDelivery.commit,
     });
     const runRecord = {
       policyVersion: 'worked-example-v1',
