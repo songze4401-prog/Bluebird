@@ -61,11 +61,9 @@ export function MessageList({
   hasMoreHistory,
   onLoadOlder,
   sending,
-  continuing,
   liveToolSteps,
   onRecall,
   onRetry,
-  onContinue,
   onOpenActions,
   isFavorite,
   emptyState,
@@ -82,12 +80,10 @@ export function MessageList({
   hasMoreHistory: boolean;
   onLoadOlder: () => Promise<{ ok: boolean; status: number; stale?: boolean }>;
   sending: boolean;
-  continuing: boolean;
   /** 本轮在途的 Agent 工具调用（tool_start 已到、done 未到）：footer 里的实时 pill */
   liveToolSteps: ToolStepView[];
   onRecall: (message: Message) => void;
   onRetry: (text?: string, attachments?: Attachment[]) => void;
-  onContinue: () => void;
   onOpenActions?: (message: Message) => void;
   isFavorite?: (message: Message) => boolean;
   /** 空会话首屏：由 App 注入合并后的主页入口 */
@@ -390,12 +386,9 @@ export function MessageList({
             theme={theme}
             item={item}
             previous={messages[index - 1]}
-            isLast={index === messages.length - 1}
             sending={sending}
-            continuing={continuing}
             onRecall={onRecall}
             onRetry={onRetry}
-            onContinue={onContinue}
             onOpenActions={onOpenActions}
             isFavorite={isFavorite ? isFavorite(item) : false}
           />

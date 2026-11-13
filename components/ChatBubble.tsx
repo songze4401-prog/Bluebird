@@ -145,24 +145,18 @@ export function ChatBubble({
   theme,
   item,
   previous,
-  isLast,
   sending,
-  continuing,
   onRecall,
   onRetry,
-  onContinue,
   onOpenActions,
   isFavorite = false,
 }: {
   theme: Theme;
   item: Message;
   previous?: Message;
-  isLast: boolean;
   sending: boolean;
-  continuing: boolean;
   onRecall: (message: Message) => void;
   onRetry: (text?: string, attachments?: Attachment[]) => void;
-  onContinue: () => void;
   onOpenActions?: (message: Message) => void;
   isFavorite?: boolean;
 }) {
@@ -173,10 +167,6 @@ export function ChatBubble({
   // 同一轮流式/分条的助手续接用较小的空档（设计图 .msg.same），
   // 换轮次（用户↔助手）才用大空档
   const isContinuation = !isUser && previous?.role === 'assistant';
-
-  // 只有「最新一条且是 Bluebird 正常回复」时才显示续写入口
-  const showContinue =
-    isLast && !isUser && !item.retryText && !sending;
 
   const timeText = item.createdAt
     ? formatMessageTime(item.createdAt, true)
@@ -284,22 +274,6 @@ export function ChatBubble({
             </TouchableOpacity>
           )}
 
-          {showContinue && (
-            // 设计图 .acts：正文下方的图标操作行。
-            // 这里只放真实存在的动作：撤回仅支持用户消息（后端 recall 只认
-            // role=user），所以助手侧只有「继续说」。
-            <View style={styles.actsRow}>
-              <TouchableOpacity
-                style={styles.actButton}
-                onPress={onContinue}
-                disabled={continuing}
-                activeOpacity={0.6}
-                accessibilityLabel="继续说"
-              >
-                <Text style={styles.actIcon}>{continuing ? '···' : '→'}</Text>
-              </TouchableOpacity>
-            </View>
-          )}
         </Pressable>
       )}
     </View>
@@ -449,25 +423,7 @@ const createStyles = (theme: Theme) =>
       color: theme.chatMuted,
       fontSize: 12,
     },
-    // ---- 操作行 / 重试 ----
-    actsRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 10,
-      marginTop: CHAT_LAYOUT.textToActions,
-    },
-    actButton: {
-      width: 28,
-      height: 24,
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    actIcon: {
-      color: theme.chatMuted,
-      fontSize: 16,
-      lineHeight: 20,
-      fontWeight: '700',
-    },
+    // ---- 重试 ----
     retryButton: {
       marginTop: CHAT_LAYOUT.nameToText,
       alignSelf: 'flex-start',

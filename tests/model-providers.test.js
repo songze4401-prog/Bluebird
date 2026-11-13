@@ -710,7 +710,6 @@ async function main() {
   );
   const lastChatReq = mockState.requests.filter(r => r.url.startsWith('/chat/completions')).pop();
   check(
-    // #85：maxTokens 1200 -> 8192（让模型把话说完整）
     '自定义服务商收到正确入参（model/Bearer/温度/上限）',
     lastChatReq &&
       lastChatReq.body.model === 'mock-model' &&
@@ -1110,8 +1109,7 @@ async function main() {
   check('/chat 默认（内置 DeepSeek）成功', legacyChat.status === 200);
   const legacyCall = builtinCalls[builtinCalls.length - 1];
   check(
-    // #85：maxTokens 1200 -> 8192，其余入参结构不变
-    '内置调用入参与改造前一致（deepseek-chat / 0.8 / 8192 / 结构）',
+    '内置调用使用扩大的输出上限（deepseek-chat / 0.8 / 8192 / 结构）',
     legacyCall &&
       legacyCall.model === 'deepseek-chat' &&
       legacyCall.temperature === 0.8 &&

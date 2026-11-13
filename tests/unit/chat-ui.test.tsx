@@ -4,7 +4,7 @@
 // 这里刻意断言两类事情：
 //   1. 版式事实——正文没有气泡底/描边/圆角，回合间距取自 CHAT_LAYOUT 令牌；
 //      改版最容易出的事故是「看着像设计图，其实样式表里还留着旧气泡」。
-//   2. 功能没被视觉改动吃掉——长按撤回、重新发送、继续说、模型 pill、
+//   2. 功能没被视觉改动吃掉——长按撤回、重新发送、模型 pill、
 //      加号面板、发送按钮的显隐规则仍然接在同一批回调上。
 // 断言只用可访问性标签与文案，不依赖像素值。
 //
@@ -84,12 +84,9 @@ const drawerSessions: SessionMeta[] = [
 
 type BubbleExtra = Partial<{
   previous: Message;
-  isLast: boolean;
   sending: boolean;
-  continuing: boolean;
   onRecall: (message: Message) => void;
   onRetry: (text?: string, attachments?: Attachment[]) => void;
-  onContinue: () => void;
   onOpenActions: (message: Message) => void;
   isFavorite: boolean;
 }>;
@@ -98,12 +95,9 @@ function bubbleProps(item: Message, extra: BubbleExtra = {}) {
   return {
     theme,
     item,
-    isLast: true,
     sending: false,
-    continuing: false,
     onRecall: noop,
     onRetry: noop,
-    onContinue: noop,
     ...extra,
   };
 }
@@ -377,11 +371,9 @@ describe('原有交互没被改版吃掉', () => {
         hasMoreHistory
         onLoadOlder={onLoadOlder}
         sending={false}
-        continuing={false}
         liveToolSteps={[]}
         onRecall={noop}
         onRetry={noop}
-        onContinue={noop}
       />
     );
 
@@ -390,8 +382,7 @@ describe('原有交互没被改版吃掉', () => {
     expect(onLoadOlder).toHaveBeenCalledTimes(1);
   });
 
-  it('最新一条助手回复有「继续说」，非最后一条没有', async () => {
-    const onContinue = jest.fn();
+  it('助手回复不再显示已删除的「继续说」入口', async () => {
     const item: Message = {
       id: 'a1',
       role: 'assistant',
@@ -399,19 +390,7 @@ describe('原有交互没被改版吃掉', () => {
       createdAt,
     };
 
-    const { unmount } = await render(
-      <ChatBubble {...bubbleProps(item, { onContinue })} />
-    );
-
-    await fireEvent.press(screen.getByLabelText('继续说'));
-    expect(onContinue).toHaveBeenCalled();
-
-    await unmount();
-
-    await render(
-      <ChatBubble {...bubbleProps(item, { isLast: false })} />
-    );
-
+    await render(<ChatBubble {...bubbleProps(item)} />);
     expect(screen.queryByLabelText('继续说')).toBeNull();
   });
 

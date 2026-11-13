@@ -55,8 +55,7 @@ export function useSessionActions({
   // 新建会话请求进行中（防连点）
   const [creatingSession, setCreatingSession] = useState(false);
 
-  const busy =
-    creatingSession || chat.sending || chat.continuing || chat.loadingHistory;
+  const busy = creatingSession || chat.sending || chat.loadingHistory;
 
   // 新建聊天：点击即创建独立会话（POST /sessions），进入空的聊天页。
   // 启动引导会以 force + silent 调用，避免被历史加载闸门挡住或在弱网时弹框。
@@ -106,7 +105,7 @@ export function useSessionActions({
 
   // 从历史列表选择一个会话：加载它的消息并进入聊天页
   const selectSession = async (sessionId: string) => {
-    if (chat.sending || chat.continuing || chat.loadingHistory) return;
+    if (chat.sending || chat.loadingHistory) return;
 
     // 保持 loadingHistory=true 直到新 sessionId 提交，避免加载期间把消息发进旧会话。
     const result = await chat.loadHistory(sessionId, { keepLoading: true });

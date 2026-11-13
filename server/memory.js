@@ -318,7 +318,7 @@ function shouldProcessMemory(message) {
 
 // ---- 观察模式（Phase 1 自动观察闭环）----
 // trigger（默认）：维持触发词 + 跨消息意图门控的历史行为。
-// every_turn：每条用户消息（非续写）都尝试一次提取，不再依赖记忆口令；
+// every_turn：每条用户消息都尝试一次提取，不再依赖记忆口令；
 //   提取输入截到 EXTRACT_INPUT_MAX 码点控成本（真实评测校准前先定 2000，TBD）。
 // 回滚 = 不设置 BLUEBIRD_MEMORY_OBSERVER（或设为 trigger）。env 每次写入时读取，
 // 与 BLUEBIRD_MEMORY_EVIDENCE_POLICY 同一口径：改 .env 后重启后端生效。
