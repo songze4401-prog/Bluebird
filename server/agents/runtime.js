@@ -1711,7 +1711,11 @@ async function runTask(taskId) {
       try {
         orchestrationEngine
           .onPlanTaskSettled({ taskId: task.taskId, status: 'completed' })
-          .catch(() => {});
+          .catch(error =>
+            console.warn(
+              `[orchestration] hook error: ${(error && error.code) || (error && error.message) || 'unknown'}`
+            )
+          );
       } catch (_) {
         // 引擎不可用不影响任务收口。
       }
