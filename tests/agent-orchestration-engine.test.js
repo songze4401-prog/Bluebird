@@ -144,7 +144,11 @@ test.before(async () => {
         const artMatch = text.match(/id=(art_[A-Za-z0-9_-]+)/);
         const verMatch = text.match(/version=(\d+)/);
         if (text.includes('独立审校任务') && artMatch) {
-          const decision = text.includes('审校fail场景') ? 'fail' : 'pass';
+          const decision = text.includes('审校fail场景')
+            ? 'fail'
+            : text.includes('审校human场景')
+              ? 'needs_human'
+              : 'pass';
           res.end(
             JSON.stringify({
               id: `chatcmpl-${Date.now()}`,
@@ -171,10 +175,12 @@ test.before(async () => {
           );
           return;
         }
-        // 普通 worker：带标记的回复让聚合结论携带审校 fail 标记。
+        // 普通 worker：回复回显场景标记，让聚合结论携带给审校的判定输入。
         const reply = text.includes('审校fail场景')
           ? '审校fail场景：汇总结论存疑，证据不足。'
-          : '已完成：示例结论与来源一致（stub 一致回复）。';
+          : text.includes('审校human场景')
+            ? '审校human场景：已执行完成，结论无法自证，需外部核对。'
+            : '已完成：示例结论与来源一致（stub 一致回复）。';
         res.end(
           JSON.stringify({
             id: `chatcmpl-${Date.now()}`,
@@ -371,6 +377,26 @@ test('f2. 审校门：独立审校 fail → blocked_review，不交付', async (
     messages.some(message => message.id.startsWith('bot-result-') && message.content.includes('编排任务完成')),
     false,
     '审校未过不得根交付'
+  );
+});
+
+test('f3. 审校门 v2 处置：needs_human → 标注交付（completed + 未经独立审校警示）', async () => {
+  resetAll();
+  const compiled = planCompiler.compilePlan({
+    mode: 'single',
+    nodes: [{ key: 'act', taskType: 'action.execute', goal: '审校human场景 执行变更' }],
+  });
+  const parentSessionId = newParentSession();
+  orchestrationEngine.orchestrateDAG({ planId: compiled.planId, parentSessionId });
+  const done = await waitForOrchestration(compiled.planId, 'completed');
+  assert.ok(done, 'needs_human 必须标注交付而非阻断');
+  assert.equal(done.reviewOutcome, 'review_needs_human');
+  const messages = sessions.getMessages(parentSessionId);
+  const rootMessage = messages.find(message => message.id === done.deliveryMessageId);
+  assert.ok(rootMessage, '标注交付必须真实回写父会话');
+  assert.ok(
+    rootMessage.content.includes('未经独立验证') && rootMessage.content.includes('review_needs_human'),
+    '交付内容必须带披露警示与审校引用'
   );
 });
 

@@ -33,7 +33,12 @@ const artifactStore = require('./artifact-store');
 const riskPolicy = require('./risk-policy');
 const planCompiler = require('./plan-compiler');
 
-const ORCHESTRATION_POLICY_VERSION = 'orchestration-engine-v1';
+// v2（2026-11-13，Owner 委托裁决）：审校门处置——fail（审校明确拒绝）→ 照旧
+// blocked 不交付；needs_human / 超时 → 标注交付（附「未经独立审校确认」警示与
+// 审校引用）。理由：编排副作用在节点执行时已发生，扣住答案不能撤销副作用只会
+// 隐藏信息；与 FM-6「交付并披露缺口」口径一致。v1 的 needs_human/超时一律
+// blocked 在真实模型下会把用户答案频繁扣住（真实 reviewer 明显偏保守）。
+const ORCHESTRATION_POLICY_VERSION = 'orchestration-engine-v2';
 const ORCHESTRATIONS_FILE = 'agent-orchestrations.json';
 const ROOT_SUMMARY_MAX = 8000;
 const CONTEXT_APPEND_MAX = 8000;
@@ -246,6 +251,7 @@ function publicOrchestration(record) {
     reducedAt: record.reducedAt || null,
     deliveryMessageId: record.deliveryMessageId || null,
     reviewRef: record.reviewRef || null,
+    reviewOutcome: record.reviewOutcome || null,
     pendingReason: record.pendingReason || null,
   };
 }
@@ -382,15 +388,22 @@ async function maybeReducePlan(planId) {
       );
     }
     const rootStatus = failed.length === 0 ? 'completed' : 'partial';
-    const summary = summaryLines.join('\n').slice(0, ROOT_SUMMARY_MAX);
+    let summary = summaryLines.join('\n').slice(0, ROOT_SUMMARY_MAX);
 
-    // 审校门：任一节点 R2+ 且确有产物可送审 → 独立审校通过才交付。
+    // 审校门（v2）：任一节点 R2+ 且确有产物可送审 → 独立审校；fail → 阻断，
+    // needs_human / 超时 → 标注交付（披露缺口，不扣住用户答案）。
     const maxRank = nodes.reduce((max, node) => Math.max(max, riskRankOf(node.riskLevel)), 0);
     if (maxRank >= 2 && completed.length) {
       const lastSettled = completed[completed.length - 1].task;
       const gate = await runReviewGate({ planId, record, lastSettledTask: lastSettled, artifactRefs, summaryLines });
       if (!gate.pass) {
         return { reduced: false, reason: 'blocked_review', reviewTaskId: gate.reviewTaskId };
+      }
+      if (gate.annotate) {
+        record.reviewOutcome = gate.reviewNote;
+        saveCurrent({ planId, patch: { reviewOutcome: gate.reviewNote } });
+        const annotation = `\n\n⚠️ 独立审校未能给出结论（${gate.reviewNote}）：以上内容未经独立验证，请自行判断；审校任务：${gate.reviewTaskId || '无'}。`;
+        summary = summary.slice(0, Math.max(0, ROOT_SUMMARY_MAX - annotation.length)) + annotation;
       }
     }
 
@@ -465,27 +478,27 @@ async function runReviewGate({ planId, record, lastSettledTask, artifactRefs, su
     if (reviewTask && tasks.isTerminalStatus(reviewTask.status)) {
       const verdict = verificationLoop.parseVerdict(reviewTask);
       if (verdict.decision === 'pass' && verdict.valid) {
-        return { pass: true, reviewTaskId, verdict };
+        return { pass: true, annotate: false, reviewNote: null, reviewTaskId, verdict };
       }
-      saveCurrent({ planId, patch: { status: 'blocked_review', pendingReason: `review_${verdict.decision}`, reviewRef: reviewTaskId } });
-      recordEvent(
-        lastSettledTask.agentId,
-        'orchestration.partial',
-        { planId, failedCount: 0, pendingReason: `review_${verdict.decision}`, toTaskId: reviewTaskId },
-        {}
-      );
-      return { pass: false, reviewTaskId, verdict };
+      if (verdict.decision === 'fail') {
+        // fail = 独立审校明确拒绝：v2 里唯一继续阻断交付的处置。
+        saveCurrent({ planId, patch: { status: 'blocked_review', pendingReason: 'review_fail', reviewRef: reviewTaskId } });
+        recordEvent(
+          lastSettledTask.agentId,
+          'orchestration.partial',
+          { planId, failedCount: 0, pendingReason: 'review_fail', toTaskId: reviewTaskId },
+          {}
+        );
+        return { pass: false, annotate: false, reviewNote: 'review_fail', reviewTaskId, verdict };
+      }
+      // needs_human：审校无法给出结论。副作用已在节点执行时发生——按 FM-6
+      // 「交付并披露缺口」口径标注交付，不由审校扣住用户答案。
+      return { pass: true, annotate: true, reviewNote: 'review_needs_human', reviewTaskId, verdict };
     }
     await new Promise(resolve => setTimeout(resolve, 50));
   }
-  saveCurrent({ planId, patch: { status: 'blocked_review', pendingReason: 'review_timeout', reviewRef: reviewTaskId } });
-  recordEvent(
-    lastSettledTask.agentId,
-    'orchestration.partial',
-    { planId, failedCount: 0, pendingReason: 'review_timeout', toTaskId: reviewTaskId },
-    {}
-  );
-  return { pass: false, reviewTaskId, verdict: null };
+  // 审校超时：与 needs_human 同处置（标注交付），不再阻断。
+  return { pass: true, annotate: true, reviewNote: 'review_timeout', reviewTaskId, verdict: null };
 }
 
 function saveCurrent({ planId, patch }) {
