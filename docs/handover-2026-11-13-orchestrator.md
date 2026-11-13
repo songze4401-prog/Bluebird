@@ -48,6 +48,7 @@ node scripts/scan-notion-ledger.js --check   # [表2] 1=21/0.5=4/0=0；[表4] 1=
 | 发布门（P5-C2） | 计划级 `publishGate:{required,taskType?}` → `publish-gate.js`（publish-gate-v1）→ `approvals` `plan.publish`（R2/30min SLA）→ `deliverOnApproval` | publish-gate-v1 | 命中任务验证通过后停 `waiting_approval`（不新造状态）；拒绝/超时永不交付；正文进 delivery 产物、审批只带引用标量 |
 | 计划编译器（轮 2） | `plan-compiler.js`（plan-compiler-v1）+ `POST/GET /agent-plans` | plan-compiler-v1 | 纯编译不执行；执行者由路由解析（**模型 agent 名一律丢弃并审计**）；同内容取出语义；`plan.rejected` 先落事件再抛错 |
 | 编排执行引擎（轮 3） | `orchestration-engine.js`（orchestration-engine-v2）+ `POST/GET /agent-orchestrations` | orchestration-engine-v2 | 只接受 `plan_pc_` 图；跨 Agent 边仅此放行（dag-v1）；产物显式 share；审校门处置（v2，Owner 委托裁决）：fail → blocked 不交付，needs_human/超时 → **标注交付**（附「未经独立验证」警示与审校引用，`reviewOutcome` 入记录）；publishGate 未批准不交付；根交付幂等 |
+| web 搜索能力（轮 W，2026-11-14） | `tool-web.js`（web_search / web_fetch，readOnly）+ DeepSeek Tools API（`/v1/tools/search|fetch`）+ manifest researcher 白名单 | 随对话 provider 钥匙（无独立版本位） | 钥匙统一复用对话 DEEPSEEK_API_KEY（未配置不注册）；URL 闸拒内网样式目标且**不吃测试旁路**；外部内容 neutralize + taint；主聊天 policy 放行即用、researcher Worker 白名单已加 |
 | 主聊天接线（轮 4） | `orchestration-chat.js`（orchestration-chat-v1）+ `agent-policy.orchestration` 开关 + index.js 两路径 | orchestration-chat-v1 | 开关关闭=直答路径零行为差异（有 stub 捕获断言锁定）；编译失败降级直答；剥块不进持久历史；续写不接线 |
 
 ## 3. 关键不变量（承接交接 v2 的 14 条 + 新增）

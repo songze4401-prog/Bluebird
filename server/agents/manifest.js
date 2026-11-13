@@ -117,7 +117,7 @@ const REVIEWER_BOT_PROMPT = `
 - 无法验证时明确标为“未验证”，不以推测替代证据。
 `.trim();
 
-const RESEARCHER_TOOLS = Object.freeze(['memory_search', 'knowledge_search']);
+const RESEARCHER_TOOLS = Object.freeze(['memory_search', 'knowledge_search', 'web_search', 'web_fetch']);
 const EXECUTOR_TOOLS = Object.freeze(['memory_remember']);
 const REVIEWER_TOOLS = Object.freeze(['memory_search', 'knowledge_search']);
 
