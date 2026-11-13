@@ -1,0 +1,182 @@
+{
+  "policyVersion": "orchestration-acceptance-v1",
+  "runId": "c05_fe3c8a15",
+  "environment": {
+    "provider": "deepseek（内置 provider，api.deepseek.com）",
+    "model": "deepseek-chat",
+    "realModel": true,
+    "note": "钥匙经环境变量注入，不落盘；本脚本只从 process.env.DEEPSEEK_API_KEY 读取。"
+  },
+  "startedAt": "2026-11-13T13:45:03.086Z",
+  "finishedAt": "2026-11-13T13:45:03.086Z",
+  "steps": [
+    {
+      "label": "complex_plan_expected",
+      "message": "acceptance-c05 请并行处理三件事：1）把「验收开始时间」记入记忆；2）检索我关于本机使用偏好的记忆；3）基于检索结果给出一份简短汇总。这是典型的多步骤任务，请按编排协议处理。",
+      "expectPlan": true,
+      "replyPreview": "行，这个确实得拆开做。我先把计划提上去。\n\n不过我这边有个问题：你说的「验收开始时间」具体是几点？现在21:44，是就按现在算，还是你另有个时间点。别让我瞎填。\n\n[已编排] 服务端已按计划派发 3 个任务（plan_pc_35b178363ce3…），完成后结果会自动回传本会话。",
+      "replyHasPlanBlock": false,
+      "orchestration": {
+        "planId": "plan_pc_35b178363ce39bbe7f32c6f90a7d2ce9",
+        "planVersion": 1,
+        "nodeCount": 3,
+        "status": "running",
+        "finalStatus": "blocked_review",
+        "pendingReason": "review_needs_human"
+      },
+      "chatLatencyMs": 1849,
+      "usage": {
+        "perNode": [
+          {
+            "prompt_tokens": 868,
+            "completion_tokens": 235,
+            "total_tokens": 1103
+          },
+          {
+            "prompt_tokens": 6383,
+            "completion_tokens": 708,
+            "total_tokens": 7091
+          },
+          {
+            "prompt_tokens": 6982,
+            "completion_tokens": 786,
+            "total_tokens": 7768
+          }
+        ],
+        "totalTokens": 15962,
+        "source": "provider_reported"
+      },
+      "nodes": [
+        {
+          "taskType": "memory.write",
+          "agentId": "executor",
+          "status": "completed",
+          "errorCode": null,
+          "usage": {
+            "prompt_tokens": 868,
+            "completion_tokens": 235,
+            "total_tokens": 1103
+          },
+          "latencyMs": 2186
+        },
+        {
+          "taskType": "memory.search",
+          "agentId": "memory",
+          "status": "completed",
+          "errorCode": null,
+          "usage": {
+            "prompt_tokens": 6383,
+            "completion_tokens": 708,
+            "total_tokens": 7091
+          },
+          "latencyMs": 5631
+        },
+        {
+          "taskType": "summary.synthesize",
+          "agentId": "researcher",
+          "status": "completed",
+          "errorCode": null,
+          "usage": {
+            "prompt_tokens": 6982,
+            "completion_tokens": 786,
+            "total_tokens": 7768
+          },
+          "latencyMs": 9157
+        }
+      ],
+      "delivery": null,
+      "compile": {
+        "planVersion": 1,
+        "nodeCount": 3
+      }
+    },
+    {
+      "label": "direct_answer_control",
+      "message": "acceptance-c05 直答对照：用一句话回答 1 加 1 等于几。",
+      "expectPlan": false,
+      "replyPreview": "1加1等于2。\n\n另外那三件事的结果都在上面了：验收开始时间没记住，因为你没给具体时间；本机偏好那条记忆库是空的，什么都没检索到，所以汇总也没内容可写。你要是想让我记点什么，得自己说清楚。",
+      "replyHasPlanBlock": false,
+      "orchestration": null,
+      "chatLatencyMs": 980,
+      "usage": null,
+      "nodes": null,
+      "delivery": null
+    },
+    {
+      "label": "complex_plan_sample2",
+      "message": "acceptance-c05 第二个编排样本：先检索「验收」相关的记忆，再基于检索结果给出一份简短汇总。两步有先后依赖，请按编排协议处理。",
+      "expectPlan": true,
+      "replyPreview": "先检索，再汇总，有依赖，这个顺序对。计划我提上去了。\n\n[已编排] 服务端已按计划派发 2 个任务（plan_pc_73a717ace77f…），完成后结果会自动回传本会话。",
+      "replyHasPlanBlock": false,
+      "orchestration": {
+        "planId": "plan_pc_73a717ace77f9f014e7a21444930c24b",
+        "planVersion": 1,
+        "nodeCount": 2,
+        "status": "running",
+        "finalStatus": "completed",
+        "pendingReason": null
+      },
+      "chatLatencyMs": 1182,
+      "usage": {
+        "perNode": [
+          {
+            "prompt_tokens": 5120,
+            "completion_tokens": 555,
+            "total_tokens": 5675
+          },
+          {
+            "prompt_tokens": 4450,
+            "completion_tokens": 638,
+            "total_tokens": 5088
+          }
+        ],
+        "totalTokens": 10763,
+        "source": "provider_reported"
+      },
+      "nodes": [
+        {
+          "taskType": "memory.search",
+          "agentId": "memory",
+          "status": "completed",
+          "errorCode": null,
+          "usage": {
+            "prompt_tokens": 5120,
+            "completion_tokens": 555,
+            "total_tokens": 5675
+          },
+          "latencyMs": 3783
+        },
+        {
+          "taskType": "summary.synthesize",
+          "agentId": "researcher",
+          "status": "completed",
+          "errorCode": null,
+          "usage": {
+            "prompt_tokens": 4450,
+            "completion_tokens": 638,
+            "total_tokens": 5088
+          },
+          "latencyMs": 3957
+        }
+      ],
+      "delivery": {
+        "messageId": "bot-result-plan_pc_73a717ace77f9f014e7a21444930c24b",
+        "contentPreview": "【编排任务完成】\n编排 ID：plan_pc_73a717ace77f9f014e7a21444930c24b\n状态：completed\n汇总：[memory.search] **结果摘要**\n\n未检索到任何与「验收」相关的长期记忆。记忆库当前为空（`reason: empty_store`），`memory_search` 返回 0 条命中，因此**没有可列出的事实及其 ID**。\n\n**依据的记忆/知识 ID**\n\n- 记忆检索：无命中（查询词「验收」，`total: 0`，`reason: empty_store`）\n- 知识检索：命中 3 条，但均来自**当前会话历史**，不是长期记忆事实：\n  - `K1` — message/bot-result-task_31d4f4a1-38a6-4fe5-85d0-02cc0d0ef8c2（此前「验收开始时间」写入任务的回执，当时因缺少时间值未写入）\n  - `K2` — message/bot-result-task_bfa8c5b9-7f08-4347-9fdd-aec05a989566（此前「本机使用偏好」检索任务回执）\n  -"
+      },
+      "compile": {
+        "planVersion": 1,
+        "nodeCount": 2
+      }
+    }
+  ],
+  "metrics": {
+    "planCases": 2,
+    "planBlockProduced": 0,
+    "planBlockRate": 0,
+    "compiled": 2,
+    "compiledRate": 1,
+    "orchestrationTerminal": 1,
+    "directClean": true,
+    "totalTokens": 26725
+  }
+}

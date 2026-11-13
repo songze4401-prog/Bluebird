@@ -13,9 +13,9 @@
 | 收尾 PR | 轮 6（台账表 4 + 扫描器双表化 + handover v3 + 测试扩口）随本文提交 | `gh pr list` |
 | 后端测试 | **backend 2473 / runner 2243 / nodeSuite 230 / frontend 190 / 125 文件**（收尾 PR +1 用例后） | `scripts/test-coverage-baseline.json` |
 | Agent 模块 | `server/agents/` 新增：`plan-revision.js`、`publish-gate.js`、`plan-compiler.js`、`orchestration-engine.js`；服务端新增 `orchestration-chat.js` | `ls` |
-| 台账 | **表 2（A/B 系列）：1 = 21 / 0.5 = 4 / 0 = 0**（第十次勘误 A-13→1.0）；**表 4（C 系列）：1 = 5 / 0.5 = 0 / 0 = 1（C-05 真实模型验收挂 Owner）** | `node scripts/scan-notion-ledger.js --check`（双表口径） |
+| 台账 | **表 2（A/B 系列）：1 = 21 / 0.5 = 4 / 0 = 0**（第十次勘误 A-13→1.0）；**表 4（C 系列）：1 = 6 / 0.5 = 0 / 0 = 0**（C-05 真实模型验收已闭环） | `node scripts/scan-notion-ledger.js --check`（双表口径） |
 | 编排开关 | **默认关闭**（`agent-policy.orchestration.enabled=false`）；Owner 经 `PUT /agent-policy` 显式开启 | `GET /agent-policy` |
-| 钥匙 | Owner 在会话中提供了 `ak_` 前缀钥匙：**provider 归属未确证，未落任何文件、未使用、未回显**（C-05 挂起） | 台账表 4 C-05 |
+| 钥匙 | Owner 会话中先后提供两把：`ak_` 前缀（归属未确证，未使用未落盘）与 `sk-` 前缀（**确证 DeepSeek**，仅环境变量注入跑通 C-05 验收，未落任何文件）；台账表 4 C-05 已复判 1.0 | 台账表 4 C-05 + `docs/orchestration-acceptance-2026-11-13.json` |
 
 **一句话现状**：Orchestrator 立项书六轮中 1–4 已合并（编译器→DAG 执行→主聊天接线），轮 5（真实模型）挂 Owner 决策，轮 6（收尾）随本交接合并。
 
@@ -66,10 +66,10 @@ node scripts/scan-notion-ledger.js --check   # [表2] 1=21/0.5=4/0=0；[表4] 1=
 
 ## 5. 下一步
 
-1. **C-05 真实模型验收（唯一挂起项，Owner 决策）**：需要 Owner 确证 `ak_` 钥匙的 provider 与 endpoint（OpenAI 兼容即可）。确证后两条路任选：① 按 `scripts/run-worked-example.js --real-provider` 口径把凭据放进 `server/.env`（该文件 gitignore）跑真实模式；② 在主聊天开启编排开关后做真实对话验收。采集口径已在台账 C-05 行写明（计划块产出率/编译通过率/成功率/Token 成本留档 JSON）。**钥匙当前只在会话里，未落盘**。
-2. P5-C2/编排的真实模型证据到位后复判 A-07/A-11/B-07（表 2 剩余 0.5）与 C-05。
-3. Owner 侧产物：A-12 管理评审签发；编排开关的开启时机（机制就绪、默认关）。
-4. 可选后续轮次：编排结果的前端展示打磨（现走既有 bot-result 消息通道，零前端改动可用）。
+1. **C-05 已闭环（2026-11-13）**：Owner 确证 DeepSeek 钥匙（sk- 格式，内置 provider）后按 `scripts/run-orchestration-acceptance.js` 补验——计划块产出 2/2（以 compiled 为证）、样本 2 端到端 completed 并回写父会话、样本 1 的 memory.write(R3) 触发审校门、真实 reviewer 判 needs_human → blocked_review（fail-closed 实证）、直答对照干净、Token 26,725。运行记录：`docs/orchestration-acceptance-2026-11-13.json`。**审校门槛值（needs_human 何时放行）属 Owner 决策**。
+2. 表 2 剩余 0.5：A-07/A-11/B-07——需要真实模型轮次数据与压测标定（编排验收已提供一部分真实 usage 数据，可作 A-07 复判的补充证据）。
+3. Owner 侧产物：A-12 管理评审签发；编排开关的开启时机（机制就绪、默认关）；blocked_review 编排的人工处置流程。
+4. 可选后续轮次：编排结果的前端展示打磨（现走既有 bot-result 消息通道，零前端改动可用）；审校门 reviewer 提示词调优（真实模型倾向 needs_human，让 pass/fail 判定更可用属提示词模板类提案）。
 
 ## 6. 自验证本文档
 
