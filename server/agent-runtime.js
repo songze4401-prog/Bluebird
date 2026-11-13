@@ -225,6 +225,13 @@ registerTool(memorySearchTool.definition);
 registerTool(memoryRememberTool.definition);
 registerTool(knowledgeSearchTool.definition);
 registerTool(delegateToBotTool.definition);
+// 轮 W：web 工具（DeepSeek Tools API，与对话 provider 共用同一把钥匙）。
+// 钥匙未配置则不注册——模型不声明也不派发（DSH readiness 口径）。
+const webTools = require('./tool-web');
+if (webTools.isConfigured()) {
+  registerTool(webTools.webSearchDefinition);
+  registerTool(webTools.webFetchDefinition);
+}
 
 // ---- 工具执行 ----
 
