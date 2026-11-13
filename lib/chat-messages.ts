@@ -194,7 +194,7 @@ export function reconcileStreamDone(
   return replaceStreamingBlock(prev, tempId, bubbles);
 }
 
-// 移除流式临时气泡（失败且不展示错误气泡的场景，如「继续说」失败）。
+// 移除流式临时气泡（例如用户停止后没有收到任何正文的场景）。
 // 必须按块根判定：流式期气泡 id 是 `${tempId}#0..#n`，
 // 精确比较 tempId 一条都删不到，会把半截回复留在屏幕上。
 export function removeStreamBubble(

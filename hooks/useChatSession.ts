@@ -1,15 +1,15 @@
 // 聊天会话状态与编排（阶段 2 状态分层）。
 //
 // 这里的职责边界：
-//   - 拥有 messages / loadingHistory / sending / continuing / mood 五个状态
-//   - 拥有「发消息」「继续说」「读历史」「清空」「撤回」的完整编排
+//   - 拥有 messages / loadingHistory / loadingOlder / sending / mood 状态
+//   - 拥有「发消息」「读历史」「向上加载」「清空」「撤回」的完整编排
 //   - 不拥有会话 id（由 App 的 useSessionList 决定），不拥有输入框内容
 //
 // 关键约束（与重构前逐条对齐，避免行为漂移）：
 //   1. 请求入口快照 sessionId：await 期间切走会话，本次请求仍落在原会话
 //   2. 流式期间每收到 delta 就按数据层规则重新分条，done 时用权威分条整体替换
 //   3. 用户已切走会话时停止渲染（消息早已落盘，切回时历史完整恢复）
-//   4. 发送失败展示错误气泡（可重试）；续写失败只弹 Alert（不产生错误气泡）
+//   4. 发送失败展示错误气泡（可重试）
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert } from 'react-native';
@@ -95,7 +95,7 @@ export type ChatSessionConfig = {
   streamingEnabled: boolean;
   // 本次请求要携带的模型选择（服务端 defaults 的镜像）
   selectedModel: ModelDefaults | null;
-  // 在线状态上报（发消息 / 续写算一次有效互动）
+  // 在线状态上报：发送用户消息时刷新活跃时间
   reportInteraction: (sessionId: string) => void;
   // 输入框内容与待发送附件：由 App 持有，发送成功后回调清空
   draft: string;
@@ -110,7 +110,6 @@ export type ChatSessionApi = {
   messages: Message[];
   loadingHistory: boolean;
   sending: boolean;
-  continuing: boolean;
   mood: string;
   // 本轮在途的 Agent 工具调用（当前会话、流式期间才有值；其余时候是空数组）
   liveToolSteps: LiveToolStep[];
@@ -119,8 +118,7 @@ export type ChatSessionApi = {
     retryAttachments?: Attachment[],
     extras?: ChatSendExtras
   ) => Promise<void>;
-  sendContinuation: () => Promise<void>;
-  // 用户主动停止当前回复/续写；保留已收到的部分正文，不再等待服务器
+  // 用户主动停止当前回复；保留已收到的部分正文，不再等待服务器
   stopGeneration: () => void;
   // stale=true：结果已被更新的请求取代，调用方不得据此改会话或弹错
   loadHistory: (
@@ -157,7 +155,6 @@ export function useChatSession({
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [historyCursor, setHistoryCursor] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
-  const [continuing, setContinuing] = useState(false);
   const [mood, setMood] = useState('calm');
 
   // 当前聊天请求的中断控制器：流式与非流式共用，停止按钮只操作这一条
@@ -381,9 +378,8 @@ export function useChatSession({
     [sessionId, setMessages]
   );
 
-  // ---- 聊天请求的公共执行器 ----
-  // 发送与续写共用这一条链路：流式 →（无 delta）回退非流式 → 统一分条。
-  // 差异只通过回调表达：发送失败要错误气泡、续写失败只弹 Alert。
+  // ---- 聊天请求执行器 ----
+  // 流式 →（无 delta）回退非流式 → 统一分条。
   const runChat = async (options: {
     requestSessionId: string;
     payload: Record<string, unknown>;
@@ -603,11 +599,10 @@ export function useChatSession({
     ).trim();
 
     // 纯发图（无文字）合法；既无文字又无附件才拦下。
-    // 并发互斥：发送 / 续写 / 首次加载任一进行中都不接受新发送。
+    // 并发互斥：发送 / 首次加载任一进行中都不接受新发送。
     if (
       (!text && attachments.length === 0) ||
       sending ||
-      continuing ||
       loadingHistory
     ) {
       return;
@@ -728,66 +723,6 @@ export function useChatSession({
     }
   };
 
-  // 「继续说」：让 Bluebird 接着自己上一条回复往下说。
-  // 走同一个 /chat，用 mode:'continue' 标记为内部续写请求；
-  // 后端不会保存任何"继续说"用户消息，只追加 assistant 消息。
-  const sendContinuation = async () => {
-    if (continuing || sending || loadingHistory) return;
-
-    const last = messagesState[messagesState.length - 1];
-
-    if (!last || last.role !== 'assistant' || last.retryText) return;
-
-    // 与 sendMessage 同样的入口快照：续写期间不因切换会话串上下文
-    const requestSessionId = sessionId;
-
-    reportInteraction(requestSessionId);
-
-    const history = messagesState
-      .filter(
-        item =>
-          !item.retryText &&
-          !item.stopped &&
-          !item.id.startsWith('welcome-')
-      )
-      .slice(-HISTORY_CONTEXT_LIMIT)
-      .map(item => ({ role: item.role, content: item.content }));
-
-    setContinuing(true);
-
-    const payload = {
-      mode: 'continue',
-      history,
-      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      sessionId: requestSessionId,
-      // 续写同样是聊天请求：沿用发出时的模型选择
-      ...(selectedModel
-        ? {
-            providerId: selectedModel.providerId,
-            modelId: selectedModel.modelId,
-          }
-        : {}),
-    };
-
-    try {
-      await runChat({
-        requestSessionId,
-        payload,
-        retry: false,
-        onStreamError: (message, streamTempId) => {
-          // 续写失败不展示错误气泡（沿用原有 Alert 提示），移除临时气泡
-          setMessages(prev => removeStreamBubble(prev, streamTempId));
-          Alert.alert('失败', message || '继续说失败了，请稍后再试。');
-        },
-        onError: message => {
-          Alert.alert('失败', message || '继续说失败了，请稍后再试。');
-        },
-      });
-    } finally {
-      setContinuing(false);
-    }
-  };
-
   // 主动停止当前生成：只中止本次请求，保留已到 delta 的本地部分回复。
   // 真正的清理发生在 runChat 的 finally（abortRef / liveToolSteps / sending）。
   const stopGeneration = useCallback(() => {
@@ -900,11 +835,9 @@ export function useChatSession({
     messages: messagesState,
     loadingHistory,
     sending,
-    continuing,
     mood,
     liveToolSteps: activeToolSteps,
     sendMessage,
-    sendContinuation,
     stopGeneration,
     loadHistory,
     loadOlderHistory,

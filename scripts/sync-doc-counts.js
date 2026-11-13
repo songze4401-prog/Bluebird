@@ -40,9 +40,9 @@ const NOTES = {
   sessions:
     'sessions: legacy migration, CRUD/isolation, 1000-message retention, /history cursor pagination, trim metadata',
   persona:
-    'persona panel: split-reply rules (single-message default, 400-char hard limit, short-segment regression), /persona API, customPrompt (defaults, old-file migration, strict type/length/body-size validation with the stored file left byte-identical, reset clears it), editable systemPrompt (built-in default vs effective, 8000-char limit, saved prompt replaces the core block in /chat and /chat/stream, blank falls back to built-in), custom block in the final /chat and /chat/stream model request, empty value = legacy prompt, malicious text neutralized and tool gating unchanged, prompt injection, corruption protection',
+    'persona panel: split-reply rules (single-message default, 4000-char server reply cap, short-segment regression), /persona API, customPrompt (defaults, old-file migration, strict type/length/body-size validation with the stored file left byte-identical, reset clears it), editable systemPrompt (built-in default vs effective, 8000-char limit, saved prompt replaces the core block in /chat and /chat/stream, blank falls back to built-in), custom block in the final /chat and /chat/stream model request, empty value = legacy prompt, malicious text neutralized and tool gating unchanged, prompt injection, corruption protection',
   'chat-stream':
-    'SSE streaming: stream-strip rules, /chat/stream framing/deltas/done fields, persistence timing, continue mode, mid-stream error, pure-image memory extraction, /chat coexistence',
+    'SSE streaming: stream-strip rules, /chat/stream framing/deltas/done fields, persistence timing, deleted continuation mode rejected by normal empty-body validation, mid-stream error, pure-image memory extraction, /chat coexistence',
   multimodal:
     'multimodal: image upload validation (magic bytes/size/kind), auth, /chat vision-model routing & history blocks, attachment orphan GC incl. retention-trim cleanup',
   'sticker-repo':

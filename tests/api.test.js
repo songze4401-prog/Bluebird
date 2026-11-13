@@ -431,7 +431,11 @@ async function waitReady() {
     );
 
     const cont = await req('/chat', { method: 'POST', body: { mode: 'continue' } });
-    check('续写模式不因缺少 message 报 400', cont.status !== 400, `实际 ${cont.status}`);
+    check(
+      'mode=continue 无正文按普通空消息校验返回 400',
+      cont.status === 400 && cont.json && cont.json.error === '消息不能为空',
+      JSON.stringify(cont.json)
+    );
   }
 
   origLog('\n限流（60 次/分钟，按 IP）');

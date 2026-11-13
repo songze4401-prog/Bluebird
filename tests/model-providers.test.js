@@ -715,7 +715,7 @@ async function main() {
       lastChatReq.body.model === 'mock-model' &&
       lastChatReq.auth === `Bearer ${CUSTOM_KEY}` &&
       lastChatReq.body.temperature === 0.8 &&
-      lastChatReq.body.max_tokens === 1200,
+      lastChatReq.body.max_tokens === 8192,
     JSON.stringify(lastChatReq && lastChatReq.body).slice(0, 200)
   );
   check(
@@ -1109,11 +1109,11 @@ async function main() {
   check('/chat 默认（内置 DeepSeek）成功', legacyChat.status === 200);
   const legacyCall = builtinCalls[builtinCalls.length - 1];
   check(
-    '内置调用入参与改造前一致（deepseek-chat / 0.8 / 1200 / 结构）',
+    '内置调用使用扩大的输出上限（deepseek-chat / 0.8 / 8192 / 结构）',
     legacyCall &&
       legacyCall.model === 'deepseek-chat' &&
       legacyCall.temperature === 0.8 &&
-      legacyCall.max_tokens === 1200 &&
+      legacyCall.max_tokens === 8192 &&
       legacyCall.messages[0].role === 'system' &&
       legacyCall.messages[legacyCall.messages.length - 1].role === 'user',
     JSON.stringify(legacyCall && legacyCall.model)

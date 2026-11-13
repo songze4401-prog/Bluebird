@@ -809,8 +809,8 @@ function computeGap(createdAt, nowMs) {
 }
 
 // 结构化时间上下文：分别告诉 Blue 距上一条用户消息、距上一条 Blue 回复
-// 各过去了多久。两种间隔是两个不同的量：续写只落盘 assistant 消息，
-// 两者会分叉，不能混用。历史文件中被撤回的消息已物理删除，天然不参与计算。
+// 各过去了多久。两种间隔是不同的量，不能混用。历史文件中被撤回的消息
+// 已物理删除，天然不参与计算。
 function buildTimeGapContext(timeZone, sessionId) {
   const history = getMessages(sessionId) || [];
   const now = new Date();
@@ -3335,7 +3335,7 @@ app.post('/chat', requireAuth, async (req, res) => {
     });
     const agentOn = agentGate.allowed;
 
-    // 轮 4：编排开关开启且非续写 → 给模型追加计划块协议。
+    // 轮 4：编排开关开启时给模型追加计划块协议。
     const orchestrationAppendix = agentOn
       ? orchestrationPromptAppendix(ctx.agentPolicy)
       : null;
@@ -3799,7 +3799,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
     );
   }
 
-  // 轮 4：编排开关开启且非续写 → 给模型追加计划块协议（与 /chat 同一协议）。
+  // 轮 4：编排开关开启时给模型追加计划块协议（与 /chat 同一协议）。
   const orchestrationAppendix =
     agentOn ? orchestrationPromptAppendix(ctx.agentPolicy) : null;
   if (orchestrationAppendix) {
@@ -3826,8 +3826,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         messages: ctx.requestMessages,
         policy: ctx.agentPolicy,
         onRequest: requestMeta => recordSentForContext(ctx, requestMeta),
-        // 与 /chat 一致：显式子 agent 请求必须真实派发，不能只靠模型自觉；
-        // 续写模式复用上一条用户消息，不能因此重复创建任务。
+        // 与 /chat 一致：显式子 agent 请求必须真实派发，不能只靠模型自觉。
         enforceExplicitDelegation: true,
       });
 
