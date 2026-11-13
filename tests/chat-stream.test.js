@@ -9,7 +9,7 @@
  *   - stream-strip 纯函数：整块/跨 chunk/全角/裸标签/多标签/非标签方括号/
  *     超长缓冲兜底/半截标签 flush/正文残留标签透传；stripMoodTags 与旧版规则一致；
  *   - POST /chat/stream：SSE 分帧、delta 增量、done 字段与 /chat 一致、
- *     情绪标签不泄露、落盘时机与内容、续写只落 assistant、分条保留；
+ *     情绪标签不泄露、落盘时机与内容、分条保留；
  *   - 失败路径：未授权 401 / 空消息 400 / 未知会话 404（均为普通 JSON）、
  *     流中途错误 -> error 事件且不落盘；
  *   - 共存：旧 /chat 非流式接口行为不变。
@@ -477,32 +477,24 @@ async function main() {
     done3 ? `=${done3.replies.length}` : 'no done'
   );
 
-  // ---- 续写模式：只落 assistant ----
+  // ---- 续写机制已删除：mode:'continue' 无正文按普通校验拒绝 ----
   const beforeCont = (
     await (await fetch(BASE + '/history?limit=200', { headers: AUTH })).json()
   ).history.length;
 
-  stubChunks = ['[mood:calm] 接着上', '次继续说'];
   const res4 = await postStream({ mode: 'continue' });
-  const sse4 = await readSSE(res4);
-  const done4 = sse4.events.find(e => e.type === 'done');
+  check(
+    '续写机制已删除：mode=continue 无正文 → 400 普通校验拒绝',
+    res4.status === 400
+  );
 
   const afterCont = (
     await (await fetch(BASE + '/history?limit=200', { headers: AUTH })).json()
-  ).history;
-
-  check(
-    '续写：userMessageId 为 null 且只落 assistant',
-    !!done4 &&
-      done4.userMessageId === null &&
-      afterCont.length === beforeCont + done4.replies.length &&
-      afterCont
-        .slice(beforeCont)
-        .every(m => m.role === 'assistant')
-  );
+  ).history.length;
+  check('续写机制已删除：不产生任何落盘', afterCont === beforeCont);
 
   // ---- 流中途错误：error 事件，不落盘 ----
-  const beforeErr = afterCont.length;
+  const beforeErr = afterCont;
 
   stubChunks = ['[mood:calm] 说', '到一半'];
   stubErrorAt = 1;

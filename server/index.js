@@ -326,10 +326,11 @@ const { BLUEBIRD_SYSTEM_PROMPT } = require('./blue-system-prompt');
 // 回复分段：默认一条消息；只有超过单条硬上限才按语义边界分片（纯函数）。
 const { splitReplyIntoSegments, DEFAULT_MAX_CHARS } = require('./split-reply');
 
-// 单条回复长度上限的唯一配置读取点：未配置时使用 lib 的默认 400。
+// 单条回复长度上限的唯一配置读取点：默认 4000（约 8k token 输出的汉字上限附近），
+// 让模型能把话说完整——不再靠「继续说」分段补；BLUEBIRD_REPLY_MAX_CHARS 仍可覆盖。
 const REPLY_MAX_CHARS = (() => {
   const raw = Number(process.env.BLUEBIRD_REPLY_MAX_CHARS);
-  return Number.isInteger(raw) && raw > 0 ? raw : DEFAULT_MAX_CHARS;
+  return Number.isInteger(raw) && raw > 0 ? raw : 4000;
 })();
 
 // 情绪标签剥离：全量（/chat）与增量（/chat/stream）共用同一套规则。
@@ -992,19 +993,6 @@ function buildPersonaPrompt(config) {
 
   return blocks.join('\n');
 }
-
-// 「继续说」的内部续写指令。它只存在于本次 API 请求的 systemPrompt 中：
-// 不写入 chat-history、不进入长期记忆、不污染任何持久化数据。
-const CONTINUE_INSTRUCTION = `
-【续写模式】
-用户点了「继续说」，你要接着你自己上一条回复自然往下说，而不是开始一段新的回答。
-- 顺着上一条回复的语气和思路继续展开：补充细节、举例、把没说完的话说完
-- 绝对不要重复已经说过的内容，也不要换个说法把同一件事再说一遍
-- 不要重新回答用户之前问过的问题，不要复述问题
-- 不要解释你为什么继续，不要出现"继续""补充""另外"这类提示词
-- 保持你的人格与当前情绪，像自然聊天那样接着讲
-- 不要写成文章、总结、列表或分条
-`.trim();
 
 app.get('/', (req, res) => {
   res.json({
@@ -2480,20 +2468,16 @@ async function prepareChatRequest(req) {
   // 每个聊天请求一个 requestId：贯穿上下文 trace、日志、记忆提取与响应，
   // 便于把「主控检索 → 过滤 → 注入 → 写入」整条链路的日志串起来排查。
   const requestId = `req_${crypto.randomUUID()}`;
-  const { message, history = [], mode, attachmentIds, stickerIds } = req.body;
+  const { message, history = [], attachmentIds, stickerIds } = req.body;
   const sessionId = resolveSessionId(req, 'body');
   // 可信用户身份：只从服务端身份解析，绝不读 req.body/query 里的 userId。
   // 长期记忆的读作用域用它（用户级），会话作用域仍用于消息与任务状态。
   const userId = resolveUserId(req);
 
-  // 续写模式：「继续说」不是真实用户消息，只是一次内部 continuation 请求
-  const isContinue = mode === 'continue';
-
   // 多模态附件：引用已上传图片的 id（POST /uploads/image 返回值）。
-  // 续写不产生新用户消息，忽略附件。
   const attachments = [];
 
-  if (!isContinue) {
+  {
     const rawIds = Array.isArray(attachmentIds) ? attachmentIds : [];
 
     if (rawIds.length > MAX_ATTACHMENTS) {
@@ -2547,11 +2531,7 @@ async function prepareChatRequest(req) {
   }
 
   // 纯发图（无文字）合法：有附件时放空文本校验
-  if (
-    !isContinue &&
-    !attachments.length &&
-    (typeof message !== 'string' || !message.trim())
-  ) {
+  if (!attachments.length && (typeof message !== 'string' || !message.trim())) {
     return { error: [400, { error: '消息不能为空' }] };
   }
 
@@ -2561,16 +2541,12 @@ async function prepareChatRequest(req) {
   }
 
   // message 非字符串且无附件时已在上面 400；这里兼容纯发图场景
-  const userText = isContinue
-    ? ''
-    : typeof message === 'string'
-      ? message.trim()
-      : '';
+  const userText = typeof message === 'string' ? message.trim() : '';
 
   // 用户消息 id 在模型回合之前生成：Agent 工具（tasks.createTask 的
   // parentMessageId、memory_remember 的 messageId）要引用这条消息，
   // id 必须先于工具调用存在。落盘时复用同一个 id（completeChatTurn）。
-  const userMessageId = isContinue ? null : crypto.randomUUID();
+  const userMessageId = crypto.randomUUID();
 
   // 上下文历史以服务端存储为准：不同会话严格隔离，客户端就算传来别的
   // 会话的历史也不会串进来。图片消息在这里转成模型可用的形态。
@@ -2663,11 +2639,7 @@ async function prepareChatRequest(req) {
     sessionId,
   });
 
-  // 续写没有新的用户消息，用最近一条用户消息作为记忆检索查询。
-  // 投影后的 content 一定是字符串，图片消息也不会变成不可检索的 blocks。
-  const memoryQuery = isContinue
-    ? ([...projectedHistory].reverse().find(item => item.role === 'user' && item.content.trim()) || {}).content || ''
-    : userText;
+  const memoryQuery = userText;
 
   const timeContext = getTimeContext(req.body.timeZone || 'Asia/Shanghai');
   const gapContext = buildTimeGapContext(
@@ -2721,7 +2693,7 @@ async function prepareChatRequest(req) {
 
   // 当前用户消息：带附件时转成 content blocks（文本 + 图片 dataURL）。
   // 图片从服务端磁盘读取，不信任客户端传来的任何图片字节。
-  let userContent = isContinue ? '（继续）' : userText;
+  let userContent = userText;
 
   if (attachments.length) {
     const blocks = [];
@@ -2742,7 +2714,7 @@ async function prepareChatRequest(req) {
 
   // 基础系统块按优先级声明：core 永不裁剪；时间/表情/情绪/人格等非关键块
   // 在输入保护阶段可先让位，决策记录在 trace.build.dropped。
-  // 后端提示词由用户在控制面板编辑；空值回退内置默认，续写指令始终由服务端追加。
+  // 后端提示词由用户在控制面板编辑；空值回退内置默认。
   const activeSystemPrompt = personaConfig.systemPrompt || BLUEBIRD_SYSTEM_PROMPT;
 
   const baseSystemBlocks = [
@@ -2751,9 +2723,7 @@ async function prepareChatRequest(req) {
       kind: 'core',
       priority: 100,
       critical: true,
-      text: [activeSystemPrompt, isContinue ? CONTINUE_INSTRUCTION : '']
-        .filter(Boolean)
-        .join('\n\n'),
+      text: activeSystemPrompt,
     },
     ...(timeContext || gapContext.promptText
       ? [
@@ -2929,7 +2899,6 @@ async function prepareChatRequest(req) {
       requestId,
       sessionId,
       userId,
-      isContinue,
       userText,
       userMessageId,
       attachments,
@@ -2988,7 +2957,7 @@ function completeChatTurn({
   userMessageReceivedAt,
   toolSteps,
 }) {
-  const { sessionId, isContinue, userText, userMessageId, attachments, personaConfig } = ctx;
+  const { sessionId, userText, userMessageId, attachments, personaConfig } = ctx;
 
   const { reply: cleanedReply, mood } = stripMoodTags(rawReply);
 
@@ -3026,10 +2995,7 @@ function completeChatTurn({
     ...(index === segments.length - 1 && hasToolSteps ? { toolSteps } : {}),
   }));
 
-  // 续写只落盘 assistant 消息：不产生"继续说"用户消息，不污染 chat-history
-  const stamped = isContinue
-    ? assistantMessages
-    : [
+  const stamped = [
         {
           // 复用模型回合前生成的 id：Agent 工具里引用的 parentMessageId
           // 与落盘后的用户消息 id 是同一个值。
@@ -3127,9 +3093,7 @@ function completeChatTurn({
   // Blue 的回复只有真正返回给客户端（非 clientGone）才开启等待计时。
   // 失败只记录日志，绝不影响聊天主流程。
   try {
-    if (!isContinue) {
-      recordPresenceUserMessage(sessionId, userMessageReceivedAt);
-    }
+    recordPresenceUserMessage(sessionId, userMessageReceivedAt);
 
     if (!isClientGone()) {
       recordPresenceBlueMessage(sessionId, Date.now());
@@ -3155,10 +3119,10 @@ function completeChatTurn({
     persisted,
     mood: emotion.emotion,
     intensity: emotion.intensity,
-    userMessageId: isContinue ? null : stamped[0].id,
+    userMessageId: stamped[0].id,
     assistantMessageId: assistantMessages[0].id,
     // 多模态附件：前端据此展示图片/表情包，历史接口同样会返回
-    userAttachments: isContinue ? [] : attachments,
+    userAttachments: attachments,
     assistantAttachments: replyAttachments,
     // Agent 工具执行摘要：有则随响应返回，无则整个字段不出现（旧响应零变化）
     ...(hasToolSteps ? { toolSteps } : {}),
@@ -3171,7 +3135,6 @@ function completeChatTurn({
 // client 取自适配层：固定内置 DeepSeek（extractMemory 内部硬编码
 // deepseek-chat，与改造前逐字节一致）；没有任何可用服务商时跳过。
 function scheduleMemoryExtraction(
-  isContinue,
   userText,
   sessionId,
   attachments = [],
@@ -3180,7 +3143,6 @@ function scheduleMemoryExtraction(
   setImmediate(() => {
     const memoryClient = getMemoryClient();
     if (!memoryClient) return; // 未配置任何模型 key，跳过记忆提取
-    if (isContinue) return; // 续写不是用户说的话，不产生长期记忆
     // 纯发图（无文字）时给记忆提取一个占位文本，避免空串进提取器
     const memoryText =
       userText ||
@@ -3374,7 +3336,7 @@ app.post('/chat', requireAuth, async (req, res) => {
     const agentOn = agentGate.allowed;
 
     // 轮 4：编排开关开启且非续写 → 给模型追加计划块协议。
-    const orchestrationAppendix = agentOn && !ctx.isContinue
+    const orchestrationAppendix = agentOn
       ? orchestrationPromptAppendix(ctx.agentPolicy)
       : null;
     if (orchestrationAppendix) {
@@ -3429,7 +3391,7 @@ app.post('/chat', requireAuth, async (req, res) => {
         userText: ctx.userText,
         userMessageId: ctx.userMessageId,
         temperature: 0.8,
-        maxTokens: 1200,
+        maxTokens: 8192,
         timeout: 90000,
         isClientGone: () => clientGone,
         abortSignal: disconnect.signal,
@@ -3437,8 +3399,8 @@ app.post('/chat', requireAuth, async (req, res) => {
         policy: ctx.agentPolicy,
         onRequest: requestMeta => recordSentForContext(ctx, requestMeta),
         // 用户明确点名 Memory Bot / 子 agent 时由运行时先真实派发，
-        // 不依赖模型是否自愿发起工具调用。续写没有新指令，不重复派发。
-        enforceExplicitDelegation: !ctx.isContinue,
+        // 不依赖模型是否自愿发起工具调用。
+        enforceExplicitDelegation: true,
       });
 
       agentOutcome = outcome;
@@ -3458,7 +3420,7 @@ app.post('/chat', requireAuth, async (req, res) => {
       // 轮 4（Orchestrator）：主聊天编排接线——开关开启且回复携带计划块时，
       // 剥块 → 服务端编译 → 编排派发（父会话 = 当前聊天会话）；编译失败降级直答。
       // 开关关闭或无块：零行为差异。（变量在 agent 分支外声明，供响应块引用）
-      if (!ctx.isContinue) {
+      {
         const wired = orchestrationChat.wireOrchestration({
           policy: ctx.agentPolicy,
           reply: rawReply,
@@ -3507,7 +3469,7 @@ app.post('/chat', requireAuth, async (req, res) => {
         modelId: ctx.modelId,
         wantVision: ctx.useVision,
         temperature: 0.8,
-        maxTokens: 1200,
+        maxTokens: 8192,
         timeout: 90000,
         messages: ctx.requestMessages,
         // 客户端断开时中止上游调用，不让模型把额度耗在没人要的回复上
@@ -3577,7 +3539,7 @@ app.post('/chat', requireAuth, async (req, res) => {
       requestId: ctx.requestId,
     });
 
-    scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments, {
+    scheduleMemoryExtraction(ctx.userText, ctx.sessionId, ctx.attachments, {
       messageId: result.userMessageId || null,
       requestId: ctx.requestId,
       // 自动抽取的更正同样按用户级作用域判定可见性：新会话里改口要能覆盖旧记忆。
@@ -3839,7 +3801,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
 
   // 轮 4：编排开关开启且非续写 → 给模型追加计划块协议（与 /chat 同一协议）。
   const orchestrationAppendix =
-    agentOn && !ctx.isContinue ? orchestrationPromptAppendix(ctx.agentPolicy) : null;
+    agentOn ? orchestrationPromptAppendix(ctx.agentPolicy) : null;
   if (orchestrationAppendix) {
     ctx.requestMessages = withOrchestrationAppendix(ctx.requestMessages, orchestrationAppendix);
   }
@@ -3854,7 +3816,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         userText: ctx.userText,
         userMessageId: ctx.userMessageId,
         temperature: 0.8,
-        maxTokens: 1200,
+        maxTokens: 8192,
         timeout: 90000,
         isClientGone: () => clientGone,
         abortSignal: disconnect.signal,
@@ -3866,7 +3828,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         onRequest: requestMeta => recordSentForContext(ctx, requestMeta),
         // 与 /chat 一致：显式子 agent 请求必须真实派发，不能只靠模型自觉；
         // 续写模式复用上一条用户消息，不能因此重复创建任务。
-        enforceExplicitDelegation: !ctx.isContinue,
+        enforceExplicitDelegation: true,
       });
 
       if (outcome.completion) {
@@ -3909,7 +3871,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
 
         // 轮 4（Orchestrator）：与 /chat 同一编排接线（stream 侧剥块 + 回执）。
         let orchestrationMeta = null;
-        if (!ctx.isContinue) {
+        {
           const wired = orchestrationChat.wireOrchestration({
             policy: ctx.agentPolicy,
             reply: rawReply,
@@ -3942,7 +3904,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         modelId: ctx.modelId,
         wantVision: ctx.useVision,
         temperature: 0.8,
-        maxTokens: 1200,
+        maxTokens: 8192,
         timeout: 90000,
         stream: true,
         messages: ctx.requestMessages,
@@ -4116,7 +4078,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   sendEvent({ type: 'done', ...result, ...(agentGate.notice ? { agentNotice: agentGate.notice } : {}), ...(streamOrchestrationMeta ? { orchestration: streamOrchestrationMeta } : {}), model, providerId: ctx.providerId, upstreamModel, modelRoute: ctx.modelRoute, sessionId: ctx.sessionId, memoryState: ctx.contextMemoryState, memoryStatus: ctx.contextMemoryStatus, requestId: ctx.requestId });
   res.end();
 
-  scheduleMemoryExtraction(ctx.isContinue, ctx.userText, ctx.sessionId, ctx.attachments, {
+  scheduleMemoryExtraction(ctx.userText, ctx.sessionId, ctx.attachments, {
     messageId: result && result.userMessageId ? result.userMessageId : null,
     requestId: ctx.requestId,
     // 与 /chat 一致：更正按用户级作用域判定，新会话改口能覆盖旧记忆。
