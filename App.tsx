@@ -368,11 +368,9 @@ export default function App() {
               hasMoreHistory={chat.hasMoreHistory}
               onLoadOlder={chat.loadOlderHistory}
               sending={chat.sending}
-              continuing={chat.continuing}
               liveToolSteps={chat.liveToolSteps}
               onRecall={chat.recallMessage}
               onRetry={chat.sendMessage}
-              onContinue={() => void chat.sendContinuation()}
               onOpenActions={setActionMessage}
               isFavorite={isFavorite}
               emptyState={
@@ -393,7 +391,7 @@ export default function App() {
               theme={theme}
               value={input}
               onChangeText={setInput}
-              sending={chat.sending || chat.continuing}
+              sending={chat.sending}
               onStop={chat.stopGeneration}
               loadingHistory={chat.loadingHistory}
               uploadingImage={attachments.uploadingImage}

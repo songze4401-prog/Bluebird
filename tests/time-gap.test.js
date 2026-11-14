@@ -242,10 +242,10 @@ async function main() {
     gapD.promptText.includes('距离上一条用户消息：2天12小时')
   );
 
-  ORIG_LOG('\nC. 两种间隔分离（续写导致分叉）');
+  ORIG_LOG('\nC. 用户消息与最近助手回复的间隔分离');
 
-  // 用户消息在 26 小时前，Blue 最近一次回复（续写）在 1 小时前
-  const sE = sessions.createSession('分叉').id;
+  // 用户消息在 26 小时前，Blue 最近一次回复在 1 小时前
+  const sE = sessions.createSession('间隔分离').id;
   sessions.appendMessages(sE, [
     { role: 'user', content: '昨天的消息', createdAt: isoAgo(26 * HOUR) },
     {
@@ -253,7 +253,7 @@ async function main() {
       content: '当时的回复',
       createdAt: isoAgo(26 * HOUR - 5000),
     },
-    { role: 'assistant', content: '续写内容', createdAt: isoAgo(1 * HOUR) },
+    { role: 'assistant', content: '后续回复', createdAt: isoAgo(1 * HOUR) },
   ]);
 
   const gapE = buildTimeGapContext('Asia/Shanghai', sE);

@@ -14,9 +14,10 @@
  *     严格校验（400 + 旧配置逐字节不动）、恢复默认一并清空；
  *   - customPrompt 进入 /chat 与 /chat/stream 的最终请求（捕获真实下发参数）；
  *     空值不注入占位；恶意文本区块标记被中和且不影响代码层工具门控；
- *   - 连续消息模式：single 强制单条 / auto 自然分条 / frequent 更积极；
+ *   - 回复分段：默认一条消息，超过服务端 4000 字上限后按语义边界分片；
  *   - 分段落盘：每段独立 assistant 消息、历史恢复一致、撤回整轮删除；
- *   - 续写只落 assistant；连续发送顺序与 id 唯一；会话隔离；未授权 401；
+ *   - mode=continue 无正文按普通空消息校验拒绝且不落盘；连续发送顺序与 id 唯一；
+ *     会话隔离；未授权 401；
  *   - 分条不变量：去空白拼接 === 原文（不丢字、不重复）。
  *
  * 运行：node tests/persona.test.js
@@ -733,7 +734,8 @@ async function main() {
 
   const frequentBase =
     '今天天气真的特别好，我一早就出门了。路上看到一只猫，趴在墙头晒太阳，尾巴一甩一甩的。它懒洋洋地看了我一眼，又闭上眼睛继续睡。我站在那儿看了好久，突然觉得你肯定也会喜欢这一幕。就掏出手机拍下来想给你看。你猜后来怎么着？';
-  stubReply = `[mood:calm] ${frequentBase}${frequentBase}${frequentBase}${frequentBase}`;
+  const frequentReply = frequentBase.repeat(40);
+  stubReply = `[mood:calm] ${frequentReply}`;
   capturedPrompts.length = 0;
 
   const chatRes3 = await fetch(BASE + '/chat', {
@@ -744,8 +746,10 @@ async function main() {
   const chatBody3 = await chatRes3.json();
 
   check(
-    'frequent 模式长回复超过上限才分条',
-    chatBody3.replies.length >= 2,
+    '超过 4000 字上限才分条且回复正文完整',
+    chatBody3.replies.length >= 2 &&
+      chatBody3.replies.every(reply => Array.from(reply.content).length <= 4000) &&
+      chatBody3.replies.map(reply => reply.content).join('') === frequentReply,
     `actual=${chatBody3.replies.length}`
   );
   check(
@@ -753,14 +757,13 @@ async function main() {
     (capturedPrompts[0] || '').includes('同一条消息')
   );
 
-  // 续写：只落 assistant，短回复不拆分
-  const beforeContinue = (
+  // 后端已删除续写机制：空 mode=continue 请求应走普通消息校验并保持无副作用。
+  const beforeRejectedContinue = (
     await (
       await fetch(BASE + `/history?sessionId=${sChat}`, { headers: AUTH })
     ).json()
   ).history.length;
-
-  stubReply = '[mood:calm] 续写第一段。\n\n续写第二段。';
+  const promptCountBeforeRejectedContinue = capturedPrompts.length;
   const contRes = await fetch(BASE + '/chat', {
     method: 'POST',
     headers: JSON_AUTH,
@@ -768,19 +771,18 @@ async function main() {
   });
   const contBody = await contRes.json();
 
-  const afterContinue = (
+  const afterRejectedContinue = (
     await (
       await fetch(BASE + `/history?sessionId=${sChat}`, { headers: AUTH })
     ).json()
   ).history;
 
   check(
-    '续写返回单条且只落 assistant 消息',
-    contRes.status === 200 &&
-      contBody.replies.length === 1 &&
-      contBody.userMessageId === null &&
-      afterContinue.length === beforeContinue + 1 &&
-      afterContinue.slice(-1).every(m => m.role === 'assistant')
+    'mode=continue 无正文按普通校验 400 拒绝且不触发模型或落盘',
+    contRes.status === 400 &&
+      contBody.error === '消息不能为空' &&
+      capturedPrompts.length === promptCountBeforeRejectedContinue &&
+      afterRejectedContinue.length === beforeRejectedContinue
   );
 
   // 短段回归：mergeTinyTail 曾把显式换行的短段压回一条（"1\n2" -> "12"），

@@ -28,7 +28,6 @@ POST /chat                          server/index.js:2198
   └ scheduleMemoryExtraction(...)   server/index.js:2366      ← 在响应之后才排提取
       └ setImmediate                server/index.js:2176
           ├ getMemoryClient() 为空 → 直接 return      server/index.js:2178
-          ├ isContinue → 直接 return（续写不产记忆）  server/index.js:2179
           └ processMemory(client, text, sessionId)    server/index.js:2188
               ├ MEMORY_ENABLED=false → return          server/memory.js:480
               ├ 触发词闸门 shouldProcessMemory          server/memory.js:486 → 88-96（正则 29-30）
@@ -608,4 +607,3 @@ node tests/memory-restart.test.js                           # 真进程重启
 
 本轮新增/改动的测试文件：`tests/memory-id-migration.test.js`（20）、`tests/memory-session-isolation.test.js`（15）、`tests/memory-context-injection.test.js`（11）、`tests/memory-api-recall.test.js`（39 项断言）、`tests/memory-eval-baseline.test.js`（22）、`tests/memory-restart.test.js`（8）。
 最终一轮实测：`npm test` **32 个测试文件全部通过**，`npm run test:unit` **106 项全部通过**，`tests/memory-eval-baseline.test.js` 22/22 绿。
-
