@@ -113,6 +113,19 @@ function pendingPublishApproval(taskId) {
     .find(item => item.operation === 'plan.publish' && item.taskId === taskId);
 }
 
+// 竞态自诊断：waitForStatus 没等到目标状态时，断言信息里直接带任务状态、
+// errorCode 与事件链，复现即可定位收口原因（不再只有 expected/actual 两个词）。
+function taskSnapshot(taskId) {
+  const task = tasks.getRawTask(taskId);
+  const events = tasks
+    .listEvents('memory', { limit: 40 })
+    .filter(event => event.taskId === taskId)
+    .map(event => `${event.eventType}${event.errorCode ? ':' + event.errorCode : ''}`);
+  return `snapshot[status=${task ? task.status : 'GONE'} errorCode=${
+    task && task.errorCode ? task.errorCode : ''
+  } events=${events.join(' -> ')}]`;
+}
+
 let stubServer;
 test.before(async () => {
   stubServer = http.createServer((req, res) => {
@@ -155,6 +168,11 @@ test.before(async () => {
       }, 20);
     });
   });
+  // keepAliveTimeout 抬到 30s：默认 5s 会在测试间隙掐死 keep-alive 池中连接
+  // （openai SDK maxRetries:0，复用死 socket 直接 model_connection 失败——
+  // 2026-11-15 全量跑里 b+c 被外部卡顿拖到 7.6s，d 的模型调用复用死 socket，
+  // 任务在进门之前就被收口 failed。见 tests/memory-bot.test.js 同款修复。）
+  stubServer.keepAliveTimeout = 30000;
   await new Promise(resolve => stubServer.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${stubServer.address().port}/v1`;
   const added = apiConfigs.addModelProvider({
@@ -210,7 +228,11 @@ test('b+c. 发布门主链：验证通过后停 waiting_approval，批准才交�
   runtime.startTask(task.taskId);
 
   const parked = await waitForStatus(task.taskId, 'waiting_approval');
-  assert.equal(parked.status, 'waiting_approval', '命中发布门的任务必须停在 waiting_approval');
+  assert.equal(
+    parked.status,
+    'waiting_approval',
+    '命中发布门的任务必须停在 waiting_approval；' + taskSnapshot(task.taskId)
+  );
 
   const pending = pendingPublishApproval(task.taskId);
   assert.ok(pending, 'plan.publish 审批必须存在');
@@ -251,13 +273,21 @@ test('d. 拒绝 → fail-closed：任务取消，delivery 产物停在 pending-c
   const task = createGatedTask({ saved, goal: '发布门拒绝场景检索' });
   runtime.startTask(task.taskId);
   const parked = await waitForStatus(task.taskId, 'waiting_approval');
-  assert.equal(parked.status, 'waiting_approval');
+  assert.equal(
+    parked.status,
+    'waiting_approval',
+    '拒绝场景任务应先停在 waiting_approval；' + taskSnapshot(task.taskId)
+  );
   const pending = pendingPublishApproval(task.taskId);
   assert.ok(pending, 'plan.publish 审批必须存在');
 
   approvals.reject(pending.approvalId, { actor: 'local-owner' });
   const after = await waitForStatus(task.taskId, 'cancelled');
-  assert.equal(after.status, 'cancelled', '拒绝后任务收口 cancelled');
+  assert.equal(
+    after.status,
+    'cancelled',
+    '拒绝后任务收口 cancelled；' + taskSnapshot(task.taskId)
+  );
   assert.equal(after.errorCode, 'approval_rejected');
   assert.equal(
     artifactStore.get(pending.payload.deliveryArtifactId).commit,

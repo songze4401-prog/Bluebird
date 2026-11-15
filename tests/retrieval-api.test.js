@@ -83,6 +83,9 @@ async function req(pathname, { method = 'GET', token = TOKEN, body } = {}) {
 }
 
 test.before(async () => {
+  // keepAliveTimeout 抬到 30s：默认 5s 会在测试间隙掐死 keep-alive 池中连接
+  // （复用死 socket 直接连接失败——见 tests/memory-bot.test.js 同款修复）
+  webServer.keepAliveTimeout = 30000;
   await new Promise(resolve => webServer.listen(0, '127.0.0.1', resolve));
   await waitReady();
 });
