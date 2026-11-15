@@ -236,7 +236,7 @@ function runBackendFile(name, dataDir, format = 'custom') {
     cwd: ROOT,
     env: backendEnv(dataDir),
     encoding: 'utf8',
-    timeout: 120000,
+    timeout: 300000,
     maxBuffer: 16 * 1024 * 1024,
   });
 
@@ -269,7 +269,7 @@ function runJest(reportFile) {
     {
       cwd: ROOT,
       encoding: 'utf8',
-      timeout: 180000,
+      timeout: 300000,
       maxBuffer: 16 * 1024 * 1024,
     }
   );

@@ -59,6 +59,9 @@ test.before(async () => {
       res.end(JSON.stringify(payload));
     });
   });
+  // keepAliveTimeout 抬到 30s：默认 5s 会在测试间隙掐死 keep-alive 池中连接
+  // （openai SDK maxRetries:0，复用死 socket 直接 model_connection 失败——见 memory-bot 同款修复）
+  stubServer.keepAliveTimeout = 30000;
   await new Promise(resolve => stubServer.listen(0, '127.0.0.1', resolve));
   stubBase = `http://127.0.0.1:${stubServer.address().port}/v1`;
   // 传输层按调用读取 DEEPSEEK_BASE_URL（DSH 同名覆盖），stub 注入这里。

@@ -300,6 +300,10 @@ test.before(async () => {
     })
   );
   apiServer = http.createServer(app);
+  // 主 API server 与 provider 桩同款修复：默认 keepAliveTimeout(5s) 会在子测试间隙
+  // （waitForTask 轮询、退避等待等 >5s 的空窗）掐死 keep-alive 池中连接——
+  // api() 复用死 socket 时 undici 偶发请求悬挂（全量跑里表现为 120s 被 spawnSync 击杀）。
+  apiServer.keepAliveTimeout = 30000;
   await new Promise(resolve => apiServer.listen(0, '127.0.0.1', resolve));
   apiBase = `http://127.0.0.1:${apiServer.address().port}`;
 });
@@ -319,6 +323,8 @@ async function api(pathname, { method = 'GET', body } = {}) {
     method,
     headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
+    // 挂死保险：任何请求 20s 不响应即快速失败（正常路径毫秒级），绝不拖到 spawnSync 120s 被杀
+    signal: AbortSignal.timeout(20000),
   });
   let json = null;
   try {
@@ -825,6 +831,8 @@ test('HTTP API：鉴权由外层注入，配置/凭证/会话/任务均走真实
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId, message: '再说一次' }),
+    // 同上：流式读取也要有期限，悬挂即快速失败
+    signal: AbortSignal.timeout(20000),
   });
   assert.equal(streamResponse.status, 200);
   const streamText = await streamResponse.text();

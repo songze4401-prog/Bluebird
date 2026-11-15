@@ -139,6 +139,9 @@ async function setupProvider(mode = 'text') {
       });
     });
   });
+  // keepAliveTimeout 抬到 30s：默认 5s 会在测试间隙掐死 keep-alive 池中连接
+  // （openai SDK maxRetries:0，复用死 socket 直接 model_connection 失败——见 memory-bot 同款修复）
+  providerServer.keepAliveTimeout = 30000;
   await new Promise(resolve => providerServer.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${providerServer.address().port}/v1`;
 
