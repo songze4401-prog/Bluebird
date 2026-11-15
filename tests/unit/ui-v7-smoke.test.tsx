@@ -71,7 +71,11 @@ jest.mock('../../hooks/useModelSelection', () => ({
   useModelSelection: () => ({
     selectedModel: null,
     selectedModelLabel: '',
+    providers: [],
+    loading: false,
+    error: '',
     refreshModelSelection: jest.fn(async () => undefined),
+    setDefaultModel: jest.fn(async () => true),
   }),
 }));
 

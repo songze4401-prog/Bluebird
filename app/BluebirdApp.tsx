@@ -88,10 +88,17 @@ function InnerShell() {
   // ---- 真实聊天链路（与旧壳 App.tsx 同款组合）----
   const [currentSessionId, setCurrentSessionId] = useState<string>(DEFAULT_SESSION_ID);
   const { streamingEnabled } = useStreamingPreference();
-  const { selectedModel, selectedModelLabel } = useModelSelection();
+  const {
+    selectedModel,
+    selectedModelLabel,
+    providers: modelProviders,
+    loading: modelLoading,
+    error: modelError,
+    setDefaultModel,
+  } = useModelSelection();
   const { reportInteraction } = usePresence(currentSessionId);
   const sessionList = useSessionList();
-  // 附件通道先接通（暂无选择入口，加号面板图片/文件仍是演示占位；R2 接相册/拍照）
+  // 附件通道：加号面板的「图片」走相册 → 上传 → 待发送预览（文件暂无后端能力）
   const attachments = useAttachments({ onUploadStart: () => {} });
   const chat = useChatSession({
     sessionId: currentSessionId,
@@ -223,7 +230,20 @@ function InnerShell() {
             />
           </View>
           <View style={{ width }}>
-            <ChatScreen chat={chat} modelLabel={selectedModelLabel} />
+            <ChatScreen
+              chat={chat}
+              modelLabel={selectedModelLabel}
+              models={modelProviders}
+              currentModel={selectedModel}
+              modelLoading={modelLoading}
+              modelError={modelError}
+              onSelectModel={async (providerId, modelId) => {
+                const ok = await setDefaultModel(providerId, modelId);
+                ui.toast(ok ? '已切换默认模型' : '切换失败，请稍后再试');
+                return ok;
+              }}
+              attachments={attachments}
+            />
           </View>
         </Animated.View>
       </View>
