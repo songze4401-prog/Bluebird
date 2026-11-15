@@ -21,9 +21,9 @@
 
 ### 1.3 `index.js` 接线点
 
-- **/chat agent 路径**：`runAgentTurn` 返回后调 `wireOrchestration`（`!ctx.isContinue` 才接线），`rawReply` 替换为剥块+回执文本后走既有 `auditChatReply`/`completeChatTurn` 落盘；响应 JSON 增 **additive** 字段 `orchestration: {planId, planVersion, nodeCount, status}`（未派发时该键不出现）。
+- **/chat agent 路径**：`runAgentTurn` 返回后调 `wireOrchestration`，`rawReply` 替换为剥块+回执文本后走既有 `auditChatReply`/`completeChatTurn` 落盘；响应 JSON 增 **additive** 字段 `orchestration: {planId, planVersion, nodeCount, status}`（未派发时该键不出现）。
 - **/chat/stream agent 路径**：同一接线（emit delta 前剥块），`done` 事件带同一 `orchestration` 回执字段。不新增 SSE 事件类型。
-- **协议注入**：`agentOn && !isContinue && enabled` 时把 appendix 并入首条 system 消息（`withOrchestrationAppendix` 返回新数组，不改入参）；能力清单 = `listManifests()` 各主体 `capabilities ∩ acceptedTaskTypes` 的并集（动态）。开关关闭不注入（模型侧零变化）。
+- **协议注入**：`agentOn && enabled` 时把 appendix 并入首条 system 消息（`withOrchestrationAppendix` 返回新数组，不改入参）；能力清单 = `listManifests()` 各主体 `capabilities ∩ acceptedTaskTypes` 的并集（动态）。开关关闭不注入（模型侧零变化）。
 
 ## 2. 验收（`tests/agent-chat-orchestration.test.js`，7 例全过）
 
@@ -41,11 +41,10 @@
 
 ## 3. 边界与如实标注
 
-1. **续写不接线**（`ctx.isContinue`）：续写没有新指令，不重复派发。
-2. **计划块不进持久消息**：剥块在落盘前完成，会话历史不含原始 JSON 块。
-3. **回执是纯文本追加**：不改变消息契约；编排结果按既有 `bot-result-<planId>` 通道回写父会话（轮 3 交付面）。
-4. **多轮编排没有去重锁**：同一用户连发多条计划块消息会各自派发（幂等键含 planId，不同计划不同血缘）；风暴防护沿用编译器 ≤8 节点与任务级预算。
-5. `maxNodes` 目前是声明位（编译器硬上限 8 不变）；chat 侧未把 policy.maxNodes 传给编译器收紧（后续如需按会话收紧再接线）。
+1. **计划块不进持久消息**：剥块在落盘前完成，会话历史不含原始 JSON 块。
+2. **回执是纯文本追加**：不改变消息契约；编排结果按既有 `bot-result-<planId>` 通道回写父会话（轮 3 交付面）。
+3. **多轮编排没有去重锁**：同一用户连发多条计划块消息会各自派发（幂等键含 planId，不同计划不同血缘）；风暴防护沿用编译器 ≤8 节点与任务级预算。
+4. `maxNodes` 目前是声明位（编译器硬上限 8 不变）；chat 侧未把 policy.maxNodes 传给编译器收紧（后续如需按会话收紧再接线）。
 6. 直答路径（无块/开关关）在响应与落盘上逐字节不变（c2/e 的 stub 捕获断言锁定）。
 
 ## 4. 计数与门禁

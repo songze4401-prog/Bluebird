@@ -174,7 +174,7 @@ export function usePresence(sessionId: string) {
     };
   }, []);
 
-  // 用户产生有效互动（发消息 / 继续说）时立即刷新活跃时间。
+  // 用户发送消息时立即刷新活跃时间。
   const reportInteraction = useCallback((targetSessionId?: string) => {
     if (appStateRef.current !== 'foreground') return;
 
