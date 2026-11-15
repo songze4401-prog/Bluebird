@@ -5,8 +5,8 @@
   "nodeTestSuiteTotal": 230,
   "runnerTotal": 2256,
   "frontend": {
-    "suites": 22,
-    "tests": 190
+    "suites": 23,
+    "tests": 191
   },
   "nodeTestSuiteFiles": [
     "memory",

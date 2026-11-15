@@ -161,6 +161,9 @@ process.env.BLUEBIRD_DATA_DIR = DATA_DIR;
 process.env.PORT = '0';
 process.env.BLUEBIRD_API_TOKEN = 'test-token-persona';
 process.env.DEEPSEEK_API_KEY = 'stub-key';
+// #85 后单条回复上限默认 4000：本进程收紧到 300，让 frequent 长回复用例仍能触发分片
+// （BLUEBIRD_REPLY_MAX_CHARS 是官方覆盖通道；其余桩回复均远短于 300，不受影响）
+process.env.BLUEBIRD_REPLY_MAX_CHARS = '300';
 // server/index.js 会用 dotenv 读本地 server/.env（dotenv 不覆盖已存在的键）。
 // 开发机 .env 里可能把 Agent 开关打开，本测试必须钉住默认关闭：
 // 自定义人格提示词不得改变工具门控，这条断言只有在开关关闭时才成立。
@@ -753,20 +756,19 @@ async function main() {
     (capturedPrompts[0] || '').includes('同一条消息')
   );
 
-  // 续写：只落 assistant，短回复不拆分
+  // 续写机制已在 #85 删除：无正文的 mode=continue 不再被特判，
+  // 按普通消息校验拒绝（400「消息不能为空」），不产生任何落盘
   const beforeContinue = (
     await (
       await fetch(BASE + `/history?sessionId=${sChat}`, { headers: AUTH })
     ).json()
   ).history.length;
 
-  stubReply = '[mood:calm] 续写第一段。\n\n续写第二段。';
   const contRes = await fetch(BASE + '/chat', {
     method: 'POST',
     headers: JSON_AUTH,
     body: JSON.stringify({ mode: 'continue', sessionId: sChat }),
   });
-  const contBody = await contRes.json();
 
   const afterContinue = (
     await (
@@ -775,12 +777,8 @@ async function main() {
   ).history;
 
   check(
-    '续写返回单条且只落 assistant 消息',
-    contRes.status === 200 &&
-      contBody.replies.length === 1 &&
-      contBody.userMessageId === null &&
-      afterContinue.length === beforeContinue + 1 &&
-      afterContinue.slice(-1).every(m => m.role === 'assistant')
+    '续写机制已删除：无正文 mode=continue 按 400 拒绝且不落盘',
+    contRes.status === 400 && afterContinue.length === beforeContinue
   );
 
   // 短段回归：mergeTinyTail 曾把显式换行的短段压回一条（"1\n2" -> "12"），

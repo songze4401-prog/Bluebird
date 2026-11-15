@@ -1,0 +1,485 @@
+// 蓝鸟 UI 移植 · 聊天整屏（原型 .pane 聊天侧的 RN 移植）
+// 结构自上而下：线程消息流（用户黑泡 / blue 白泡 + 工具标签 + busy 打字三点）→
+//   悬浮身份组 → 底部输入条（＋钮 / 输入框 / 发送钮）→ ＋号就地长成的选项面板。
+// 三个弹层（资料编辑 / 默认模型 / 工具详情）由本屏挂载；全页透明底透出壁纸层，
+// 颜色走 tokens，阴影走 V7_SHADOWS，动效只用 RN 内置 Animated。
+
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  Animated,
+  Easing,
+  Keyboard,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+  type ScrollViewInstance,
+} from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+import { useUi } from './ui-state';
+import { V7_SHADOWS, type V7Tokens } from './ui-theme';
+import { IdentityHeader } from '../components/IdentityHeader';
+import { EditProfileSheet } from '../components/EditProfileSheet';
+import { ModelPickerSheet } from '../components/ModelPickerSheet';
+import { ToolDetailSheet } from '../components/ToolDetailSheet';
+
+// 全屏绝对定位（与 app/ui-state.tsx 同款写法：本仓库 RN 版型里没有 absoluteFillObject）
+const ABS_FILL = {
+  position: 'absolute',
+  left: 0,
+  right: 0,
+  top: 0,
+  bottom: 0,
+} as const;
+
+// 原型 --spring：加号面板宽/高/圆角形变共用的弹簧曲线
+const SPRING = Easing.bezier(0.3, 1.1, 0.45, 1);
+
+// busy 打字三点（原型 .typing + @keyframes bl）：6px 圆 ink 底，透明度 0.25↔1 循环，
+// 三点各延迟 150ms 相位错开、周期保持 1s；卸载时 stop 收掉。
+function TypingDots() {
+  const { tokens } = useUi();
+  // 动画值用 useState 惰性初始化持有（渲染期读 ref.current 被 react-hooks/refs 禁止）
+  const [dots] = useState(() => [0, 1, 2].map(() => new Animated.Value(0.25)));
+
+  useEffect(() => {
+    const anims = dots.map((v, i) =>
+      // 先延迟 i*150ms 再进无限循环：相位错开且每点周期都是 1s（原型 animation-delay .15s/.3s）
+      Animated.sequence([
+        Animated.delay(i * 150),
+        Animated.loop(
+          Animated.sequence([
+            Animated.timing(v, { toValue: 1, duration: 500, useNativeDriver: true }),
+            Animated.timing(v, { toValue: 0.25, duration: 500, useNativeDriver: true }),
+          ])
+        ),
+      ])
+    );
+    anims.forEach(a => a.start());
+    return () => anims.forEach(a => a.stop());
+  }, [dots]);
+
+  return (
+    <View style={typingStyles.wrap}>
+      {dots.map((v, i) => (
+        <Animated.View
+          key={i}
+          style={[typingStyles.dot, { backgroundColor: tokens.ink, opacity: v }]}
+        />
+      ))}
+    </View>
+  );
+}
+
+// 打字三点的尺寸样式（颜色随主题，在组件里给）
+const typingStyles = StyleSheet.create({
+  wrap: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingVertical: 4 },
+  dot: { width: 6, height: 6, borderRadius: 3 },
+});
+
+// 原型 .thread/.m/.who/.txt/.bub/.tool/.atchip/.chatbrand/.comp/.bar/.plus/.send/
+// .pp/.ppi/.prow 的 RN 移植；fd=fontDelta：blue 白泡字号随字号设置（原型 13/15/17 三档）
+const createStyles = (t: V7Tokens, fd: number) =>
+  StyleSheet.create({
+    // 原型 .thread：flex1 透明底透出壁纸层；paddingTop 由安全区+76 在 JSX 给（给悬浮身份组让位）
+    thread: { flex: 1, backgroundColor: 'transparent' },
+    threadContent: { paddingHorizontal: 18, paddingBottom: 12, gap: 20 },
+
+    // 消息列（原型 .m：maxWidth 86%、列 gap 8；user 右对齐、blue 左对齐）
+    mUser: { maxWidth: '86%', alignSelf: 'flex-end', alignItems: 'flex-end', gap: 8 },
+    mBlue: { maxWidth: '86%', alignSelf: 'flex-start', alignItems: 'flex-start', gap: 8 },
+    who: { fontSize: 10, color: t.ink },
+
+    // 用户黑泡（原型 .bub：card 底，圆角 14/4/14/14，p12/15，阴影 card）
+    bub: {
+      backgroundColor: t.card,
+      borderTopLeftRadius: 14,
+      borderTopRightRadius: 4,
+      borderBottomRightRadius: 14,
+      borderBottomLeftRadius: 14,
+      paddingVertical: 12,
+      paddingHorizontal: 15,
+      ...V7_SHADOWS.card,
+    },
+    bubTxt: { fontSize: 14, lineHeight: 23, color: t.on },
+    // 附件 chip（原型 .atchip：白系 22% 底 r10 p6/10，单行省略；收在黑泡内）
+    atchip: {
+      alignSelf: 'flex-start',
+      maxWidth: '100%',
+      marginTop: 6,
+      borderRadius: 10,
+      backgroundColor: 'rgba(255,255,255,0.22)',
+      paddingVertical: 6,
+      paddingHorizontal: 10,
+    },
+    atchipTxt: { fontSize: 12, fontWeight: '600', color: t.on },
+
+    // blue 白泡（原型 .txt：surface 底，圆角 4/14/14/14，p9/12，阴影 md）
+    txt: {
+      backgroundColor: t.surface,
+      borderTopLeftRadius: 4,
+      borderTopRightRadius: 14,
+      borderBottomRightRadius: 14,
+      borderBottomLeftRadius: 14,
+      paddingVertical: 9,
+      paddingHorizontal: 12,
+      ...V7_SHADOWS.md,
+    },
+    txtTxt: { fontSize: 15 + fd, lineHeight: Math.round((15 + fd) * 1.7), color: t.ink },
+    // 工具标签（原型 .tool：行 gap 8，✓ ink w700 + 文案 sec；按下开工具详情）
+    tool: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+    toolCk: { fontSize: 12, fontWeight: '700', color: t.ink },
+    toolTxt: { fontSize: 12, color: t.sec },
+
+    // 悬浮身份组外壳（原型 .chatbrand：top 由安全区+4 在 JSX 给；点击穿透交给 box-none）
+    headerWrap: { position: 'absolute', left: 0, right: 0 },
+
+    // 底部输入容器（原型 .comp：bottom 由安全区+12 在 JSX 给；加号面板绝对定位在其中）
+    comp: { position: 'absolute', left: 0, right: 0 },
+    // 输入条（原型 .bar：surface 底 r999 p6/6/6/8 阴影 lg，左右 18）
+    bar: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      backgroundColor: t.surface,
+      borderRadius: 999,
+      paddingTop: 6,
+      paddingRight: 6,
+      paddingBottom: 6,
+      paddingLeft: 8,
+      marginHorizontal: 18,
+      ...V7_SHADOWS.lg,
+    },
+    // ＋钮（原型 .plus：34 圆 surface 底阴影 md；面板开着时整钮 opacity 0）
+    plus: {
+      width: 34,
+      height: 34,
+      borderRadius: 17,
+      backgroundColor: t.surface,
+      alignItems: 'center',
+      justifyContent: 'center',
+      ...V7_SHADOWS.md,
+    },
+    plusTxt: { fontSize: 17, color: t.ink },
+    input: { flex: 1, minWidth: 0, fontSize: 14, color: t.ink, paddingVertical: 0 },
+    // 发送钮（原型 .send：36 圆 card 底阴影 card；disabled 时 opacity .35）
+    send: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      backgroundColor: t.card,
+      alignItems: 'center',
+      justifyContent: 'center',
+      ...V7_SHADOWS.card,
+    },
+    sendTxt: { fontSize: 15, color: t.on },
+
+    // 加号面板（原型 .pp：从＋钮位置就地长成；尺寸/圆角/透明度由动画值驱动）
+    pp: {
+      position: 'absolute',
+      left: 18,
+      bottom: 0,
+      backgroundColor: t.surface,
+      overflow: 'hidden',
+      ...V7_SHADOWS.lg,
+    },
+    // 面板内容（原型 .ppi：列 gap 4 p10；透明度延迟淡入由动画值驱动）
+    ppi: { flex: 1, gap: 4, padding: 10 },
+    ppxRow: { flexShrink: 1, flexDirection: 'row', justifyContent: 'flex-end' },
+    // 右上 ✕（原型 .ppx：30 圆 surface 底阴影 md）
+    ppx: {
+      width: 30,
+      height: 30,
+      borderRadius: 15,
+      backgroundColor: t.surface,
+      alignItems: 'center',
+      justifyContent: 'center',
+      ...V7_SHADOWS.md,
+    },
+    ppxTxt: { fontSize: 14, color: t.ink },
+    // 面板选项行（原型 .prow：行 gap 12 p11/10 r14，按下泛 soft 底）。
+    // 原型 .ppi 高 190 装不下 30+3×54 的内容，靠 CSS flex 默认收缩把行压紧；
+    // RN 默认 flexShrink 0，这里显式给 1 复刻同款压缩。
+    prow: {
+      flexShrink: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      paddingVertical: 11,
+      paddingHorizontal: 10,
+      borderRadius: 14,
+    },
+    prowPressed: { backgroundColor: t.soft },
+    pi: {
+      width: 32,
+      height: 32,
+      borderRadius: 10,
+      backgroundColor: t.card,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    piTxt: { fontSize: 14, color: t.on },
+    pl: { flex: 1, fontSize: 13, fontWeight: '500', color: t.ink },
+    pv: { fontSize: 12, color: t.mut },
+  });
+
+export function ChatScreen() {
+  const ui = useUi();
+  const t = ui.tokens;
+  const styles = createStyles(t, ui.fontDelta);
+  const insets = useSafeAreaInsets();
+
+  // 本屏挂载的弹层开关（资料编辑 / 默认模型 / 工具详情）
+  const [editOpen, setEditOpen] = useState(false);
+  const [modelOpen, setModelOpen] = useState(false);
+  const [toolOpen, setToolOpen] = useState(false);
+  const [tool, setTool] = useState<string | null>(null);
+
+  // 输入框本地草稿（发送后清空）
+  const [input, setInput] = useState('');
+
+  // 加号面板：panelOpen 驱动交互（垫层/pointerEvents/＋钮透明）；progress 形变、
+  // ppFade 面板整体淡入淡出（原型 .pp opacity .18s）、fade 内容延迟淡入（.ppi .16s delay .1s）
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [progress] = useState(() => new Animated.Value(0));
+  const [ppFade] = useState(() => new Animated.Value(0));
+  const [fade] = useState(() => new Animated.Value(0));
+
+  // 线程滚动引用：内容撑高后滚到底（原型 renderThread 后 scrollTop=scrollHeight）
+  const scrollRef = useRef<ScrollViewInstance>(null);
+  const scrollToBottom = () => scrollRef.current?.scrollToEnd({ animated: false });
+
+  // 「模型切换」的延迟打开定时器（关面板 260ms 后开抽屉），卸载时清掉
+  const modelTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (modelTimer.current) clearTimeout(modelTimer.current);
+    };
+  }, []);
+
+  // 面板形变三值：宽 34↔248、高 34↔190、圆角 17↔20（原型 openPlus/closePlus）
+  const ppWidth = progress.interpolate({ inputRange: [0, 1], outputRange: [34, 248] });
+  const ppHeight = progress.interpolate({ inputRange: [0, 1], outputRange: [34, 190] });
+  const ppRadius = progress.interpolate({ inputRange: [0, 1], outputRange: [17, 20] });
+
+  const openPanel = () => {
+    setPanelOpen(true);
+    progress.setValue(0);
+    ppFade.setValue(0);
+    fade.setValue(0);
+    Animated.timing(progress, {
+      toValue: 1,
+      duration: 300,
+      easing: SPRING,
+      useNativeDriver: false,
+    }).start();
+    Animated.timing(ppFade, { toValue: 1, duration: 180, useNativeDriver: false }).start();
+    Animated.timing(fade, {
+      toValue: 1,
+      duration: 160,
+      delay: 100,
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const closePanel = () => {
+    setPanelOpen(false);
+    Animated.timing(progress, {
+      toValue: 0,
+      duration: 300,
+      easing: SPRING,
+      useNativeDriver: false,
+    }).start();
+    Animated.timing(ppFade, { toValue: 0, duration: 180, useNativeDriver: false }).start();
+    Animated.timing(fade, { toValue: 0, duration: 160, useNativeDriver: true }).start();
+  };
+
+  // 占位规矩：图片/文件不真上传，toast 后收起面板
+  const demoUpload = () => {
+    ui.toast('演示版：图片/文件上传暂未接入');
+    closePanel();
+  };
+
+  // 模型切换：先收面板，260ms 后再开默认模型抽屉（原型 data-opt=model 的时序）
+  const openModelPicker = () => {
+    closePanel();
+    if (modelTimer.current) clearTimeout(modelTimer.current);
+    modelTimer.current = setTimeout(() => setModelOpen(true), 260);
+  };
+
+  // 发送：busy 或空文本忽略 → send → 清空输入 → 收起键盘（原型 send + Enter 提交）
+  const doSend = () => {
+    const text = input.trim();
+    if (ui.busy || !text) return;
+    ui.send(text);
+    setInput('');
+    Keyboard.dismiss();
+  };
+
+  return (
+    <>
+      {/* 1. 线程：透明底消息流 */}
+      <ScrollView
+        ref={scrollRef}
+        style={styles.thread}
+        contentContainerStyle={[styles.threadContent, { paddingTop: insets.top + 76 }]}
+        showsVerticalScrollIndicator={false}
+        onContentSizeChange={scrollToBottom}
+      >
+        {ui.messages.map((m, i) =>
+          m.role === 'user' ? (
+            /* 用户消息：右对齐列 = 时间 → 黑泡（附件 chip 收在泡内） */
+            <View key={i} style={styles.mUser}>
+              <Text style={styles.who}>{m.time}</Text>
+              <View style={styles.bub}>
+                <Text style={styles.bubTxt}>{m.text}</Text>
+                {m.attach && (
+                  <View style={styles.atchip}>
+                    <Text numberOfLines={1} style={styles.atchipTxt}>
+                      {(m.attach.kind === 'img' ? '🖼' : '📎') + ' ' + m.attach.name}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            </View>
+          ) : (
+            /* blue 消息：左对齐列 = 时间 → 白泡 → 工具标签（按下开工具详情） */
+            <View key={i} style={styles.mBlue}>
+              <Text style={styles.who}>{m.time}</Text>
+              <View style={styles.txt}>
+                <Text style={styles.txtTxt}>{m.text}</Text>
+              </View>
+              {m.tool && (
+                <Pressable
+                  style={styles.tool}
+                  onPress={() => {
+                    setTool(m.tool ?? null);
+                    setToolOpen(true);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={'工具调用详情：' + m.tool}
+                >
+                  <Text style={styles.toolCk}>✓</Text>
+                  <Text style={styles.toolTxt}>{m.tool}</Text>
+                </Pressable>
+              )}
+            </View>
+          )
+        )}
+        {/* busy：线程尾打字三点 */}
+        {ui.busy && <TypingDots />}
+      </ScrollView>
+
+      {/* 2. 悬浮身份组：点身份 pill 开资料弹层（外壳 box-none 不吃两侧点击） */}
+      <View pointerEvents="box-none" style={[styles.headerWrap, { top: insets.top + 4 }]}>
+        <IdentityHeader onOpenProfile={() => setEditOpen(true)} />
+      </View>
+
+      {/* 3. 加号面板开着时垫全屏透明垫层：点面板外任意处收面板 */}
+      {panelOpen && (
+        <Pressable
+          style={ABS_FILL}
+          onPress={closePanel}
+          accessibilityRole="button"
+          accessibilityLabel="关闭加号面板"
+        />
+      )}
+
+      {/* 4. 底部输入条 + 加号面板（面板后渲染，压在输入条上方） */}
+      <View style={[styles.comp, { bottom: insets.bottom + 12 }]}>
+        <View style={styles.bar}>
+          <Pressable
+            style={[styles.plus, { opacity: panelOpen ? 0 : 1 }]}
+            onPress={openPanel}
+            accessibilityRole="button"
+            accessibilityLabel="更多选项"
+          >
+            <Text style={styles.plusTxt}>＋</Text>
+          </Pressable>
+          <TextInput
+            style={styles.input}
+            value={input}
+            onChangeText={setInput}
+            placeholder="与 Bluebird 对话…"
+            placeholderTextColor={t.mut}
+            blurOnSubmit={false}
+            onSubmitEditing={doSend}
+          />
+          <Pressable
+            style={[styles.send, { opacity: ui.busy || !input.trim() ? 0.35 : 1 }]}
+            disabled={ui.busy || !input.trim()}
+            onPress={doSend}
+            accessibilityRole="button"
+            accessibilityLabel="发送"
+          >
+            <Text style={styles.sendTxt}>↑</Text>
+          </Pressable>
+        </View>
+
+        {/* 加号面板（原型 .pp 就地长成）：宽/高/圆角 300ms 弹簧形变，内容延迟淡入 */}
+        <Animated.View
+          pointerEvents={panelOpen ? 'auto' : 'none'}
+          style={[
+            styles.pp,
+            { width: ppWidth, height: ppHeight, borderRadius: ppRadius, opacity: ppFade },
+          ]}
+        >
+          <Animated.View style={[styles.ppi, { opacity: fade }]}>
+            <View style={styles.ppxRow}>
+              <Pressable
+                style={styles.ppx}
+                onPress={closePanel}
+                accessibilityRole="button"
+                accessibilityLabel="关闭面板"
+              >
+                <Text style={styles.ppxTxt}>✕</Text>
+              </Pressable>
+            </View>
+            <Pressable
+              style={({ pressed }) => [styles.prow, pressed && styles.prowPressed]}
+              onPress={demoUpload}
+              accessibilityRole="button"
+              accessibilityLabel="图片"
+            >
+              <View style={styles.pi}>
+                <Text style={styles.piTxt}>🖼</Text>
+              </View>
+              <Text style={styles.pl}>图片</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.prow, pressed && styles.prowPressed]}
+              onPress={demoUpload}
+              accessibilityRole="button"
+              accessibilityLabel="文件"
+            >
+              <View style={styles.pi}>
+                <Text style={styles.piTxt}>📎</Text>
+              </View>
+              <Text style={styles.pl}>文件</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.prow, pressed && styles.prowPressed]}
+              onPress={openModelPicker}
+              accessibilityRole="button"
+              accessibilityLabel="模型切换"
+            >
+              <View style={styles.pi}>
+                <Text style={styles.piTxt}>◉</Text>
+              </View>
+              <Text style={styles.pl}>模型切换</Text>
+              <Text style={styles.pv}>{ui.model}</Text>
+            </Pressable>
+          </Animated.View>
+        </Animated.View>
+      </View>
+
+      {/* 5. 本屏弹层：资料编辑 / 默认模型 / 工具详情 */}
+      <EditProfileSheet visible={editOpen} onClose={() => setEditOpen(false)} />
+      <ModelPickerSheet visible={modelOpen} onClose={() => setModelOpen(false)} />
+      <ToolDetailSheet visible={toolOpen} onClose={() => setToolOpen(false)} tool={tool} />
+    </>
+  );
+}
