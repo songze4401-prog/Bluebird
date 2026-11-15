@@ -22,6 +22,16 @@ import { HomeScreen } from './HomeScreen';
 import { ChatScreen } from './ChatScreen';
 import { SettingsScreen } from './SettingsScreen';
 
+// 真实聊天链路：复用旧壳的全套 hooks（v7 壳只换皮不换逻辑）
+import { DEFAULT_SESSION_ID } from '../lib/constants';
+import { usePresence } from '../lib/presence';
+import { useChatSession } from '../hooks/useChatSession';
+import { useSessionList } from '../hooks/useSessionList';
+import { useSessionActions } from '../hooks/useSessionActions';
+import { useModelSelection } from '../hooks/useModelSelection';
+import { useStreamingPreference } from '../hooks/useStreamingPreference';
+import { useAttachments } from '../hooks/useAttachments';
+
 // ---- 底部导航单键：选中键展开到 66 显示文字，未选中收成 40 只留图标 ----
 function NavTab(props: {
   icon: string;
@@ -75,6 +85,69 @@ function InnerShell() {
   const insets = useSafeAreaInsets();
   const [settingsOpen, setSettingsOpen] = useState(false);
 
+  // ---- 真实聊天链路（与旧壳 App.tsx 同款组合）----
+  const [currentSessionId, setCurrentSessionId] = useState<string>(DEFAULT_SESSION_ID);
+  const { streamingEnabled } = useStreamingPreference();
+  const { selectedModel, selectedModelLabel } = useModelSelection();
+  const { reportInteraction } = usePresence(currentSessionId);
+  const sessionList = useSessionList();
+  // 附件通道先接通（暂无选择入口，加号面板图片/文件仍是演示占位；R2 接相册/拍照）
+  const attachments = useAttachments({ onUploadStart: () => {} });
+  const chat = useChatSession({
+    sessionId: currentSessionId,
+    streamingEnabled,
+    selectedModel,
+    reportInteraction,
+    // v7 输入框草稿由 ChatScreen 本地持有；这里只接附件通道
+    draft: '',
+    pendingAttachments: attachments.pendingAttachments,
+    onDraftConsumed: () => {},
+    onAttachmentsConsumed: attachments.clearAttachments,
+    onMenuCloseRequest: () => {},
+  });
+  const actions = useSessionActions({
+    chat,
+    sessionList,
+    currentSessionId,
+    setCurrentSessionId,
+    onEnterChat: () => {},
+  });
+
+  // 启动引导（与旧壳同款）：复用空白会话当草稿 → 否则新建 → 失败回退默认会话
+  useEffect(() => {
+    let cancelled = false;
+    const bootstrap = async () => {
+      const sessions = await sessionList.refresh();
+      if (cancelled) return;
+      const draftSession = sessions?.find(item => item.messageCount === 0);
+      if (draftSession) {
+        setCurrentSessionId(draftSession.id);
+        chat.resetMessages();
+        chat.markHistoryLoaded();
+        return;
+      }
+      const created = await actions.createNewChat({ force: true, silent: true });
+      if (cancelled) return;
+      chat.markHistoryLoaded();
+      if (!created) {
+        setCurrentSessionId(DEFAULT_SESSION_ID);
+        chat.resetMessages();
+      }
+    };
+    void bootstrap();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 启动并行项：情绪状态读取（顶栏 Emoji 一致性）。模型选择刷新由
+  // useModelSelection 内部的挂载 effect 自带（旧壳顶层不重复调，避免双请求）。
+  useEffect(() => {
+    void chat.loadEmotion();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // 轨道：主页 0 ↔ 聊天 -width（原型 .track translateX，380ms 同款缓动）
   const [trackX] = useState(() => new Animated.Value(ui.view === 'chat' ? -width : 0));
   useEffect(() => {
@@ -122,7 +195,7 @@ function InnerShell() {
             <HomeScreen />
           </View>
           <View style={{ width }}>
-            <ChatScreen />
+            <ChatScreen chat={chat} modelLabel={selectedModelLabel} />
           </View>
         </Animated.View>
       </View>
