@@ -110,28 +110,35 @@ function InnerShell() {
     sessionList,
     currentSessionId,
     setCurrentSessionId,
-    onEnterChat: () => {},
+    // 主页选中会话 / 新建聊天成功后，轨道切到聊天页（旧壳等价于 setTab('chat')）
+    onEnterChat: () => ui.setView('chat'),
   });
 
   // 启动引导（与旧壳同款）：复用空白会话当草稿 → 否则新建 → 失败回退默认会话
+  const [bootstrapped, setBootstrapped] = useState(false);
   useEffect(() => {
     let cancelled = false;
     const bootstrap = async () => {
-      const sessions = await sessionList.refresh();
-      if (cancelled) return;
-      const draftSession = sessions?.find(item => item.messageCount === 0);
-      if (draftSession) {
-        setCurrentSessionId(draftSession.id);
-        chat.resetMessages();
+      try {
+        const sessions = await sessionList.refresh();
+        if (cancelled) return;
+        const draftSession = sessions?.find(item => item.messageCount === 0);
+        if (draftSession) {
+          setCurrentSessionId(draftSession.id);
+          chat.resetMessages();
+          chat.markHistoryLoaded();
+          return;
+        }
+        const created = await actions.createNewChat({ force: true, silent: true });
+        if (cancelled) return;
         chat.markHistoryLoaded();
-        return;
-      }
-      const created = await actions.createNewChat({ force: true, silent: true });
-      if (cancelled) return;
-      chat.markHistoryLoaded();
-      if (!created) {
-        setCurrentSessionId(DEFAULT_SESSION_ID);
-        chat.resetMessages();
+        if (!created) {
+          setCurrentSessionId(DEFAULT_SESSION_ID);
+          chat.resetMessages();
+        }
+      } finally {
+        // 引导结束前不允许主页刷新抢请求闸门（会顶掉 bootstrap 的 refresh）
+        if (!cancelled) setBootstrapped(true);
       }
     };
     void bootstrap();
@@ -147,6 +154,13 @@ function InnerShell() {
     void chat.loadEmotion();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 切回主页时刷新会话列表：标题 / 时间以服务端为权威（旧壳打开历史列表同语义）。
+  // 引导结束后才允许刷新，避免抢掉 bootstrap 的会话列表请求。
+  useEffect(() => {
+    if (bootstrapped && ui.view === 'home') void sessionList.refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bootstrapped, ui.view]);
 
   // 轨道：主页 0 ↔ 聊天 -width（原型 .track translateX，380ms 同款缓动）
   const [trackX] = useState(() => new Animated.Value(ui.view === 'chat' ? -width : 0));
@@ -192,7 +206,21 @@ function InnerShell() {
           }}
         >
           <View style={{ width }}>
-            <HomeScreen />
+            <HomeScreen
+              sessions={sessionList.sessions}
+              currentSessionId={currentSessionId}
+              loadingSessions={sessionList.loading}
+              sessionsError={sessionList.error}
+              onSelectSession={sessionId => {
+                // 回复中 / 历史加载中不切会话（与旧壳一致），但要给出可见反馈，
+                // 避免主页点击看起来没反应。
+                if (actions.busy) {
+                  ui.toast('正在回复中，请稍后切换');
+                  return;
+                }
+                void actions.selectSession(sessionId);
+              }}
+            />
           </View>
           <View style={{ width }}>
             <ChatScreen chat={chat} modelLabel={selectedModelLabel} />

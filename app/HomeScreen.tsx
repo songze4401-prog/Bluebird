@@ -28,7 +28,17 @@ import { TaskAddSheet } from '../components/TaskAddSheet';
 import { VizPanelSheet } from '../components/VizPanelSheet';
 import { MemoryPanelSheet } from '../components/MemoryPanelSheet';
 import { TaskDetailSheet } from '../components/TaskDetailSheet';
-import type { Bot, Conv, DoneTask, RunningTask, VizKind } from '../data/mock';
+import { formatMessageTime } from '../lib/utils';
+import type { SessionMeta } from '../lib/types';
+import type { DoneTask, RunningTask, VizKind } from '../data/mock';
+
+// 空白会话统一显示「新对话」（与旧壳 HistoryScreen 同语义）；
+// 服务端的「新会话」只是占位标题，不对用户暴露。
+function sessionDisplayTitle(item: SessionMeta): string {
+  if (item.messageCount === 0) return '新对话';
+
+  return item.title || '未命名会话';
+}
 
 // 卡片上的白系叠层（原型 .ei / .sq .hd button / .vsel / .trow / .news .n 的底色，
 // 只出现在强调色卡上，浅深主题通用）
@@ -295,9 +305,31 @@ const createStyles = (t: V7Tokens) =>
     },
     convSub: { fontSize: 12, color: t.mut, marginTop: 2 },
     convTime: { fontSize: 10, color: t.mut, flexShrink: 0 },
+    // 对话记录空态 / 读取中 / 读取失败：同一张卡片内居中弱化文字
+    convEmpty: {
+      backgroundColor: t.surface,
+      borderRadius: 16,
+      paddingVertical: 16,
+      paddingHorizontal: 12,
+      ...V7_SHADOWS.md,
+    },
+    convEmptyTxt: { fontSize: 12, color: t.mut, textAlign: 'center' },
+    convChipCur: { backgroundColor: t.soft, color: t.sec },
   });
 
-export function HomeScreen() {
+export function HomeScreen({
+  sessions,
+  currentSessionId,
+  loadingSessions,
+  sessionsError,
+  onSelectSession,
+}: {
+  sessions: SessionMeta[];
+  currentSessionId: string;
+  loadingSessions: boolean;
+  sessionsError: string;
+  onSelectSession: (sessionId: string) => void;
+}) {
   const ui = useUi();
   const t = ui.tokens;
   const styles = createStyles(t);
@@ -341,8 +373,9 @@ export function HomeScreen() {
     setDoneAtBottom(prev => (prev === atBottom ? prev : atBottom));
   };
 
-  // 对话行的 bot 资料（原型按名字回查 bots，找不到时退回第一个）
-  const botOf = (c: Conv): Bot | undefined => ui.bots.find(b => b.n === c.bot) ?? ui.bots[0];
+  // 对话入口取「最近一条有内容的会话」（服务端 updatedAt 倒序）；
+  // 全是空白草稿时才退回第一条，避免点开一个空对话。
+  const latestSession = sessions.find(item => item.messageCount > 0) ?? sessions[0];
 
   // 股票涨跌配色（柱状图与涨跌幅共用）
   const chgColor = ui.stock.chg >= 0 ? t.up : t.down;
@@ -363,7 +396,9 @@ export function HomeScreen() {
         <View style={styles.entryRow}>
           <Pressable
             style={styles.entryCard}
-            onPress={() => (ui.convs.length ? ui.openConv(0) : ui.toast('还没有对话记录'))}
+            onPress={() =>
+              latestSession ? onSelectSession(latestSession.id) : ui.toast('还没有对话记录')
+            }
             accessibilityRole="button"
             accessibilityLabel="对话"
           >
@@ -566,44 +601,60 @@ export function HomeScreen() {
           </View>
         )}
 
-        {/* 8. 对话记录 */}
+        {/* 8. 对话记录（真实会话列表：数据由 useSessionList 注入，点击切换会话） */}
         <View style={styles.sechead}>
           <Text style={styles.secTxt}>对话记录</Text>
+          {sessions.length > 0 && (
+            <>
+              <View style={{ flex: 1 }} />
+              <Text style={styles.secCount}>{sessions.length} 个对话</Text>
+            </>
+          )}
         </View>
         <View style={styles.listCol}>
-          {ui.convs.map((c, i) => {
-            const bot = botOf(c);
-            if (!bot) return null;
-            return (
-              <Pressable
-                key={c.bot + c.t}
-                style={styles.convRow}
-                onPress={() => ui.openConv(i)}
-                accessibilityRole="button"
-                accessibilityLabel={'打开对话：' + c.t}
-              >
-                <View style={[styles.convAvatar, { backgroundColor: bot.bg }]}>
-                  <Text style={styles.convAvatarTxt}>{bot.icon}</Text>
-                </View>
-                <View style={styles.convMid}>
-                  <View style={styles.convTitleRow}>
-                    <Text style={styles.convTitle} numberOfLines={1}>
-                      {c.t}
-                    </Text>
-                    {bot.created && bot.role !== '' && (
-                      <Text style={[styles.convChip, { backgroundColor: `${bot.bg}1a`, color: bot.bg }]}>
-                        {bot.role}
-                      </Text>
-                    )}
+          {/* 列表已有内容但刷新失败：保留列表，同时如实提示错误（不静默吞掉） */}
+          {!!sessionsError && sessions.length > 0 && (
+            <Text style={styles.convEmptyTxt}>{sessionsError}</Text>
+          )}
+          {sessions.length === 0 ? (
+            <View style={styles.convEmpty}>
+              <Text style={styles.convEmptyTxt}>
+                {loadingSessions ? '正在读取对话记录…' : sessionsError || '还没有对话记录'}
+              </Text>
+            </View>
+          ) : (
+            sessions.map(item => {
+              const current = item.id === currentSessionId;
+              const title = sessionDisplayTitle(item);
+              return (
+                <Pressable
+                  key={item.id}
+                  style={styles.convRow}
+                  onPress={() => onSelectSession(item.id)}
+                  accessibilityRole="button"
+                  accessibilityLabel={'打开对话：' + title}
+                >
+                  <View style={[styles.convAvatar, { backgroundColor: ui.bots[0]?.bg ?? '#000000' }]}>
+                    <Text style={styles.convAvatarTxt}>{ui.bots[0]?.icon ?? '🐦'}</Text>
                   </View>
-                  <Text style={styles.convSub} numberOfLines={1}>
-                    {c.bot} · {c.s}
-                  </Text>
-                </View>
-                <Text style={styles.convTime}>{c.m}</Text>
-              </Pressable>
-            );
-          })}
+                  <View style={styles.convMid}>
+                    <View style={styles.convTitleRow}>
+                      <Text style={styles.convTitle} numberOfLines={1}>
+                        {title}
+                      </Text>
+                      {current && (
+                        <Text style={[styles.convChip, styles.convChipCur]}>当前</Text>
+                      )}
+                    </View>
+                    <Text style={styles.convSub} numberOfLines={1}>
+                      {`Bluebird · ${item.messageCount} 条消息`}
+                    </Text>
+                  </View>
+                  <Text style={styles.convTime}>{formatMessageTime(item.updatedAt)}</Text>
+                </Pressable>
+              );
+            })
+          )}
         </View>
       </ScrollView>
 
