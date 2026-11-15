@@ -50,7 +50,19 @@ function scriptChat(overrides: {
 async function renderChat(chat: ChatSessionApi) {
   return render(
     <UiStateProvider>
-      <ChatScreen chat={chat} modelLabel="DeepSeek" />
+      <ChatScreen
+        chat={chat}
+        modelLabel="DeepSeek"
+        models={[]}
+        currentModel={null}
+        onSelectModel={async () => true}
+        attachments={{
+          pendingAttachments: [],
+          uploadingImage: false,
+          pickImage: async () => undefined,
+          removeAttachment: () => undefined,
+        }}
+      />
     </UiStateProvider>
   );
 }

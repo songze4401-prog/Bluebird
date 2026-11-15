@@ -9,7 +9,11 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { apiFetch } from '../lib/api/client';
 import { API_PATHS } from '../lib/api/endpoints';
-import type { ModelProvidersResponse } from '../lib/api/types';
+import { apiErrorFromPayload } from '../lib/api/errors';
+import type {
+  ModelDefaultsResponse,
+  ModelProvidersResponse,
+} from '../lib/api/types';
 import { readJsonResponse } from '../lib/utils';
 
 import type { ModelDefaults, ModelProvider } from '../lib/types';
@@ -37,21 +41,37 @@ export function useModelSelection(): {
   selectedModel: ModelDefaults | null;
   // 当前所选模型的展示名（供输入区上方的模型 pill 显示）
   selectedModelLabel: string;
-  refreshModelSelection: () => Promise<void>;
+  // 真实服务商/模型列表（默认模型抽屉只从这里取，不再读 mock）
+  providers: ModelProvider[];
+  loading: boolean;
+  error: string;
+  // 读取成功返回 true；失败返回 false（error 里是给用户看的文案）
+  refreshModelSelection: () => Promise<boolean>;
+  // 切换全局默认模型；成功返回 true 并刷新镜像，失败返回 false（错误留在 error）
+  setDefaultModel: (providerId: string, modelId: string) => Promise<boolean>;
 } {
   const [selectedModel, setSelectedModel] = useState<ModelDefaults | null>(
     null
   );
   const [selectedModelLabel, setSelectedModelLabel] = useState('');
+  const [providers, setProviders] = useState<ModelProvider[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
 
-  const refreshModelSelection = useCallback(async () => {
+  const refreshModelSelection = useCallback(async (): Promise<boolean> => {
+    setLoading(true);
+    setError('');
+
     try {
       const response = await apiFetch(API_PATHS.modelProviders);
 
       const data = (await readJsonResponse(response)) as ModelProvidersResponse;
 
       // 读取失败时保持 null：请求不带 ids，由服务端全局默认兜底
-      if (!response.ok || !data || !data.defaults) return;
+      if (!response.ok || !data || !data.defaults) {
+        setError('读取模型列表失败，请稍后再试。');
+        return false;
+      }
 
       const { providerId, modelId } = data.defaults;
 
@@ -63,10 +83,58 @@ export function useModelSelection(): {
           buildLabel(Array.isArray(data.providers) ? data.providers : [], defaults)
         );
       }
-    } catch (error) {
-      console.error('Load model selection error:', error);
+
+      setProviders(Array.isArray(data.providers) ? data.providers : []);
+      return true;
+    } catch (err) {
+      console.error('Load model selection error:', err);
+      setError('读取模型列表失败，请稍后再试。');
+      return false;
+    } finally {
+      setLoading(false);
     }
   }, []);
+
+  // 切换全局默认模型（PUT /model-providers/default）。
+  // 服务端是唯一数据源：先用 PUT 返回的 defaults 同步镜像（重读失败也不会继续用旧模型），
+  // 再重读一次拿完整 providers/标签。
+  const setDefaultModel = useCallback(
+    async (providerId: string, modelId: string): Promise<boolean> => {
+      try {
+        const response = await apiFetch(API_PATHS.modelDefaults, {
+          method: 'PUT',
+          body: JSON.stringify({ providerId, modelId }),
+        });
+
+        const data = (await readJsonResponse(response)) as ModelDefaultsResponse;
+
+        if (!response.ok) {
+          throw apiErrorFromPayload(data, response.status, '切换模型失败');
+        }
+
+        const next = data?.defaults;
+        const applied =
+          !!next &&
+          typeof next.providerId === 'string' &&
+          typeof next.modelId === 'string';
+
+        if (applied) {
+          setSelectedModel(next);
+          setSelectedModelLabel(buildLabel(providers, next));
+        }
+
+        // PUT 已明确成功时，即使随后的重读失败也算成功（镜像已用返回值更新）
+        const refreshed = await refreshModelSelection();
+
+        return refreshed || applied;
+      } catch (err) {
+        console.error('Set default model error:', err);
+        setError('切换模型失败，请稍后再试。');
+        return false;
+      }
+    },
+    [providers, refreshModelSelection]
+  );
 
   // 启动时读取一次当前所选模型（服务端 defaults 为准）。
   // 用内部 async 函数包一层：setState 发生在 await 之后，
@@ -87,5 +155,13 @@ export function useModelSelection(): {
     };
   }, [refreshModelSelection]);
 
-  return { selectedModel, selectedModelLabel, refreshModelSelection };
+  return {
+    selectedModel,
+    selectedModelLabel,
+    providers,
+    loading,
+    error,
+    refreshModelSelection,
+    setDefaultModel,
+  };
 }

@@ -8,6 +8,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   Animated,
   Easing,
+  Image,
   Keyboard,
   Pressable,
   ScrollView,
@@ -26,7 +27,8 @@ import { EditProfileSheet } from '../components/EditProfileSheet';
 import { ModelPickerSheet } from '../components/ModelPickerSheet';
 import { ToolDetailSheet } from '../components/ToolDetailSheet';
 import type { ChatSessionApi } from '../hooks/useChatSession';
-import type { ContentSegment } from '../lib/types';
+import type { AttachmentsApi } from '../hooks/useAttachments';
+import type { ContentSegment, ModelDefaults, ModelProvider } from '../lib/types';
 
 // 全屏绝对定位（与 app/ui-state.tsx 同款写法：本仓库 RN 版型里没有 absoluteFillObject）
 const ABS_FILL = {
@@ -163,6 +165,38 @@ const createStyles = (t: V7Tokens, fd: number) =>
 
     // 底部输入容器（原型 .comp：bottom 由安全区+12 在 JSX 给；加号面板绝对定位在其中）
     comp: { position: 'absolute', left: 0, right: 0 },
+    // 待发送图片预览行（浮在输入条上方，与旧壳 ChatInput 同语义）
+    pendingRow: {
+      flexDirection: 'row',
+      gap: 8,
+      paddingHorizontal: 18,
+      paddingBottom: 8,
+    },
+    pendingItem: {
+      width: 48,
+      height: 48,
+      borderRadius: 12,
+      backgroundColor: t.surface,
+      ...V7_SHADOWS.md,
+    },
+    pendingThumb: { width: 48, height: 48, borderRadius: 12 },
+    pendingRemove: {
+      position: 'absolute',
+      top: -6,
+      right: -6,
+      width: 18,
+      height: 18,
+      borderRadius: 9,
+      backgroundColor: t.card,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    pendingRemoveTxt: { fontSize: 12, lineHeight: 14, color: t.on },
+    pendingUploading: {
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    pendingUploadingTxt: { fontSize: 16, color: t.mut },
     // 输入条（原型 .bar：surface 底 r999 p6/6/6/8 阴影 lg，左右 18）
     bar: {
       flexDirection: 'row',
@@ -250,9 +284,22 @@ const createStyles = (t: V7Tokens, fd: number) =>
     pv: { fontSize: 12, color: t.mut },
   });
 
-export function ChatScreen(props: { chat: ChatSessionApi; modelLabel: string }) {
+export function ChatScreen(props: {
+  chat: ChatSessionApi;
+  modelLabel: string;
+  models: ModelProvider[];
+  currentModel: ModelDefaults | null;
+  modelLoading?: boolean;
+  modelError?: string;
+  onSelectModel: (providerId: string, modelId: string) => Promise<boolean>;
+  attachments: Pick<
+    AttachmentsApi,
+    'pendingAttachments' | 'uploadingImage' | 'pickImage' | 'removeAttachment'
+  >;
+}) {
   const ui = useUi();
   const chat = props.chat;
+  const attachments = props.attachments;
   const t = ui.tokens;
   const styles = createStyles(t, ui.fontDelta);
   const insets = useSafeAreaInsets();
@@ -326,9 +373,17 @@ export function ChatScreen(props: { chat: ChatSessionApi; modelLabel: string }) 
     Animated.timing(fade, { toValue: 0, duration: 160, useNativeDriver: true }).start();
   };
 
-  // 占位规矩：图片/文件不真上传，toast 后收起面板
-  const demoUpload = () => {
-    ui.toast('演示版：图片/文件上传暂未接入');
+  // 加号面板：图片走真实相册选图 → 上传 → 进入待发送预览行；
+  // 文件上传目前没有后端能力，保留明确的演示占位（不假装成功）。
+  const pickPhoto = () => {
+    if (chat.sending || chat.loadingHistory || attachments.uploadingImage) return;
+
+    closePanel();
+    void attachments.pickImage('album');
+  };
+
+  const demoFile = () => {
+    ui.toast('演示版：文件上传暂未接入');
     closePanel();
   };
 
@@ -339,13 +394,21 @@ export function ChatScreen(props: { chat: ChatSessionApi; modelLabel: string }) 
     modelTimer.current = setTimeout(() => setModelOpen(true), 260);
   };
 
-  // 发送：sending/loadingHistory/空文本任一拦下（与 hook 内部闸门一致，
-  // 避免输入已被清空但请求被静默吞掉）→ sendMessage(undefined, undefined,
-  // { overrideText: text })。注意首参在契约里是 retryText——新发送绝不能走首参，
-  // 否则用户气泡不上屏、历史上下文被截、服务端 id 改写到上一轮（oracle 复查阻断①）。
+  // 发送：sending/loadingHistory/上传中任一拦下；有待发送图片时允许空文本发送。
+  // sendMessage(undefined, undefined, { overrideText: text })：首参在契约里是
+  // retryText——新发送绝不能走首参，否则用户气泡不上屏、历史上下文被截、
+  // 服务端 id 改写到上一轮（oracle 复查阻断①）。
+  const hasPending = attachments.pendingAttachments.length > 0;
+  const canSend = !!input.trim() || hasPending;
+  // 历史加载中 / 上传中都禁用发送（与旧壳 ChatInput 的 sendDisabled 同语义）
+  const sendDisabled =
+    !chat.sending &&
+    (chat.loadingHistory || attachments.uploadingImage || !canSend);
+
   const doSend = () => {
     const text = input.trim();
-    if (chat.sending || chat.loadingHistory || !text) return;
+    if (chat.sending || chat.loadingHistory || attachments.uploadingImage) return;
+    if (!text && !hasPending) return;
     void chat.sendMessage(undefined, undefined, { overrideText: text });
     setInput('');
     Keyboard.dismiss();
@@ -460,6 +523,31 @@ export function ChatScreen(props: { chat: ChatSessionApi; modelLabel: string }) 
 
       {/* 4. 底部输入条 + 加号面板（面板后渲染，压在输入条上方） */}
       <View style={[styles.comp, { bottom: insets.bottom + 12 }]}>
+        {/* 待发送图片预览行：缩略图 + × 移除；上传中显示占位 */}
+        {(attachments.pendingAttachments.length > 0 || attachments.uploadingImage) && (
+          <View style={styles.pendingRow}>
+            {attachments.pendingAttachments.map(item => (
+              <View key={item.attachment.id} style={styles.pendingItem}>
+                <Image source={{ uri: item.previewUri }} style={styles.pendingThumb} />
+                <Pressable
+                  style={styles.pendingRemove}
+                  onPress={() => attachments.removeAttachment(item.attachment.id)}
+                  accessibilityRole="button"
+                  accessibilityLabel="移除图片"
+                  hitSlop={6}
+                >
+                  <Text style={styles.pendingRemoveTxt}>×</Text>
+                </Pressable>
+              </View>
+            ))}
+            {attachments.uploadingImage && (
+              <View style={[styles.pendingItem, styles.pendingUploading]}>
+                <Text style={styles.pendingUploadingTxt}>…</Text>
+              </View>
+            )}
+          </View>
+        )}
+
         <View style={styles.bar}>
           <Pressable
             style={[styles.plus, { opacity: panelOpen ? 0 : 1 }]}
@@ -479,8 +567,8 @@ export function ChatScreen(props: { chat: ChatSessionApi; modelLabel: string }) 
             onSubmitEditing={doSend}
           />
           <Pressable
-            style={[styles.send, { opacity: chat.sending ? 1 : !input.trim() ? 0.35 : 1 }]}
-            disabled={!chat.sending && !input.trim()}
+            style={[styles.send, { opacity: chat.sending ? 1 : sendDisabled ? 0.35 : 1 }]}
+            disabled={sendDisabled}
             onPress={() => {
               if (chat.sending) {
                 chat.stopGeneration();
@@ -516,7 +604,7 @@ export function ChatScreen(props: { chat: ChatSessionApi; modelLabel: string }) 
             </View>
             <Pressable
               style={({ pressed }) => [styles.prow, pressed && styles.prowPressed]}
-              onPress={demoUpload}
+              onPress={pickPhoto}
               accessibilityRole="button"
               accessibilityLabel="图片"
             >
@@ -527,7 +615,7 @@ export function ChatScreen(props: { chat: ChatSessionApi; modelLabel: string }) 
             </Pressable>
             <Pressable
               style={({ pressed }) => [styles.prow, pressed && styles.prowPressed]}
-              onPress={demoUpload}
+              onPress={demoFile}
               accessibilityRole="button"
               accessibilityLabel="文件"
             >
@@ -553,8 +641,22 @@ export function ChatScreen(props: { chat: ChatSessionApi; modelLabel: string }) 
       </View>
 
       {/* 5. 本屏弹层：资料编辑 / 默认模型 / 工具详情 */}
-      <EditProfileSheet visible={editOpen} onClose={() => setEditOpen(false)} />
-      <ModelPickerSheet visible={modelOpen} onClose={() => setModelOpen(false)} />
+      <EditProfileSheet
+        visible={editOpen}
+        onClose={() => setEditOpen(false)}
+        providers={props.models}
+        currentModel={props.currentModel}
+        onSelectModel={props.onSelectModel}
+      />
+      <ModelPickerSheet
+        visible={modelOpen}
+        onClose={() => setModelOpen(false)}
+        providers={props.models}
+        current={props.currentModel}
+        loading={props.modelLoading}
+        error={props.modelError}
+        onSelect={props.onSelectModel}
+      />
       <ToolDetailSheet visible={toolOpen} onClose={() => setToolOpen(false)} tool={tool} />
     </>
   );
