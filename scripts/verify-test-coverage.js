@@ -235,7 +235,15 @@ function runBackendFile(name, dataDir, format = 'custom') {
   const file = path.join(TESTS_DIR, `${name}.test.js`);
   const args =
     format === 'node'
-      ? ['--test', '--test-reporter=tap', '--test-concurrency=1', file]
+      ? [
+          '--test',
+          '--test-reporter=tap',
+          '--test-concurrency=1',
+          // 每测试 60s 期限：悬挂测试 60s 内带测试名+堆栈快速失败，
+          // 而不是拖到进程级超时被匿名击杀（2026-11-16 memory-bot 全量偶发悬挂）
+          '--test-timeout=60000',
+          file,
+        ]
       : [file];
 
   const result = spawnSync(process.execPath, args, {

@@ -25,6 +25,8 @@ import { IdentityHeader } from '../components/IdentityHeader';
 import { EditProfileSheet } from '../components/EditProfileSheet';
 import { ModelPickerSheet } from '../components/ModelPickerSheet';
 import { ToolDetailSheet } from '../components/ToolDetailSheet';
+import type { ChatSessionApi } from '../hooks/useChatSession';
+import type { ContentSegment } from '../lib/types';
 
 // 全屏绝对定位（与 app/ui-state.tsx 同款写法：本仓库 RN 版型里没有 absoluteFillObject）
 const ABS_FILL = {
@@ -34,6 +36,14 @@ const ABS_FILL = {
   top: 0,
   bottom: 0,
 } as const;
+
+// 消息时间戳（原型 .who）：ISO → HH:MM；无时间或解析失败给空串
+function formatTime(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
 
 // 原型 --spring：加号面板宽/高/圆角形变共用的弹簧曲线
 const SPRING = Easing.bezier(0.3, 1.1, 0.45, 1);
@@ -129,6 +139,20 @@ const createStyles = (t: V7Tokens, fd: number) =>
       ...V7_SHADOWS.md,
     },
     txtTxt: { fontSize: 15 + fd, lineHeight: Math.round((15 + fd) * 1.7), color: t.ink },
+    // 表情包分段 chip（历史消息可能含 sticker 段；white 泡侧用 soft 底 mut 字）
+    stchip: {
+      alignSelf: 'flex-start',
+      maxWidth: '100%',
+      borderRadius: 10,
+      backgroundColor: t.soft,
+      paddingVertical: 6,
+      paddingHorizontal: 10,
+    },
+    stchipTxt: { fontSize: 12, color: t.mut },
+    // 发送失败重试行（用户消息下方，红字可点）
+    failTxt: { fontSize: 11, color: t.down },
+    // 用户主动停止后的部分回复提示
+    stoppedTxt: { fontSize: 11, color: t.mut },
     // 工具标签（原型 .tool：行 gap 8，✓ ink w700 + 文案 sec；按下开工具详情）
     tool: { flexDirection: 'row', alignItems: 'center', gap: 8 },
     toolCk: { fontSize: 12, fontWeight: '700', color: t.ink },
@@ -226,8 +250,9 @@ const createStyles = (t: V7Tokens, fd: number) =>
     pv: { fontSize: 12, color: t.mut },
   });
 
-export function ChatScreen() {
+export function ChatScreen(props: { chat: ChatSessionApi; modelLabel: string }) {
   const ui = useUi();
+  const chat = props.chat;
   const t = ui.tokens;
   const styles = createStyles(t, ui.fontDelta);
   const insets = useSafeAreaInsets();
@@ -248,9 +273,13 @@ export function ChatScreen() {
   const [ppFade] = useState(() => new Animated.Value(0));
   const [fade] = useState(() => new Animated.Value(0));
 
-  // 线程滚动引用：内容撑高后滚到底（原型 renderThread 后 scrollTop=scrollHeight）
+  // 线程滚动引用：内容撑高后「仅在用户本就停留在底部附近」才跟随滚到底——
+  // 流式增量期间用户上滑阅读不被逐帧拽回（旧壳 follow 三态机的轻量版）。
   const scrollRef = useRef<ScrollViewInstance>(null);
-  const scrollToBottom = () => scrollRef.current?.scrollToEnd({ animated: false });
+  const followRef = useRef(true);
+  const scrollToBottom = () => {
+    if (followRef.current) scrollRef.current?.scrollToEnd({ animated: false });
+  };
 
   // 「模型切换」的延迟打开定时器（关面板 260ms 后开抽屉），卸载时清掉
   const modelTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -310,11 +339,14 @@ export function ChatScreen() {
     modelTimer.current = setTimeout(() => setModelOpen(true), 260);
   };
 
-  // 发送：busy 或空文本忽略 → send → 清空输入 → 收起键盘（原型 send + Enter 提交）
+  // 发送：sending/loadingHistory/空文本任一拦下（与 hook 内部闸门一致，
+  // 避免输入已被清空但请求被静默吞掉）→ sendMessage(undefined, undefined,
+  // { overrideText: text })。注意首参在契约里是 retryText——新发送绝不能走首参，
+  // 否则用户气泡不上屏、历史上下文被截、服务端 id 改写到上一轮（oracle 复查阻断①）。
   const doSend = () => {
     const text = input.trim();
-    if (ui.busy || !text) return;
-    ui.send(text);
+    if (chat.sending || chat.loadingHistory || !text) return;
+    void chat.sendMessage(undefined, undefined, { overrideText: text });
     setInput('');
     Keyboard.dismiss();
   };
@@ -327,50 +359,88 @@ export function ChatScreen() {
         style={styles.thread}
         contentContainerStyle={[styles.threadContent, { paddingTop: insets.top + 76 }]}
         showsVerticalScrollIndicator={false}
+        onScroll={e => {
+          const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+          followRef.current =
+            contentSize.height - contentOffset.y - layoutMeasurement.height < 80;
+        }}
+        scrollEventThrottle={100}
         onContentSizeChange={scrollToBottom}
       >
-        {ui.messages.map((m, i) =>
+        {chat.messages.map(m =>
           m.role === 'user' ? (
-            /* 用户消息：右对齐列 = 时间 → 黑泡（附件 chip 收在泡内） */
-            <View key={i} style={styles.mUser}>
-              <Text style={styles.who}>{m.time}</Text>
+            /* 用户消息：右对齐列 = 时间 → 黑泡（附件 chip 收在泡内）→ 失败重试行 */
+            <View key={m.id} style={styles.mUser}>
+              <Text style={styles.who}>{formatTime(m.createdAt)}</Text>
               <View style={styles.bub}>
-                <Text style={styles.bubTxt}>{m.text}</Text>
-                {m.attach && (
-                  <View style={styles.atchip}>
+                <Text style={styles.bubTxt}>{m.content}</Text>
+                {(m.attachments ?? []).map(a => (
+                  <View key={a.id} style={styles.atchip}>
                     <Text numberOfLines={1} style={styles.atchipTxt}>
-                      {(m.attach.kind === 'img' ? '🖼' : '📎') + ' ' + m.attach.name}
+                      {(a.kind === 'image' ? '🖼' : '📎') + ' ' + (a.name ?? '附件')}
                     </Text>
                   </View>
-                )}
+                ))}
               </View>
             </View>
           ) : (
-            /* blue 消息：左对齐列 = 时间 → 白泡 → 工具标签（按下开工具详情） */
-            <View key={i} style={styles.mBlue}>
-              <Text style={styles.who}>{m.time}</Text>
-              <View style={styles.txt}>
-                <Text style={styles.txtTxt}>{m.text}</Text>
-              </View>
-              {m.tool && (
+            /* blue 消息：左对齐列 = 时间 → 白泡（分段各一泡）→ 工具 pill（按下开工具详情） */
+            <View key={m.id} style={styles.mBlue}>
+              <Text style={styles.who}>{formatTime(m.createdAt)}</Text>
+              {(m.segments ?? [{ type: 'text', text: m.content }]).map(
+                (seg: ContentSegment, si: number) =>
+                  seg.type === 'text' ? (
+                    seg.text ? (
+                      <View key={si} style={styles.txt}>
+                        <Text style={styles.txtTxt}>{seg.text}</Text>
+                      </View>
+                    ) : null
+                  ) : (
+                    <View key={si} style={styles.stchip}>
+                      <Text numberOfLines={1} style={styles.stchipTxt}>
+                        {/* BUG-03 纪律：绝不把原始 sticker 标记透回给用户 */}
+                        {seg.valid ? '🖼 表情包' : '表情已失效'}
+                      </Text>
+                    </View>
+                  )
+              )}
+              {m.stopped && <Text style={styles.stoppedTxt}>已停止，以上为部分回复</Text>}
+              {/* 发送失败的错误气泡是 assistant 角色 + retryText（旧壳 ChatBubble 同款语义）：
+                  重试入口必须在这里，放用户分支永远不会出现（oracle 复查阻断②） */}
+              {m.retryText !== undefined && (
                 <Pressable
+                  onPress={() => void chat.sendMessage(m.retryText, m.retryAttachments)}
+                  disabled={chat.sending}
+                  accessibilityRole="button"
+                  accessibilityLabel="重试发送"
+                >
+                  <Text style={styles.failTxt}>发送失败 · 点击重试</Text>
+                </Pressable>
+              )}
+              {(m.toolSteps ?? []).map((step, ti) => (
+                <Pressable
+                  key={ti}
                   style={styles.tool}
                   onPress={() => {
-                    setTool(m.tool ?? null);
+                    setTool(step.name + ' · ' + step.summary);
                     setToolOpen(true);
                   }}
                   accessibilityRole="button"
-                  accessibilityLabel={'工具调用详情：' + m.tool}
+                  accessibilityLabel={'工具调用详情：' + step.name}
                 >
-                  <Text style={styles.toolCk}>✓</Text>
-                  <Text style={styles.toolTxt}>{m.tool}</Text>
+                  <Text style={[styles.toolCk, { color: step.ok ? t.ink : t.down }]}>
+                    {step.running ? '●' : step.ok ? '✓' : '✕'}
+                  </Text>
+                  <Text numberOfLines={1} style={styles.toolTxt}>
+                    {step.name + (step.summary ? ' · ' + step.summary : '')}
+                  </Text>
                 </Pressable>
-              )}
+              ))}
             </View>
           )
         )}
-        {/* busy：线程尾打字三点 */}
-        {ui.busy && <TypingDots />}
+        {/* sending：线程尾打字三点 */}
+        {chat.sending && <TypingDots />}
       </ScrollView>
 
       {/* 2. 悬浮身份组：点身份 pill 开资料弹层（外壳 box-none 不吃两侧点击） */}
@@ -409,13 +479,19 @@ export function ChatScreen() {
             onSubmitEditing={doSend}
           />
           <Pressable
-            style={[styles.send, { opacity: ui.busy || !input.trim() ? 0.35 : 1 }]}
-            disabled={ui.busy || !input.trim()}
-            onPress={doSend}
+            style={[styles.send, { opacity: chat.sending ? 1 : !input.trim() ? 0.35 : 1 }]}
+            disabled={!chat.sending && !input.trim()}
+            onPress={() => {
+              if (chat.sending) {
+                chat.stopGeneration();
+                return;
+              }
+              doSend();
+            }}
             accessibilityRole="button"
-            accessibilityLabel="发送"
+            accessibilityLabel={chat.sending ? '停止生成' : '发送'}
           >
-            <Text style={styles.sendTxt}>↑</Text>
+            <Text style={styles.sendTxt}>{chat.sending ? '■' : '↑'}</Text>
           </Pressable>
         </View>
 
@@ -470,7 +546,7 @@ export function ChatScreen() {
                 <Text style={styles.piTxt}>◉</Text>
               </View>
               <Text style={styles.pl}>模型切换</Text>
-              <Text style={styles.pv}>{ui.model}</Text>
+              <Text style={styles.pv}>{props.modelLabel}</Text>
             </Pressable>
           </Animated.View>
         </Animated.View>
