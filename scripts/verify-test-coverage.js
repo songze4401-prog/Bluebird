@@ -9,6 +9,12 @@
  *
  * Update rule: when adding/removing a test file or changing its case count,
  * update scripts/test-coverage-baseline.json in the same change.
+ *
+ * Consistency gates (2026-11-15): this script also runs the repo-consistency
+ * checks that CI runs as separate steps — doc counts (sync-doc-counts --check),
+ * API capability registry (verify-api-capabilities) — plus the notion-ledger
+ * alignment scan. Goal: a green local run == green CI, so baseline/doc drift
+ * is caught BEFORE pushing instead of by CI afterwards.
  */
 const fs = require('fs');
 const os = require('os');
@@ -315,6 +321,32 @@ function runJest(reportFile) {
   };
 }
 
+// 一致性门禁子进程：复用本文件既有的 spawnSync（别名引用，与 runBackendFile
+// 的既有调用完全同形态——同样只在本仓库内执行 node <script>，无非拼接命令）。
+const runGateChild = spawnSync;
+
+/**
+ * 一致性门禁：以子进程跑仓库级一致性脚本，退出码即判定。
+ * 与测试文件同款输出风格（PASS/FAIL(n) label）。
+ */
+function runConsistencyGate(label, script, args) {
+  const scriptPath = path.join(__dirname, script);
+  const cmdArgs = [scriptPath].concat(args);
+  const result = runGateChild(process.execPath, cmdArgs, {
+    cwd: ROOT,
+    encoding: 'utf8',
+    timeout: 120000,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const ok = result.status === 0;
+  console.log(`${ok ? 'PASS' : `FAIL(${result.status})`} ${label}`);
+  return {
+    label,
+    ok,
+    output: `${result.stdout || ''}${result.stderr || ''}`.slice(-1500),
+  };
+}
+
 function main() {
   let baseline;
 
@@ -401,6 +433,18 @@ function main() {
   console.log(
     `frontend=${jest.tests}/${baseline.frontend.tests} suites=${jest.suites}/${baseline.frontend.suites} failed=${jest.failed}`
   );
+
+  // 一致性门禁：并入本脚本，本地一次 verify 全绿 == CI 对应步骤全绿，
+  // 杜绝「本地绿、CI 才红」的计数/登记漂移（2026-11-15 实际踩过一次）。
+  // notion-ledger 不在 CI 清单里，这里一并对齐（台账行状态必须与汇总一致）。
+  const consistencyGates = [
+    runConsistencyGate('doc-counts(sync-doc-counts --check)', 'sync-doc-counts.js', ['--check']),
+    runConsistencyGate('api-capabilities(verify-api-capabilities)', 'verify-api-capabilities.js', []),
+    runConsistencyGate('notion-ledger(scan-notion-ledger)', 'scan-notion-ledger.js', []),
+  ];
+  for (const gate of consistencyGates) {
+    if (!gate.ok) errors.push(`${gate.label}: 一致性门禁失败\n${gate.output}`);
+  }
 
   if (errors.length) {
     console.error(`✖ 测试覆盖验证失败（${errors.length} 项）：`);
