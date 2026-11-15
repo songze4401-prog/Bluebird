@@ -18,7 +18,6 @@ import {
   Animated,
   Easing,
   Image,
-  StyleSheet,
   Text,
   useColorScheme,
   useWindowDimensions,
@@ -40,7 +39,6 @@ import {
   type Persona,
   type RunningTask,
   type Stage,
-  type StageMark,
   type TaskTimer,
   type ThemePref,
   type UiPanel,
@@ -149,7 +147,7 @@ export function UiStateProvider({ children }: { children: React.ReactNode }) {
 
   // ---- Toast（原型 .toast：强调色 pill，2.2s 自动消失）----
   const [toastMsg, setToastMsg] = useState<string | null>(null);
-  const toastAnim = useRef(new Animated.Value(0)).current;
+  const [toastAnim] = useState(() => new Animated.Value(0));
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toast = (msg: string) => {
     setToastMsg(msg);
@@ -167,8 +165,8 @@ export function UiStateProvider({ children }: { children: React.ReactNode }) {
   // 切深色：深色圆从选项中心扩散覆盖全屏，动画结束后才提交主题；
   // 切浅色：主题立即提交，深色圆沿同一圆心（revealOrigin 原路）收回。
   const [reveal, setReveal] = useState<{ toDark: boolean; x: number; y: number } | null>(null);
-  const revealAnim = useRef(new Animated.Value(0)).current;
-  const revealOrigin = useRef<Origin | null>(null);
+  const [revealAnim] = useState(() => new Animated.Value(0));
+  const [revealOrigin, setRevealOrigin] = useState<Origin | null>(null);
 
   const requestTheme = (next: ThemePref, origin?: Origin) => {
     const willDark = next === 'dark' || (next === 'system' && scheme === 'dark');
@@ -183,8 +181,8 @@ export function UiStateProvider({ children }: { children: React.ReactNode }) {
       // 切浅色：主题立即提交，深色圆在上层沿原路收回
       patch(prev => ({ ...prev, ui: { ...prev.ui, theme: next } }));
     }
-    const o = origin ?? revealOrigin.current ?? { x: 0, y: 0 };
-    if (willDark) revealOrigin.current = o;
+    const o = origin ?? revealOrigin ?? { x: 0, y: 0 };
+    if (willDark) setRevealOrigin(o);
     setReveal({ toDark: willDark, x: o.x, y: o.y });
     revealAnim.setValue(willDark ? 0 : 1);
     Animated.timing(revealAnim, {

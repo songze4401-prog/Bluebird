@@ -55,7 +55,11 @@ import { useStreamingPreference } from './hooks/useStreamingPreference';
 import { useAttachments } from './hooks/useAttachments';
 import { useBotResultStream } from './hooks/useBotResultStream';
 
-export default function App() {
+// 蓝鸟 v7 新壳（mock 预览）：默认关闭，见 app/shell-config.ts
+import { UI_V7_PREVIEW } from './app/shell-config';
+import { BluebirdApp } from './app/BluebirdApp';
+
+function LegacyApp() {
   // ---- 页面与弹层（纯 UI 状态，不进任何 hook）----
   // 没有独立主页：进入应用即新对话，主页内容合并进聊天首屏（ChatWelcome）。
   // 底部标签栏选中的「同一屏内容」：对话 / 任务。
@@ -617,4 +621,10 @@ export default function App() {
       />
     </View>
   );
+}
+
+// 根组件：默认走旧壳（生产路径零变化）；UI_V7_PREVIEW=true 时进入 v7 mock 预览壳
+export default function App() {
+  if (UI_V7_PREVIEW) return <BluebirdApp />;
+  return <LegacyApp />;
 }

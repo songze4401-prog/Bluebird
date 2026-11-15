@@ -430,8 +430,9 @@ async function waitReady() {
       JSON.stringify(noKey.json)
     );
 
+    // 续写机制已在 #85 删除：mode=continue 不再被特判，缺正文按普通校验拒绝
     const cont = await req('/chat', { method: 'POST', body: { mode: 'continue' } });
-    check('续写模式不因缺少 message 报 400', cont.status !== 400, `实际 ${cont.status}`);
+    check('续写机制已删除：mode=continue 缺正文按 400 拒绝', cont.status === 400, `实际 ${cont.status}`);
   }
 
   origLog('\n限流（60 次/分钟，按 IP）');

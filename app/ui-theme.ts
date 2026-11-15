@@ -3,8 +3,6 @@
 // 前景 on/onDim 由强调色亮度决定（亮色强调如橙/绿自动换深字，阈值 0.25）。
 // 所有界面颜色都从这里取 token，组件里不再硬编码浅/深色值。
 
-import { ACCENT_LIST } from '../data/mock';
-
 export type V7Tokens = {
   isDark: boolean;
   bg: string;
