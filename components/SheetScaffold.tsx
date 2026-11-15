@@ -11,6 +11,7 @@ import {
   Animated,
   Easing,
   Pressable,
+  ScrollView,
   Text,
   TouchableOpacity,
   useWindowDimensions,
@@ -238,8 +239,14 @@ export function SheetScaffold(props: {
           </TouchableOpacity>
         </View>
 
-        {/* sh-body：内边距与滚动由各弹层自己排 */}
-        <View style={{ flex: 1 }}>{children}</View>
+        {/* sh-body：滚动由壳统一提供（原型 .sh-body overflow-y:auto），内边距由各弹层自己排 */}
+        <ScrollView
+          style={{ flex: 1 }}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          {children}
+        </ScrollView>
       </Animated.View>
     </View>
   );

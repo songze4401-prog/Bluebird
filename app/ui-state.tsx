@@ -184,13 +184,16 @@ export function UiStateProvider({ children }: { children: React.ReactNode }) {
     const o = origin ?? revealOrigin ?? { x: 0, y: 0 };
     if (willDark) setRevealOrigin(o);
     setReveal({ toDark: willDark, x: o.x, y: o.y });
+    revealAnim.stopAnimation();
     revealAnim.setValue(willDark ? 0 : 1);
     Animated.timing(revealAnim, {
       toValue: willDark ? 1 : 0,
       duration: 800,
       easing: Easing.bezier(0.3, 1.1, 0.45, 1),
       useNativeDriver: true,
-    }).start(() => {
+    }).start(({ finished }) => {
+      // 被打断的旧动画不得提交主题（快速连点深→浅的竞态守卫）
+      if (!finished) return;
       if (willDark) {
         // 盖满全屏后才提交深色主题
         patch(prev => ({ ...prev, ui: { ...prev.ui, theme: next } }));
@@ -244,8 +247,9 @@ export function UiStateProvider({ children }: { children: React.ReactNode }) {
         for (const r of prev.running) {
           if (r.status !== 'failed' && r.p < 100) {
             const np = Math.min(100, r.p + 1 + Math.floor(Math.random() * 3));
+            // 任何推进都要提交：moved 只在完成当帧置真会让增量被整帧丢弃（进度死锁）
+            moved = moved || np !== r.p;
             if (np >= 100) {
-              moved = true;
               justDone.push({
                 n: r.n,
                 bot: r.bot,
@@ -378,8 +382,9 @@ export function UiStateProvider({ children }: { children: React.ReactNode }) {
   const setUserAvatar = (a: UserAvatar) =>
     setS(prev => ({ ...prev, user: { ...prev.user, avatar: a } }));
 
+  // 任务动作按任务名寻址（原型口径）：tick 每帧重建 running 对象，按引用匹配会静默失配
   const cancelTask = (t: RunningTask) => {
-    setS(prev => ({ ...prev, running: prev.running.filter(x => x !== t) }));
+    setS(prev => ({ ...prev, running: prev.running.filter(x => x.n !== t.n) }));
     toast('「' + t.n + '」已取消');
   };
 
@@ -387,7 +392,7 @@ export function UiStateProvider({ children }: { children: React.ReactNode }) {
     setS(prev => ({
       ...prev,
       running: prev.running.map(x =>
-        x === t
+        x.n === t.n
           ? {
               ...x,
               status: undefined,
@@ -407,7 +412,7 @@ export function UiStateProvider({ children }: { children: React.ReactNode }) {
   const redoDone = (t: DoneTask) => {
     setS(prev => ({
       ...prev,
-      done: prev.done.filter(x => x !== t),
+      done: prev.done.filter(x => x.n !== t.n),
       running: [...prev.running, {
         n: t.n, bot: t.bot, p: 10, c: t.c,
         stages: [['计划', 'active'], ['收集 Worker', 'wait'], ['撰写', 'wait'], ['审校', 'wait'], ['交付', 'wait']] as Stage[],

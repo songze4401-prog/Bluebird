@@ -45,5 +45,14 @@ describe('蓝鸟 v7 新壳', () => {
       expect(utils.getByText('系统监控')).toBeTruthy();
       expect(utils.getByText('退出登录')).toBeTruthy();
     });
+
+    // 进度 tick 回归：进行中任务的百分比应在 ~2s 内推进
+    // （防「p 增量被整帧丢弃」死锁复发——2026-11-15 复查发现的阻断级 bug）
+    await waitFor(
+      () => {
+        expect(utils.queryByText('62%')).toBeNull();
+      },
+      { timeout: 4000 }
+    );
   });
 });

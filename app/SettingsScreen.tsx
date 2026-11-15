@@ -13,7 +13,6 @@ import {
   Image,
   PanResponder,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -127,9 +126,11 @@ function TiltUserCard(props: { onAvatarPress: () => void }) {
       };
       // eslint-disable-next-line react-hooks/refs -- 手势回调仅在事件阶段读 ref，渲染期不读
       return PanResponder.create({
-        // onStart 不抢手势：轻点头像仍走内层 Pressable；移动超过阈值才接管做倾斜
+        // onStart 不抢手势：轻点头像仍走内层 Pressable；横向意图明显才接管做倾斜，
+        // 竖向拖动让给弹层滚动（原型 pointermove 不阻塞页面滚动）
         onStartShouldSetPanResponder: () => false,
-        onMoveShouldSetPanResponder: (_evt, g) => Math.abs(g.dx) > 3 || Math.abs(g.dy) > 3,
+        onMoveShouldSetPanResponder: (_evt, g) =>
+          Math.abs(g.dx) > 6 && Math.abs(g.dx) > Math.abs(g.dy) * 1.2,
         onPanResponderGrant: evt => {
           // 实测卡面矩形（原型每次 pointer 事件都取 getBoundingClientRect，这里 grant 记一次）
           wrapRef.current?.measureInWindow((x, y, width, height) => {
@@ -380,7 +381,8 @@ export function SettingsScreen(props: { visible: boolean; onClose: () => void })
     <>
       {/* 主面板（原型 #aSheet） */}
       <SheetScaffold visible={props.visible} onClose={props.onClose} title="设置">
-        <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false}>
+        {/* 滚动由 SheetScaffold 统一提供（原型 .sh-body overflow-y:auto）；这里只做布局 */}
+        <View style={styles.body}>
           {/* 1. 3D 倾斜用户卡（原型 .ucard/.tcard） */}
           <TiltUserCard onAvatarPress={() => setAvatarOpen(true)} />
 
@@ -436,7 +438,7 @@ export function SettingsScreen(props: { visible: boolean; onClose: () => void })
           {/* 7. 关于 / 退出登录（原型 setgroup 第五组：danger 行无 ›） */}
           <View style={styles.setgroup}>
             <SetRow label="关于" onPress={() => openSub('about')} />
-            <SetRow label="退出登录" danger showChev={false} onPress={() => toast('已退出登录')} />
+            <SetRow label="退出登录" danger showChev={false} onPress={() => { props.onClose(); toast('已退出登录'); }} />
           </View>
 
           {/* 8. 版本脚注（原型 .setfoot） */}
@@ -446,7 +448,7 @@ export function SettingsScreen(props: { visible: boolean; onClose: () => void })
             </View>
             <Text style={styles.footver}>{'v' + APP_VERSION}</Text>
           </View>
-        </ScrollView>
+        </View>
       </SheetScaffold>
 
       {/* 更换头像弹层（AvatarSheet：预设格子 + 从本机选择图片） */}
@@ -459,7 +461,8 @@ export function SettingsScreen(props: { visible: boolean; onClose: () => void })
         title={SUB_TITLES[sub]}
         onBack={() => setSubOpen(false)}
       >
-        <ScrollView contentContainerStyle={styles.subBody} showsVerticalScrollIndicator={false}>
+        {/* 滚动由 SheetScaffold 统一提供；这里只做布局 */}
+        <View style={styles.subBody}>
           {/* 切换账号（原型 data-acct 行：首字符方块 + 账号名 + 当前标记） */}
           {sub === 'accounts' &&
             user.accounts.map(a => (
@@ -552,7 +555,7 @@ export function SettingsScreen(props: { visible: boolean; onClose: () => void })
               <Text style={styles.aboutver}>{'v' + APP_VERSION}</Text>
             </View>
           )}
-        </ScrollView>
+        </View>
       </SheetScaffold>
     </>
   );
