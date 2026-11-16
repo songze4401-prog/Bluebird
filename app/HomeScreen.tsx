@@ -63,12 +63,135 @@ const VIZ_SEGS: { k: VizKind; label: string }[] = [
 ];
 
 // 四格快捷（原型 .quad：连接/项目/搭建为占位，记忆开弹层）
-const QUADS: { key: string; icon: string; label: string; placeholder: boolean }[] = [
-  { key: 'connect', icon: '🔗', label: '连接', placeholder: true },
-  { key: 'project', icon: '🗂', label: '项目', placeholder: true },
-  { key: 'build', icon: '🧩', label: '搭建', placeholder: true },
-  { key: 'memory', icon: '◉', label: '记忆', placeholder: false },
+const QUADS: { key: 'connect' | 'project' | 'build' | 'memory'; label: string; placeholder: boolean }[] = [
+  { key: 'connect', label: '连接', placeholder: true },
+  { key: 'project', label: '项目', placeholder: true },
+  { key: 'build', label: '搭建', placeholder: true },
+  { key: 'memory', label: '记忆', placeholder: false },
 ];
+
+// 四格图标：原型 .qc svg 的纯 View 组合（白形单色几何，无字体/emoji 依赖——
+// ◉ 等字符在部分安卓机型不渲染，实测踩坑后全部改绘）
+function QuadIcon({ kind }: { kind: 'connect' | 'project' | 'build' | 'memory' }) {
+  if (kind === 'memory') {
+    // 原型：三层同心圆（opacity .28/.62/1）
+    return (
+      <View style={{ width: 30, height: 30, alignItems: 'center', justifyContent: 'center' }}>
+        <View
+          style={{
+            width: 30,
+            height: 30,
+            borderRadius: 15,
+            backgroundColor: 'rgba(255,255,255,0.28)',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <View
+            style={{
+              width: 19,
+              height: 19,
+              borderRadius: 9.5,
+              backgroundColor: 'rgba(255,255,255,0.62)',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <View style={{ width: 9, height: 9, borderRadius: 4.5, backgroundColor: '#ffffff' }} />
+          </View>
+        </View>
+      </View>
+    );
+  }
+  if (kind === 'connect') {
+    // 原型：两节链环 + 中央销
+    return (
+      <View style={{ width: 30, height: 30, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
+        <View
+          style={{
+            width: 12,
+            height: 16,
+            borderRadius: 6,
+            borderWidth: 2.5,
+            borderColor: '#ffffff',
+            borderRightWidth: 0,
+            borderTopRightRadius: 0,
+            borderBottomRightRadius: 0,
+          }}
+        />
+        <View style={{ width: 7, height: 5, borderRadius: 2, backgroundColor: '#ffffff', marginHorizontal: -2 }} />
+        <View
+          style={{
+            width: 12,
+            height: 16,
+            borderRadius: 6,
+            borderWidth: 2.5,
+            borderColor: '#ffffff',
+            borderLeftWidth: 0,
+            borderTopLeftRadius: 0,
+            borderBottomLeftRadius: 0,
+          }}
+        />
+      </View>
+    );
+  }
+  if (kind === 'project') {
+    // 原型：三层堆叠（实/0.6/0.35）
+    return (
+      <View style={{ width: 30, height: 30, alignItems: 'center', justifyContent: 'center', gap: 2.5 }}>
+        <View style={{ width: 22, height: 6, borderRadius: 3, backgroundColor: '#ffffff' }} />
+        <View style={{ width: 22, height: 6, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.6)' }} />
+        <View style={{ width: 22, height: 6, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.35)' }} />
+      </View>
+    );
+  }
+  // build：2x2 方格，右下是加号
+  return (
+    <View style={{ width: 30, height: 30, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center' }}>
+      <View style={{ width: 12, height: 12, borderRadius: 5, backgroundColor: '#ffffff', marginRight: 2, marginBottom: 2 }} />
+      <View style={{ width: 12, height: 12, borderRadius: 5, backgroundColor: 'rgba(255,255,255,0.5)', marginBottom: 2 }} />
+      <View style={{ width: 12, height: 12, borderRadius: 5, backgroundColor: 'rgba(255,255,255,0.5)', marginRight: 2 }} />
+      <View style={{ width: 12, height: 12, alignItems: 'center', justifyContent: 'center' }}>
+        <View style={{ position: 'absolute', width: 12, height: 3, borderRadius: 1.5, backgroundColor: '#ffffff' }} />
+        <View style={{ position: 'absolute', width: 3, height: 12, borderRadius: 1.5, backgroundColor: '#ffffff' }} />
+      </View>
+    </View>
+  );
+}
+
+// 双入口卡图标（原型 .ei svg：对话气泡 / 新建网格加号）
+function EntryIcon({ kind }: { kind: 'chat' | 'grid' }) {
+  if (kind === 'chat') {
+    return (
+      <View style={{ width: 16, height: 16 }}>
+        <View style={{ width: 16, height: 13, borderRadius: 8, backgroundColor: '#ffffff' }} />
+        <View
+          style={{
+            position: 'absolute',
+            left: 1,
+            bottom: 0,
+            width: 6,
+            height: 6,
+            backgroundColor: '#ffffff',
+            borderBottomLeftRadius: 2,
+            transform: [{ rotate: '45deg' }],
+          }}
+        />
+      </View>
+    );
+  }
+  return (
+    <View style={{ width: 16, height: 16, flexDirection: 'row', flexWrap: 'wrap' }}>
+      <View style={{ width: 7, height: 7, borderRadius: 2, backgroundColor: '#ffffff', marginRight: 1, marginBottom: 1 }} />
+      <View style={{ width: 7, height: 7, borderRadius: 2, backgroundColor: '#ffffff', marginBottom: 1 }} />
+      <View style={{ width: 7, height: 7, borderRadius: 2, backgroundColor: '#ffffff', marginRight: 1 }} />
+      <View style={{ width: 7, height: 7, alignItems: 'center', justifyContent: 'center' }}>
+        <View style={{ position: 'absolute', width: 7, height: 2, borderRadius: 1, backgroundColor: '#ffffff' }} />
+        <View style={{ position: 'absolute', width: 2, height: 7, borderRadius: 1, backgroundColor: '#ffffff' }} />
+      </View>
+    </View>
+  );
+}
 
 // 迷你柱状图：pts 归一化到 4~56 高度（原型 spark 的 RN 柱状近似）
 function barHeights(pts: number[]): number[] {
@@ -167,7 +290,10 @@ const createStyles = (t: V7Tokens) =>
       backgroundColor: t.card,
       borderRadius: 20,
       padding: 14,
-      gap: 8,
+      // 原型 .entrycard > .er：图标块与标题同一行（紧凑单行卡）
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
       ...V7_SHADOWS.card,
     },
     entryIcon: {
@@ -218,7 +344,7 @@ const createStyles = (t: V7Tokens) =>
       paddingHorizontal: 10,
     },
     tm: { fontSize: 10, color: t.onDim, width: 34, flexShrink: 0 },
-    tl: { flex: 1, fontSize: 12, color: t.on },
+    tl: { flex: 1, minWidth: 0, fontSize: 12, color: t.on },
 
     // 数据卡（原型 .vizbody/.vsel/.stock/.weather/.news）
     vizbody: { flex: 1, gap: 8 },
@@ -403,7 +529,7 @@ export function HomeScreen({
             accessibilityLabel="对话"
           >
             <View style={styles.entryIcon}>
-              <Text style={styles.entryIconTxt}>💬</Text>
+              <EntryIcon kind="chat" />
             </View>
             <Text style={styles.entryName}>对话</Text>
           </Pressable>
@@ -414,7 +540,7 @@ export function HomeScreen({
             accessibilityLabel="创建面板"
           >
             <View style={styles.entryIcon}>
-              <Text style={styles.entryIconTxt}>⌗</Text>
+              <EntryIcon kind="grid" />
             </View>
             <Text style={styles.entryName}>创建面板</Text>
           </Pressable>
@@ -537,7 +663,7 @@ export function HomeScreen({
               accessibilityRole="button"
               accessibilityLabel={q.label}
             >
-              <Text style={styles.qcIcon}>{q.icon}</Text>
+              <QuadIcon kind={q.key} />
               <Text style={styles.qcLabel}>{q.label}</Text>
             </Pressable>
           ))}

@@ -327,7 +327,8 @@ export function createInitialState(): UiState {
       },
     ],
     viz: 'stock',
-    stock: { price: 128.4, chg: 1.24, pts: [] },
+    // 原型启动即 genPts()（state.stock.pts=[] 会导致走势柱空白一片）
+    stock: { price: 128.4, chg: 1.24, pts: genPts() },
     weather: { temp: 24, cond: '多云', hi: 27, lo: 19 },
     news: [
       { s: '科技', t: '本地 AI 助手迎来记忆系统升级' },

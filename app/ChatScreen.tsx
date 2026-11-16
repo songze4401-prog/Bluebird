@@ -155,6 +155,10 @@ const createStyles = (t: V7Tokens, fd: number) =>
     failTxt: { fontSize: 11, color: t.down },
     // 用户主动停止后的部分回复提示
     stoppedTxt: { fontSize: 11, color: t.mut },
+    // 空会话引导（轻提示，不学旧壳的大欢迎页）
+    empty: { alignItems: 'center', marginTop: 140, gap: 6 },
+    emptyTxt: { fontSize: 16, fontWeight: '700', color: t.ink },
+    emptySub: { fontSize: 13, color: t.mut },
     // 工具标签（原型 .tool：行 gap 8，✓ ink w700 + 文案 sec；按下开工具详情）
     tool: { flexDirection: 'row', alignItems: 'center', gap: 8 },
     toolCk: { fontSize: 12, fontWeight: '700', color: t.ink },
@@ -420,7 +424,12 @@ export function ChatScreen(props: {
       <ScrollView
         ref={scrollRef}
         style={styles.thread}
-        contentContainerStyle={[styles.threadContent, { paddingTop: insets.top + 76 }]}
+        contentContainerStyle={[
+          styles.threadContent,
+          // paddingBottom 抬到 170：给「底部导航(44) + 输入条(56) + 空隙」让位，
+          // 否则最后一条消息被悬浮元素盖住（原型 .thread padding-bottom 12 + .pane 60 同理）
+          { paddingTop: insets.top + 76, paddingBottom: 170 },
+        ]}
         showsVerticalScrollIndicator={false}
         onScroll={e => {
           const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
@@ -503,6 +512,13 @@ export function ChatScreen(props: {
           )
         )}
         {/* sending：线程尾打字三点 */}
+        {/* 空会话引导（真会话首次进入无历史，轻提示避免整屏空白） */}
+        {chat.messages.length === 0 && !chat.sending && !chat.loadingHistory && (
+          <View style={styles.empty}>
+            <Text style={styles.emptyTxt}>开始新的对话吧</Text>
+            <Text style={styles.emptySub}>直接输入，或从主页选择一段对话</Text>
+          </View>
+        )}
         {chat.sending && <TypingDots />}
       </ScrollView>
 
@@ -522,7 +538,9 @@ export function ChatScreen(props: {
       )}
 
       {/* 4. 底部输入条 + 加号面板（面板后渲染，压在输入条上方） */}
-      <View style={[styles.comp, { bottom: insets.bottom + 12 }]}>
+      {/* 4. 底部输入条 + 加号面板：输入条必须悬在底部导航（44+12）之上，
+          否则导航盖住输入框（原型 .pane padding-bottom 60 同款让位） */}
+      <View style={[styles.comp, { bottom: insets.bottom + 66 }]}>
         {/* 待发送图片预览行：缩略图 + × 移除；上传中显示占位 */}
         {(attachments.pendingAttachments.length > 0 || attachments.uploadingImage) && (
           <View style={styles.pendingRow}>
