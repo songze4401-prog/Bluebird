@@ -28,6 +28,7 @@ import { V7_SHADOWS, type V7Tokens } from './ui-theme';
 import { getTheme } from '../theme';
 import { MarkdownMessage } from '../components/MarkdownMessage';
 import { SheetScaffold } from '../components/SheetScaffold';
+import { parseStickerMarkers } from '../lib/utils';
 import { IdentityHeader } from '../components/IdentityHeader';
 import { EditProfileSheet } from '../components/EditProfileSheet';
 import { ModelPickerSheet } from '../components/ModelPickerSheet';
@@ -64,6 +65,41 @@ function formatTime(iso?: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+// 行内表情包图片（旧壳 InlineSticker 同源：/sticker-repo/:id/image + 鉴权头）。
+// 模块级组件：定义在 ChatScreen 函数体内会因父组件每次渲染重挂（failed 状态被
+// 重置、图片反复请求），必须提出来。
+function InlineStickerImage({
+  id,
+  valid,
+  styles,
+}: {
+  id: string;
+  valid: boolean;
+  styles: ReturnType<typeof createStyles>;
+}) {
+  const [failed, setFailed] = useState(!valid);
+  if (failed) {
+    return (
+      <View style={styles.stchip}>
+        <Text numberOfLines={1} style={styles.stchipTxt}>
+          表情包已失效
+        </Text>
+      </View>
+    );
+  }
+  return (
+    <View style={styles.stchip}>
+      <ExpoImage
+        source={{ uri: stickerImageUrl(id), headers: IMAGE_AUTH_HEADERS }}
+        style={styles.inlineSticker}
+        contentFit="contain"
+        onError={() => setFailed(true)}
+        accessibilityLabel="表情包"
+      />
+    </View>
+  );
 }
 
 // 原型 --spring：加号面板宽/高/圆角形变共用的弹簧曲线
@@ -500,7 +536,8 @@ export function ChatScreen(props: {
         </View>
       );
     }
-    const segs: ContentSegment[] = m.segments ?? [{ type: 'text', text: m.content }];
+    const segs: ContentSegment[] =
+      m.segments ?? parseStickerMarkers(m.content);
     return segs.map((seg, si) =>
       seg.type === 'text' && seg.text ? (
         <View key={si} style={styles.txt}>
@@ -508,35 +545,10 @@ export function ChatScreen(props: {
         </View>
       ) : seg.type === 'sticker' ? (
         // 行内表情：真图（仓库路由 + 鉴权头）；加载失败/已失效 → 灰字占位（BUG-03）
-        <InlineStickerImage key={si} id={seg.id} valid={seg.valid} />
+        <InlineStickerImage key={si} id={seg.id} valid={seg.valid} styles={styles} />
       ) : null
     );
   };
-
-  // 行内表情包图片（旧壳 InlineSticker 同源：/sticker-repo/:id/image + 鉴权头）
-  function InlineStickerImage({ id, valid }: { id: string; valid: boolean }) {
-    const [failed, setFailed] = useState(!valid);
-    if (failed) {
-      return (
-        <View style={styles.stchip}>
-          <Text numberOfLines={1} style={styles.stchipTxt}>
-            表情包已失效
-          </Text>
-        </View>
-      );
-    }
-    return (
-      <View style={styles.stchip}>
-        <ExpoImage
-          source={{ uri: stickerImageUrl(id), headers: IMAGE_AUTH_HEADERS }}
-          style={styles.inlineSticker}
-          contentFit="contain"
-          onError={() => setFailed(true)}
-          accessibilityLabel="表情包"
-        />
-      </View>
-    );
-  }
 
   // 键盘弹出后把最新一条消息顶到输入条上方（等键盘动画落定再滚）
   useEffect(() => {
@@ -615,22 +627,27 @@ export function ChatScreen(props: {
     modelTimer.current = setTimeout(() => setModelOpen(true), 260);
   };
 
-  // 表情包选择器：打开即拉仓库列表（GET /sticker-repo）；「添加」走相册登记入库
+  // 表情包选择器：每次打开都重拉仓库（瞬时网络失败不能把选择器打瘫到重启——
+  // 旧壳 PlusPanel 每次打开都重拉同语义）
   const openStickerPicker = () => {
     closePanel();
+    setStickers(null);
     setStickersOpen(true);
-    if (stickers === null) {
-      listStickerRepo()
-        .then(setStickers)
-        .catch(() => {
-          ui.toast('读取表情包仓库失败');
-          setStickers([]);
-        });
-    }
+    listStickerRepo()
+      .then(setStickers)
+      .catch(() => {
+        ui.toast('读取表情包仓库失败');
+        setStickers([]);
+      });
   };
 
-  // 表情包点按直发：附件即消息，无正文（旧壳 App.sendSticker 同语义）
+  // 表情包点按直发：附件即消息，无正文（旧壳 App.sendSticker 同语义）。
+  // 回复生成中/历史加载中不发也不关面板（旧壳 PlusPanel busy 时 disabled 同语义）
   const sendStickerNow = (att: Attachment) => {
+    if (chat.sending || chat.loadingHistory) {
+      ui.toast('正在回复中，请稍后再试');
+      return;
+    }
     props.onSendSticker?.(att);
     setStickersOpen(false);
   };
@@ -676,6 +693,8 @@ export function ChatScreen(props: {
           const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
           followRef.current =
             contentSize.height - contentOffset.y - layoutMeasurement.height < 80;
+          // 滚回底部时收起「返回底部」箭头（旧壳箭头纯由距底距离驱动）
+          if (followRef.current && showJump) setShowJump(false);
           // 到顶自动加载更早消息（一次性闸门防滚动连发；hook 内部另有并发守卫）
           if (
             olderGuard.current &&
@@ -1053,16 +1072,19 @@ export function ChatScreen(props: {
               </>
             ) : (
               <>
-                <Pressable
-                  style={({ pressed }) => [styles.actRow, pressed && styles.prowPressed]}
-                  onPress={() => {
-                    void Share.share({ message: actionMsg.content });
-                  }}
-                  accessibilityRole="button"
-                  accessibilityLabel="分享这条回复"
-                >
-                  <Text style={styles.actRowTxt}>分享这条回复</Text>
-                </Pressable>
+                {/* 分享需有正文（旧壳 MessageActionSheet hasText 同守卫） */}
+                {!!actionMsg.content?.trim() && (
+                  <Pressable
+                    style={({ pressed }) => [styles.actRow, pressed && styles.prowPressed]}
+                    onPress={() => {
+                      void Share.share({ message: actionMsg.content });
+                    }}
+                    accessibilityRole="button"
+                    accessibilityLabel="分享这条回复"
+                  >
+                    <Text style={styles.actRowTxt}>分享这条回复</Text>
+                  </Pressable>
+                )}
                 <Pressable
                   style={({ pressed }) => [styles.actRow, pressed && styles.prowPressed]}
                   onPress={() => {
