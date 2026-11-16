@@ -1,12 +1,15 @@
 // 蓝鸟 UI 移植 · 弹层「任务详情」（原型 openTask：阶段/结果/失败原因/Worker 产物 + 动作）
 // 对照后端 DAG 阶段与审校门：run=取消/重试/继续（等宽三键），done=重新发起（单键）。
+// R5 起支持真实任务模式（realTask：/agent-tasks 的任务，可取消状态给「取消任务」）。
 // 本组件只负责 sh-body 内容：scrim / 把手 / 标题 / ✕ 由弹层壳 SheetScaffold 统一承担。
 
-import React from 'react';
+import React, { useState } from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 
 import { SheetScaffold } from './SheetScaffold';
 import { useUi } from '../app/ui-state';
+import { apiFetch } from '../lib/api/client';
+import { API_PATHS } from '../lib/api/endpoints';
 import type { V7Tokens } from '../app/ui-theme';
 import type { DoneTask, RunningTask, StageMark } from '../data/mock';
 
@@ -28,12 +31,76 @@ const STAGE_LABEL: Record<StageMark, string> = {
 export function TaskDetailSheet(props: {
   visible: boolean;
   onClose: () => void;
-  kind: 'run' | 'done';
-  task: RunningTask | DoneTask | null;
+  kind?: 'run' | 'done';
+  task?: RunningTask | DoneTask | null;
+  // 真实任务模式（/agent-tasks）：给 goal/状态标签 + 可取消入口
+  realTask?: {
+    taskId: string;
+    goal: string;
+    botId: string;
+    statusLabel: string;
+    cancellable: boolean;
+  } | null;
+  onRealCancelled?: () => void;
 }) {
   const ui = useUi();
   const t = ui.tokens;
   const styles = createStyles(t);
+  const [cancelBusy, setCancelBusy] = useState(false);
+
+  // 真实任务分支：goal + Bot chip + 状态 chip + 取消任务（POST /agent-tasks/:id/cancel）
+  if (props.realTask) {
+    const real = props.realTask;
+    const cancelTask = async () => {
+      if (cancelBusy) return;
+      setCancelBusy(true);
+      try {
+        const response = await apiFetch(
+          API_PATHS.agentTaskCancel(real.taskId),
+          { method: 'POST' }
+        );
+        if (!response.ok) {
+          ui.toast('取消失败，请稍后再试');
+          return;
+        }
+        ui.toast('已取消');
+        props.onRealCancelled?.();
+        props.onClose();
+      } catch {
+        ui.toast('取消失败，请稍后再试');
+      } finally {
+        setCancelBusy(false);
+      }
+    };
+    return (
+      <SheetScaffold visible={props.visible} onClose={props.onClose} title="任务详情">
+        <View>
+          <View style={styles.wtop}>
+            <Text style={styles.wname} numberOfLines={1} ellipsizeMode="tail">
+              {real.goal}
+            </Text>
+            <Text style={styles.wchip}>{real.botId}</Text>
+            <Text style={styles.wchip}>{real.statusLabel}</Text>
+          </View>
+          <View style={styles.wacts}>
+            {real.cancellable ? (
+              <TouchableOpacity
+                style={styles.wact}
+                disabled={cancelBusy}
+                onPress={() => void cancelTask()}
+              >
+                <Text style={styles.wactTxt}>{cancelBusy ? '取消中…' : '取消任务'}</Text>
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.wact}>
+                <Text style={styles.wactTxt}>该状态无法取消</Text>
+              </View>
+            )}
+          </View>
+        </View>
+      </SheetScaffold>
+    );
+  }
 
   // task 为 null：壳照常渲染，内容给空 View
   if (!props.task) {
@@ -44,10 +111,11 @@ export function TaskDetailSheet(props: {
     );
   }
   const task = props.task;
+  const kind = props.kind ?? 'run';
 
   // 联合收窄：RunningTask 独有 p 字段（kind 与 task 由调用方保证一致）
-  const runTask: RunningTask | null = props.kind === 'run' && 'p' in task ? task : null;
-  const doneTask: DoneTask | null = props.kind === 'done' && !('p' in task) ? task : null;
+  const runTask: RunningTask | null = kind === 'run' && 'p' in task ? task : null;
+  const doneTask: DoneTask | null = kind === 'done' && !('p' in task) ? task : null;
 
   // 状态 chip：run 失败→「失败」down 色；run→p%；done→「完成」up 色
   const statusChip = (): { text: string; color: string } => {

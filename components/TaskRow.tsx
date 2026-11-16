@@ -1,7 +1,7 @@
 // 蓝鸟 UI 移植 · 进行中/已完成共用任务行（原型 .runcard/.run/.pbar）
-// kind 决定右值与进度条语义：
-//   run 非失败 → 右值「{p}%」，fill 跟 p（任务色）；run 失败 → 右值「失败」，fill 100% down 35%；
-//   done → 右值「完成」，fill 100% up。
+// R5 起改为视图模型驱动：调用方（主页 mock / 真实 /agent-tasks）各自归一化成
+// TaskRowModel——行组件不再关心数据来自哪里。
+//   fillPct/fillColor/fillOpacity 决定进度条；rightLabel/rightTone 决定右值。
 // fill 宽度用 Animated 过渡（500ms）：useState 存上一次目标值，变化时启动 timing。
 
 import React, { useEffect, useState } from 'react';
@@ -9,43 +9,44 @@ import { Animated, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { useUi } from '../app/ui-state';
 import { V7_SHADOWS, type V7Tokens } from '../app/ui-theme';
-import type { DoneTask, RunningTask } from '../data/mock';
 
 // 原型 .pbar i transition: width .5s ease
 const FILL_MS = 500;
 
-export function TaskRow(props: {
-  task: RunningTask | DoneTask;
-  kind: 'run' | 'done';
-  onPress: () => void;
-}) {
-  const { task, kind, onPress } = props;
+export type TaskRowModel = {
+  // 任务名（真实任务 = goal）
+  n: string;
+  // 右值文案与色（真实任务 = STATUS_LABEL[status]）
+  rightLabel: string;
+  rightTone: 'mut' | 'fail' | 'ok';
+  // 进度条：0-100；无真实进度数据的运行态给状态色满条+透明度（状态条，非假进度）
+  fillPct: number;
+  fillColor: string;
+  fillOpacity?: number;
+};
+
+export function TaskRow(props: { model: TaskRowModel; onPress: () => void }) {
+  const { model, onPress } = props;
   const { tokens: t } = useUi();
   const styles = createStyles(t);
 
-  // run→RunningTask / done→DoneTask 一一对应；两个独立 props 无法自动收窄，用 in 判别
-  const failed = 'status' in task && task.status === 'failed';
-  // fill 目标宽度：done 100%；run 失败 100%；run 正常 = p
-  const progress = 'p' in task ? (failed ? 100 : task.p) : 100;
-  // fill 颜色：done 用 up；run 用任务色（失败换 down + 35% 透明）
-  const fillColor = kind === 'done' ? t.up : failed ? t.down : task.c;
-  const fillOpacity = failed ? 0.35 : 1;
-  // 右值：done「完成」mut / run 失败「失败」down / run 正常「{p}%」mut
-  const rightLabel = kind === 'done' ? '完成' : failed ? '失败' : progress + '%';
-  const rightColor = failed ? t.down : t.mut;
+  const rightColor =
+    model.rightTone === 'fail' ? t.down : model.rightTone === 'ok' ? t.up : t.mut;
 
-  // fill 宽度过渡：useState 存上一次目标值，progress 变化时启动 500ms timing
+  // fill 宽度过渡：useState 存上一次目标值，变化时启动 500ms timing
   // （setPrevP 放在动画完成回调里——effect 体内同步 setState 会被 react-hooks 禁掉）
-  const [prevP, setPrevP] = useState(progress);
+  const [prevP, setPrevP] = useState(model.fillPct);
   const [fill] = useState(() => new Animated.Value(prevP));
   useEffect(() => {
-    if (prevP === progress) return;
+    if (prevP === model.fillPct) return;
     // 先停掉在途动画：从当前位置出发去新的目标值，避免两段 timing 并行写帧
     fill.stopAnimation();
-    Animated.timing(fill, { toValue: progress, duration: FILL_MS, useNativeDriver: false }).start(
-      () => setPrevP(progress)
-    );
-  }, [progress, prevP, fill]);
+    Animated.timing(fill, {
+      toValue: model.fillPct,
+      duration: FILL_MS,
+      useNativeDriver: false,
+    }).start(() => setPrevP(model.fillPct));
+  }, [model.fillPct, prevP, fill]);
   const fillWidth = fill.interpolate({ inputRange: [0, 100], outputRange: ['0%', '100%'] });
 
   return (
@@ -53,14 +54,14 @@ export function TaskRow(props: {
       style={[styles.card, V7_SHADOWS.md]}
       onPress={onPress}
       accessibilityRole="button"
-      accessibilityLabel={task.n}
+      accessibilityLabel={model.n}
     >
       {/* 行：名 + 右值（原型 .run .rl） */}
       <View style={styles.row}>
         <Text numberOfLines={1} style={styles.name}>
-          {task.n}
+          {model.n}
         </Text>
-        <Text style={[styles.right, { color: rightColor }]}>{rightLabel}</Text>
+        <Text style={[styles.right, { color: rightColor }]}>{model.rightLabel}</Text>
       </View>
       {/* 进度条：soft 底 h5 r3，fill 宽度动画（原型 .pbar） */}
       <View style={styles.pbar}>
@@ -69,8 +70,8 @@ export function TaskRow(props: {
             height: 5,
             borderRadius: 3,
             width: fillWidth,
-            backgroundColor: fillColor,
-            opacity: fillOpacity,
+            backgroundColor: model.fillColor,
+            opacity: model.fillOpacity ?? 1,
           }}
         />
       </View>
@@ -98,6 +99,7 @@ const createStyles = (t: V7Tokens) =>
     // 名：12 w600 ink，一行省略
     name: {
       flex: 1,
+      minWidth: 0,
       fontSize: 12,
       fontWeight: '600',
       color: t.ink,
