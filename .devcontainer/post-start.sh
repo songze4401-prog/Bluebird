@@ -1,5 +1,5 @@
-gh codespace ports visibility 3000:public -c "$CODESPACE_NAME"
-gh codespace ports visibility 8081:public -c "$CODESPACE_NAME"
+gh codespace ports visibility 3000:private -c "$CODESPACE_NAME"
+gh codespace ports visibility 8081:private -c "$CODESPACE_NAME"
 
 # blue 快捷命令（幂等：已存在则不重复追加）
 # 通过脚本自身位置推导 blue-start.sh，不依赖固定的工作区名
