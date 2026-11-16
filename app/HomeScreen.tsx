@@ -669,30 +669,36 @@ export function HomeScreen({
           ))}
         </View>
 
-        {/* 6. 进行中的任务 */}
-        <View style={styles.sechead}>
-          <Text style={styles.secTxt}>进行中的任务</Text>
-          <View style={{ flex: 1 }} />
-          <Text style={styles.secCount}>{ui.running.length} 个进行中</Text>
-        </View>
-        <View style={styles.listCol}>
-          {ui.running.map(r => (
-            <TaskRow
-              key={r.n}
-              kind="run"
-              task={r}
-              onPress={() => setTaskDetail({ task: r, kind: 'run' })}
-            />
-          ))}
-        </View>
+        {/* 6. 进行中的任务（无任务时整段隐藏——不展示假数据） */}
+        {ui.running.length > 0 && (
+          <>
+            <View style={styles.sechead}>
+              <Text style={styles.secTxt}>进行中的任务</Text>
+              <View style={{ flex: 1 }} />
+              <Text style={styles.secCount}>{ui.running.length} 个进行中</Text>
+            </View>
+            <View style={styles.listCol}>
+              {ui.running.map(r => (
+                <TaskRow
+                  key={r.n}
+                  kind="run"
+                  task={r}
+                  onPress={() => setTaskDetail({ task: r, kind: 'run' })}
+                />
+              ))}
+            </View>
+          </>
+        )}
 
-        {/* 7. 已完成任务：超过 4 条时裁剪 + 底部渐隐，不超过则原样铺开 */}
-        <View style={styles.sechead}>
-          <Text style={styles.secTxt}>已完成任务</Text>
-          <View style={{ flex: 1 }} />
-          <Text style={styles.secCount}>{ui.done.length} 个已完成</Text>
-        </View>
-        {ui.done.length > 4 ? (
+        {/* 7. 已完成任务（无任务时整段隐藏；超过 4 条时裁剪 + 底部渐隐） */}
+        {ui.done.length > 0 && (
+          <>
+            <View style={styles.sechead}>
+              <Text style={styles.secTxt}>已完成任务</Text>
+              <View style={{ flex: 1 }} />
+              <Text style={styles.secCount}>{ui.done.length} 个已完成</Text>
+            </View>
+            {ui.done.length > 4 ? (
           <View style={doneMaxHeight !== undefined ? [styles.doneWrap, { maxHeight: doneMaxHeight }] : undefined}>
             <View style={styles.listCol}>
               {ui.done.map((d, i) => (
@@ -725,6 +731,8 @@ export function HomeScreen({
               />
             ))}
           </View>
+        )}
+          </>
         )}
 
         {/* 8. 对话记录（真实会话列表：数据由 useSessionList 注入，点击切换会话） */}
