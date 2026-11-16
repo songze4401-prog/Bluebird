@@ -321,6 +321,7 @@ function InnerShell() {
           <View style={{ width }}>
             <ChatScreen
               chat={{ ...chat, messages: visibleMessages }}
+              sessionId={currentSessionId}
               modelLabel={selectedModelLabel}
               models={modelProviders}
               currentModel={selectedModel}

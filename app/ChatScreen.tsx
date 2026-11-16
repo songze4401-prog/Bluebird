@@ -315,6 +315,7 @@ const createStyles = (t: V7Tokens, fd: number) =>
 
 export function ChatScreen(props: {
   chat: ChatSessionApi;
+  sessionId?: string;
   modelLabel: string;
   models: ModelProvider[];
   currentModel: ModelDefaults | null;
@@ -349,11 +350,27 @@ export function ChatScreen(props: {
   const [modelOpen, setModelOpen] = useState(false);
   const [toolOpen, setToolOpen] = useState(false);
   const [tool, setTool] = useState<string | null>(null);
-  // 长按操作的目标消息
-  const [actionMsg, setActionMsg] = useState<Message | null>(null);
 
   // 输入框本地草稿（发送后清空）
   const [input, setInput] = useState('');
+  // 长按操作：open 控制弹层显隐（关闭动画期间保留目标消息，避免滑出动画里空白）
+  const [actionOpen, setActionOpen] = useState(false);
+  const [actionMsg, setActionMsg] = useState<Message | null>(null);
+
+  // 会话切换时清掉长按目标：跨会话的撤回/隐藏会打错目标（oracle 建议）。
+  // 用 React 官方「渲染期对比 prev props 调整 state」模式（effect 内同步 setState 会被禁）。
+  const [prevSessionId, setPrevSessionId] = useState(props.sessionId);
+  if (prevSessionId !== props.sessionId) {
+    setPrevSessionId(props.sessionId);
+    setActionMsg(null);
+    setActionOpen(false);
+  }
+
+  // 长按入口：记录目标消息并打开弹层
+  const openMsgActions = (m: Message) => {
+    setActionMsg(m);
+    setActionOpen(true);
+  };
 
   // 加号面板：panelOpen 驱动交互（垫层/pointerEvents/＋钮透明）；progress 形变、
   // ppFade 面板整体淡入淡出（原型 .pp opacity .18s）、fade 内容延迟淡入（.ppi .16s delay .1s）
@@ -564,7 +581,7 @@ export function ChatScreen(props: {
             <Pressable
               key={m.id}
               style={styles.mUser}
-              onLongPress={() => setActionMsg(m)}
+              onLongPress={() => openMsgActions(m)}
               delayLongPress={350}
             >
               <Text style={styles.who}>{formatTime(m.createdAt)}</Text>
@@ -585,7 +602,7 @@ export function ChatScreen(props: {
             <Pressable
               key={m.id}
               style={styles.mBlue}
-              onLongPress={() => setActionMsg(m)}
+              onLongPress={() => openMsgActions(m)}
               delayLongPress={350}
             >
               <Text style={styles.who}>{formatTime(m.createdAt)}</Text>
@@ -805,8 +822,8 @@ export function ChatScreen(props: {
 
       {/* 6. 消息长按操作（旧壳 MessageActionSheet 的 v7 版：复制/收藏/撤回/隐藏） */}
       <SheetScaffold
-        visible={!!actionMsg}
-        onClose={() => setActionMsg(null)}
+        visible={actionOpen}
+        onClose={() => setActionOpen(false)}
         title="消息操作"
       >
         {actionMsg && (
@@ -818,9 +835,13 @@ export function ChatScreen(props: {
               <Pressable
                 style={({ pressed }) => [styles.actRow, pressed && styles.prowPressed]}
                 onPress={() => {
-                  Clipboard.setString(actionMsg.content);
-                  ui.toast('已复制');
-                  setActionMsg(null);
+                  try {
+                    Clipboard.setString(actionMsg.content);
+                    ui.toast('已复制');
+                  } catch {
+                    ui.toast('复制失败，当前设备无法访问剪贴板');
+                  }
+                  setActionOpen(false);
                 }}
                 accessibilityRole="button"
                 accessibilityLabel="复制文字"
@@ -832,9 +853,10 @@ export function ChatScreen(props: {
               <Pressable
                 style={({ pressed }) => [styles.actRow, pressed && styles.prowPressed]}
                 onPress={() => {
+                  // recallMessage 内部有「撤回确认」Alert——不在此处预报成功
+                  // （旧壳无 toast；用户取消或服务端失败时不能虚假反馈，oracle 阻断①）
                   chat.recallMessage(actionMsg);
-                  setActionMsg(null);
-                  ui.toast('已撤回');
+                  setActionOpen(false);
                 }}
                 accessibilityRole="button"
                 accessibilityLabel="撤回这条消息"
@@ -847,7 +869,7 @@ export function ChatScreen(props: {
                   style={({ pressed }) => [styles.actRow, pressed && styles.prowPressed]}
                   onPress={() => {
                     props.onToggleFavorite?.(actionMsg);
-                    setActionMsg(null);
+                    setActionOpen(false);
                   }}
                   accessibilityRole="button"
                   accessibilityLabel={
@@ -862,8 +884,7 @@ export function ChatScreen(props: {
                   style={({ pressed }) => [styles.actRow, pressed && styles.prowPressed]}
                   onPress={() => {
                     props.onHideMessage?.(actionMsg);
-                    setActionMsg(null);
-                    ui.toast('已从本机视图隐藏');
+                    setActionOpen(false);
                   }}
                   accessibilityRole="button"
                   accessibilityLabel="隐藏这条回复"
