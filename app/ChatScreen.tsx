@@ -28,6 +28,7 @@ import { ModelPickerSheet } from '../components/ModelPickerSheet';
 import { ToolDetailSheet } from '../components/ToolDetailSheet';
 import type { ChatSessionApi } from '../hooks/useChatSession';
 import type { AttachmentsApi } from '../hooks/useAttachments';
+import { useKeyboardHeight } from '../hooks/useKeyboardHeight';
 import type { ContentSegment, ModelDefaults, ModelProvider } from '../lib/types';
 
 // 全屏绝对定位（与 app/ui-state.tsx 同款写法：本仓库 RN 版型里没有 absoluteFillObject）
@@ -303,6 +304,8 @@ export function ChatScreen(props: {
   const t = ui.tokens;
   const styles = createStyles(t, ui.fontDelta);
   const insets = useSafeAreaInsets();
+  // 键盘高度：输入条/线程让位都按它上移（绝对定位悬浮层不会自动避让键盘）
+  const keyboardH = useKeyboardHeight();
 
   // 本屏挂载的弹层开关（资料编辑 / 默认模型 / 工具详情）
   const [editOpen, setEditOpen] = useState(false);
@@ -327,6 +330,17 @@ export function ChatScreen(props: {
   const scrollToBottom = () => {
     if (followRef.current) scrollRef.current?.scrollToEnd({ animated: false });
   };
+
+  // 键盘弹出后把最新一条消息顶到输入条上方（等键盘动画落定再滚）
+  useEffect(() => {
+    if (keyboardH <= 0) return undefined;
+
+    const timer = setTimeout(() => {
+      if (followRef.current) scrollRef.current?.scrollToEnd({ animated: true });
+    }, 80);
+
+    return () => clearTimeout(timer);
+  }, [keyboardH]);
 
   // 「模型切换」的延迟打开定时器（关面板 260ms 后开抽屉），卸载时清掉
   const modelTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -420,7 +434,16 @@ export function ChatScreen(props: {
       <ScrollView
         ref={scrollRef}
         style={styles.thread}
-        contentContainerStyle={[styles.threadContent, { paddingTop: insets.top + 76 }]}
+        contentContainerStyle={[
+          styles.threadContent,
+          // 底部让位 = 输入条(≈48) + 输入条底距 + 余量 12；
+          // 键盘弹出时输入条上移到键盘上方，线程同步让位
+          {
+            paddingTop: insets.top + 76,
+            paddingBottom:
+              keyboardH > 0 ? keyboardH + 68 : insets.bottom + 120,
+          },
+        ]}
         showsVerticalScrollIndicator={false}
         onScroll={e => {
           const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
@@ -521,8 +544,14 @@ export function ChatScreen(props: {
         />
       )}
 
-      {/* 4. 底部输入条 + 加号面板（面板后渲染，压在输入条上方） */}
-      <View style={[styles.comp, { bottom: insets.bottom + 12 }]}>
+      {/* 4. 底部输入条 + 加号面板：输入条悬在底部导航（44+12）之上，
+          与原型 .pane padding-bottom 60 同款让位 */}
+      <View
+        style={[
+          styles.comp,
+          { bottom: keyboardH > 0 ? keyboardH + 8 : insets.bottom + 60 },
+        ]}
+      >
         {/* 待发送图片预览行：缩略图 + × 移除；上传中显示占位 */}
         {(attachments.pendingAttachments.length > 0 || attachments.uploadingImage) && (
           <View style={styles.pendingRow}>

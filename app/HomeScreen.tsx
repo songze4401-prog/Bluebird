@@ -28,6 +28,7 @@ import { TaskAddSheet } from '../components/TaskAddSheet';
 import { VizPanelSheet } from '../components/VizPanelSheet';
 import { MemoryPanelSheet } from '../components/MemoryPanelSheet';
 import { TaskDetailSheet } from '../components/TaskDetailSheet';
+import { EntryIcon, QuadIcon } from '../components/V7Icons';
 import { formatMessageTime } from '../lib/utils';
 import type { SessionMeta } from '../lib/types';
 import type { DoneTask, RunningTask, VizKind } from '../data/mock';
@@ -63,11 +64,11 @@ const VIZ_SEGS: { k: VizKind; label: string }[] = [
 ];
 
 // 四格快捷（原型 .quad：连接/项目/搭建为占位，记忆开弹层）
-const QUADS: { key: string; icon: string; label: string; placeholder: boolean }[] = [
-  { key: 'connect', icon: '🔗', label: '连接', placeholder: true },
-  { key: 'project', icon: '🗂', label: '项目', placeholder: true },
-  { key: 'build', icon: '🧩', label: '搭建', placeholder: true },
-  { key: 'memory', icon: '◉', label: '记忆', placeholder: false },
+const QUADS: { key: 'connect' | 'project' | 'build' | 'memory'; label: string; placeholder: boolean }[] = [
+  { key: 'connect', label: '连接', placeholder: true },
+  { key: 'project', label: '项目', placeholder: true },
+  { key: 'build', label: '搭建', placeholder: true },
+  { key: 'memory', label: '记忆', placeholder: false },
 ];
 
 // 迷你柱状图：pts 归一化到 4~56 高度（原型 spark 的 RN 柱状近似）
@@ -156,7 +157,7 @@ const toggleStyles = StyleSheet.create({
 const createStyles = (t: V7Tokens) =>
   StyleSheet.create({
     page: { flex: 1 },
-    // 原型 .home：padding 50/18/76 → 上由安全区 +8 承担，左右 18，底 96，块间距 16
+    // 原型 .home：padding 50/18/76 → 上由安全区 +8 承担，左右 18，底 76，块间距 16
     content: { paddingHorizontal: 18, gap: 16 },
 
     // 双入口卡（原型 .entry/.entrycard）
@@ -167,7 +168,10 @@ const createStyles = (t: V7Tokens) =>
       backgroundColor: t.card,
       borderRadius: 20,
       padding: 14,
-      gap: 8,
+      // 原型 .entrycard > .er：图标块与标题同一行（紧凑单行卡）
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
       ...V7_SHADOWS.card,
     },
     entryIcon: {
@@ -181,11 +185,10 @@ const createStyles = (t: V7Tokens) =>
     entryIconTxt: { fontSize: 14 },
     entryName: { fontSize: 14, fontWeight: '700', color: t.on },
 
-    // 任务·定时 + 数据 双卡行（原型 .duo>.sq，RN 版型改为横排两卡）
-    duoRow: { flexDirection: 'row', gap: 12 },
+    // 任务·定时 + 数据：原型 .duo 是纵向排列（两张通栏卡），不是横排半宽
+    duoRow: { gap: 12 },
     sq: {
-      flex: 1,
-      minWidth: 0,
+      width: '100%',
       backgroundColor: t.card,
       borderRadius: 22,
       height: 236,
@@ -218,7 +221,7 @@ const createStyles = (t: V7Tokens) =>
       paddingHorizontal: 10,
     },
     tm: { fontSize: 10, color: t.onDim, width: 34, flexShrink: 0 },
-    tl: { flex: 1, fontSize: 12, color: t.on },
+    tl: { flex: 1, minWidth: 0, fontSize: 12, color: t.on },
 
     // 数据卡（原型 .vizbody/.vsel/.stock/.weather/.news）
     vizbody: { flex: 1, gap: 8 },
@@ -346,9 +349,9 @@ export function HomeScreen({
 
   // 已完成任务裁剪：每张卡 onLayout 记高度（按任务名记，避免下标位移拿错卡）；
   // 超过 4 条时容器 maxHeight = 前 4 张卡累计 + 3*12 gap + 64
-  // （原型第 4 张卡底边 +64px 的简化实现）
+  // （原型第 4 张卡底边 +64px 的简化实现）；容器本身可滚动，滑到底后渐隐层消失
   const [doneHeights, setDoneHeights] = useState<Record<string, number>>({});
-  const [doneAtBottom, setDoneAtBottom] = useState(false);
+  const [doneInnerEnd, setDoneInnerEnd] = useState(false);
 
   const measureDone = (name: string) => (e: LayoutChangeEvent) => {
     const h = Math.round(e.nativeEvent.layout.height);
@@ -364,13 +367,13 @@ export function HomeScreen({
   const doneMaxHeight = doneHeightsReady
     ? first4Heights.reduce((a, b) => a + b, 0) + 3 * 12 + 64
     : undefined;
-  const showDoneFade = doneHeightsReady && !doneAtBottom;
+  const showDoneFade = doneHeightsReady && !doneInnerEnd;
 
-  // 页面滚动接近底部时隐藏渐隐层（原型 .donewrap.at-bottom 的简化）
-  const onPageScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+  // 已完成任务容器内部滚动到底（原型 .donewrap.at-bottom：--donefade 归零）
+  const onDoneScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, layoutMeasurement, contentSize } = e.nativeEvent;
-    const atBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 2;
-    setDoneAtBottom(prev => (prev === atBottom ? prev : atBottom));
+    const atEnd = contentOffset.y + layoutMeasurement.height >= contentSize.height - 2;
+    setDoneInnerEnd(prev => (prev === atEnd ? prev : atEnd));
   };
 
   // 对话入口取「最近一条有内容的会话」（服务端 updatedAt 倒序）；
@@ -384,10 +387,8 @@ export function HomeScreen({
     <>
       <ScrollView
         style={styles.page}
-        contentContainerStyle={[styles.content, { paddingTop: insets.top + 8, paddingBottom: 96 }]}
+        contentContainerStyle={[styles.content, { paddingTop: insets.top + 8, paddingBottom: 76 }]}
         showsVerticalScrollIndicator={false}
-        onScroll={onPageScroll}
-        scrollEventThrottle={16}
       >
         {/* 1. 问候语 */}
         <Greeting />
@@ -403,7 +404,7 @@ export function HomeScreen({
             accessibilityLabel="对话"
           >
             <View style={styles.entryIcon}>
-              <Text style={styles.entryIconTxt}>💬</Text>
+              <EntryIcon kind="chat" />
             </View>
             <Text style={styles.entryName}>对话</Text>
           </Pressable>
@@ -414,7 +415,7 @@ export function HomeScreen({
             accessibilityLabel="创建面板"
           >
             <View style={styles.entryIcon}>
-              <Text style={styles.entryIconTxt}>⌗</Text>
+              <EntryIcon kind="grid" />
             </View>
             <Text style={styles.entryName}>创建面板</Text>
           </Pressable>
@@ -537,39 +538,52 @@ export function HomeScreen({
               accessibilityRole="button"
               accessibilityLabel={q.label}
             >
-              <Text style={styles.qcIcon}>{q.icon}</Text>
+              <QuadIcon kind={q.key} />
               <Text style={styles.qcLabel}>{q.label}</Text>
             </Pressable>
           ))}
         </View>
 
-        {/* 6. 进行中的任务 */}
-        <View style={styles.sechead}>
-          <Text style={styles.secTxt}>进行中的任务</Text>
-          <View style={{ flex: 1 }} />
-          <Text style={styles.secCount}>{ui.running.length} 个进行中</Text>
-        </View>
-        <View style={styles.listCol}>
-          {ui.running.map(r => (
-            <TaskRow
-              key={r.n}
-              kind="run"
-              task={r}
-              onPress={() => setTaskDetail({ task: r, kind: 'run' })}
-            />
-          ))}
-        </View>
-
-        {/* 7. 已完成任务：超过 4 条时裁剪 + 底部渐隐，不超过则原样铺开 */}
-        <View style={styles.sechead}>
-          <Text style={styles.secTxt}>已完成任务</Text>
-          <View style={{ flex: 1 }} />
-          <Text style={styles.secCount}>{ui.done.length} 个已完成</Text>
-        </View>
-        {ui.done.length > 4 ? (
-          <View style={doneMaxHeight !== undefined ? [styles.doneWrap, { maxHeight: doneMaxHeight }] : undefined}>
+        {/* 6. 进行中的任务（无任务时整段隐藏——不展示假数据） */}
+        {ui.running.length > 0 && (
+          <>
+            <View style={styles.sechead}>
+              <Text style={styles.secTxt}>进行中的任务</Text>
+              <View style={{ flex: 1 }} />
+              <Text style={styles.secCount}>{ui.running.length} 个进行中</Text>
+            </View>
             <View style={styles.listCol}>
-              {ui.done.map((d, i) => (
+              {ui.running.map(r => (
+                <TaskRow
+                  key={r.n}
+                  kind="run"
+                  task={r}
+                  onPress={() => setTaskDetail({ task: r, kind: 'run' })}
+                />
+              ))}
+            </View>
+          </>
+        )}
+
+        {/* 7. 已完成任务（无任务时整段隐藏；超过 4 条时裁剪 + 底部渐隐） */}
+        {ui.done.length > 0 && (
+          <>
+            <View style={styles.sechead}>
+              <Text style={styles.secTxt}>已完成任务</Text>
+              <View style={{ flex: 1 }} />
+              <Text style={styles.secCount}>{ui.done.length} 个已完成</Text>
+            </View>
+            {ui.done.length > 4 ? (
+          <View>
+            <ScrollView
+              style={doneMaxHeight !== undefined ? [styles.doneWrap, { maxHeight: doneMaxHeight }] : styles.doneWrap}
+              contentContainerStyle={styles.listCol}
+              nestedScrollEnabled
+              showsVerticalScrollIndicator={false}
+              onScroll={onDoneScroll}
+              scrollEventThrottle={16}
+            >
+              {ui.done.map(d => (
                 <View key={d.n} onLayout={measureDone(d.n)}>
                   <TaskRow
                     kind="done"
@@ -578,7 +592,7 @@ export function HomeScreen({
                   />
                 </View>
               ))}
-            </View>
+            </ScrollView>
             {/* 底部 64px 渐隐层：三层 surface 叠出近似的 mask 渐隐（原型 mask-image） */}
             {showDoneFade && (
               <>
@@ -599,6 +613,8 @@ export function HomeScreen({
               />
             ))}
           </View>
+        )}
+          </>
         )}
 
         {/* 8. 对话记录（真实会话列表：数据由 useSessionList 注入，点击切换会话） */}

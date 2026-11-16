@@ -109,15 +109,15 @@ describe('蓝鸟 v7 新壳', () => {
     expect(utils.getByText('聊天')).toBeTruthy();
     expect(utils.getByText('设置')).toBeTruthy();
 
-    // 切主页：入口卡 / 双卡 / 四个分区头都在
+    // 切主页：入口卡 / 双卡 / 对话记录都在；任务两段在无任务时整段隐藏（不展示假数据）
     fireEvent.press(utils.getByText('主页'));
     await waitFor(() => {
       expect(utils.getByText('创建面板')).toBeTruthy();
       expect(utils.getByText('任务 · 定时')).toBeTruthy();
-      expect(utils.getByText('进行中的任务')).toBeTruthy();
-      expect(utils.getByText('已完成任务')).toBeTruthy();
       expect(utils.getByText('对话记录')).toBeTruthy();
     });
+    expect(utils.queryByText('进行中的任务')).toBeNull();
+    expect(utils.queryByText('已完成任务')).toBeNull();
 
     // 设置弹层：主要行可见（命名纪律：无「主控」、无「Bot」后缀）
     fireEvent.press(utils.getByText('设置'));
@@ -127,13 +127,9 @@ describe('蓝鸟 v7 新壳', () => {
       expect(utils.getByText('退出登录')).toBeTruthy();
     });
 
-    // 进度 tick 回归：进行中任务的百分比应在 ~2s 内推进
-    // （防「p 增量被整帧丢弃」死锁复发——2026-11-15 复查发现的阻断级 bug）
-    await waitFor(
-      () => {
-        expect(utils.queryByText('62%')).toBeNull();
-      },
-      { timeout: 4000 }
-    );
+    // 假数据守卫：mock 任务已清空（真实任务由 R3 的 /agent-tasks 驱动），
+    // 验证「进行中的任务」分区不复活、历史假百分比不可见
+    expect(utils.queryByText('进行中的任务')).toBeNull();
+    expect(utils.queryByText('62%')).toBeNull();
   });
 });

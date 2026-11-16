@@ -23,12 +23,16 @@ export function IdentityHeader(props: { onOpenProfile: () => void }) {
 
   return (
     <View style={styles.wrap}>
-      {/* 品牌圆 44：bots[0] 有自定义头像则铺满圆，否则用应用图标 34 圆角（原型 .brand） */}
+      {/* 品牌圆 44：bots[0] 有自定义头像则铺满圆，否则用原型白色鸟标（黑圆底） */}
       <View style={styles.brand} pointerEvents="none">
         <Image
           style={bot.avatarImg ? styles.brandImgFull : styles.brandImg}
-          source={bot.avatarImg ? { uri: bot.avatarImg } : require('../assets/icon.png')}
-          resizeMode="cover"
+          source={
+            bot.avatarImg
+              ? { uri: bot.avatarImg }
+              : require('../assets/bluebird-mark-white.png')
+          }
+          resizeMode="contain"
         />
       </View>
 
@@ -81,7 +85,6 @@ const createStyles = (t: V7Tokens) =>
     brandImg: {
       width: 34,
       height: 34,
-      borderRadius: 8,
     },
     // 原型 .idrow：marginTop -8 把 pill 顶部压到圆下 8px
     pillWrap: {

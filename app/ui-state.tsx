@@ -23,6 +23,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import Svg, { Defs, LinearGradient, RadialGradient, Rect, Stop } from 'react-native-svg';
 
 import {
   INITIAL_MEMS,
@@ -546,39 +547,52 @@ function WallpaperLayer({
       />
     );
   }
-  const base = wallpaper === 'deep' ? '#060913' : '#e1e9f7';
+  const isDeep = wallpaper === 'deep';
+
+  // 原型 state.wallpapers 的 light/deep 两套 background：4 层 radial-gradient
+  // + 180deg 线性底色。RN 用 react-native-svg 的 RadialGradient/LinearGradient
+  // 原样复刻（之前用硬边圆层近似，边缘有明显圆环，与原型不符）。
+  const blobs = isDeep
+    ? [
+        { cx: 0.3, cy: 0.3, r: 0.26, c: 'rgba(130,185,255,0.45)' },
+        { cx: 0.22, cy: 0.18, r: 0.62, c: 'rgba(47,107,255,0.85)' },
+        { cx: 0.86, cy: 0.42, r: 0.46, c: 'rgba(55,182,255,0.5)' },
+        { cx: 0.5, cy: 0.9, r: 0.62, c: 'rgba(56,70,178,0.55)' },
+      ]
+    : [
+        { cx: 0.3, cy: 0.3, r: 0.26, c: 'rgba(255,255,255,0.55)' },
+        { cx: 0.24, cy: 0.2, r: 0.6, c: 'rgba(70,120,250,0.38)' },
+        { cx: 0.85, cy: 0.45, r: 0.46, c: 'rgba(90,175,255,0.3)' },
+        { cx: 0.5, cy: 0.9, r: 0.6, c: 'rgba(130,150,248,0.3)' },
+      ];
+
   return (
     <View style={{ ...ABS_FILL, backgroundColor: tokens.bg }}>
       {(wallpaper === 'deep' || wallpaper === 'light') && (
-        <View style={{ ...ABS_FILL, backgroundColor: base }}>
-          {(wallpaper === 'deep'
-            ? [
-                { l: '-25%', t: '-18%', w: '80%', h: '52%', c: 'rgba(47,107,255,0.85)' },
-                { l: '0%', t: '-5%', w: '60%', h: '38%', c: 'rgba(130,185,255,0.45)' },
-                { l: '55%', t: '18%', w: '70%', h: '46%', c: 'rgba(55,182,255,0.5)' },
-                { l: '-5%', t: '62%', w: '90%', h: '52%', c: 'rgba(56,70,178,0.55)' },
-              ]
-            : [
-                { l: '-20%', t: '-16%', w: '75%', h: '48%', c: 'rgba(70,120,250,0.38)' },
-                { l: '0%', t: '-10%', w: '55%', h: '34%', c: 'rgba(255,255,255,0.55)' },
-                { l: '60%', t: '20%', w: '60%', h: '40%', c: 'rgba(90,175,255,0.3)' },
-                { l: '55%', t: '62%', w: '90%', h: '52%', c: 'rgba(130,150,248,0.3)' },
-              ]
-          ).map((c, i) => (
-            <View
-              key={i}
-              style={{
-                position: 'absolute',
-                left: c.l,
-                top: c.t,
-                width: c.w,
-                height: c.h,
-                borderRadius: 999,
-                backgroundColor: c.c,
-              }}
-            />
+        <Svg width="100%" height="100%">
+          <Defs>
+            <LinearGradient id="wpBase" x1="0" y1="0" x2="0" y2="1">
+              <Stop offset="0" stopColor={isDeep ? '#060913' : '#e1e9f7'} />
+              <Stop offset="1" stopColor={isDeep ? '#0b1226' : '#ccdcef'} />
+            </LinearGradient>
+            {blobs.map((b, i) => (
+              <RadialGradient
+                key={i}
+                id={`wpBlob${i}`}
+                cx={`${b.cx * 100}%`}
+                cy={`${b.cy * 100}%`}
+                r={`${b.r * 100}%`}
+              >
+                <Stop offset="0" stopColor={b.c} />
+                <Stop offset="1" stopColor={b.c} stopOpacity={0} />
+              </RadialGradient>
+            ))}
+          </Defs>
+          <Rect x="0" y="0" width="100%" height="100%" fill="url(#wpBase)" />
+          {blobs.map((_, i) => (
+            <Rect key={i} x="0" y="0" width="100%" height="100%" fill={`url(#wpBlob${i})`} />
           ))}
-        </View>
+        </Svg>
       )}
     </View>
   );

@@ -8,7 +8,6 @@ import {
   Animated,
   Easing,
   KeyboardAvoidingView,
-  Platform,
   Text,
   useWindowDimensions,
   View,
@@ -31,12 +30,15 @@ import { useSessionActions } from '../hooks/useSessionActions';
 import { useModelSelection } from '../hooks/useModelSelection';
 import { useStreamingPreference } from '../hooks/useStreamingPreference';
 import { useAttachments } from '../hooks/useAttachments';
+import { useKeyboardHeight } from '../hooks/useKeyboardHeight';
+import { NavIcon } from '../components/V7Icons';
 
 // ---- 底部导航单键：选中键展开到 66 显示文字，未选中收成 40 只留图标 ----
 function NavTab(props: {
-  icon: string;
+  icon: 'home' | 'chat' | 'settings';
   label: string;
   width: Animated.AnimatedInterpolation<number> | number;
+  labelWidth: Animated.AnimatedInterpolation<number> | number;
   labelOpacity: Animated.AnimatedInterpolation<number> | number;
   onPress: () => void;
   active: boolean;
@@ -46,6 +48,7 @@ function NavTab(props: {
       style={{
         width: props.width,
         height: 36,
+        flexDirection: 'row',
         justifyContent: 'center',
         alignItems: 'center',
         zIndex: 1,
@@ -56,24 +59,34 @@ function NavTab(props: {
         style={{
           flexDirection: 'row',
           alignItems: 'center',
-          gap: 5,
           color: '#ffffff',
           fontSize: 12,
           fontWeight: '600',
           opacity: props.active ? 1 : 0.6,
         }}
       >
-        <Text style={{ fontSize: 15 }}>{props.icon}</Text>
-        <Animated.Text
+        <NavIcon kind={props.icon} />
+        {/* 原型 .tb .lbl：未选中 max-width:0 + overflow:hidden，选中才展开 28px；
+            不用固定 gap，否则收起态的图标会被 5px 间隙顶偏、文字竖排换行 */}
+        <Animated.View
           style={{
-            color: '#ffffff',
-            fontSize: 12,
-            fontWeight: '600',
+            width: props.labelWidth,
+            overflow: 'hidden',
             opacity: props.labelOpacity,
           }}
         >
-          {props.label}
-        </Animated.Text>
+          <Text
+            numberOfLines={1}
+            style={{
+              paddingLeft: 5,
+              color: '#ffffff',
+              fontSize: 12,
+              fontWeight: '600',
+            }}
+          >
+            {props.label}
+          </Text>
+        </Animated.View>
       </Text>
     </Animated.View>
   );
@@ -83,6 +96,8 @@ function InnerShell() {
   const ui = useUi();
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
+  // 键盘弹出时隐藏底部导航（否则会浮在键盘上方压住输入条）
+  const keyboardH = useKeyboardHeight();
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   // ---- 真实聊天链路（与旧壳 App.tsx 同款组合）----
@@ -196,12 +211,12 @@ function InnerShell() {
   const chatWidth = pillX.interpolate({ inputRange: [0, 40], outputRange: [40, 66] });
   const homeLabel = pillX.interpolate({ inputRange: [0, 20], outputRange: [1, 0], extrapolate: 'clamp' });
   const chatLabel = pillX.interpolate({ inputRange: [20, 40], outputRange: [0, 1], extrapolate: 'clamp' });
+  // 文字槽宽：0（只留图标）↔ 33（28px 文字 + 5px 间距），与原型 .lbl max-width 一致
+  const homeLabelW = pillX.interpolate({ inputRange: [0, 20], outputRange: [33, 0], extrapolate: 'clamp' });
+  const chatLabelW = pillX.interpolate({ inputRange: [20, 40], outputRange: [0, 33], extrapolate: 'clamp' });
 
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1 }}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
+    <KeyboardAvoidingView style={{ flex: 1 }}>
       <StatusBar style={ui.isDark ? 'light' : 'dark'} />
       <View style={{ flex: 1, overflow: 'hidden' }}>
         <Animated.View
@@ -248,7 +263,9 @@ function InnerShell() {
         </Animated.View>
       </View>
 
-      {/* 底部悬浮导航：空白处点击穿透（pointerEvents box-none），pill 本体可按 */}
+      {/* 底部悬浮导航：空白处点击穿透（pointerEvents box-none），pill 本体可按。
+          键盘弹出时整体隐藏，避免浮在键盘上方压住输入条。 */}
+      {keyboardH === 0 && (
       <View
         pointerEvents="box-none"
         style={{
@@ -282,11 +299,12 @@ function InnerShell() {
               transform: [{ translateX: pillX }],
             }}
           />
-          <NavTab icon="⌂" label="主页" width={homeWidth} labelOpacity={homeLabel} active={ui.view === 'home'} onPress={() => ui.setView('home')} />
-          <NavTab icon="💬" label="聊天" width={chatWidth} labelOpacity={chatLabel} active={ui.view === 'chat'} onPress={() => ui.setView('chat')} />
-          <NavTab icon="⚙" label="设置" width={40} labelOpacity={0} active={false} onPress={() => setSettingsOpen(true)} />
+          <NavTab icon="home" label="主页" width={homeWidth} labelWidth={homeLabelW} labelOpacity={homeLabel} active={ui.view === 'home'} onPress={() => ui.setView('home')} />
+          <NavTab icon="chat" label="聊天" width={chatWidth} labelWidth={chatLabelW} labelOpacity={chatLabel} active={ui.view === 'chat'} onPress={() => ui.setView('chat')} />
+          <NavTab icon="settings" label="设置" width={40} labelWidth={0} labelOpacity={0} active={false} onPress={() => setSettingsOpen(true)} />
         </View>
       </View>
+      )}
 
       <SettingsScreen visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </KeyboardAvoidingView>
