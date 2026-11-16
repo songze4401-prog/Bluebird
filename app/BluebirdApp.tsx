@@ -3,8 +3,9 @@
 // + 底部悬浮导航（黑 pill 高亮滑移）+ 设置弹层。
 // 进入默认落在聊天页（原型 openRecent：进入即回到最近一次对话）。
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   Animated,
   Easing,
   KeyboardAvoidingView,
@@ -12,6 +13,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StatusBar } from 'expo-status-bar';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -23,6 +25,7 @@ import { SettingsScreen } from './SettingsScreen';
 
 // 真实聊天链路：复用旧壳的全套 hooks（v7 壳只换皮不换逻辑）
 import { DEFAULT_SESSION_ID } from '../lib/constants';
+import type { Message } from '../lib/types';
 import { usePresence } from '../lib/presence';
 import { useChatSession } from '../hooks/useChatSession';
 import { useSessionList } from '../hooks/useSessionList';
@@ -30,6 +33,7 @@ import { useSessionActions } from '../hooks/useSessionActions';
 import { useModelSelection } from '../hooks/useModelSelection';
 import { useStreamingPreference } from '../hooks/useStreamingPreference';
 import { useAttachments } from '../hooks/useAttachments';
+import { useBotResultStream } from '../hooks/useBotResultStream';
 import { useKeyboardHeight } from '../hooks/useKeyboardHeight';
 import { NavIcon } from '../components/V7Icons';
 
@@ -135,6 +139,76 @@ function InnerShell() {
     // 主页选中会话 / 新建聊天成功后，轨道切到聊天页（旧壳等价于 setTab('chat')）
     onEnterChat: () => ui.setView('chat'),
   });
+
+  // ---- 收藏 / 本机隐藏（与旧壳同键名同语义：bluebird.favoriteMessages）----
+  const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set());
+  const [hiddenMessageIds, setHiddenMessageIds] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    let cancelled = false;
+    AsyncStorage.getItem('bluebird.favoriteMessages')
+      .then(raw => {
+        if (cancelled || !raw) return;
+        const ids = JSON.parse(raw);
+        if (Array.isArray(ids)) setFavoriteIds(new Set(ids.filter(Boolean)));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggleFavorite = (message: Message) => {
+    setFavoriteIds(prev => {
+      const next = new Set(prev);
+      if (next.has(message.id)) next.delete(message.id);
+      else next.add(message.id);
+      void AsyncStorage.setItem(
+        'bluebird.favoriteMessages',
+        JSON.stringify([...next])
+      ).catch(() => {});
+      return next;
+    });
+  };
+
+  // 隐藏单条 AI 回复：服务端无此接口，只在本机视图过滤（旧壳同款文案）
+  const hideMessage = (message: Message) => {
+    const key = `${currentSessionId}:${message.id}`;
+    setHiddenMessageIds(prev => new Set(prev).add(key));
+    Alert.alert(
+      '已从本机视图隐藏',
+      '服务端尚未提供删除单条 AI 回复的接口；刷新或重新进入会话后可能恢复显示。'
+    );
+  };
+
+  // Memory Bot 结果回传 SSE：结果写入当前会话（与旧壳 App.tsx 同款接线）
+  useBotResultStream({
+    sessionId: currentSessionId,
+    onResult: result => {
+      if (result.message) {
+        chat.receiveExternalMessage(result.sessionId, result.message);
+      }
+    },
+    onDeliveryFailed: (taskId, errorCode) => {
+      Alert.alert(
+        'Memory Bot 结果回传失败',
+        errorCode
+          ? `任务结果未能写入当前会话（${errorCode}）。可在主页查看任务状态。`
+          : '任务结果未能写入当前会话。'
+      );
+    },
+    onError: message => {
+      Alert.alert('Memory Bot 结果流中断', `${message}。可切换会话或刷新后重试。`);
+    },
+  });
+
+  // 本机隐藏过滤（收藏不过滤，只显示 ★ 标记）
+  const visibleMessages = useMemo(
+    () =>
+      chat.messages.filter(
+        m => !hiddenMessageIds.has(`${currentSessionId}:${m.id}`)
+      ),
+    [chat.messages, currentSessionId, hiddenMessageIds]
+  );
 
   // 启动引导（与旧壳同款）：复用空白会话当草稿 → 否则新建 → 失败回退默认会话
   const [bootstrapped, setBootstrapped] = useState(false);
@@ -246,7 +320,7 @@ function InnerShell() {
           </View>
           <View style={{ width }}>
             <ChatScreen
-              chat={chat}
+              chat={{ ...chat, messages: visibleMessages }}
               modelLabel={selectedModelLabel}
               models={modelProviders}
               currentModel={selectedModel}
@@ -258,6 +332,9 @@ function InnerShell() {
                 return ok;
               }}
               attachments={attachments}
+              isFavorite={m => favoriteIds.has(m.id)}
+              onToggleFavorite={toggleFavorite}
+              onHideMessage={hideMessage}
             />
           </View>
         </Animated.View>

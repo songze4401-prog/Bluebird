@@ -94,6 +94,11 @@ jest.mock('../../hooks/useAttachments', () => ({
   }),
 }));
 
+// 结果回传 SSE 在 Node 测试环境没有 XMLHttpRequest，必须桩掉
+jest.mock('../../hooks/useBotResultStream', () => ({
+  useBotResultStream: jest.fn(),
+}));
+
 describe('蓝鸟 v7 新壳', () => {
   it('聊天首屏 + 底部导航 + 主页区块 + 设置弹层 + 进度推进（mock 数据）', async () => {
     const utils = await render(<BluebirdApp />);

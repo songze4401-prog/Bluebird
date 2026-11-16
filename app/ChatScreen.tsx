@@ -4,9 +4,10 @@
 // 三个弹层（资料编辑 / 默认模型 / 工具详情）由本屏挂载；全页透明底透出壁纸层，
 // 颜色走 tokens，阴影走 V7_SHADOWS，动效只用 RN 内置 Animated。
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
+  Clipboard,
   Easing,
   Image,
   Keyboard,
@@ -22,6 +23,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useUi } from './ui-state';
 import { V7_SHADOWS, type V7Tokens } from './ui-theme';
+import { getTheme } from '../theme';
+import { MarkdownMessage } from '../components/MarkdownMessage';
+import { SheetScaffold } from '../components/SheetScaffold';
 import { IdentityHeader } from '../components/IdentityHeader';
 import { EditProfileSheet } from '../components/EditProfileSheet';
 import { ModelPickerSheet } from '../components/ModelPickerSheet';
@@ -29,7 +33,7 @@ import { ToolDetailSheet } from '../components/ToolDetailSheet';
 import type { ChatSessionApi } from '../hooks/useChatSession';
 import type { AttachmentsApi } from '../hooks/useAttachments';
 import { useKeyboardHeight } from '../hooks/useKeyboardHeight';
-import type { ContentSegment, ModelDefaults, ModelProvider } from '../lib/types';
+import type { ContentSegment, Message, ModelDefaults, ModelProvider } from '../lib/types';
 
 // 全屏绝对定位（与 app/ui-state.tsx 同款写法：本仓库 RN 版型里没有 absoluteFillObject）
 const ABS_FILL = {
@@ -156,6 +160,30 @@ const createStyles = (t: V7Tokens, fd: number) =>
     failTxt: { fontSize: 11, color: t.down },
     // 用户主动停止后的部分回复提示
     stoppedTxt: { fontSize: 11, color: t.mut },
+    // 提示条（modelNote/agentNotice/memoryNote，旧壳 ChatBubble 同语义）与收藏标记
+    noteTxt: { fontSize: 11, color: t.mut, lineHeight: 16 },
+    favStar: { fontSize: 11, color: t.warn },
+    // 历史分页头 + 加载提示（旧壳 MessageList listHeader 同语义）
+    loadOlder: {
+      alignSelf: 'center',
+      borderRadius: 999,
+      backgroundColor: t.soft,
+      paddingVertical: 7,
+      paddingHorizontal: 14,
+      marginBottom: 8,
+    },
+    loadOlderTxt: { fontSize: 12, color: t.sec },
+    loadingTxt: { alignSelf: 'center', fontSize: 12, color: t.mut, marginBottom: 8 },
+    // 消息操作弹层（SheetScaffold children）
+    actWrap: { gap: 8, paddingBottom: 12 },
+    actTitle: { fontSize: 12, fontWeight: '700', color: t.sec, paddingTop: 4 },
+    actRow: {
+      paddingVertical: 12,
+      paddingHorizontal: 12,
+      borderRadius: 12,
+      backgroundColor: t.soft,
+    },
+    actRowTxt: { fontSize: 14, color: t.ink },
     // 工具标签（原型 .tool：行 gap 8，✓ ink w700 + 文案 sec；按下开工具详情）
     tool: { flexDirection: 'row', alignItems: 'center', gap: 8 },
     toolCk: { fontSize: 12, fontWeight: '700', color: t.ink },
@@ -297,6 +325,10 @@ export function ChatScreen(props: {
     AttachmentsApi,
     'pendingAttachments' | 'uploadingImage' | 'pickImage' | 'removeAttachment'
   >;
+  // 消息长按操作（旧壳 MessageActionSheet 语义）：收藏/隐藏为可选（桩测试可不传）
+  isFavorite?: (message: Message) => boolean;
+  onToggleFavorite?: (message: Message) => void;
+  onHideMessage?: (message: Message) => void;
 }) {
   const ui = useUi();
   const chat = props.chat;
@@ -306,12 +338,19 @@ export function ChatScreen(props: {
   const insets = useSafeAreaInsets();
   // 键盘高度：输入条/线程让位都按它上移（绝对定位悬浮层不会自动避让键盘）
   const keyboardH = useKeyboardHeight();
+  // 助手气泡的 markdown 渲染用旧壳主题桥（MarkdownMessage 吃 theme.ts 的 Theme）
+  const legacyTheme = useMemo(
+    () => getTheme(t.isDark ? 'dark' : 'light'),
+    [t.isDark]
+  );
 
-  // 本屏挂载的弹层开关（资料编辑 / 默认模型 / 工具详情）
+  // 本屏挂载的弹层开关（资料编辑 / 默认模型 / 工具详情 / 消息操作）
   const [editOpen, setEditOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [toolOpen, setToolOpen] = useState(false);
   const [tool, setTool] = useState<string | null>(null);
+  // 长按操作的目标消息
+  const [actionMsg, setActionMsg] = useState<Message | null>(null);
 
   // 输入框本地草稿（发送后清空）
   const [input, setInput] = useState('');
@@ -327,8 +366,42 @@ export function ChatScreen(props: {
   // 流式增量期间用户上滑阅读不被逐帧拽回（旧壳 follow 三态机的轻量版）。
   const scrollRef = useRef<ScrollViewInstance>(null);
   const followRef = useRef(true);
+  // 向上翻页的一次性闸门：到顶自动触发后关闭，加载结束才重开（防滚动事件连发刷请求）
+  const olderGuard = useRef(true);
   const scrollToBottom = () => {
     if (followRef.current) scrollRef.current?.scrollToEnd({ animated: false });
+  };
+
+  // 助手正文渲染（旧壳 ChatBubble 同款语义分流）：
+  //   含 sticker 段 → 分段渲染（text 段走 markdown / sticker 段走失效占位 chip）；
+  //   纯文本 → 整段 MarkdownMessage。
+  const renderAssistantContent = (m: Message) => {
+    const hasSticker =
+      m.segments?.some(s => s.type === 'sticker') ||
+      (!m.segments && /\[sticker:[^\]]+\]/.test(m.content));
+    if (!m.content && !hasSticker) return null;
+    if (!hasSticker) {
+      return (
+        <View style={styles.txt}>
+          <MarkdownMessage content={m.content} theme={legacyTheme} />
+        </View>
+      );
+    }
+    const segs: ContentSegment[] = m.segments ?? [{ type: 'text', text: m.content }];
+    return segs.map((seg, si) =>
+      seg.type === 'text' && seg.text ? (
+        <View key={si} style={styles.txt}>
+          <MarkdownMessage content={seg.text} theme={legacyTheme} />
+        </View>
+      ) : seg.type === 'sticker' ? (
+        <View key={si} style={styles.stchip}>
+          <Text numberOfLines={1} style={styles.stchipTxt}>
+            {/* BUG-03 纪律：绝不把原始 sticker 标记透回给用户 */}
+            {seg.valid ? '🖼 表情包' : '表情已失效'}
+          </Text>
+        </View>
+      ) : null
+    );
   };
 
   // 键盘弹出后把最新一条消息顶到输入条上方（等键盘动画落定再滚）
@@ -449,14 +522,51 @@ export function ChatScreen(props: {
           const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
           followRef.current =
             contentSize.height - contentOffset.y - layoutMeasurement.height < 80;
+          // 到顶自动加载更早消息（一次性闸门防滚动连发；hook 内部另有并发守卫）
+          if (
+            olderGuard.current &&
+            contentOffset.y < 60 &&
+            chat.hasMoreHistory &&
+            !chat.loadingOlder
+          ) {
+            olderGuard.current = false;
+            void chat
+              .loadOlderHistory()
+              .then(() => {
+                olderGuard.current = true;
+              })
+              .catch(() => {
+                olderGuard.current = true;
+              });
+          }
         }}
         scrollEventThrottle={100}
         onContentSizeChange={scrollToBottom}
       >
+        {/* 历史分页头：有更早消息时的手动入口（滚动到顶也会自动触发，旧壳 MessageList 同语义） */}
+        {chat.hasMoreHistory && (
+          <Pressable
+            style={styles.loadOlder}
+            disabled={chat.loadingOlder}
+            onPress={() => void chat.loadOlderHistory()}
+            accessibilityRole="button"
+            accessibilityLabel="加载更早消息"
+          >
+            <Text style={styles.loadOlderTxt}>
+              {chat.loadingOlder ? '正在加载更早消息…' : '加载更早消息'}
+            </Text>
+          </Pressable>
+        )}
+        {chat.loadingHistory && <Text style={styles.loadingTxt}>正在读取对话…</Text>}
         {chat.messages.map(m =>
           m.role === 'user' ? (
-            /* 用户消息：右对齐列 = 时间 → 黑泡（附件 chip 收在泡内）→ 失败重试行 */
-            <View key={m.id} style={styles.mUser}>
+            /* 用户消息：右对齐列 = 时间 → 黑泡（附件 chip 收在泡内）；长按开消息操作 */
+            <Pressable
+              key={m.id}
+              style={styles.mUser}
+              onLongPress={() => setActionMsg(m)}
+              delayLongPress={350}
+            >
               <Text style={styles.who}>{formatTime(m.createdAt)}</Text>
               <View style={styles.bub}>
                 <Text style={styles.bubTxt}>{m.content}</Text>
@@ -468,29 +578,22 @@ export function ChatScreen(props: {
                   </View>
                 ))}
               </View>
-            </View>
+            </Pressable>
           ) : (
-            /* blue 消息：左对齐列 = 时间 → 白泡（分段各一泡）→ 工具 pill（按下开工具详情） */
-            <View key={m.id} style={styles.mBlue}>
+            /* blue 消息：左对齐列 = 时间 → 白泡（markdown/sticker 分流）→ 停止/提示条 →
+               工具 pill → 收藏标记；长按任意处开消息操作（旧壳 MessageActionSheet 语义） */
+            <Pressable
+              key={m.id}
+              style={styles.mBlue}
+              onLongPress={() => setActionMsg(m)}
+              delayLongPress={350}
+            >
               <Text style={styles.who}>{formatTime(m.createdAt)}</Text>
-              {(m.segments ?? [{ type: 'text', text: m.content }]).map(
-                (seg: ContentSegment, si: number) =>
-                  seg.type === 'text' ? (
-                    seg.text ? (
-                      <View key={si} style={styles.txt}>
-                        <Text style={styles.txtTxt}>{seg.text}</Text>
-                      </View>
-                    ) : null
-                  ) : (
-                    <View key={si} style={styles.stchip}>
-                      <Text numberOfLines={1} style={styles.stchipTxt}>
-                        {/* BUG-03 纪律：绝不把原始 sticker 标记透回给用户 */}
-                        {seg.valid ? '🖼 表情包' : '表情已失效'}
-                      </Text>
-                    </View>
-                  )
-              )}
-              {m.stopped && <Text style={styles.stoppedTxt}>已停止，以上为部分回复</Text>}
+              {renderAssistantContent(m)}
+              {m.stopped && <Text style={styles.stoppedTxt}>已停止生成 · 本机保留的部分回复</Text>}
+              {!!m.modelNote && <Text style={styles.noteTxt}>{m.modelNote}</Text>}
+              {!!m.agentNotice && <Text style={styles.noteTxt}>{m.agentNotice}</Text>}
+              {!!m.memoryNote && <Text style={styles.noteTxt}>{m.memoryNote}</Text>}
               {/* 发送失败的错误气泡是 assistant 角色 + retryText（旧壳 ChatBubble 同款语义）：
                   重试入口必须在这里，放用户分支永远不会出现（oracle 复查阻断②） */}
               {m.retryText !== undefined && (
@@ -522,10 +625,22 @@ export function ChatScreen(props: {
                   </Text>
                 </Pressable>
               ))}
-            </View>
+              {props.isFavorite?.(m) && <Text style={styles.favStar}>★ 已收藏</Text>}
+            </Pressable>
           )
         )}
-        {/* sending：线程尾打字三点 */}
+        {/* sending：在途工具 pill + 打字三点（旧壳 AgentRunBlock footer 的 v7 版） */}
+        {chat.sending &&
+          chat.liveToolSteps.map((step, ti) => (
+            <View key={`live-${ti}`} style={styles.tool}>
+              <Text style={[styles.toolCk, { color: step.ok ? t.ink : t.mut }]}>
+                {step.running ? '●' : step.ok ? '✓' : '✕'}
+              </Text>
+              <Text numberOfLines={1} style={styles.toolTxt}>
+                {step.name + (step.summary ? ' · ' + step.summary : '')}
+              </Text>
+            </View>
+          ))}
         {chat.sending && <TypingDots />}
       </ScrollView>
 
@@ -687,6 +802,79 @@ export function ChatScreen(props: {
         onSelect={props.onSelectModel}
       />
       <ToolDetailSheet visible={toolOpen} onClose={() => setToolOpen(false)} tool={tool} />
+
+      {/* 6. 消息长按操作（旧壳 MessageActionSheet 的 v7 版：复制/收藏/撤回/隐藏） */}
+      <SheetScaffold
+        visible={!!actionMsg}
+        onClose={() => setActionMsg(null)}
+        title="消息操作"
+      >
+        {actionMsg && (
+          <View style={styles.actWrap}>
+            <Text style={styles.actTitle}>
+              {actionMsg.role === 'user' ? '这条消息' : '这条回复'}
+            </Text>
+            {!!actionMsg.content?.trim() && (
+              <Pressable
+                style={({ pressed }) => [styles.actRow, pressed && styles.prowPressed]}
+                onPress={() => {
+                  Clipboard.setString(actionMsg.content);
+                  ui.toast('已复制');
+                  setActionMsg(null);
+                }}
+                accessibilityRole="button"
+                accessibilityLabel="复制文字"
+              >
+                <Text style={styles.actRowTxt}>复制文字</Text>
+              </Pressable>
+            )}
+            {actionMsg.role === 'user' ? (
+              <Pressable
+                style={({ pressed }) => [styles.actRow, pressed && styles.prowPressed]}
+                onPress={() => {
+                  chat.recallMessage(actionMsg);
+                  setActionMsg(null);
+                  ui.toast('已撤回');
+                }}
+                accessibilityRole="button"
+                accessibilityLabel="撤回这条消息"
+              >
+                <Text style={[styles.actRowTxt, { color: t.down }]}>撤回这条消息</Text>
+              </Pressable>
+            ) : (
+              <>
+                <Pressable
+                  style={({ pressed }) => [styles.actRow, pressed && styles.prowPressed]}
+                  onPress={() => {
+                    props.onToggleFavorite?.(actionMsg);
+                    setActionMsg(null);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    props.isFavorite?.(actionMsg) ? '取消收藏' : '收藏这条回复'
+                  }
+                >
+                  <Text style={styles.actRowTxt}>
+                    {props.isFavorite?.(actionMsg) ? '★ 取消收藏' : '收藏这条回复'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={({ pressed }) => [styles.actRow, pressed && styles.prowPressed]}
+                  onPress={() => {
+                    props.onHideMessage?.(actionMsg);
+                    setActionMsg(null);
+                    ui.toast('已从本机视图隐藏');
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel="隐藏这条回复"
+                >
+                  <Text style={styles.actRowTxt}>隐藏这条回复</Text>
+                </Pressable>
+              </>
+            )}
+          </View>
+        )}
+      </SheetScaffold>
     </>
   );
 }

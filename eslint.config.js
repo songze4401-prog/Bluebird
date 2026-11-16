@@ -5,6 +5,17 @@ const expoConfig = require("eslint-config-expo/flat");
 module.exports = defineConfig([
   expoConfig,
   {
+    // import/no-unresolved 解析器显式给 TS/RN 扩展名（react-native-svg 的
+    // main 指向 lib/commonjs/index.js，默认解析在某些插件版本下会漏报已安装的包）
+    settings: {
+      'import/resolver': {
+        node: {
+          extensions: ['.js', '.jsx', '.ts', '.tsx', '.json'],
+        },
+      },
+    },
+  },
+  {
     ignores: ["dist/*"],
   },
   // 阶段 0 基线护栏 → 阶段 1 收口：禁止组件层直接调用 fetch。
