@@ -454,6 +454,54 @@ describe('processMemory 提取流程（假 client 拦截）', SERIAL, () => {
     assert.equal(second.state.calls, 1, '待记忆意图应传递给下一条消息');
   });
 
+  test('交错会话：待记忆意图不会被其他会话继承或消费', async () => {
+    await quiesce();
+    seed([]);
+
+    const first = fakeClient('{}');
+    await memory.processMemory(first.client, '记住', 'session-A');
+    assert.equal(first.state.calls, 1);
+
+    // B 的普通消息既不应因 A 的意图触发提取，也不应消费 A 的待处理状态。
+    const otherSession = fakeClient(
+      validReply({
+        content: '我很喜欢抹茶',
+        type: 'fact',
+        keywords: ['抹茶'],
+        sourceQuote: '我很喜欢抹茶',
+      })
+    );
+    const otherOutcome = await memory.processMemory(
+      otherSession.client,
+      '我很喜欢抹茶',
+      'session-B'
+    );
+    assert.equal(otherOutcome.reason, 'not_triggered');
+    assert.equal(otherSession.state.calls, 0);
+    assert.deepEqual(memory.getMemories(), []);
+
+    // A 的下一条普通消息仍应消费 A 自己的待处理意图并完成提取。
+    const continuation = fakeClient(
+      validReply({
+        content: '我很喜欢抹茶',
+        type: 'fact',
+        keywords: ['抹茶'],
+        sourceQuote: '我很喜欢抹茶',
+      })
+    );
+    const continuationOutcome = await memory.processMemory(
+      continuation.client,
+      '我很喜欢抹茶',
+      'session-A'
+    );
+    assert.equal(continuation.state.calls, 1);
+    assert.equal(continuationOutcome.written, true);
+    assert.deepEqual(
+      memory.getMemories()[0].contributions.map(contribution => contribution.sessionId),
+      ['session-A']
+    );
+  });
+
   test('记忆数量超过上限(100)时裁剪最旧的非 identity 记忆', async () => {
     await quiesce();
     const many = [];

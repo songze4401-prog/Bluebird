@@ -94,8 +94,8 @@ const MEMORY_TRIGGER =
   /(记一下|记一笔|记录一下|帮我记|别忘了|记住|记着|记下|保存|我叫|我的名字|我是|我喜欢|我不喜欢|我想要|我的目标|以后请|请不要|忘记|别记|不要记)/;
 
 // 跨消息的"待记忆"状态：用户先单独发一句「记住」，下一条才给出内容时，
-// 由它让下一条消息也走一次记忆提取。消费一次即清除，不会长期残留。
-let pendingMemoryIntent = false;
+// 由它让同一会话的下一条消息也走一次记忆提取。按可信用户与会话隔离，消费一次即清除。
+const pendingMemoryIntents = new Set();
 
 const SENSITIVE_PATTERN =
   /(密码|口令|私钥|助记词|验证码|信用卡|银行卡|身份证|手机号|cvv|api[\s_-]?key|secret|bearer|sk-[a-zA-Z0-9_-]{8,}|(?:\d[\s-]?){11,})/i;
@@ -163,6 +163,10 @@ const INJECT_TOKEN_BUDGET = 2400;
 
 function cleanText(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function pendingMemoryIntentKey(sessionId, userId) {
+  return JSON.stringify([cleanText(userId), cleanText(sessionId)]);
 }
 
 // 旧条目的 id 由已有字段推出（正文 + 落库时间 + 最早那条原话），
@@ -2008,11 +2012,15 @@ async function attemptMemoryWrite(client, message, sessionId = null, options = {
   const text = String(message || '').trim();
 
   // 观察模式：every_turn 下每轮都尝试提取（不再依赖触发词）；trigger 维持历史门控。
-  // pendingMemoryIntent 的跨消息意图两种模式都同步消费，避免并发重复使用同一次意图。
+  // 待记忆意图按当前可信用户/会话读取并消费，避免跨会话串用或并发重复使用。
   const observerMode = getObserverMode();
+  const intentKey = pendingMemoryIntentKey(sessionId, options.userId);
+  const hasPendingIntent = pendingMemoryIntents.has(intentKey);
   const shouldTryMemory =
-    observerMode === OBSERVER_EVERY_TURN ? Boolean(text) : pendingMemoryIntent || shouldProcessMemory(text);
-  pendingMemoryIntent = false;
+    observerMode === OBSERVER_EVERY_TURN
+      ? Boolean(text)
+      : hasPendingIntent || shouldProcessMemory(text);
+  pendingMemoryIntents.delete(intentKey);
 
   if (!shouldTryMemory) {
     outcome.reason = 'not_triggered';
@@ -2046,7 +2054,7 @@ async function attemptMemoryWrite(client, message, sessionId = null, options = {
 
     // 本条看着像记忆指令（例如只发了「记住」）却没提取到内容 —— 把意图交给下一条
     if (shouldProcessMemory(text)) {
-      pendingMemoryIntent = true;
+      pendingMemoryIntents.add(intentKey);
     }
 
     return outcome;
