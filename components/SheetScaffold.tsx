@@ -162,6 +162,11 @@ export function SheetScaffold(props: {
           backgroundColor: tokens.surface,
           borderTopLeftRadius: 26,
           borderTopRightRadius: 26,
+          // 原型 .sheet 是内容高度 + max-height 86%：内容超高时由 sh-body 滚动。
+          // RN 里 ScrollView 用 flexShrink:1（而非 flex:1/flexBasis 0）才能在
+          // 未定高的 sheet 里正确取内容高度并被 maxHeight 截断，避免真机上
+          // 顶部内容被挤出可视区（设置页用户卡被裁的根因）。
+          overflow: 'hidden',
           maxHeight: draggable ? undefined : maxSheetHeight,
           height: draggable ? sheetHeight : undefined,
           // 原型 box-shadow: 0 -14px 44px（负 y 向上投影）：复用 card 阴影、翻转偏移
@@ -239,9 +244,11 @@ export function SheetScaffold(props: {
           </TouchableOpacity>
         </View>
 
-        {/* sh-body：滚动由壳统一提供（原型 .sh-body overflow-y:auto），内边距由各弹层自己排 */}
+        {/* sh-body：滚动由壳统一提供（原型 .sh-body overflow-y:auto），内边距由各弹层自己排。
+            用 flexShrink 而不是 flex:1：sheet 未定高（只有 maxHeight），flexBasis 0 会让
+            ScrollView 在真机上量不到内容高度，内容可能从顶部被裁。 */}
         <ScrollView
-          style={{ flex: 1 }}
+          style={{ flexShrink: 1 }}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >

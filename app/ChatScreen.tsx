@@ -28,6 +28,7 @@ import { ModelPickerSheet } from '../components/ModelPickerSheet';
 import { ToolDetailSheet } from '../components/ToolDetailSheet';
 import type { ChatSessionApi } from '../hooks/useChatSession';
 import type { AttachmentsApi } from '../hooks/useAttachments';
+import { useKeyboardHeight } from '../hooks/useKeyboardHeight';
 import type { ContentSegment, ModelDefaults, ModelProvider } from '../lib/types';
 
 // 全屏绝对定位（与 app/ui-state.tsx 同款写法：本仓库 RN 版型里没有 absoluteFillObject）
@@ -155,10 +156,6 @@ const createStyles = (t: V7Tokens, fd: number) =>
     failTxt: { fontSize: 11, color: t.down },
     // 用户主动停止后的部分回复提示
     stoppedTxt: { fontSize: 11, color: t.mut },
-    // 空会话引导（轻提示，不学旧壳的大欢迎页）
-    empty: { alignItems: 'center', marginTop: 140, gap: 6 },
-    emptyTxt: { fontSize: 16, fontWeight: '700', color: t.ink },
-    emptySub: { fontSize: 13, color: t.mut },
     // 工具标签（原型 .tool：行 gap 8，✓ ink w700 + 文案 sec；按下开工具详情）
     tool: { flexDirection: 'row', alignItems: 'center', gap: 8 },
     toolCk: { fontSize: 12, fontWeight: '700', color: t.ink },
@@ -307,6 +304,8 @@ export function ChatScreen(props: {
   const t = ui.tokens;
   const styles = createStyles(t, ui.fontDelta);
   const insets = useSafeAreaInsets();
+  // 键盘高度：输入条/线程让位都按它上移（绝对定位悬浮层不会自动避让键盘）
+  const keyboardH = useKeyboardHeight();
 
   // 本屏挂载的弹层开关（资料编辑 / 默认模型 / 工具详情）
   const [editOpen, setEditOpen] = useState(false);
@@ -331,6 +330,17 @@ export function ChatScreen(props: {
   const scrollToBottom = () => {
     if (followRef.current) scrollRef.current?.scrollToEnd({ animated: false });
   };
+
+  // 键盘弹出后把最新一条消息顶到输入条上方（等键盘动画落定再滚）
+  useEffect(() => {
+    if (keyboardH <= 0) return undefined;
+
+    const timer = setTimeout(() => {
+      if (followRef.current) scrollRef.current?.scrollToEnd({ animated: true });
+    }, 80);
+
+    return () => clearTimeout(timer);
+  }, [keyboardH]);
 
   // 「模型切换」的延迟打开定时器（关面板 260ms 后开抽屉），卸载时清掉
   const modelTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -426,9 +436,13 @@ export function ChatScreen(props: {
         style={styles.thread}
         contentContainerStyle={[
           styles.threadContent,
-          // paddingBottom 抬到 170：给「底部导航(44) + 输入条(56) + 空隙」让位，
-          // 否则最后一条消息被悬浮元素盖住（原型 .thread padding-bottom 12 + .pane 60 同理）
-          { paddingTop: insets.top + 76, paddingBottom: 170 },
+          // 底部让位 = 输入条(≈48) + 输入条底距 + 余量 12；
+          // 键盘弹出时输入条上移到键盘上方，线程同步让位
+          {
+            paddingTop: insets.top + 76,
+            paddingBottom:
+              keyboardH > 0 ? keyboardH + 68 : insets.bottom + 120,
+          },
         ]}
         showsVerticalScrollIndicator={false}
         onScroll={e => {
@@ -512,13 +526,6 @@ export function ChatScreen(props: {
           )
         )}
         {/* sending：线程尾打字三点 */}
-        {/* 空会话引导（真会话首次进入无历史，轻提示避免整屏空白） */}
-        {chat.messages.length === 0 && !chat.sending && !chat.loadingHistory && (
-          <View style={styles.empty}>
-            <Text style={styles.emptyTxt}>开始新的对话吧</Text>
-            <Text style={styles.emptySub}>直接输入，或从主页选择一段对话</Text>
-          </View>
-        )}
         {chat.sending && <TypingDots />}
       </ScrollView>
 
@@ -537,10 +544,14 @@ export function ChatScreen(props: {
         />
       )}
 
-      {/* 4. 底部输入条 + 加号面板（面板后渲染，压在输入条上方） */}
-      {/* 4. 底部输入条 + 加号面板：输入条必须悬在底部导航（44+12）之上，
-          否则导航盖住输入框（原型 .pane padding-bottom 60 同款让位） */}
-      <View style={[styles.comp, { bottom: insets.bottom + 66 }]}>
+      {/* 4. 底部输入条 + 加号面板：输入条悬在底部导航（44+12）之上，
+          与原型 .pane padding-bottom 60 同款让位 */}
+      <View
+        style={[
+          styles.comp,
+          { bottom: keyboardH > 0 ? keyboardH + 8 : insets.bottom + 60 },
+        ]}
+      >
         {/* 待发送图片预览行：缩略图 + × 移除；上传中显示占位 */}
         {(attachments.pendingAttachments.length > 0 || attachments.uploadingImage) && (
           <View style={styles.pendingRow}>

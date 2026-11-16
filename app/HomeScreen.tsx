@@ -28,6 +28,7 @@ import { TaskAddSheet } from '../components/TaskAddSheet';
 import { VizPanelSheet } from '../components/VizPanelSheet';
 import { MemoryPanelSheet } from '../components/MemoryPanelSheet';
 import { TaskDetailSheet } from '../components/TaskDetailSheet';
+import { EntryIcon, QuadIcon } from '../components/V7Icons';
 import { formatMessageTime } from '../lib/utils';
 import type { SessionMeta } from '../lib/types';
 import type { DoneTask, RunningTask, VizKind } from '../data/mock';
@@ -69,129 +70,6 @@ const QUADS: { key: 'connect' | 'project' | 'build' | 'memory'; label: string; p
   { key: 'build', label: '搭建', placeholder: true },
   { key: 'memory', label: '记忆', placeholder: false },
 ];
-
-// 四格图标：原型 .qc svg 的纯 View 组合（白形单色几何，无字体/emoji 依赖——
-// ◉ 等字符在部分安卓机型不渲染，实测踩坑后全部改绘）
-function QuadIcon({ kind }: { kind: 'connect' | 'project' | 'build' | 'memory' }) {
-  if (kind === 'memory') {
-    // 原型：三层同心圆（opacity .28/.62/1）
-    return (
-      <View style={{ width: 30, height: 30, alignItems: 'center', justifyContent: 'center' }}>
-        <View
-          style={{
-            width: 30,
-            height: 30,
-            borderRadius: 15,
-            backgroundColor: 'rgba(255,255,255,0.28)',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <View
-            style={{
-              width: 19,
-              height: 19,
-              borderRadius: 9.5,
-              backgroundColor: 'rgba(255,255,255,0.62)',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-          >
-            <View style={{ width: 9, height: 9, borderRadius: 4.5, backgroundColor: '#ffffff' }} />
-          </View>
-        </View>
-      </View>
-    );
-  }
-  if (kind === 'connect') {
-    // 原型：两节链环 + 中央销
-    return (
-      <View style={{ width: 30, height: 30, flexDirection: 'row', alignItems: 'center', justifyContent: 'center' }}>
-        <View
-          style={{
-            width: 12,
-            height: 16,
-            borderRadius: 6,
-            borderWidth: 2.5,
-            borderColor: '#ffffff',
-            borderRightWidth: 0,
-            borderTopRightRadius: 0,
-            borderBottomRightRadius: 0,
-          }}
-        />
-        <View style={{ width: 7, height: 5, borderRadius: 2, backgroundColor: '#ffffff', marginHorizontal: -2 }} />
-        <View
-          style={{
-            width: 12,
-            height: 16,
-            borderRadius: 6,
-            borderWidth: 2.5,
-            borderColor: '#ffffff',
-            borderLeftWidth: 0,
-            borderTopLeftRadius: 0,
-            borderBottomLeftRadius: 0,
-          }}
-        />
-      </View>
-    );
-  }
-  if (kind === 'project') {
-    // 原型：三层堆叠（实/0.6/0.35）
-    return (
-      <View style={{ width: 30, height: 30, alignItems: 'center', justifyContent: 'center', gap: 2.5 }}>
-        <View style={{ width: 22, height: 6, borderRadius: 3, backgroundColor: '#ffffff' }} />
-        <View style={{ width: 22, height: 6, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.6)' }} />
-        <View style={{ width: 22, height: 6, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.35)' }} />
-      </View>
-    );
-  }
-  // build：2x2 方格，右下是加号
-  return (
-    <View style={{ width: 30, height: 30, flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center' }}>
-      <View style={{ width: 12, height: 12, borderRadius: 5, backgroundColor: '#ffffff', marginRight: 2, marginBottom: 2 }} />
-      <View style={{ width: 12, height: 12, borderRadius: 5, backgroundColor: 'rgba(255,255,255,0.5)', marginBottom: 2 }} />
-      <View style={{ width: 12, height: 12, borderRadius: 5, backgroundColor: 'rgba(255,255,255,0.5)', marginRight: 2 }} />
-      <View style={{ width: 12, height: 12, alignItems: 'center', justifyContent: 'center' }}>
-        <View style={{ position: 'absolute', width: 12, height: 3, borderRadius: 1.5, backgroundColor: '#ffffff' }} />
-        <View style={{ position: 'absolute', width: 3, height: 12, borderRadius: 1.5, backgroundColor: '#ffffff' }} />
-      </View>
-    </View>
-  );
-}
-
-// 双入口卡图标（原型 .ei svg：对话气泡 / 新建网格加号）
-function EntryIcon({ kind }: { kind: 'chat' | 'grid' }) {
-  if (kind === 'chat') {
-    return (
-      <View style={{ width: 16, height: 16 }}>
-        <View style={{ width: 16, height: 13, borderRadius: 8, backgroundColor: '#ffffff' }} />
-        <View
-          style={{
-            position: 'absolute',
-            left: 1,
-            bottom: 0,
-            width: 6,
-            height: 6,
-            backgroundColor: '#ffffff',
-            borderBottomLeftRadius: 2,
-            transform: [{ rotate: '45deg' }],
-          }}
-        />
-      </View>
-    );
-  }
-  return (
-    <View style={{ width: 16, height: 16, flexDirection: 'row', flexWrap: 'wrap' }}>
-      <View style={{ width: 7, height: 7, borderRadius: 2, backgroundColor: '#ffffff', marginRight: 1, marginBottom: 1 }} />
-      <View style={{ width: 7, height: 7, borderRadius: 2, backgroundColor: '#ffffff', marginBottom: 1 }} />
-      <View style={{ width: 7, height: 7, borderRadius: 2, backgroundColor: '#ffffff', marginRight: 1 }} />
-      <View style={{ width: 7, height: 7, alignItems: 'center', justifyContent: 'center' }}>
-        <View style={{ position: 'absolute', width: 7, height: 2, borderRadius: 1, backgroundColor: '#ffffff' }} />
-        <View style={{ position: 'absolute', width: 2, height: 7, borderRadius: 1, backgroundColor: '#ffffff' }} />
-      </View>
-    </View>
-  );
-}
 
 // 迷你柱状图：pts 归一化到 4~56 高度（原型 spark 的 RN 柱状近似）
 function barHeights(pts: number[]): number[] {
@@ -279,7 +157,7 @@ const toggleStyles = StyleSheet.create({
 const createStyles = (t: V7Tokens) =>
   StyleSheet.create({
     page: { flex: 1 },
-    // 原型 .home：padding 50/18/76 → 上由安全区 +8 承担，左右 18，底 96，块间距 16
+    // 原型 .home：padding 50/18/76 → 上由安全区 +8 承担，左右 18，底 76，块间距 16
     content: { paddingHorizontal: 18, gap: 16 },
 
     // 双入口卡（原型 .entry/.entrycard）
@@ -307,11 +185,10 @@ const createStyles = (t: V7Tokens) =>
     entryIconTxt: { fontSize: 14 },
     entryName: { fontSize: 14, fontWeight: '700', color: t.on },
 
-    // 任务·定时 + 数据 双卡行（原型 .duo>.sq，RN 版型改为横排两卡）
-    duoRow: { flexDirection: 'row', gap: 12 },
+    // 任务·定时 + 数据：原型 .duo 是纵向排列（两张通栏卡），不是横排半宽
+    duoRow: { gap: 12 },
     sq: {
-      flex: 1,
-      minWidth: 0,
+      width: '100%',
       backgroundColor: t.card,
       borderRadius: 22,
       height: 236,
@@ -472,9 +349,9 @@ export function HomeScreen({
 
   // 已完成任务裁剪：每张卡 onLayout 记高度（按任务名记，避免下标位移拿错卡）；
   // 超过 4 条时容器 maxHeight = 前 4 张卡累计 + 3*12 gap + 64
-  // （原型第 4 张卡底边 +64px 的简化实现）
+  // （原型第 4 张卡底边 +64px 的简化实现）；容器本身可滚动，滑到底后渐隐层消失
   const [doneHeights, setDoneHeights] = useState<Record<string, number>>({});
-  const [doneAtBottom, setDoneAtBottom] = useState(false);
+  const [doneInnerEnd, setDoneInnerEnd] = useState(false);
 
   const measureDone = (name: string) => (e: LayoutChangeEvent) => {
     const h = Math.round(e.nativeEvent.layout.height);
@@ -490,13 +367,13 @@ export function HomeScreen({
   const doneMaxHeight = doneHeightsReady
     ? first4Heights.reduce((a, b) => a + b, 0) + 3 * 12 + 64
     : undefined;
-  const showDoneFade = doneHeightsReady && !doneAtBottom;
+  const showDoneFade = doneHeightsReady && !doneInnerEnd;
 
-  // 页面滚动接近底部时隐藏渐隐层（原型 .donewrap.at-bottom 的简化）
-  const onPageScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+  // 已完成任务容器内部滚动到底（原型 .donewrap.at-bottom：--donefade 归零）
+  const onDoneScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, layoutMeasurement, contentSize } = e.nativeEvent;
-    const atBottom = contentOffset.y + layoutMeasurement.height >= contentSize.height - 2;
-    setDoneAtBottom(prev => (prev === atBottom ? prev : atBottom));
+    const atEnd = contentOffset.y + layoutMeasurement.height >= contentSize.height - 2;
+    setDoneInnerEnd(prev => (prev === atEnd ? prev : atEnd));
   };
 
   // 对话入口取「最近一条有内容的会话」（服务端 updatedAt 倒序）；
@@ -510,10 +387,8 @@ export function HomeScreen({
     <>
       <ScrollView
         style={styles.page}
-        contentContainerStyle={[styles.content, { paddingTop: insets.top + 8, paddingBottom: 96 }]}
+        contentContainerStyle={[styles.content, { paddingTop: insets.top + 8, paddingBottom: 76 }]}
         showsVerticalScrollIndicator={false}
-        onScroll={onPageScroll}
-        scrollEventThrottle={16}
       >
         {/* 1. 问候语 */}
         <Greeting />
@@ -699,9 +574,16 @@ export function HomeScreen({
               <Text style={styles.secCount}>{ui.done.length} 个已完成</Text>
             </View>
             {ui.done.length > 4 ? (
-          <View style={doneMaxHeight !== undefined ? [styles.doneWrap, { maxHeight: doneMaxHeight }] : undefined}>
-            <View style={styles.listCol}>
-              {ui.done.map((d, i) => (
+          <View>
+            <ScrollView
+              style={doneMaxHeight !== undefined ? [styles.doneWrap, { maxHeight: doneMaxHeight }] : styles.doneWrap}
+              contentContainerStyle={styles.listCol}
+              nestedScrollEnabled
+              showsVerticalScrollIndicator={false}
+              onScroll={onDoneScroll}
+              scrollEventThrottle={16}
+            >
+              {ui.done.map(d => (
                 <View key={d.n} onLayout={measureDone(d.n)}>
                   <TaskRow
                     kind="done"
@@ -710,7 +592,7 @@ export function HomeScreen({
                   />
                 </View>
               ))}
-            </View>
+            </ScrollView>
             {/* 底部 64px 渐隐层：三层 surface 叠出近似的 mask 渐隐（原型 mask-image） */}
             {showDoneFade && (
               <>
