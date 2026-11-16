@@ -60,8 +60,10 @@ async function renderChat(chat: ChatSessionApi) {
           pendingAttachments: [],
           uploadingImage: false,
           pickImage: async () => undefined,
+          pickSticker: async () => null,
           removeAttachment: () => undefined,
         }}
+        sessionId="test-session"
       />
     </UiStateProvider>
   );
@@ -107,7 +109,7 @@ describe('v7 聊天屏渲染契约', () => {
     expect(sendMessage).toHaveBeenCalledWith('你好', undefined);
   });
 
-  it('sticker 分段不透出原始标记：失效给占位、有效给通用标签', async () => {
+  it('sticker 分段不透出原始标记：失效给占位、有效给真图（鉴权路由）', async () => {
     const messages: Message[] = [
       {
         id: 'a1',
@@ -121,8 +123,10 @@ describe('v7 聊天屏渲染契约', () => {
     ];
     const utils = await renderChat(scriptChat({ messages }));
 
-    expect(utils.getByText('表情已失效')).toBeTruthy();
-    expect(utils.getByText('🖼 表情包')).toBeTruthy();
+    // R4：失效 → 灰字占位；有效 → 真图（expo-image，鉴权头拉 /sticker-repo/:id/image）
+    expect(utils.getByText('表情包已失效')).toBeTruthy();
+    expect(utils.getAllByLabelText('表情包').length).toBeGreaterThan(0);
+    // BUG-03：原始标记绝不透回
     expect(utils.queryByText(/sticker:abc-123/)).toBeNull();
     expect(utils.queryByText(/sticker:def-456/)).toBeNull();
   });

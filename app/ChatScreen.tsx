@@ -13,12 +13,14 @@ import {
   Keyboard,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
   View,
   type ScrollViewInstance,
 } from 'react-native';
+import { Image as ExpoImage } from 'expo-image';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useUi } from './ui-state';
@@ -33,7 +35,19 @@ import { ToolDetailSheet } from '../components/ToolDetailSheet';
 import type { ChatSessionApi } from '../hooks/useChatSession';
 import type { AttachmentsApi } from '../hooks/useAttachments';
 import { useKeyboardHeight } from '../hooks/useKeyboardHeight';
-import type { ContentSegment, Message, ModelDefaults, ModelProvider } from '../lib/types';
+import {
+  IMAGE_AUTH_HEADERS,
+  imageUrl,
+  listStickerRepo,
+  stickerImageUrl,
+} from '../lib/uploads';
+import type {
+  Attachment,
+  ContentSegment,
+  Message,
+  ModelDefaults,
+  ModelProvider,
+} from '../lib/types';
 
 // 全屏绝对定位（与 app/ui-state.tsx 同款写法：本仓库 RN 版型里没有 absoluteFillObject）
 const ABS_FILL = {
@@ -184,6 +198,48 @@ const createStyles = (t: V7Tokens, fd: number) =>
       backgroundColor: t.soft,
     },
     actRowTxt: { fontSize: 14, color: t.ink },
+    // 消息附件媒体（旧壳 BubbleAttachments）
+    mediaRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, maxWidth: '86%' },
+    mediaRowEnd: { alignSelf: 'flex-end', justifyContent: 'flex-end' },
+    mediaImage: { width: 160, height: 120, borderRadius: 12, ...V7_SHADOWS.md },
+    mediaSticker: { width: 110, height: 110, borderRadius: 10, ...V7_SHADOWS.md },
+    mediaBox: { borderRadius: 10, backgroundColor: t.soft },
+    mediaExpired: { width: 110, height: 80, alignItems: 'center', justifyContent: 'center' },
+    mediaExpiredTxt: { fontSize: 11, color: t.mut },
+    // 行内表情（旧壳 InlineSticker）
+    inlineSticker: { width: 64, height: 64, borderRadius: 8 },
+    // 表情包选择器网格
+    stkGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 10,
+      paddingBottom: 12,
+    },
+    stkThumb: { width: 72, height: 72, borderRadius: 10, backgroundColor: t.soft },
+    stkAdd: {
+      width: 72,
+      height: 72,
+      borderRadius: 10,
+      borderWidth: 1.5,
+      borderColor: t.mut,
+      borderStyle: 'dashed',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    stkAddTxt: { fontSize: 22, color: t.mut },
+    // 返回底部箭头
+    jumpBtn: {
+      position: 'absolute',
+      right: 18,
+      width: 38,
+      height: 38,
+      borderRadius: 19,
+      backgroundColor: t.surface,
+      alignItems: 'center',
+      justifyContent: 'center',
+      ...V7_SHADOWS.md,
+    },
+    jumpTxt: { fontSize: 16, color: t.ink },
     // 工具标签（原型 .tool：行 gap 8，✓ ink w700 + 文案 sec；按下开工具详情）
     tool: { flexDirection: 'row', alignItems: 'center', gap: 8 },
     toolCk: { fontSize: 12, fontWeight: '700', color: t.ink },
@@ -324,8 +380,10 @@ export function ChatScreen(props: {
   onSelectModel: (providerId: string, modelId: string) => Promise<boolean>;
   attachments: Pick<
     AttachmentsApi,
-    'pendingAttachments' | 'uploadingImage' | 'pickImage' | 'removeAttachment'
+    'pendingAttachments' | 'uploadingImage' | 'pickImage' | 'pickSticker' | 'removeAttachment'
   >;
+  // 表情包点按直发（旧壳 App.sendSticker 同语义：附件即消息，无正文）
+  onSendSticker?: (attachment: Attachment) => void;
   // 消息长按操作（旧壳 MessageActionSheet 语义）：收藏/隐藏为可选（桩测试可不传）
   isFavorite?: (message: Message) => boolean;
   onToggleFavorite?: (message: Message) => void;
@@ -345,14 +403,19 @@ export function ChatScreen(props: {
     [t.isDark]
   );
 
-  // 本屏挂载的弹层开关（资料编辑 / 默认模型 / 工具详情 / 消息操作）
+  // 本屏挂载的弹层开关（资料编辑 / 默认模型 / 工具详情 / 消息操作 / 表情包选择）
   const [editOpen, setEditOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [toolOpen, setToolOpen] = useState(false);
   const [tool, setTool] = useState<string | null>(null);
+  const [stickersOpen, setStickersOpen] = useState(false);
+  // 表情包仓库列表（GET /sticker-repo，打开选择器时拉取）
+  const [stickers, setStickers] = useState<Attachment[] | null>(null);
 
   // 输入框本地草稿（发送后清空）
   const [input, setInput] = useState('');
+  // 返回底部箭头（用户上滑阅读后出现）
+  const [showJump, setShowJump] = useState(false);
   // 长按操作：open 控制弹层显隐（关闭动画期间保留目标消息，避免滑出动画里空白）
   const [actionOpen, setActionOpen] = useState(false);
   const [actionMsg, setActionMsg] = useState<Message | null>(null);
@@ -389,6 +452,39 @@ export function ChatScreen(props: {
     if (followRef.current) scrollRef.current?.scrollToEnd({ animated: false });
   };
 
+  // 消息附件媒体（旧壳 BubbleAttachments 同源：uploads / 表情包仓库路由 + 鉴权头；
+  // 仓库条目被物理删除时 GET /history 标注 expired → 占位）
+  const renderMedia = (m: Message, fromUser: boolean) => {
+    const atts = m.attachments ?? [];
+    if (atts.length === 0) return null;
+    return (
+      <View style={[styles.mediaRow, fromUser && styles.mediaRowEnd]}>
+        {atts.map(att =>
+          att.expired ? (
+            <View key={att.id} style={[styles.mediaBox, styles.mediaExpired]}>
+              <Text style={styles.mediaExpiredTxt}>表情已删除</Text>
+            </View>
+          ) : (
+            <ExpoImage
+              key={att.id}
+              source={{
+                uri:
+                  att.kind === 'sticker'
+                    ? stickerImageUrl(att.id)
+                    : imageUrl(att.id),
+                headers: IMAGE_AUTH_HEADERS,
+              }}
+              style={att.kind === 'sticker' ? styles.mediaSticker : styles.mediaImage}
+              contentFit={att.kind === 'sticker' ? 'contain' : 'cover'}
+              transition={120}
+              accessibilityLabel={att.name || '图片'}
+            />
+          )
+        )}
+      </View>
+    );
+  };
+
   // 助手正文渲染（旧壳 ChatBubble 同款语义分流）：
   //   含 sticker 段 → 分段渲染（text 段走 markdown / sticker 段走失效占位 chip）；
   //   纯文本 → 整段 MarkdownMessage。
@@ -411,15 +507,36 @@ export function ChatScreen(props: {
           <MarkdownMessage content={seg.text} theme={legacyTheme} />
         </View>
       ) : seg.type === 'sticker' ? (
-        <View key={si} style={styles.stchip}>
-          <Text numberOfLines={1} style={styles.stchipTxt}>
-            {/* BUG-03 纪律：绝不把原始 sticker 标记透回给用户 */}
-            {seg.valid ? '🖼 表情包' : '表情已失效'}
-          </Text>
-        </View>
+        // 行内表情：真图（仓库路由 + 鉴权头）；加载失败/已失效 → 灰字占位（BUG-03）
+        <InlineStickerImage key={si} id={seg.id} valid={seg.valid} />
       ) : null
     );
   };
+
+  // 行内表情包图片（旧壳 InlineSticker 同源：/sticker-repo/:id/image + 鉴权头）
+  function InlineStickerImage({ id, valid }: { id: string; valid: boolean }) {
+    const [failed, setFailed] = useState(!valid);
+    if (failed) {
+      return (
+        <View style={styles.stchip}>
+          <Text numberOfLines={1} style={styles.stchipTxt}>
+            表情包已失效
+          </Text>
+        </View>
+      );
+    }
+    return (
+      <View style={styles.stchip}>
+        <ExpoImage
+          source={{ uri: stickerImageUrl(id), headers: IMAGE_AUTH_HEADERS }}
+          style={styles.inlineSticker}
+          contentFit="contain"
+          onError={() => setFailed(true)}
+          accessibilityLabel="表情包"
+        />
+      </View>
+    );
+  }
 
   // 键盘弹出后把最新一条消息顶到输入条上方（等键盘动画落定再滚）
   useEffect(() => {
@@ -498,6 +615,26 @@ export function ChatScreen(props: {
     modelTimer.current = setTimeout(() => setModelOpen(true), 260);
   };
 
+  // 表情包选择器：打开即拉仓库列表（GET /sticker-repo）；「添加」走相册登记入库
+  const openStickerPicker = () => {
+    closePanel();
+    setStickersOpen(true);
+    if (stickers === null) {
+      listStickerRepo()
+        .then(setStickers)
+        .catch(() => {
+          ui.toast('读取表情包仓库失败');
+          setStickers([]);
+        });
+    }
+  };
+
+  // 表情包点按直发：附件即消息，无正文（旧壳 App.sendSticker 同语义）
+  const sendStickerNow = (att: Attachment) => {
+    props.onSendSticker?.(att);
+    setStickersOpen(false);
+  };
+
   // 发送：sending/loadingHistory/上传中任一拦下；有待发送图片时允许空文本发送。
   // sendMessage(undefined, undefined, { overrideText: text })：首参在契约里是
   // retryText——新发送绝不能走首参，否则用户气泡不上屏、历史上下文被截、
@@ -558,7 +695,10 @@ export function ChatScreen(props: {
           }
         }}
         scrollEventThrottle={100}
-        onContentSizeChange={scrollToBottom}
+        onContentSizeChange={() => {
+          if (followRef.current) scrollToBottom();
+          else setShowJump(true);
+        }}
       >
         {/* 历史分页头：有更早消息时的手动入口（滚动到顶也会自动触发，旧壳 MessageList 同语义） */}
         {chat.hasMoreHistory && (
@@ -584,16 +724,13 @@ export function ChatScreen(props: {
               onLongPress={() => openMsgActions(m)}
               delayLongPress={350}
             >
-              <Text style={styles.who}>{formatTime(m.createdAt)}</Text>
+              <Text style={styles.who}>
+                {formatTime(m.createdAt)}
+                {props.isFavorite?.(m) ? ' ★' : ''}
+              </Text>
+              {renderMedia(m, true)}
               <View style={styles.bub}>
                 <Text style={styles.bubTxt}>{m.content}</Text>
-                {(m.attachments ?? []).map(a => (
-                  <View key={a.id} style={styles.atchip}>
-                    <Text numberOfLines={1} style={styles.atchipTxt}>
-                      {(a.kind === 'image' ? '🖼' : '📎') + ' ' + (a.name ?? '附件')}
-                    </Text>
-                  </View>
-                ))}
               </View>
             </Pressable>
           ) : (
@@ -607,6 +744,7 @@ export function ChatScreen(props: {
             >
               <Text style={styles.who}>{formatTime(m.createdAt)}</Text>
               {renderAssistantContent(m)}
+              {renderMedia(m, false)}
               {m.stopped && <Text style={styles.stoppedTxt}>已停止生成 · 本机保留的部分回复</Text>}
               {!!m.modelNote && <Text style={styles.noteTxt}>{m.modelNote}</Text>}
               {!!m.agentNotice && <Text style={styles.noteTxt}>{m.agentNotice}</Text>}
@@ -675,6 +813,28 @@ export function ChatScreen(props: {
           accessibilityLabel="关闭加号面板"
         />
       )}
+
+        {/* 返回底部：用户上滑阅读、新内容到达时出现（旧壳「返回底部」箭头的轻量版） */}
+        {showJump && !panelOpen && (
+          <Pressable
+            style={[
+              styles.jumpBtn,
+              {
+                bottom:
+                  keyboardH > 0 ? keyboardH + 70 : insets.bottom + 122,
+              },
+            ]}
+            onPress={() => {
+              followRef.current = true;
+              setShowJump(false);
+              scrollRef.current?.scrollToEnd({ animated: true });
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="回到底部"
+          >
+            <Text style={styles.jumpTxt}>↓</Text>
+          </Pressable>
+        )}
 
       {/* 4. 底部输入条 + 加号面板：输入条悬在底部导航（44+12）之上，
           与原型 .pane padding-bottom 60 同款让位 */}
@@ -787,6 +947,17 @@ export function ChatScreen(props: {
             </Pressable>
             <Pressable
               style={({ pressed }) => [styles.prow, pressed && styles.prowPressed]}
+              onPress={openStickerPicker}
+              accessibilityRole="button"
+              accessibilityLabel="表情包"
+            >
+              <View style={styles.pi}>
+                <Text style={styles.piTxt}>🙂</Text>
+              </View>
+              <Text style={styles.pl}>表情包</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.prow, pressed && styles.prowPressed]}
               onPress={openModelPicker}
               accessibilityRole="button"
               accessibilityLabel="模型切换"
@@ -850,21 +1021,48 @@ export function ChatScreen(props: {
               </Pressable>
             )}
             {actionMsg.role === 'user' ? (
-              <Pressable
-                style={({ pressed }) => [styles.actRow, pressed && styles.prowPressed]}
-                onPress={() => {
-                  // recallMessage 内部有「撤回确认」Alert——不在此处预报成功
-                  // （旧壳无 toast；用户取消或服务端失败时不能虚假反馈，oracle 阻断①）
-                  chat.recallMessage(actionMsg);
-                  setActionOpen(false);
-                }}
-                accessibilityRole="button"
-                accessibilityLabel="撤回这条消息"
-              >
-                <Text style={[styles.actRowTxt, { color: t.down }]}>撤回这条消息</Text>
-              </Pressable>
+              <>
+                <Pressable
+                  style={({ pressed }) => [styles.actRow, pressed && styles.prowPressed]}
+                  onPress={() => {
+                    props.onToggleFavorite?.(actionMsg);
+                    setActionOpen(false);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    props.isFavorite?.(actionMsg) ? '取消收藏' : '收藏这条消息'
+                  }
+                >
+                  <Text style={styles.actRowTxt}>
+                    {props.isFavorite?.(actionMsg) ? '★ 取消收藏' : '收藏这条消息'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={({ pressed }) => [styles.actRow, pressed && styles.prowPressed]}
+                  onPress={() => {
+                    // recallMessage 内部有「撤回确认」Alert——不在此处预报成功
+                    // （旧壳无 toast；用户取消或服务端失败时不能虚假反馈，oracle 阻断①）
+                    chat.recallMessage(actionMsg);
+                    setActionOpen(false);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel="撤回这条消息"
+                >
+                  <Text style={[styles.actRowTxt, { color: t.down }]}>撤回这条消息</Text>
+                </Pressable>
+              </>
             ) : (
               <>
+                <Pressable
+                  style={({ pressed }) => [styles.actRow, pressed && styles.prowPressed]}
+                  onPress={() => {
+                    void Share.share({ message: actionMsg.content });
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel="分享这条回复"
+                >
+                  <Text style={styles.actRowTxt}>分享这条回复</Text>
+                </Pressable>
                 <Pressable
                   style={({ pressed }) => [styles.actRow, pressed && styles.prowPressed]}
                   onPress={() => {
@@ -894,6 +1092,47 @@ export function ChatScreen(props: {
               </>
             )}
           </View>
+        )}
+      </SheetScaffold>
+
+      {/* 7. 表情包选择器：仓库网格点按直发；「添加」把相册图登记入库（sha256 去重） */}
+      <SheetScaffold
+        visible={stickersOpen}
+        onClose={() => setStickersOpen(false)}
+        title="表情包"
+      >
+        <View style={styles.stkGrid}>
+          {(stickers ?? []).map(att => (
+            <Pressable
+              key={att.id}
+              onPress={() => sendStickerNow(att)}
+              accessibilityRole="button"
+              accessibilityLabel={'发送表情包 ' + (att.name || '')}
+            >
+              <ExpoImage
+                source={{ uri: stickerImageUrl(att.id), headers: IMAGE_AUTH_HEADERS }}
+                style={styles.stkThumb}
+                contentFit="contain"
+                transition={100}
+                accessibilityLabel={att.name || '表情包'}
+              />
+            </Pressable>
+          ))}
+          <Pressable
+            style={styles.stkAdd}
+            onPress={() =>
+              void attachments.pickSticker().then(att => {
+                if (att) setStickers(prev => [...(prev ?? []), att]);
+              })
+            }
+            accessibilityRole="button"
+            accessibilityLabel="添加表情包"
+          >
+            <Text style={styles.stkAddTxt}>＋</Text>
+          </Pressable>
+        </View>
+        {stickers === null && (
+          <Text style={styles.loadingTxt}>正在读取表情包仓库…</Text>
         )}
       </SheetScaffold>
     </>

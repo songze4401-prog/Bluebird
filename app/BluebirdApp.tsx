@@ -333,6 +333,13 @@ function InnerShell() {
                 return ok;
               }}
               attachments={attachments}
+              // 表情包点按直发：附件即消息，无正文（旧壳 App.sendSticker 同款）
+              onSendSticker={attachment => {
+                void chat.sendMessage(undefined, undefined, {
+                  attachments: [attachment],
+                  overrideText: '',
+                });
+              }}
               isFavorite={m => favoriteIds.has(m.id)}
               onToggleFavorite={toggleFavorite}
               onHideMessage={hideMessage}
