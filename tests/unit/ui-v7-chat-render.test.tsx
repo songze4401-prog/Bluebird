@@ -60,8 +60,10 @@ async function renderChat(chat: ChatSessionApi) {
           pendingAttachments: [],
           uploadingImage: false,
           pickImage: async () => undefined,
+          pickSticker: async () => null,
           removeAttachment: () => undefined,
         }}
+        sessionId="test-session"
       />
     </UiStateProvider>
   );
@@ -107,8 +109,7 @@ describe('v7 聊天屏渲染契约', () => {
     expect(sendMessage).toHaveBeenCalledWith('你好', undefined);
   });
 
-  it('sticker 分段不透出原始标记：失效给占位、有效给通用标签', async () => {
-    const messages: Message[] = [
+  it('sticker 分段不透出原始标记：失效给占位、有效给真图（鉴权路由）', async () => {    const messages: Message[] = [
       {
         id: 'a1',
         role: 'assistant',
@@ -121,10 +122,28 @@ describe('v7 聊天屏渲染契约', () => {
     ];
     const utils = await renderChat(scriptChat({ messages }));
 
-    expect(utils.getByText('表情已失效')).toBeTruthy();
-    expect(utils.getByText('🖼 表情包')).toBeTruthy();
+    // R4：失效 → 灰字占位；有效 → 真图（expo-image，鉴权头拉 /sticker-repo/:id/image）
+    expect(utils.getByText('表情包已失效')).toBeTruthy();
+    expect(utils.getAllByLabelText('表情包').length).toBeGreaterThan(0);
+    // BUG-03：原始标记绝不透回
     expect(utils.queryByText(/sticker:abc-123/)).toBeNull();
     expect(utils.queryByText(/sticker:def-456/)).toBeNull();
+  });
+
+  it('无 segments 且正文含原始标记 → 兜底解析（parseStickerMarkers），标记不透出', async () => {
+    const messages: Message[] = [
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '这是正文 [sticker:xyz-789] 收尾',
+      },
+    ];
+    const utils = await renderChat(scriptChat({ messages }));
+
+    // 兜底路径必须走完整解析：标记 → 真图，原文绝不透出（BUG-03 硬红线）
+    expect(utils.getAllByLabelText('表情包').length).toBeGreaterThan(0);
+    expect(utils.queryByText(/sticker:xyz-789/)).toBeNull();
+    expect(utils.queryByText(/\[sticker:/)).toBeNull();
   });
 
   it('工具 pill：ok=✓、running=●、fail=✕，文本带 name · summary', async () => {
