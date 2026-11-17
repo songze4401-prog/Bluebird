@@ -34,7 +34,6 @@ import { useModelSelection } from '../hooks/useModelSelection';
 import { useStreamingPreference } from '../hooks/useStreamingPreference';
 import { useAttachments } from '../hooks/useAttachments';
 import { useBotResultStream } from '../hooks/useBotResultStream';
-import { useKeyboardHeight } from '../hooks/useKeyboardHeight';
 import { NavIcon } from '../components/V7Icons';
 
 // ---- 底部导航单键：选中键展开到 66 显示文字，未选中收成 40 只留图标 ----
@@ -101,7 +100,9 @@ function InnerShell() {
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   // 键盘弹出时隐藏底部导航（否则会浮在键盘上方压住输入条）
-  const keyboardH = useKeyboardHeight();
+  // 键盘期隐藏底部导航：改由输入框焦点驱动（焦点事件 100% 可靠，不依赖
+  // 安卓 edge-to-edge 下可能不触发的键盘高度事件）
+  const [chatInputFocused, setChatInputFocused] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   // ---- 真实聊天链路（与旧壳 App.tsx 同款组合）----
@@ -114,6 +115,7 @@ function InnerShell() {
     loading: modelLoading,
     error: modelError,
     setDefaultModel,
+    refreshModelSelection,
   } = useModelSelection();
   const { reportInteraction } = usePresence(currentSessionId);
   const sessionList = useSessionList();
@@ -322,6 +324,7 @@ function InnerShell() {
             <ChatScreen
               chat={{ ...chat, messages: visibleMessages }}
               sessionId={currentSessionId}
+              onInputFocusChange={setChatInputFocused}
               modelLabel={selectedModelLabel}
               models={modelProviders}
               currentModel={selectedModel}
@@ -350,7 +353,7 @@ function InnerShell() {
 
       {/* 底部悬浮导航：空白处点击穿透（pointerEvents box-none），pill 本体可按。
           键盘弹出时整体隐藏，避免浮在键盘上方压住输入条。 */}
-      {keyboardH === 0 && (
+      {!chatInputFocused && (
       <View
         pointerEvents="box-none"
         style={{
@@ -391,7 +394,11 @@ function InnerShell() {
       </View>
       )}
 
-      <SettingsScreen visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsScreen
+        visible={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onDefaultsChanged={() => void refreshModelSelection()}
+      />
     </KeyboardAvoidingView>
   );
 }

@@ -372,11 +372,19 @@ function main() {
 
   try {
     for (const name of files) {
-      const result = runBackendFile(
+      let result = runBackendFile(
         name,
         dataDir,
         baseline.files[name] ? baseline.files[name].format : 'custom'
       );
+      // 负载敏感文件偶发悬挂/竞态（memory-bot 实证三次，均单跑全绿）：失败原地重试一次。
+      // 确定性失败会连续两次红（门禁依然诚实），纯负载抖动被吸收——这是把 Owner 手动
+      // 「红了重跑」的流程自动化，不放过任何真问题。
+      if (!result.ok) {
+        const firstStatus = `FAIL(${result.status})${result.parsed ? ` ${result.parsed.count}` : ' ?'}`;
+        console.log(`RETRY ${name}（首跑 ${firstStatus}，负载抖动重试一次）`);
+        result = runBackendFile(name, dataDir, baseline.files[name] ? baseline.files[name].format : 'custom');
+      }
       actualResults[name] = result;
       const status = result.ok ? 'PASS' : `FAIL(${result.status})`;
       console.log(`${status} ${name}${result.parsed ? ` ${result.parsed.count}` : ' ?'}`);
