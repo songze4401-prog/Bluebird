@@ -58,7 +58,7 @@ export function MemoryPanelSheet(props: { visible: boolean; onClose: () => void 
     try {
       const body =
         action === 'delete' && !item.id
-          ? { createdAt: item.validFrom, content: item.content }
+          ? { createdAt: item.createdAt, content: item.content }
           : { id: item.id };
       const response = await apiFetch(
         action === 'confirm'
@@ -85,7 +85,11 @@ export function MemoryPanelSheet(props: { visible: boolean; onClose: () => void 
 
   const all = memories ?? [];
   const pending = all.filter(m => m.status === 'pending');
-  const kept = all.filter(m => m.status !== 'pending' && m.status !== 'archived');
+  // superseded（已被新记忆取代）不进「Blue 记住的」——scope=all 是审计语义，
+  // 轻量面板只呈现当前成立的事实（oracle 建议）
+  const kept = all.filter(
+    m => m.status !== 'pending' && m.status !== 'archived' && m.status !== 'superseded'
+  );
 
   return (
     <SheetScaffold visible={props.visible} onClose={props.onClose} title="记忆">

@@ -33,13 +33,16 @@ export function TaskDetailSheet(props: {
   onClose: () => void;
   kind?: 'run' | 'done';
   task?: RunningTask | DoneTask | null;
-  // 真实任务模式（/agent-tasks）：给 goal/状态标签 + 可取消入口
+  // 真实任务模式（/agent-tasks）：给 goal/状态标签 + 可取消入口 + 结果/错误码
   realTask?: {
     taskId: string;
     goal: string;
     botId: string;
     statusLabel: string;
     cancellable: boolean;
+    cancelRequested?: boolean;
+    resultSummary?: string;
+    errorCode?: string;
   } | null;
   onRealCancelled?: () => void;
 }) {
@@ -48,7 +51,9 @@ export function TaskDetailSheet(props: {
   const styles = createStyles(t);
   const [cancelBusy, setCancelBusy] = useState(false);
 
-  // 真实任务分支：goal + Bot chip + 状态 chip + 取消任务（POST /agent-tasks/:id/cancel）
+  // 真实任务分支：goal + Bot/状态 chip + 结果/失败原因 + 取消任务（POST /agent-tasks/:id/cancel）。
+  // 取消成功必须校验服务端真的收口（data.task.status==='cancelled'）——终态 no-op 200
+  // 不能提示「已取消」（oracle 复查：假成功反馈）。
   if (props.realTask) {
     const real = props.realTask;
     const cancelTask = async () => {
@@ -61,6 +66,11 @@ export function TaskDetailSheet(props: {
         );
         if (!response.ok) {
           ui.toast('取消失败，请稍后再试');
+          return;
+        }
+        const data = (await response.json()) as { task?: { status?: string } };
+        if (data.task?.status && data.task.status !== 'cancelled') {
+          ui.toast('取消未生效，请稍后再试');
           return;
         }
         ui.toast('已取消');
@@ -82,8 +92,26 @@ export function TaskDetailSheet(props: {
             <Text style={styles.wchip}>{real.botId}</Text>
             <Text style={styles.wchip}>{real.statusLabel}</Text>
           </View>
+          {!!real.resultSummary && (
+            <View>
+              <Text style={styles.pglabel}>结果</Text>
+              <Text style={styles.wres}>{real.resultSummary}</Text>
+            </View>
+          )}
+          {!!real.errorCode && (
+            <View>
+              <Text style={styles.pglabel}>失败原因</Text>
+              <Text style={styles.wfail}>{real.errorCode}</Text>
+            </View>
+          )}
           <View style={styles.wacts}>
-            {real.cancellable ? (
+            {real.cancelRequested || !real.cancellable ? (
+              <View style={styles.wact}>
+                <Text style={styles.wactTxt}>
+                  {real.cancelRequested ? '已请求取消' : '该状态无法取消'}
+                </Text>
+              </View>
+            ) : (
               <TouchableOpacity
                 style={styles.wact}
                 disabled={cancelBusy}
@@ -91,10 +119,6 @@ export function TaskDetailSheet(props: {
               >
                 <Text style={styles.wactTxt}>{cancelBusy ? '取消中…' : '取消任务'}</Text>
               </TouchableOpacity>
-            ) : (
-              <View style={styles.wact}>
-                <Text style={styles.wactTxt}>该状态无法取消</Text>
-              </View>
             )}
           </View>
         </View>

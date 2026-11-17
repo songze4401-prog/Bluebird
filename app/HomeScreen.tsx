@@ -33,7 +33,9 @@ import type { AgentTask, AgentTasksResponse } from '../lib/api/types';
 import type { SessionMeta } from '../lib/types';
 import type { VizKind } from '../data/mock';
 
-// 真实任务状态语义（与旧壳 TasksPanel 同源）：进行中 = 非终态；终态进「已完成」段
+// 真实任务状态语义（与旧壳 TasksPanel 同源）：进行中 = 非终态；终态进「已完成」段。
+// 注意 recovery（待核对）在服务端是正式终态（status-vocabulary.js S5）——
+// 放进运行段会让待核对任务永久卡在「进行中」+ 假成功取消（oracle 复查阻断）
 const TASK_STATUS_LABEL: Record<string, string> = {
   queued: '排队中',
   accepted: '已接收',
@@ -52,7 +54,6 @@ const RUNNING_STATUSES = new Set([
   'running',
   'waiting_approval',
   'retrying',
-  'recovery',
 ]);
 const CANCELLABLE_STATUSES = RUNNING_STATUSES;
 
@@ -367,7 +368,9 @@ export function HomeScreen({
   const [memOpen, setMemOpen] = useState(false);
 
   // ---- 真实任务（/agent-tasks，与旧壳 TasksPanel 同源）----
-  // 主页是全局视图：拉 memory Bot 的任务（不挂 parentSessionId），6s 轮询对齐旧壳节奏
+  // 主页是全局视图：拉 memory Bot 的任务（不挂 parentSessionId）。
+  // 轮询只在主页视图进行（双 pane 常挂载，聊天/设置/弹层打开时不打请求）；
+  // 6s 是主页自己的节奏（旧壳任务页 4s，两 pane 常挂载下更省）。
   const [agentTasks, setAgentTasks] = useState<AgentTask[]>([]);
   const loadAgentTasks = useCallback(() => {
     apiFetch(API_PATHS.agentTasks('memory', 30))
@@ -381,10 +384,11 @@ export function HomeScreen({
       });
   }, []);
   useEffect(() => {
+    if (ui.view !== 'home') return undefined;
     loadAgentTasks();
     const timer = setInterval(loadAgentTasks, 6000);
     return () => clearInterval(timer);
-  }, [loadAgentTasks]);
+  }, [ui.view, loadAgentTasks]);
 
   const runningTasks = agentTasks.filter(t => RUNNING_STATUSES.has(t.status));
   const doneTasks = agentTasks.filter(t => !RUNNING_STATUSES.has(t.status));
@@ -413,8 +417,11 @@ export function HomeScreen({
     };
   };
 
-  // 任务详情（真实任务）：点行开详情，可取消状态给「取消任务」入口
-  const [realDetail, setRealDetail] = useState<AgentTask | null>(null);
+  // 任务详情（真实任务）：点行开详情，可取消状态给「取消任务」入口。
+  // 轮询每 6s 重建 agentTasks——详情按 taskId 从最新列表派生 live 状态，
+  // 打开期间任务终态化时 statusLabel/cancellable 跟着变（不持陈旧引用）
+  const [realDetailId, setRealDetailId] = useState<string | null>(null);
+  const realDetailLive = agentTasks.find(t => t.taskId === realDetailId) ?? null;
 
   // 对话入口取「最近一条有内容的会话」（服务端 updatedAt 倒序）；
   // 全是空白草稿时才退回第一条，避免点开一个空对话。
@@ -597,7 +604,7 @@ export function HomeScreen({
                 <TaskRow
                   key={t.taskId}
                   model={realRowModel(t)}
-                  onPress={() => setRealDetail(t)}
+                  onPress={() => setRealDetailId(t.taskId)}
                 />
               ))}
             </View>
@@ -614,7 +621,7 @@ export function HomeScreen({
             </View>
             <View style={styles.listCol}>
               {doneTasks.map(t => (
-                <TaskRow key={t.taskId} model={realRowModel(t)} onPress={() => setRealDetail(t)} />
+                <TaskRow key={t.taskId} model={realRowModel(t)} onPress={() => setRealDetailId(t.taskId)} />
               ))}
             </View>
           </>
@@ -682,21 +689,24 @@ export function HomeScreen({
       <VizPanelSheet visible={vizOpen} onClose={() => setVizOpen(false)} />
       <MemoryPanelSheet visible={memOpen} onClose={() => setMemOpen(false)} />
       <TaskDetailSheet
-        visible={realDetail !== null}
-        onClose={() => setRealDetail(null)}
+        visible={realDetailLive !== null}
+        onClose={() => setRealDetailId(null)}
         realTask={
-          realDetail
+          realDetailLive
             ? {
-                taskId: realDetail.taskId,
-                goal: realDetail.goal,
-                botId: realDetail.botId,
-                statusLabel: TASK_STATUS_LABEL[realDetail.status] ?? realDetail.status,
-                cancellable: CANCELLABLE_STATUSES.has(realDetail.status),
+                taskId: realDetailLive.taskId,
+                goal: realDetailLive.goal,
+                botId: realDetailLive.botId,
+                statusLabel: TASK_STATUS_LABEL[realDetailLive.status] ?? realDetailLive.status,
+                cancellable: CANCELLABLE_STATUSES.has(realDetailLive.status),
+                cancelRequested: realDetailLive.cancelRequested,
+                resultSummary: realDetailLive.result?.summary ?? '',
+                errorCode: realDetailLive.errorCode ?? '',
               }
             : null
         }
         onRealCancelled={() => {
-          setRealDetail(null);
+          setRealDetailId(null);
           loadAgentTasks();
         }}
       />
