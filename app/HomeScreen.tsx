@@ -26,6 +26,7 @@ import { VizPanelSheet } from '../components/VizPanelSheet';
 import { MemoryCenterSheet } from '../components/MemoryCenterSheet';
 import { TaskDetailSheet } from '../components/TaskDetailSheet';
 import { EntryIcon, QuadIcon } from '../components/V7Icons';
+import Svg, { Polyline } from 'react-native-svg';
 import { apiFetch } from '../lib/api/client';
 import { API_PATHS } from '../lib/api/endpoints';
 import { formatMessageTime } from '../lib/utils';
@@ -95,12 +96,32 @@ const QUADS: { key: 'connect' | 'project' | 'build' | 'memory'; label: string; p
   { key: 'memory', label: '记忆', placeholder: false },
 ];
 
-// 迷你柱状图：pts 归一化到 4~56 高度（原型 spark 的 RN 柱状近似）
-function barHeights(pts: number[]): number[] {
+// 数据卡走势图（原型 spark 的 RN 移植）：SVG 折线，与原型曲线视觉一致
+function SparkLine({ pts, color }: { pts: number[]; color: string }) {
+  const w = 300;
+  const h = 60;
   const min = Math.min(...pts);
   const max = Math.max(...pts);
   const range = max - min || 1;
-  return pts.map(p => 4 + ((p - min) / range) * 52);
+  const points = pts
+    .map((p, i) => {
+      const x = (i / (pts.length - 1)) * w;
+      const y = h - 6 - ((p - min) / range) * (h - 12);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(' ');
+  return (
+    <Svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`}>
+      <Polyline
+        points={points}
+        fill="none"
+        stroke={color}
+        strokeWidth={2}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  );
 }
 
 // 定时任务开关（原型 .tg）：knob left 2↔14 260ms 弹簧位移；
@@ -537,11 +558,7 @@ export function HomeScreen({
                     {(ui.stock.chg >= 0 ? '+' : '') + ui.stock.chg.toFixed(2) + '%'}
                   </Text>
                   {ui.stock.pts.length > 0 && (
-                    <View style={styles.bars}>
-                      {barHeights(ui.stock.pts).map((h, i) => (
-                        <View key={i} style={[styles.bar, { height: h, backgroundColor: chgColor }]} />
-                      ))}
-                    </View>
+                    <SparkLine pts={ui.stock.pts} color={chgColor} />
                   )}
                 </>
               )}
