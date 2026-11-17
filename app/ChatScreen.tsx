@@ -35,7 +35,6 @@ import { ModelPickerSheet } from '../components/ModelPickerSheet';
 import { ToolDetailSheet } from '../components/ToolDetailSheet';
 import type { ChatSessionApi } from '../hooks/useChatSession';
 import type { AttachmentsApi } from '../hooks/useAttachments';
-import { useKeyboardHeight } from '../hooks/useKeyboardHeight';
 import {
   IMAGE_AUTH_HEADERS,
   imageUrl,
@@ -285,8 +284,10 @@ const createStyles = (t: V7Tokens, fd: number) =>
     headerWrap: { position: 'absolute', left: 0, right: 0 },
 
     // 底部输入容器（原型 .comp：bottom 由安全区+12 在 JSX 给；加号面板绝对定位在其中）
-    comp: { position: 'absolute', left: 0, right: 0 },
-    // 待发送图片预览行（浮在输入条上方，与旧壳 ChatInput 同语义）
+    // v7 屏根：常规流列布局（键盘避让走壳层 KAV padding）
+    screen: { flex: 1 },
+    // 输入坞：常规流贴容器底，margin 让位底部导航（44+12）
+    compDock: { marginBottom: 0 },
     pendingRow: {
       flexDirection: 'row',
       gap: 8,
@@ -343,7 +344,14 @@ const createStyles = (t: V7Tokens, fd: number) =>
       ...V7_SHADOWS.md,
     },
     plusTxt: { fontSize: 17, color: t.ink },
-    input: { flex: 1, minWidth: 0, fontSize: 14, color: t.ink, paddingVertical: 0 },
+    input: {
+      flex: 1,
+      minWidth: 0,
+      fontSize: 14,
+      color: t.ink,
+      paddingVertical: 0,
+      // multiline：内容高由 onContentSizeChange 驱动（上限 120，见 TextInput style）
+    },
     // 发送钮（原型 .send：36 圆 card 底阴影 card；disabled 时 opacity .35）
     send: {
       width: 36,
@@ -424,6 +432,8 @@ export function ChatScreen(props: {
   isFavorite?: (message: Message) => boolean;
   onToggleFavorite?: (message: Message) => void;
   onHideMessage?: (message: Message) => void;
+  // 输入框焦点变化：壳用它隐藏底部导航（不依赖安卓键盘高度事件）
+  onInputFocusChange?: (focused: boolean) => void;
 }) {
   const ui = useUi();
   const chat = props.chat;
@@ -431,8 +441,9 @@ export function ChatScreen(props: {
   const t = ui.tokens;
   const styles = createStyles(t, ui.fontDelta);
   const insets = useSafeAreaInsets();
-  // 键盘高度：输入条/线程让位都按它上移（绝对定位悬浮层不会自动避让键盘）
-  const keyboardH = useKeyboardHeight();
+  // 键盘避让改走壳层 KeyboardAvoidingView padding（旧壳同款机制，真机实证可用）：
+  // 输入条回到常规流，键盘弹出时 KAV 收缩容器 → 输入条原生上移，不依赖键盘高度事件
+  // （WorkBuddy 的 keyboardH 事件方案在部分安卓 edge-to-edge 设备上不触发，实测踩坑）
   // 助手气泡的 markdown 渲染用旧壳主题桥（MarkdownMessage 吃 theme.ts 的 Theme）
   const legacyTheme = useMemo(
     () => getTheme(t.isDark ? 'dark' : 'light'),
@@ -450,6 +461,8 @@ export function ChatScreen(props: {
 
   // 输入框本地草稿（发送后清空）
   const [input, setInput] = useState('');
+  // 多行输入的实时内容高（onContentSizeChange 驱动，1~120px 自动增高）
+  const [inputH, setInputH] = useState(22);
   // 返回底部箭头（用户上滑阅读后出现）
   const [showJump, setShowJump] = useState(false);
   // 长按操作：open 控制弹层显隐（关闭动画期间保留目标消息，避免滑出动画里空白）
@@ -549,17 +562,6 @@ export function ChatScreen(props: {
       ) : null
     );
   };
-
-  // 键盘弹出后把最新一条消息顶到输入条上方（等键盘动画落定再滚）
-  useEffect(() => {
-    if (keyboardH <= 0) return undefined;
-
-    const timer = setTimeout(() => {
-      if (followRef.current) scrollRef.current?.scrollToEnd({ animated: true });
-    }, 80);
-
-    return () => clearTimeout(timer);
-  }, [keyboardH]);
 
   // 「模型切换」的延迟打开定时器（关面板 260ms 后开抽屉），卸载时清掉
   const modelTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -673,20 +675,17 @@ export function ChatScreen(props: {
   };
 
   return (
-    <>
+    /* 根改常规流列布局：键盘避让走壳层 KAV padding（收缩容器→常规流的输入条原生上移），
+       不再用绝对定位 + keyboardH 手动偏移（部分安卓 edge-to-edge 设备键盘事件不触发） */
+    <View style={styles.screen}>
       {/* 1. 线程：透明底消息流 */}
       <ScrollView
         ref={scrollRef}
         style={styles.thread}
         contentContainerStyle={[
           styles.threadContent,
-          // 底部让位 = 输入条(≈48) + 输入条底距 + 余量 12；
-          // 键盘弹出时输入条上移到键盘上方，线程同步让位
-          {
-            paddingTop: insets.top + 76,
-            paddingBottom:
-              keyboardH > 0 ? keyboardH + 68 : insets.bottom + 120,
-          },
+          // 底部让位 = 底部导航（44+12）+ 输入条高 + 余量；键盘让位交给壳层 KAV
+          { paddingTop: insets.top + 76, paddingBottom: insets.bottom + 130 },
         ]}
         showsVerticalScrollIndicator={false}
         onScroll={e => {
@@ -836,13 +835,7 @@ export function ChatScreen(props: {
         {/* 返回底部：用户上滑阅读、新内容到达时出现（旧壳「返回底部」箭头的轻量版） */}
         {showJump && !panelOpen && (
           <Pressable
-            style={[
-              styles.jumpBtn,
-              {
-                bottom:
-                  keyboardH > 0 ? keyboardH + 70 : insets.bottom + 122,
-              },
-            ]}
+            style={[styles.jumpBtn, { bottom: insets.bottom + 122 }]}
             onPress={() => {
               followRef.current = true;
               setShowJump(false);
@@ -855,14 +848,8 @@ export function ChatScreen(props: {
           </Pressable>
         )}
 
-      {/* 4. 底部输入条 + 加号面板：输入条悬在底部导航（44+12）之上，
-          与原型 .pane padding-bottom 60 同款让位 */}
-      <View
-        style={[
-          styles.comp,
-          { bottom: keyboardH > 0 ? keyboardH + 8 : insets.bottom + 60 },
-        ]}
-      >
+      {/* 4. 底部输入条 + 加号面板：常规流布局（键盘让位走壳层 KAV padding），margin 让位底部导航 */}
+      <View style={styles.compDock}>
         {/* 待发送图片预览行：缩略图 + × 移除；上传中显示占位 */}
         {(attachments.pendingAttachments.length > 0 || attachments.uploadingImage) && (
           <View style={styles.pendingRow}>
@@ -898,13 +885,20 @@ export function ChatScreen(props: {
             <Text style={styles.plusTxt}>＋</Text>
           </Pressable>
           <TextInput
-            style={styles.input}
+            style={[styles.input, { height: Math.min(Math.max(inputH, 22), 120) }]}
             value={input}
             onChangeText={setInput}
             placeholder="与 Bluebird 对话…"
             placeholderTextColor={t.mut}
+            multiline
+            textAlignVertical="center"
+            onFocus={() => props.onInputFocusChange?.(true)}
+            onBlur={() => props.onInputFocusChange?.(false)}
             blurOnSubmit={false}
             onSubmitEditing={doSend}
+            onContentSizeChange={e =>
+              setInputH(e.nativeEvent.contentSize.height)
+            }
           />
           <Pressable
             style={[styles.send, { opacity: chat.sending ? 1 : sendDisabled ? 0.35 : 1 }]}
@@ -1157,6 +1151,6 @@ export function ChatScreen(props: {
           <Text style={styles.loadingTxt}>正在读取表情包仓库…</Text>
         )}
       </SheetScaffold>
-    </>
+      </View>
   );
 }
