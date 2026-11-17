@@ -155,7 +155,7 @@ describe('写入决策六类', { concurrency: 1 }, () => {
     assert.equal(saved.contributions.length, 2);
   });
 
-  test('supersede：冲突事实保留旧记录并建立关联', async () => {
+  test('未明确更正的冲突事实进入 pending，旧 active 保持不变', async () => {
     const old = await memory.applyCandidate(
       base(),
       USER
@@ -171,14 +171,13 @@ describe('写入决策六类', { concurrency: 1 }, () => {
       USER
     );
 
-    assert.equal(next.decision, 'supersede');
-    assert.equal(next.supersededId, old.id);
+    assert.equal(next.decision, 'needs_confirmation');
+    assert.equal(next.status, 'pending');
     const all = memory.getMemories({ includeSuperseded: true });
-    const archived = all.find(item => item.id === old.id);
-    assert.equal(archived.status, 'superseded');
-    assert.equal(archived.supersededBy, next.id);
-    assert.ok(archived.validTo);
-    assert.equal(memory.getMemories().some(item => item.id === old.id), false);
+    const unchanged = all.find(item => item.id === old.id);
+    assert.equal(unchanged.status, 'active');
+    assert.equal(unchanged.supersededBy, null);
+    assert.equal(memory.getMemories().some(item => item.id === old.id), true);
   });
 
   test('requireMutationConfirmation：UPDATE/MERGE/SUPERSEDE 先 pending，确认后生效', async () => {

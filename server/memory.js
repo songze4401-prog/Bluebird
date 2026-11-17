@@ -49,6 +49,8 @@ const {
   VALID_PROVENANCE,
   getPolicyMode,
   detectPersistentIntent,
+  detectExplicitCorrection,
+  hasHedge,
   resolveProvenance,
   classifyCategory,
   buildEvidence,
@@ -72,13 +74,6 @@ const MEMORY_TOMBSTONE_FILE = path.join(DATA_DIR, 'memory-tombstones.json');
 const MEMORY_LIMIT = 100;
 // 待确认候选只有高度相似的后续表达才合并，避免将相近但不同的事实并成一条。
 const PENDING_CANDIDATE_MATCH_MIN = 0.9;
-const LOW_CONFIDENCE_CANDIDATE_MIN = DEFAULT_RULES.confirmableConfidence;
-const RETAINABLE_LOW_CONFIDENCE_CATEGORIES = new Set([
-  CATEGORY.STABLE_FACT,
-  CATEGORY.LONG_TERM_PREFERENCE,
-  CATEGORY.PROJECT_DECISION,
-  CATEGORY.MODEL_INFERENCE,
-]);
 // 被更正的旧条目不立刻删除（审计与回滚要看得见的），但只留最近的这么多条。
 const SUPERSEDED_HISTORY = 20;
 // 待确认、冲突与已归档条目也属于历史留档，必须有显式上限，避免无限堆积。
@@ -128,9 +123,8 @@ const ID_PREFIX_ISSUED = 'mem-';
 
 // 相似度分档与临时状态规则在 memory-decision.js 中定义并测试。
 
-// 置信度权重：只调节次序，不推翻相关性。active 条目的落库闸门保持 ≥ 0.85；
-// 0.6–0.85 的合格候选只进入 pending，不参与检索。权重区间 [0.94, 1.0] 仍只用于
-// 拆掉近似平局，不够让强相关的低置信记忆被弱相关的高置信记忆挤下去。
+// 检索置信度权重只调节排序；写入准入由 memory-evidence.js 的类别化证据策略决定。
+// 权重区间 [0.94, 1.0] 只用于拆近似平局，不推翻相关性，也不决定是否写入。
 const CONFIDENCE_WEIGHT_FLOOR = 0.6;
 // 非 identity 候选的最低混合相关度：过滤掉英文常用二元组造成的 1-2% 词面噪声，
 // 同时保留“1 个二元组 / 6 个内容二元组”这类合法但很低的命中（约 5%）。
@@ -360,6 +354,10 @@ const MEMORY_SKIP_REASONS = [
   'quote_too_short',
   'type_not_allowed',
   'low_confidence',
+  'stale_evidence',
+  'low_utility',
+  'insufficient_specificity',
+  'weak_source_evidence',
   'sensitive_output',
   'quote_not_grounded',
   'ungrounded_content',
@@ -588,15 +586,14 @@ function normalizeCandidate(raw, options = {}) {
     ? sourceTypeCandidate
     : 'user';
   const provenance = resolveProvenance({ ...source, sourceType }, options);
-  const persistentIntent = detectPersistentIntent(
-    options.userText || source.userText || ''
-  );
+  const userText = options.userText || source.userText || '';
+  const persistentIntent = detectPersistentIntent(userText);
   const category = classifyCategory(
     {
       content,
       type: source.type,
       sourceQuote,
-      userText: options.userText || source.userText,
+      userText,
     },
     provenance
   );
@@ -638,6 +635,15 @@ function normalizeCandidate(raw, options = {}) {
     provenance,
     category,
     persistentIntent,
+    uncertainty:
+      source.uncertainty === 'source_hedged' ||
+      hasHedge(sourceQuote) ||
+      hasHedge(userText)
+        ? 'source_hedged'
+        : cleanText(source.uncertainty),
+    explicitCorrection:
+      options.intent === 'correction' ||
+      detectExplicitCorrection(userText),
     observedAt,
     evidence: null,
     policyVersion: POLICY_VERSION,
@@ -800,33 +806,9 @@ function findDuplicateSourceEntry(current, candidate) {
   );
 }
 
-function rulesForCandidate(candidate) {
-  if (
-    candidate.persistentIntent === true &&
-    candidate.provenance === PROVENANCE.USER_ASSERTED &&
-    candidate.sourceType !== 'agent'
-  ) {
-    return { ...DEFAULT_RULES, minConfidence: 0.6 };
-  }
-
+function rulesForCandidate() {
+  // 通用决策器只计算重复/冲突/生命周期关系；准入由 P2 证据策略按类别评估。
   return DEFAULT_RULES;
-}
-
-function canRetainLowConfidenceCandidate(candidate, options = {}) {
-  return (
-    options.retainLowConfidenceCandidate === true &&
-    options.requireUserGrounding === true &&
-    candidate.sourceType === 'user' &&
-    candidate.persistentIntent !== true &&
-    !candidate.targetId &&
-    Number.isFinite(candidate.confidence) &&
-    candidate.confidence >= LOW_CONFIDENCE_CANDIDATE_MIN &&
-    candidate.confidence < DEFAULT_RULES.minConfidence &&
-    [PROVENANCE.USER_ASSERTED, PROVENANCE.MODEL_INFERRED].includes(
-      candidate.provenance
-    ) &&
-    RETAINABLE_LOW_CONFIDENCE_CATEGORIES.has(candidate.category)
-  );
 }
 
 // strict 偏好与安全暂存的低置信候选都可累计后续来源；模型推断只合并同来源，
@@ -843,6 +825,8 @@ function findPendingCandidateForPromotion(
     const eligibleReason =
       item.pendingReason === 'low_confidence_candidate' ||
       item.pendingReason === 'model_inference_requires_confirmation' ||
+      (item.pendingReason === 'user_hedged_requires_confirmation' &&
+        candidate.category !== CATEGORY.BEHAVIOR_PATTERN) ||
       (item.pendingReason === 'single_preference_candidate' &&
         policyMode === 'strict' &&
         candidate.category === CATEGORY.LONG_TERM_PREFERENCE);
@@ -1236,14 +1220,12 @@ async function extractMemory(client, message, force = false, sessionId = null, o
               {
                 role: 'system',
                 content: `
-你是一个长期记忆提取器。
-
-只从用户原话中提取明确、稳定、值得跨会话保存的信息。
-
-不要推测。
-不要总结用户没有明确说出的内容。
-不要保存临时情绪。
-不要保存玩笑、假设或反问。
+你是一个长期记忆提取器。当前阶段提出可能值得跨会话保留的候选；后续证据策略会决定存储、待确认或拒绝，不要只因为置信度不高就隐去有价值候选。
+优先提取清晰、稳定、具体的信息；不要把临时情绪、一次性状态、玩笑、假设或反问当作长期事实。
+sourceQuote 必须逐字引用用户当前消息中的连续原文，不得润色、改写或合并不同片段。
+content 应忠实表达原话。若原话含“可能、也许、似乎、大概、不确定、好像”等犹豫语气，content 必须保留同等不确定性，不能改成确定事实。
+只有当结论不是用户直接说出的内容时才标记 inferred=true；模型推断必须显式标记，且不得伪装成用户直述。
+可以提出需要确认的推断或模糊候选，但必须保留来源与不确定性。
 不要保存密码、密钥、验证码、银行卡、身份证等敏感信息。
 
 如果没有值得保存的信息，返回 {}。
@@ -1256,14 +1238,14 @@ async function extractMemory(client, message, force = false, sessionId = null, o
   "keywords": ["关键词1", "关键词2", "关键词3"],
   "confidence": 0.0,
   "inferred": false,
+  "uncertainty": "none|source_hedged",
   "sourceQuote": "用户原话中的连续片段"
 }
 
 content 不要超过 100 个字符。
 keywords 提取 3-5 个与这条记忆直接相关的具体关键词或同义词。
 不要使用“什么”“应该”“这个”“那个”“以后”等低信息量词。
-sourceQuote 必须来自用户原话。
-inferred 只有当你从用户原话归纳出用户没有直接说出的结论时才为 true；直接复述用户原话时为 false。
+uncertainty 在原话有犹豫表达时必须为 source_hedged，否则为 none。
 `.trim(),
               },
               {
@@ -1309,7 +1291,7 @@ inferred 只有当你从用户原话归纳出用户没有直接说出的结论�
       return skip('model_empty');
     }
 
-    const content =
+    let content =
       typeof candidate.content === 'string'
         ? candidate.content
             .replace(/\s+/g, ' ')
@@ -1336,14 +1318,25 @@ inferred 只有当你从用户原话归纳出用户没有直接说出的结论�
 
     if (!content || !sourceQuote) return skip('no_content');
 
+    const sourceHedged =
+      hasHedge(message) ||
+      hasHedge(sourceQuote) ||
+      candidate.uncertainty === 'source_hedged';
+    const uncertainty = sourceHedged ? 'source_hedged' : 'none';
+    // 模型漏掉语气词时用显式说明补回语义，且策略会把此条限制在待确认状态。
+    if (sourceHedged && !hasHedge(content)) {
+      content = `可能：${content}`;
+    }
+
     if (content.length > 100) return skip('content_too_long', { length: content.length });
 
     if (sourceQuote.length < 2) return skip('quote_too_short');
 
     if (!ALLOWED_TYPES.has(type)) return skip('type_not_allowed', { type });
 
-    const explicitIntent = detectPersistentIntent(message);
-    const minConfidence = explicitIntent ? 0.6 : 0.85;
+    if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+      return skip('invalid_confidence');
+    }
 
     if (isSensitive(content) || isSensitive(sourceQuote)) {
       return skip('sensitive_output');
@@ -1383,30 +1376,6 @@ inferred 只有当你从用户原话归纳出用户没有直接说出的结论�
     const provenance = inferred
       ? PROVENANCE.MODEL_INFERRED
       : PROVENANCE.USER_ASSERTED;
-    const category = classifyCategory(
-      { content, type, sourceQuote, userText: message },
-      provenance
-    );
-    const belowConfidenceThreshold =
-      !Number.isFinite(confidence) || confidence < minConfidence;
-
-    if (belowConfidenceThreshold) {
-      // 台账只记内容哈希与来源会话，不存正文/原话；通过全部安全校验且置信度处于
-      // confirmable 下限以上的有价值候选，才继续进入 applyCandidate 的 pending 路径。
-      memoryObservationLedger.observe({
-        content,
-        sessionId,
-        reason: 'low_confidence',
-        confidence,
-      });
-      const retainable =
-        !explicitIntent &&
-        Number.isFinite(confidence) &&
-        confidence >= LOW_CONFIDENCE_CANDIDATE_MIN &&
-        RETAINABLE_LOW_CONFIDENCE_CATEGORIES.has(category);
-      if (!retainable) return skip('low_confidence', { confidence });
-    }
-
     const now = new Date().toISOString();
     const messageId = cleanText(options.messageId);
 
@@ -1439,6 +1408,7 @@ inferred 只有当你从用户原话归纳出用户没有直接说出的结论�
         provenance: inferred
           ? PROVENANCE.MODEL_INFERRED
           : PROVENANCE.USER_ASSERTED,
+        uncertainty,
         intent: options.intent || 'auto',
         targetId: cleanText(options.targetId),
         eventAt: cleanText(options.eventAt),
@@ -1448,7 +1418,6 @@ inferred 只有当你从用户原话归纳出用户没有直接说出的结论�
       reason: null,
       anchorScore,
       grounding,
-      lowConfidenceCandidate: belowConfidenceThreshold,
     };
   } catch (error) {
     console.error(
@@ -1609,31 +1578,16 @@ async function applyCandidate(raw, options = {}) {
       target,
       rules: candidateRules,
     });
+    const decision = evaluatedDecision;
+    const policyMode = getPolicyMode();
     const hasExistingDuplicate = matches.some(
       match =>
         match &&
         match.contextConflict !== true &&
         match.similarity >= candidateRules.duplicateMin
     );
-    const retainedLowConfidenceCandidate =
-      !hasExistingDuplicate &&
-      canRetainLowConfidenceCandidate(candidate, options) &&
-      evaluatedDecision.decision === DECISION.REJECT &&
-      evaluatedDecision.reason === 'low_confidence';
-    const decision = retainedLowConfidenceCandidate
-      ? {
-          ...evaluatedDecision,
-          decision: DECISION.NEEDS_CONFIRMATION,
-          reason:
-            candidate.provenance === PROVENANCE.MODEL_INFERRED
-              ? 'model_inference_requires_confirmation'
-              : 'low_confidence_candidate',
-        }
-      : evaluatedDecision;
-    const policyMode = getPolicyMode();
     const pendingCandidate =
-      (decision.decision === DECISION.CREATE ||
-        retainedLowConfidenceCandidate)
+      !hasExistingDuplicate && decision.decision === DECISION.CREATE
         ? findPendingCandidateForPromotion(
             next,
             candidate,
@@ -1641,11 +1595,21 @@ async function applyCandidate(raw, options = {}) {
             policyMode
           )
         : null;
+    const counterEvidence = matches.filter(
+      match =>
+        match &&
+        match.contextConflict !== true &&
+        match.sameType &&
+        match.sharedKeyword &&
+        match.similarity >= candidateRules.conflictMin &&
+        match.similarity < candidateRules.duplicateMin
+    ).length;
     const evidence = buildEvidence({
       candidate,
       decision,
       existing: decision.target || pendingCandidate,
       userText: options.userText || '',
+      counterEvidence,
       policyMode,
     });
 
@@ -1660,7 +1624,7 @@ async function applyCandidate(raw, options = {}) {
       policyMode,
     });
     const finalDecision =
-      policy.decision === decision.decision
+      policy.decision === decision.decision && policy.reason === decision.reason
         ? decision
         : { ...decision, decision: policy.decision, reason: policy.reason };
 
@@ -1684,6 +1648,7 @@ async function applyCandidate(raw, options = {}) {
       );
       const promote =
         candidate.provenance === PROVENANCE.USER_ASSERTED &&
+        finalDecision.decision !== DECISION.NEEDS_CONFIRMATION &&
         (candidate.persistentIntent === true ||
           sessions.size >= 2 ||
           finalDecision.decision === DECISION.CREATE);
@@ -1697,7 +1662,8 @@ async function applyCandidate(raw, options = {}) {
         ...evidence,
         repetition: contributions.length,
         independentSessions: sessions.size,
-        ...(candidate.provenance === PROVENANCE.USER_ASSERTED &&
+        ...(promote &&
+        candidate.provenance === PROVENANCE.USER_ASSERTED &&
         sessions.size >= 2
           ? { consistency: 1, promotion: 'independent_support' }
           : {}),
@@ -2164,8 +2130,7 @@ async function attemptMemoryWrite(client, message, sessionId = null, options = {
     ...options,
     sessionId,
     userText: text,
-    requireUserGrounding: extracted.lowConfidenceCandidate === true,
-    retainLowConfidenceCandidate: extracted.lowConfidenceCandidate === true,
+    requireUserGrounding: true,
   });
 
   Object.assign(outcome, {
@@ -2191,6 +2156,15 @@ async function attemptMemoryWrite(client, message, sessionId = null, options = {
         extra: { sessionId, id: result.id },
       });
     } else {
+      if (result.reason === 'low_confidence') {
+        // 台账仅保留内容哈希和会话计数；正文、原话、关键词不会进入文件。
+        memoryObservationLedger.observe({
+          content: extracted.entry.content,
+          sessionId,
+          reason: result.reason,
+          confidence: extracted.entry.confidence,
+        });
+      }
       reportSkip(result.reason, null);
     }
   }

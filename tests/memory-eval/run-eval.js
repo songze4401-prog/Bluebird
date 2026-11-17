@@ -673,10 +673,10 @@ async function runPhase2() {
     item => item.residueOf
   );
 
-  // 拒写都要带短码：把 phase2 全部「没写成」的题/探针合起来数一次。
+  // 未写入的候选都要带短码：pending 与 reject 都属于尚未写成 active。
   // 逐题行的短码字段叫 writeReason、探针行叫 reason，这里先归一再看，
   // 否则字段名不同会被当成「没带短码」，报出一个根本不存在的可观测性缺口。
-  const rejectedAll = [
+  const nonWrittenAll = [
     ...report.phase2.perQuestion
       .filter(item => item.wroteNewEntry === false)
       .map(item => ({ key: item.id, reason: item.writeReason })),
@@ -695,10 +695,10 @@ async function runPhase2() {
     definition:
       '更正残留 = 更正后旧事实仍在活跃记忆集里（getMemories 默认视图）或仍可被检索命中的题数；' +
       '旧条目转 status=superseded 留在磁盘做审计，不计入残留',
-    rejectedAttempts: rejectedAll.length,
-    rejectedWithReason: rejectedAll.filter(item => item.reason).length,
-    rejectedWithoutReason: rejectedAll.filter(item => !item.reason).length,
-    rejectedWithoutReasonKeys: rejectedAll
+    nonWrittenAttempts: nonWrittenAll.length,
+    nonWrittenWithReason: nonWrittenAll.filter(item => item.reason).length,
+    nonWrittenWithoutReason: nonWrittenAll.filter(item => !item.reason).length,
+    nonWrittenWithoutReasonKeys: nonWrittenAll
       .filter(item => !item.reason)
       .map(item => item.key),
     // 每个探针只动一道闸门，判据不符说明闸门行为变了（不再能区分拒写成因）
@@ -713,7 +713,7 @@ async function runPhase2() {
       `（其中走 supersede 留档 ${report.phase2.metrics.correctionHandledBySupersede}）`
   );
   origLog(
-    `拒写有短码 ${report.phase2.metrics.rejectedWithReason} / 无短码 ${report.phase2.metrics.rejectedWithoutReason}`
+    `未写入有短码 ${report.phase2.metrics.nonWrittenWithReason} / 无短码 ${report.phase2.metrics.nonWrittenWithoutReason}`
   );
   origLog(
     `拒写成因鉴别：${report.phase2.metrics.gateProbeReasons.join(' ')}` +

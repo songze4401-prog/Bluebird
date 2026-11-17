@@ -503,17 +503,17 @@ async function waitReady() {
     );
 
     const clearCandidate = {
-      content: '清空后不得复活的事实',
+      content: '用户养了一盆多肉',
       type: 'fact',
-      keywords: ['清空', '墓碑'],
+      keywords: ['多肉', '植物'],
       confidence: 0.95,
-      sourceQuote: '记住清空后不得复活的事实',
+      sourceQuote: '我养了一盆多肉',
     };
     const clearOptions = {
       sessionId: a3,
       userId: owner,
       messageId: 'm-tombstone-clear',
-      userText: '记住清空后不得复活的事实',
+      userText: '记住，我养了一盆多肉',
       requireUserGrounding: true,
     };
 

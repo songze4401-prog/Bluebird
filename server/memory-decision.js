@@ -9,8 +9,6 @@ const DECISION = Object.freeze({
 });
 
 const DEFAULT_RULES = Object.freeze({
-  minConfidence: 0.85,
-  confirmableConfidence: 0.6,
   duplicateMin: 0.8,
   conflictMin: 0.3,
 });
@@ -59,15 +57,8 @@ function decide({ candidate, matches = [], target = null, rules = DEFAULT_RULES 
 
   const confidence = Number(candidate.confidence);
 
-  if (!Number.isFinite(confidence) || confidence < rules.minConfidence) {
-    const confirmable =
-      candidate.sourceType === 'agent' &&
-      Number.isFinite(confidence) &&
-      confidence >= rules.confirmableConfidence;
-
-    return confirmable
-      ? needsConfirmation('low_confidence')
-      : reject('low_confidence');
+  if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+    return reject('invalid_confidence');
   }
 
   if (candidate.requiresConfirmation) {
