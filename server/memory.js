@@ -4046,9 +4046,11 @@ async function rejectPending(id, userId = null) {
     }
 
     const next = current.slice();
+    const rejected = next[index];
     next.splice(index, 1);
 
-    await saveMemories(next);
+    // 拒绝是对该候选来源的显式撤销：只记哈希/来源标识，阻止异步重试复活。
+    await commitWithTombstones(next, [rejected], 'reject_pending');
     memories = next;
     logLifecycleEvent({
       action: 'reject',
