@@ -21,6 +21,9 @@ import {
 } from 'react-native';
 
 import { AvatarSheet } from '../components/AvatarSheet';
+import { MemoryCenterSheet } from '../components/MemoryCenterSheet';
+import { ModelManageSheet } from '../components/ModelManageSheet';
+import { MonitoringSheet } from '../components/MonitoringSheet';
 import { SheetScaffold } from '../components/SheetScaffold';
 import { WallpaperPicker } from '../components/WallpaperPicker';
 import { ACCENT_LIST, APP_VERSION, type FontPref, type ThemePref } from '../data/mock';
@@ -52,34 +55,15 @@ const THEME_SEGS: { v: ThemePref; label: string }[] = [
 const LANGUAGE_OPTIONS = ['简体中文', 'English', '日本語'];
 const FONT_OPTIONS: FontPref[] = ['小', '标准', '大'];
 
-// 二级面板种类（原型 #dSheet 的 openSub 分支；kind 记最后一次打开的种类，关闭动画期间内容不闪空）
-type SubKind = 'accounts' | 'monitor' | 'language' | 'font' | 'about';
+// 二级面板种类（原型 #dSheet 的 openSub 分支；kind 记最后一次打开的种类，关闭动画期间内容不闪空）。
+// 系统监控/模型与 API/记忆中心改为独立真数据弹层（R6），不再走 mock 二级面板。
+type SubKind = 'accounts' | 'language' | 'font' | 'about';
 const SUB_TITLES: Record<SubKind, string> = {
   accounts: '切换账号',
-  monitor: '系统监控',
   language: '语言',
   font: '字号',
   about: '关于',
 };
-
-// 系统监控统计卡（原型 monitorBody 的 monstat 2x2）
-const MON_CARDS: [string, string][] = [
-  ['128', '请求'],
-  ['0', '错误'],
-  ['420 ms', '平均耗时'],
-  ['只读', '访问方式'],
-];
-// 系统监控只读行（对照仓库 lib/memory-center 的字段语义，数值仅示意）
-const MON_ROWS: [string, string][] = [
-  ['候选 candidate', '7'],
-  ['选中 selected', '2'],
-  ['接受 accepted', '2'],
-  ['注入 injected', '2'],
-  ['发送 sent', '2'],
-  ['供应商 usage', '已返回'],
-  ['未采集', '0'],
-  ['排除/跳过原因', '过期 7 · 已替代 7 · 低相关 42'],
-];
 
 // ---- 3D 倾斜用户卡（原型 .ucard/.tcard + pointermove 脚本的 RN 移植）----
 // 外容器接管拖动手势，内白卡 rotateX/Y 跟手（±9°，perspective 620），松手弹簧回正。
@@ -358,6 +342,10 @@ export function SettingsScreen(props: { visible: boolean; onClose: () => void })
 
   // 更换头像弹层（原型 setAvatar → dSheet 的 RN 版独立弹层）
   const [avatarOpen, setAvatarOpen] = useState(false);
+  // R6 真数据弹层：系统监控 / 模型与 API / 记忆中心
+  const [monitoringOpen, setMonitoringOpen] = useState(false);
+  const [modelManageOpen, setModelManageOpen] = useState(false);
+  const [memoryCenterOpen, setMemoryCenterOpen] = useState(false);
   // 二级面板：kind 记最后一次打开的种类（关闭动画期间内容不闪空）
   const [subOpen, setSubOpen] = useState(false);
   const [sub, setSub] = useState<SubKind>('accounts');
@@ -386,10 +374,12 @@ export function SettingsScreen(props: { visible: boolean; onClose: () => void })
           {/* 1. 3D 倾斜用户卡（原型 .ucard/.tcard） */}
           <TiltUserCard onAvatarPress={() => setAvatarOpen(true)} />
 
-          {/* 2. 账号 / 监控 / 通知（原型 setgroup 第一组） */}
+          {/* 2. 账号 / 监控 / 模型与 API / 记忆中心 / 通知（原型 setgroup 第一组） */}
           <View style={styles.setgroup}>
             <SetRow label="切换账号" value={user.account} onPress={() => openSub('accounts')} />
-            <SetRow label="系统监控" value="只读" onPress={() => openSub('monitor')} />
+            <SetRow label="系统监控" value="只读" onPress={() => setMonitoringOpen(true)} />
+            <SetRow label="模型与 API" onPress={() => setModelManageOpen(true)} />
+            <SetRow label="记忆中心" onPress={() => setMemoryCenterOpen(true)} />
             <SetRow
               label="通知"
               right={<NotifyToggle on={ui.notify} onToggle={() => setNotify(!ui.notify)} />}
@@ -454,6 +444,23 @@ export function SettingsScreen(props: { visible: boolean; onClose: () => void })
       {/* 更换头像弹层（AvatarSheet：预设格子 + 从本机选择图片） */}
       <AvatarSheet visible={avatarOpen} onClose={() => setAvatarOpen(false)} />
 
+      {/* 系统监控（真数据：/monitoring 总览+Traces+Events，只读） */}
+      <MonitoringSheet
+        visible={monitoringOpen}
+        onClose={() => setMonitoringOpen(false)}
+      />
+      {/* 模型与 API 管理（真数据：/model-providers 服务商+密钥+测试连接） */}
+      <ModelManageSheet
+        visible={modelManageOpen}
+        onClose={() => setModelManageOpen(false)}
+        onDefaultsChanged={() => toast('默认模型已同步')}
+      />
+      {/* 记忆中心（真数据：/memory 总览/管理/写入/画像） */}
+      <MemoryCenterSheet
+        visible={memoryCenterOpen}
+        onClose={() => setMemoryCenterOpen(false)}
+      />
+
       {/* 二级面板（原型 #dSheet）：与主面板并存，后渲染者自然在上层 */}
       <SheetScaffold
         visible={subOpen}
@@ -484,30 +491,7 @@ export function SettingsScreen(props: { visible: boolean; onClose: () => void })
               </Pressable>
             ))}
 
-          {/* 系统监控（原型 monitorBody：monstat 2x2 + 分隔线 + 只读行） */}
-          {sub === 'monitor' && (
-            <>
-              <View style={styles.monstat}>
-                {[MON_CARDS.slice(0, 2), MON_CARDS.slice(2, 4)].map((row, i) => (
-                  <View key={i} style={styles.monrow}>
-                    {row.map(c => (
-                      <View key={c[1]} style={styles.moncard}>
-                        <Text style={styles.moncardB}>{c[0]}</Text>
-                        <Text style={styles.moncardSpan}>{c[1]}</Text>
-                      </View>
-                    ))}
-                  </View>
-                ))}
-              </View>
-              <View style={styles.pdiv} />
-              {MON_ROWS.map(r => (
-                <View key={r[0]} style={styles.optrow}>
-                  <Text style={styles.ol}>{r[0]}</Text>
-                  <Text style={styles.ov}>{r[1]}</Text>
-                </View>
-              ))}
-            </>
-          )}
+          {/* 系统监控已升级为独立真数据弹层 MonitoringSheet（R6），mock 二级面板移除 */}
 
           {/* 语言（原型 optionsBody('lang', ...)） */}
           {sub === 'language' &&

@@ -23,7 +23,7 @@ import { TaskRow, type TaskRowModel } from '../components/TaskRow';
 import { MyPanels } from '../components/MyPanels';
 import { TaskAddSheet } from '../components/TaskAddSheet';
 import { VizPanelSheet } from '../components/VizPanelSheet';
-import { MemoryPanelSheet } from '../components/MemoryPanelSheet';
+import { MemoryCenterSheet } from '../components/MemoryCenterSheet';
 import { TaskDetailSheet } from '../components/TaskDetailSheet';
 import { EntryIcon, QuadIcon } from '../components/V7Icons';
 import { apiFetch } from '../lib/api/client';
@@ -687,7 +687,7 @@ export function HomeScreen({
       {/* 本屏弹层：添加任务 / 新建面板 / 记忆 / 任务详情 */}
       <TaskAddSheet visible={taskAddOpen} onClose={() => setTaskAddOpen(false)} />
       <VizPanelSheet visible={vizOpen} onClose={() => setVizOpen(false)} />
-      <MemoryPanelSheet visible={memOpen} onClose={() => setMemOpen(false)} />
+      <MemoryCenterSheet visible={memOpen} onClose={() => setMemOpen(false)} />
       <TaskDetailSheet
         visible={realDetailLive !== null}
         onClose={() => setRealDetailId(null)}

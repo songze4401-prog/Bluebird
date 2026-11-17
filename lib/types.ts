@@ -152,6 +152,9 @@ export type AgentPolicyTool = {
 // 后端永不下发完整 Key：只有 keyConfigured 布尔与脱敏 keyHint
 export type ModelCapabilities = {
   vision: boolean;
+  // tools：Tool Calling 支持（server/api-configs.js normalizeModel 随脱敏视图一起下发）。
+  // 可选：缺省 = 未知 = 不支持（服务端按 capabilities.tools === true 才启用工具）。
+  tools?: boolean;
 };
 
 export type ModelEntry = {
