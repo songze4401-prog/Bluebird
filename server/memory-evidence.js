@@ -100,7 +100,13 @@ function classifyCategory(candidate = {}, provenance) {
     return CATEGORY.MODEL_INFERENCE;
   }
 
-  if (hasHedge(text)) return CATEGORY.BEHAVIOR_PATTERN;
+  if (
+    hasHedge(text) ||
+    hasHedge(candidate.sourceQuote) ||
+    hasHedge(candidate.userText)
+  ) {
+    return CATEGORY.BEHAVIOR_PATTERN;
+  }
   if (hasTemporaryMarker(text)) return CATEGORY.TEMPORARY_STATE;
   if (type === 'identity' || type === 'relationship') {
     return CATEGORY.STABLE_FACT;
