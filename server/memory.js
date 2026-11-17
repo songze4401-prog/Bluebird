@@ -592,7 +592,12 @@ function normalizeCandidate(raw, options = {}) {
     options.userText || source.userText || ''
   );
   const category = classifyCategory(
-    { content, type: source.type },
+    {
+      content,
+      type: source.type,
+      sourceQuote,
+      userText: options.userText || source.userText,
+    },
     provenance
   );
   const observedAt = cleanText(source.observedAt) || now;
@@ -844,8 +849,7 @@ function findPendingCandidateForPromotion(
 
     return (
       eligibleReason &&
-      (writeScope.mode !== 'user' ||
-        scopeOf(item, writeScope) !== 'excluded') &&
+      scopeOf(item, writeScope) !== 'excluded' &&
       item.type === candidate.type &&
       item.provenance === candidate.provenance &&
       similarity(item.content, candidate.content) >=
@@ -1379,7 +1383,10 @@ inferred 只有当你从用户原话归纳出用户没有直接说出的结论�
     const provenance = inferred
       ? PROVENANCE.MODEL_INFERRED
       : PROVENANCE.USER_ASSERTED;
-    const category = classifyCategory({ content, type }, provenance);
+    const category = classifyCategory(
+      { content, type, sourceQuote, userText: message },
+      provenance
+    );
     const belowConfidenceThreshold =
       !Number.isFinite(confidence) || confidence < minConfidence;
 
