@@ -119,9 +119,13 @@ export function ModelManageSheet(props: {
   // 列表加载中：打开后还没有数据且没有报错
   const loading = providers === null && loadError === null;
 
-  // 服务商列表：停用的不展示（同 v7 其他弹层口径）；内置服务商只可测试
-  const visibleProviders = (providers ?? []).filter(
+  // 服务商列表：启用的在前正常展示；停用的也可见（只读行 + 「已禁用」标签）——
+  // 全仓库没有启用/停用切换入口，服务端侧停用的服务商若整行隐藏将不可见也不可删（oracle 建议）
+  const enabledProviders = (providers ?? []).filter(
     provider => provider.enabled
+  );
+  const disabledProviders = (providers ?? []).filter(
+    provider => !provider.enabled
   );
 
   // 当前默认模型（管理面只展示；切换走聊天页模型抽屉）
@@ -505,7 +509,7 @@ export function ModelManageSheet(props: {
             </View>
           )}
 
-          {visibleProviders.map(provider => (
+          {enabledProviders.map(provider => (
             <View key={provider.id} style={styles.card}>
               <View style={styles.cardHead}>
                 <Text style={styles.providerName} numberOfLines={1}>
@@ -593,6 +597,31 @@ export function ModelManageSheet(props: {
             </View>
           ))}
 
+          {disabledProviders.length > 0 && (
+            <>
+              <Text style={styles.disabledHead}>
+                已停用（{disabledProviders.length}）
+              </Text>
+              {disabledProviders.map(provider => (
+                <View key={provider.id} style={[styles.card, styles.disabledCard]}>
+                  <View style={styles.cardHead}>
+                    <Text style={styles.providerName} numberOfLines={1}>
+                      {provider.name}
+                    </Text>
+                    {provider.builtin && <Text style={styles.tag}>内置</Text>}
+                    <Text style={styles.tagDisabled}>已停用</Text>
+                  </View>
+                  <Text style={styles.providerUrl} numberOfLines={1}>
+                    {provider.baseUrl}
+                  </Text>
+                  <Text style={styles.disabledNote}>
+                    服务端侧停用的服务商：整仓库没有启用/停用入口，需在服务端或旧壳恢复后才会回到上方列表
+                  </Text>
+                </View>
+              ))}
+            </>
+          )}
+
           {actionError && <Text style={styles.errorText}>{actionError}</Text>}
 
           <Pressable
@@ -669,6 +698,26 @@ const createStyles = (t: V7Tokens) =>
     currentModel: { fontSize: 12, color: t.sec },
     cardHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
     providerName: { flex: 1, fontSize: 14, fontWeight: '700', color: t.ink },
+    // 已停用段标题与标记（oracle 建议：服务端侧停用的服务商保持可见）
+    disabledHead: {
+      fontSize: 12,
+      fontWeight: '700',
+      color: t.sec,
+      marginTop: 6,
+      marginBottom: 8,
+    },
+    disabledCard: { opacity: 0.65 },
+    tagDisabled: {
+      backgroundColor: t.soft,
+      borderRadius: 999,
+      paddingVertical: 3,
+      paddingHorizontal: 8,
+      fontSize: 10,
+      fontWeight: '700',
+      color: t.mut,
+      overflow: 'hidden',
+    },
+    disabledNote: { fontSize: 11, lineHeight: 17, color: t.mut },
     // 内置标记：bg 底圆角小片（soft 卡内用 bg 反衬）
     tag: {
       backgroundColor: t.bg,

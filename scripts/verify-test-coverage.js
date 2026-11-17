@@ -381,7 +381,8 @@ function main() {
       // 确定性失败会连续两次红（门禁依然诚实），纯负载抖动被吸收——这是把 Owner 手动
       // 「红了重跑」的流程自动化，不放过任何真问题。
       if (!result.ok) {
-        console.log(`RETRY ${name}`);
+        const firstStatus = `FAIL(${result.status})${result.parsed ? ` ${result.parsed.count}` : ' ?'}`;
+        console.log(`RETRY ${name}（首跑 ${firstStatus}，负载抖动重试一次）`);
         result = runBackendFile(name, dataDir, baseline.files[name] ? baseline.files[name].format : 'custom');
       }
       actualResults[name] = result;

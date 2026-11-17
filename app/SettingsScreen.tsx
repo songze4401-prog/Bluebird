@@ -325,7 +325,12 @@ function SegOption(props: { on: boolean; label: string; onPress: (origin: Origin
   );
 }
 
-export function SettingsScreen(props: { visible: boolean; onClose: () => void }) {
+export function SettingsScreen(props: {
+  visible: boolean;
+  onClose: () => void;
+  // 模型/服务商变动后由壳刷新 useModelSelection 镜像（聊天抽屉与 pill 才能拿到新数据）
+  onDefaultsChanged?: () => void;
+}) {
   const {
     user,
     ui,
@@ -453,7 +458,10 @@ export function SettingsScreen(props: { visible: boolean; onClose: () => void })
       <ModelManageSheet
         visible={modelManageOpen}
         onClose={() => setModelManageOpen(false)}
-        onDefaultsChanged={() => toast('默认模型已同步')}
+        onDefaultsChanged={() => {
+          props.onDefaultsChanged?.();
+          toast('默认模型已同步');
+        }}
       />
       {/* 记忆中心（真数据：/memory 总览/管理/写入/画像） */}
       <MemoryCenterSheet

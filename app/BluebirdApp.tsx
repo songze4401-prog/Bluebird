@@ -114,6 +114,7 @@ function InnerShell() {
     loading: modelLoading,
     error: modelError,
     setDefaultModel,
+    refreshModelSelection,
   } = useModelSelection();
   const { reportInteraction } = usePresence(currentSessionId);
   const sessionList = useSessionList();
@@ -391,7 +392,11 @@ function InnerShell() {
       </View>
       )}
 
-      <SettingsScreen visible={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      <SettingsScreen
+        visible={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onDefaultsChanged={() => void refreshModelSelection()}
+      />
     </KeyboardAvoidingView>
   );
 }
