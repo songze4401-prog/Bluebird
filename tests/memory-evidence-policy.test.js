@@ -294,6 +294,77 @@ test('strict：第二次独立表达把候选晋升为 active', async () => {
   );
 });
 
+test('无可信 userId：待确认候选仍按会话作用域隔离', async () => {
+  const fallbackSessionOptions = (sessionId, messageId) => ({
+    sessionId,
+    sourceType: 'user',
+    actor: 'test',
+    userText: '我喜欢喝美式咖啡',
+    requireUserGrounding: true,
+    retainLowConfidenceCandidate: true,
+    messageId,
+  });
+  const first = await memory.applyCandidate(
+    candidate({ confidence: 0.7 }),
+    fallbackSessionOptions('s-a', 'm-p1-fallback-a')
+  );
+  const second = await memory.applyCandidate(
+    candidate({ confidence: 0.7 }),
+    fallbackSessionOptions('s-b', 'm-p1-fallback-b')
+  );
+
+  assert.equal(first.status, 'pending');
+  assert.equal(second.status, 'pending');
+  assert.notEqual(first.id, second.id);
+
+  const saved = allMemories();
+  assert.equal(saved.length, 2);
+  assert.ok(saved.every(item => item.status === 'pending'));
+  assert.deepEqual(
+    saved.map(item => item.contributions.map(contribution => contribution.sessionId)),
+    [['s-a'], ['s-b']]
+  );
+});
+
+test('自动抽取：原话有不确定语气时 inferred:false 不能保留为确定偏好', async () => {
+  const fakeClient = {
+    chat: {
+      completions: {
+        create: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  content: '用户喜欢喝美式咖啡',
+                  type: 'preference',
+                  keywords: ['咖啡', '美式'],
+                  confidence: 0.75,
+                  inferred: false,
+                  sourceQuote: '我可能喜欢喝美式咖啡',
+                }),
+              },
+            },
+          ],
+        }),
+      },
+    },
+  };
+  const message = '记一下，我可能喜欢喝美式咖啡';
+
+  const first = await memory.processMemory(fakeClient, message, 's-a', {
+    messageId: 'm-p1-hedged-a',
+  });
+  const second = await memory.processMemory(fakeClient, message, 's-b', {
+    messageId: 'm-p1-hedged-b',
+  });
+
+  assert.equal(first.written, false);
+  assert.equal(second.written, false);
+  assert.equal(first.reason, 'low_confidence');
+  assert.equal(second.reason, 'low_confidence');
+  assert.equal(allMemories().length, 0);
+});
+
 test('strict：同一 messageId 的重复抽取被幂等拒绝', async () => {
   const first = await memory.applyCandidate(
     candidate(),

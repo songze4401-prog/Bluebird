@@ -6,7 +6,8 @@
  *   2. 隐私边界：台账文件只含内容哈希，绝不出现正文/原话
  *   3. 上限：500 条封顶，超出按 lastSeenAt 淘汰最旧
  *   4. 损坏隔离：坏 JSON → 隔离为 .corrupt-<ts> + 回退空台账（与 memory 同策略）
- *   5. 集成：memory.processMemory 的 low_confidence 拒写自动入台账，跨会话累计
+ *   5. 集成：拒写仅入 hash 台账；安全低置信候选进入 pending 并可逐步晋升
+ *   6. 来源、敏感性、会话隔离，以及撤回/删除后的墓碑防复活
  *
  * 隔离：BLUEBIRD_DATA_DIR 指向临时目录，不读写 server/data 的真实数据。
  *
@@ -62,11 +63,18 @@ function validReply(overrides = {}) {
   });
 }
 
+function processReply(reply, text, sessionId, messageId, userId = USER) {
+  const options = { messageId };
+  if (userId) options.userId = userId;
+  return memory.processMemory(fakeClient(reply), text, sessionId, options);
+}
+
 before(() => {
   seed([]);
 });
 
-after(() => {
+after(async () => {
+  await ledger.flushForTests();
   fs.rmSync(TMP_DIR, { recursive: true, force: true });
   console.log = origLog;
 });
@@ -167,4 +175,274 @@ test('集成：processMemory 的 low_confidence 拒写自动入台账并跨会�
   assert.equal(third.written, false, '台账本身不改变决策语义（晋升留待评审）');
   assert.equal(ledger.weigh(key).independentSessions, 2, '跨会话独立支持被累计');
   assert.deepEqual(memory.getMemories(), [], '全程不产生正式记忆');
+});
+
+test('低置信直述：安全校验后暂存为不可检索候选并保留来源', async () => {
+  seed([]);
+  const reply = validReply({ confidence: 0.7 });
+  const result = await processReply(
+    reply,
+    '我叫宋泽',
+    'low-confidence-a',
+    'msg-low-confidence-a'
+  );
+
+  assert.equal(result.written, false);
+  assert.equal(result.status, 'pending');
+  assert.equal(result.reason, 'low_confidence_candidate');
+
+  const [saved] = memory.getMemories({ includePending: true });
+  assert.equal(saved.id, result.id);
+  assert.equal(saved.status, 'pending');
+  assert.equal(saved.pendingReason, 'low_confidence_candidate');
+  assert.equal(saved.provenance, 'user_asserted');
+  assert.equal(saved.category, 'stable_fact');
+  assert.equal(saved.evidence.modelConfidence, 0.7);
+  assert.equal(saved.evidence.independentSessions, 1);
+  assert.equal(saved.userId, USER);
+  assert.equal(saved.contributions[0].sessionId, 'low-confidence-a');
+  assert.equal(saved.contributions[0].messageId, 'msg-low-confidence-a');
+  assert.equal(saved.contributions[0].sourceQuote, '我叫宋泽');
+  assert.deepEqual(memory.getMemories(), [], 'pending 不进入普通有效记忆');
+
+  await ledger.flushForTests();
+  const ledgerText = fs.readFileSync(ledger.LEDGER_FILE, 'utf8');
+  assert.equal(ledgerText.includes('用户叫宋泽'), false);
+  assert.equal(ledgerText.includes('我叫宋泽'), false);
+});
+
+test('低置信直述：同会话重复不晋升，独立会话后续证据可晋升', async () => {
+  seed([]);
+  const first = await processReply(
+    validReply({ confidence: 0.7 }),
+    '我叫宋泽',
+    'promotion-a',
+    'msg-promotion-a1'
+  );
+  const sameSession = await processReply(
+    validReply({ confidence: 0.72 }),
+    '我叫宋泽',
+    'promotion-a',
+    'msg-promotion-a2'
+  );
+
+  assert.equal(first.status, 'pending');
+  assert.equal(sameSession.written, false);
+  assert.equal(sameSession.id, first.id);
+  assert.equal(sameSession.status, 'pending');
+  assert.equal(memory.getMemories({ includePending: true }).length, 1);
+  assert.equal(
+    memory.getMemories({ includePending: true })[0].evidence.independentSessions,
+    1,
+    '不同消息但同一会话不算独立支持'
+  );
+
+  const independent = await processReply(
+    validReply({ confidence: 0.73 }),
+    '我叫宋泽',
+    'promotion-b',
+    'msg-promotion-b1'
+  );
+  assert.equal(independent.written, true);
+  assert.equal(independent.status, 'active');
+  assert.equal(independent.action, 'reinforced');
+
+  const [active] = memory.getMemories();
+  assert.equal(active.id, first.id);
+  assert.equal(active.provenance, 'user_asserted');
+  assert.equal(active.evidence.independentSessions, 2);
+  assert.equal(active.evidence.promotion, 'independent_support');
+  assert.equal(active.lastDecision.action, 'reinforce');
+  assert.deepEqual(
+    active.contributions.map(item => item.sessionId).sort(),
+    ['promotion-a', 'promotion-a', 'promotion-b']
+  );
+  assert.deepEqual(
+    active.contributions.map(item => item.messageId).sort(),
+    ['msg-promotion-a1', 'msg-promotion-a2', 'msg-promotion-b1']
+  );
+});
+
+test('模型推断：独立会话累计仍保留推断标签并要求用户确认', async () => {
+  seed([]);
+  const inferredReply = validReply({
+    content: '用户可能喜欢低维护成本方案',
+    type: 'preference',
+    keywords: ['维护', '方案'],
+    confidence: 0.7,
+    inferred: true,
+    sourceQuote: '我喜欢低维护成本方案',
+  });
+  const first = await processReply(
+    inferredReply,
+    '我喜欢低维护成本方案',
+    'inferred-a',
+    'msg-inferred-a'
+  );
+  const second = await processReply(
+    inferredReply,
+    '我喜欢低维护成本方案',
+    'inferred-b',
+    'msg-inferred-b'
+  );
+
+  assert.equal(first.status, 'pending');
+  assert.equal(second.written, false);
+  assert.equal(second.status, 'pending');
+  assert.equal(second.id, first.id);
+  const [saved] = memory.getMemories({ includePending: true });
+  assert.equal(saved.provenance, 'model_inferred');
+  assert.equal(saved.category, 'model_inference');
+  assert.equal(saved.pendingReason, 'model_inference_requires_confirmation');
+  assert.equal(saved.evidence.independentSessions, 2);
+  assert.deepEqual(memory.getMemories(), []);
+});
+
+test('低置信候选删除：墓碑阻止同来源重试复活', async () => {
+  seed([]);
+  const reply = validReply({ confidence: 0.7 });
+
+  const withdrawalMessageId = 'msg-low-confidence-withdrawn';
+  const stagedForWithdrawal = await processReply(
+    reply,
+    '我叫宋泽',
+    'low-confidence-withdrawal',
+    withdrawalMessageId
+  );
+  assert.equal(stagedForWithdrawal.status, 'pending');
+  const withdrawn = await memory.recallMemoryBySourceQuote(
+    '我叫宋泽',
+    null,
+    'low-confidence-withdrawal',
+    withdrawalMessageId
+  );
+  assert.deepEqual(withdrawn, { removedEntries: 1, removedContributions: 1 });
+  const withdrawalRetry = await processReply(
+    reply,
+    '我叫宋泽',
+    'low-confidence-withdrawal',
+    withdrawalMessageId
+  );
+  assert.equal(withdrawalRetry.reason, 'deleted_source');
+  assert.deepEqual(memory.getMemories({ includePending: true }), []);
+
+  const messageId = 'msg-low-confidence-deleted';
+  const first = await processReply(
+    reply,
+    '我叫宋泽',
+    'low-confidence-delete',
+    messageId
+  );
+  assert.equal(first.status, 'pending');
+
+  const deleted = await memory.deleteMemory({ id: first.id, userId: USER });
+  assert.equal(deleted.removed, 1);
+  const retry = await processReply(
+    reply,
+    '我叫宋泽',
+    'low-confidence-delete',
+    messageId
+  );
+
+  assert.equal(retry.written, false);
+  assert.equal(retry.reason, 'deleted_source');
+  assert.deepEqual(memory.getMemories({ includePending: true }), []);
+  const tombstones = fs.readFileSync(
+    path.join(TMP_DIR, 'memory-tombstones.json'),
+    'utf8'
+  );
+  assert.equal(tombstones.includes('我叫宋泽'), false);
+  assert.equal(tombstones.includes('用户叫宋泽'), false);
+});
+
+test('低置信候选安全边界：敏感输出或未接地原话不进 pending 与观察台账', async () => {
+  seed([]);
+  const sensitiveContent = '用户喜欢咖啡，联系电话 12345678901';
+  const sensitive = await processReply(
+    validReply({
+      content: sensitiveContent,
+      type: 'preference',
+      keywords: ['咖啡'],
+      confidence: 0.7,
+      sourceQuote: '我喜欢喝咖啡',
+    }),
+    '我喜欢喝咖啡',
+    'sensitive-low-confidence',
+    'msg-sensitive-low-confidence'
+  );
+  assert.equal(sensitive.reason, 'sensitive_output');
+  assert.equal(ledger.weigh(sensitiveContent).attempts, 0);
+
+  const ungroundedContent = '用户喜欢喝绿茶';
+  const ungrounded = await processReply(
+    validReply({
+      content: ungroundedContent,
+      type: 'preference',
+      keywords: ['绿茶'],
+      confidence: 0.7,
+      sourceQuote: '我喜欢喝红茶',
+    }),
+    '我喜欢喝绿茶',
+    'ungrounded-low-confidence',
+    'msg-ungrounded-low-confidence'
+  );
+  assert.equal(ungrounded.reason, 'quote_not_grounded');
+  assert.equal(ledger.weigh(ungroundedContent).attempts, 0);
+  assert.deepEqual(memory.getMemories({ includePending: true }), []);
+});
+
+test('模型推断与用户直述：不同来源证据不会被混并', async () => {
+  seed([]);
+  const inferred = await processReply(
+    validReply({ confidence: 0.7, inferred: true }),
+    '我叫宋泽',
+    'provenance-inferred',
+    'msg-provenance-inferred'
+  );
+  const direct = await processReply(
+    validReply({ confidence: 0.7 }),
+    '我叫宋泽',
+    'provenance-direct',
+    'msg-provenance-direct'
+  );
+
+  assert.equal(inferred.status, 'pending');
+  assert.equal(direct.status, 'pending');
+  assert.notEqual(direct.id, inferred.id);
+  const pending = memory.getMemories({ includePending: true });
+  assert.equal(pending.length, 2);
+  assert.deepEqual(pending.map(item => item.provenance).sort(), [
+    'model_inferred',
+    'user_asserted',
+  ]);
+  assert.deepEqual(pending.map(item => item.pendingReason).sort(), [
+    'low_confidence_candidate',
+    'model_inference_requires_confirmation',
+  ]);
+  assert.deepEqual(memory.getMemories(), []);
+});
+
+test('低置信候选：已有 active 同事实时不新建重复 pending', async () => {
+  seed([]);
+  const existing = await processReply(
+    validReply({ confidence: 0.95 }),
+    '我叫宋泽',
+    'existing-active-a',
+    'msg-existing-active'
+  );
+  assert.equal(existing.status, 'active');
+
+  const repeatedLowConfidence = await processReply(
+    validReply({ confidence: 0.7 }),
+    '我叫宋泽',
+    'existing-active-b',
+    'msg-existing-active-low'
+  );
+  assert.equal(repeatedLowConfidence.written, false);
+  assert.equal(repeatedLowConfidence.reason, 'low_confidence');
+
+  const saved = memory.getMemories({ includePending: true });
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].id, existing.id);
+  assert.equal(saved[0].status, 'active');
 });

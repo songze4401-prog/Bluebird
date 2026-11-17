@@ -48,6 +48,8 @@
 
 允许转换由 `memory-lifecycle.js` 的 `TRANSITIONS`/`canTransition` 定义；`pending → active/deleted`、`active → superseded/archived/deleted`、`superseded → archived/deleted`、`archived → deleted`。
 
+拒绝 pending 会先写入来源墓碑再移除候选：墓碑只保存用户/会话/消息标识与哈希，不存记忆正文或原话。同一 `messageId` 的异步重试在 24 小时匹配窗口内即使重启也会被阻断；新的 `messageId` 代表新的表达，可以重新成为候选。
+
 ## 4. 接口契约
 
 ### Agent 工具 `memory_remember`
