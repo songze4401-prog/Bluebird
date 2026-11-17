@@ -4,7 +4,7 @@
 // 四个弹层（添加任务 / 新建面板 / 记忆 / 任务详情）由本屏挂载；
 // 全页透明底透出壁纸层，颜色走 tokens，动效只用 RN 内置 Animated。
 
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   Animated,
   Easing,
@@ -13,25 +13,49 @@ import {
   StyleSheet,
   Text,
   View,
-  type LayoutChangeEvent,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useUi } from './ui-state';
 import { V7_SHADOWS, type V7Tokens } from './ui-theme';
 import { Greeting } from '../components/Greeting';
-import { TaskRow } from '../components/TaskRow';
+import { TaskRow, type TaskRowModel } from '../components/TaskRow';
 import { MyPanels } from '../components/MyPanels';
 import { TaskAddSheet } from '../components/TaskAddSheet';
 import { VizPanelSheet } from '../components/VizPanelSheet';
 import { MemoryPanelSheet } from '../components/MemoryPanelSheet';
 import { TaskDetailSheet } from '../components/TaskDetailSheet';
 import { EntryIcon, QuadIcon } from '../components/V7Icons';
+import { apiFetch } from '../lib/api/client';
+import { API_PATHS } from '../lib/api/endpoints';
 import { formatMessageTime } from '../lib/utils';
+import type { AgentTask, AgentTasksResponse } from '../lib/api/types';
 import type { SessionMeta } from '../lib/types';
-import type { DoneTask, RunningTask, VizKind } from '../data/mock';
+import type { VizKind } from '../data/mock';
+
+// 真实任务状态语义（与旧壳 TasksPanel 同源）：进行中 = 非终态；终态进「已完成」段。
+// 注意 recovery（待核对）在服务端是正式终态（status-vocabulary.js S5）——
+// 放进运行段会让待核对任务永久卡在「进行中」+ 假成功取消（oracle 复查阻断）
+const TASK_STATUS_LABEL: Record<string, string> = {
+  queued: '排队中',
+  accepted: '已接收',
+  running: '执行中',
+  waiting_approval: '等待审批',
+  retrying: '重试中',
+  recovery: '待核对',
+  completed: '完成',
+  failed: '失败',
+  cancelled: '已取消',
+  timed_out: '超时',
+};
+const RUNNING_STATUSES = new Set([
+  'queued',
+  'accepted',
+  'running',
+  'waiting_approval',
+  'retrying',
+]);
+const CANCELLABLE_STATUSES = RUNNING_STATUSES;
 
 // 空白会话统一显示「新对话」（与旧壳 HistoryScreen 同语义）；
 // 服务端的「新会话」只是占位标题，不对用户暴露。
@@ -342,39 +366,62 @@ export function HomeScreen({
   const [taskAddOpen, setTaskAddOpen] = useState(false);
   const [vizOpen, setVizOpen] = useState(false);
   const [memOpen, setMemOpen] = useState(false);
-  const [taskDetail, setTaskDetail] = useState<{
-    task: RunningTask | DoneTask;
-    kind: 'run' | 'done';
-  } | null>(null);
 
-  // 已完成任务裁剪：每张卡 onLayout 记高度（按任务名记，避免下标位移拿错卡）；
-  // 超过 4 条时容器 maxHeight = 前 4 张卡累计 + 3*12 gap + 64
-  // （原型第 4 张卡底边 +64px 的简化实现）；容器本身可滚动，滑到底后渐隐层消失
-  const [doneHeights, setDoneHeights] = useState<Record<string, number>>({});
-  const [doneInnerEnd, setDoneInnerEnd] = useState(false);
+  // ---- 真实任务（/agent-tasks，与旧壳 TasksPanel 同源）----
+  // 主页是全局视图：拉 memory Bot 的任务（不挂 parentSessionId）。
+  // 轮询只在主页视图进行（双 pane 常挂载，聊天/设置/弹层打开时不打请求）；
+  // 6s 是主页自己的节奏（旧壳任务页 4s，两 pane 常挂载下更省）。
+  const [agentTasks, setAgentTasks] = useState<AgentTask[]>([]);
+  const loadAgentTasks = useCallback(() => {
+    apiFetch(API_PATHS.agentTasks('memory', 30))
+      .then(async response => {
+        if (!response.ok) throw new Error('failed');
+        const data = (await response.json()) as AgentTasksResponse;
+        setAgentTasks(data.tasks || []);
+      })
+      .catch(() => {
+        // 拉取失败保持上一次列表（或空），不弹框打断主页
+      });
+  }, []);
+  useEffect(() => {
+    if (ui.view !== 'home') return undefined;
+    loadAgentTasks();
+    const timer = setInterval(loadAgentTasks, 6000);
+    return () => clearInterval(timer);
+  }, [ui.view, loadAgentTasks]);
 
-  const measureDone = (name: string) => (e: LayoutChangeEvent) => {
-    const h = Math.round(e.nativeEvent.layout.height);
-    setDoneHeights(prev => (prev[name] === h ? prev : { ...prev, [name]: h }));
+  const runningTasks = agentTasks.filter(t => RUNNING_STATUSES.has(t.status));
+  const doneTasks = agentTasks.filter(t => !RUNNING_STATUSES.has(t.status));
+
+  const realRowModel = (t: AgentTask): TaskRowModel => {
+    const label = TASK_STATUS_LABEL[t.status] ?? t.status;
+    if (RUNNING_STATUSES.has(t.status)) {
+      // 运行态没有真实百分比数据：状态色满条 + 35% 透明（状态条，不伪造进度）
+      return {
+        n: t.goal,
+        rightLabel: label,
+        rightTone: 'mut',
+        fillPct: 100,
+        fillColor: ui.tokens.info,
+        fillOpacity: 0.35,
+      };
+    }
+    const failed = t.status !== 'completed';
+    return {
+      n: t.goal,
+      rightLabel: label,
+      rightTone: failed ? 'fail' : 'ok',
+      fillPct: 100,
+      fillColor: failed ? ui.tokens.down : ui.tokens.up,
+      fillOpacity: failed ? 0.35 : 1,
+    };
   };
 
-  // 前 4 张卡的实测高度（量齐才启用裁剪，首帧不裁）
-  const first4Heights = ui.done
-    .slice(0, 4)
-    .map(d => doneHeights[d.n])
-    .filter((h): h is number => typeof h === 'number');
-  const doneHeightsReady = ui.done.length > 4 && first4Heights.length === 4;
-  const doneMaxHeight = doneHeightsReady
-    ? first4Heights.reduce((a, b) => a + b, 0) + 3 * 12 + 64
-    : undefined;
-  const showDoneFade = doneHeightsReady && !doneInnerEnd;
-
-  // 已完成任务容器内部滚动到底（原型 .donewrap.at-bottom：--donefade 归零）
-  const onDoneScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const { contentOffset, layoutMeasurement, contentSize } = e.nativeEvent;
-    const atEnd = contentOffset.y + layoutMeasurement.height >= contentSize.height - 2;
-    setDoneInnerEnd(prev => (prev === atEnd ? prev : atEnd));
-  };
+  // 任务详情（真实任务）：点行开详情，可取消状态给「取消任务」入口。
+  // 轮询每 6s 重建 agentTasks——详情按 taskId 从最新列表派生 live 状态，
+  // 打开期间任务终态化时 statusLabel/cancellable 跟着变（不持陈旧引用）
+  const [realDetailId, setRealDetailId] = useState<string | null>(null);
+  const realDetailLive = agentTasks.find(t => t.taskId === realDetailId) ?? null;
 
   // 对话入口取「最近一条有内容的会话」（服务端 updatedAt 倒序）；
   // 全是空白草稿时才退回第一条，避免点开一个空对话。
@@ -544,76 +591,39 @@ export function HomeScreen({
           ))}
         </View>
 
-        {/* 6. 进行中的任务（无任务时整段隐藏——不展示假数据） */}
-        {ui.running.length > 0 && (
+        {/* 6. 进行中的任务（真实 /agent-tasks；无任务时整段隐藏——不展示假数据） */}
+        {runningTasks.length > 0 && (
           <>
             <View style={styles.sechead}>
               <Text style={styles.secTxt}>进行中的任务</Text>
               <View style={{ flex: 1 }} />
-              <Text style={styles.secCount}>{ui.running.length} 个进行中</Text>
+              <Text style={styles.secCount}>{runningTasks.length} 个进行中</Text>
             </View>
             <View style={styles.listCol}>
-              {ui.running.map(r => (
+              {runningTasks.map(t => (
                 <TaskRow
-                  key={r.n}
-                  kind="run"
-                  task={r}
-                  onPress={() => setTaskDetail({ task: r, kind: 'run' })}
+                  key={t.taskId}
+                  model={realRowModel(t)}
+                  onPress={() => setRealDetailId(t.taskId)}
                 />
               ))}
             </View>
           </>
         )}
 
-        {/* 7. 已完成任务（无任务时整段隐藏；超过 4 条时裁剪 + 底部渐隐） */}
-        {ui.done.length > 0 && (
+        {/* 7. 已完成任务（真实终态任务；无任务时整段隐藏） */}
+        {doneTasks.length > 0 && (
           <>
             <View style={styles.sechead}>
               <Text style={styles.secTxt}>已完成任务</Text>
               <View style={{ flex: 1 }} />
-              <Text style={styles.secCount}>{ui.done.length} 个已完成</Text>
+              <Text style={styles.secCount}>{doneTasks.length} 个已完成</Text>
             </View>
-            {ui.done.length > 4 ? (
-          <View>
-            <ScrollView
-              style={doneMaxHeight !== undefined ? [styles.doneWrap, { maxHeight: doneMaxHeight }] : styles.doneWrap}
-              contentContainerStyle={styles.listCol}
-              nestedScrollEnabled
-              showsVerticalScrollIndicator={false}
-              onScroll={onDoneScroll}
-              scrollEventThrottle={16}
-            >
-              {ui.done.map(d => (
-                <View key={d.n} onLayout={measureDone(d.n)}>
-                  <TaskRow
-                    kind="done"
-                    task={d}
-                    onPress={() => setTaskDetail({ task: d, kind: 'done' })}
-                  />
-                </View>
+            <View style={styles.listCol}>
+              {doneTasks.map(t => (
+                <TaskRow key={t.taskId} model={realRowModel(t)} onPress={() => setRealDetailId(t.taskId)} />
               ))}
-            </ScrollView>
-            {/* 底部 64px 渐隐层：三层 surface 叠出近似的 mask 渐隐（原型 mask-image） */}
-            {showDoneFade && (
-              <>
-                <View pointerEvents="none" style={[styles.fadeLayer, { bottom: 0, opacity: 0.75 }]} />
-                <View pointerEvents="none" style={[styles.fadeLayer, { bottom: 16, opacity: 0.45 }]} />
-                <View pointerEvents="none" style={[styles.fadeLayer, { bottom: 32, opacity: 0.2 }]} />
-              </>
-            )}
-          </View>
-        ) : (
-          <View style={styles.listCol}>
-            {ui.done.map(d => (
-              <TaskRow
-                key={d.n}
-                kind="done"
-                task={d}
-                onPress={() => setTaskDetail({ task: d, kind: 'done' })}
-              />
-            ))}
-          </View>
-        )}
+            </View>
           </>
         )}
 
@@ -679,10 +689,26 @@ export function HomeScreen({
       <VizPanelSheet visible={vizOpen} onClose={() => setVizOpen(false)} />
       <MemoryPanelSheet visible={memOpen} onClose={() => setMemOpen(false)} />
       <TaskDetailSheet
-        visible={taskDetail !== null}
-        onClose={() => setTaskDetail(null)}
-        kind={taskDetail?.kind ?? 'run'}
-        task={taskDetail?.task ?? null}
+        visible={realDetailLive !== null}
+        onClose={() => setRealDetailId(null)}
+        realTask={
+          realDetailLive
+            ? {
+                taskId: realDetailLive.taskId,
+                goal: realDetailLive.goal,
+                botId: realDetailLive.botId,
+                statusLabel: TASK_STATUS_LABEL[realDetailLive.status] ?? realDetailLive.status,
+                cancellable: CANCELLABLE_STATUSES.has(realDetailLive.status),
+                cancelRequested: realDetailLive.cancelRequested,
+                resultSummary: realDetailLive.result?.summary ?? '',
+                errorCode: realDetailLive.errorCode ?? '',
+              }
+            : null
+        }
+        onRealCancelled={() => {
+          setRealDetailId(null);
+          loadAgentTasks();
+        }}
       />
     </>
   );
