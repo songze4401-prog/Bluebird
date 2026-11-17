@@ -29,6 +29,7 @@ import { getTheme } from '../theme';
 import { MarkdownMessage } from '../components/MarkdownMessage';
 import { SheetScaffold } from '../components/SheetScaffold';
 import { parseStickerMarkers } from '../lib/utils';
+import { buildWelcomeMessages } from '../lib/chat-messages';
 import { IdentityHeader } from '../components/IdentityHeader';
 import { EditProfileSheet } from '../components/EditProfileSheet';
 import { ModelPickerSheet } from '../components/ModelPickerSheet';
@@ -463,6 +464,8 @@ export function ChatScreen(props: {
   const [input, setInput] = useState('');
   // 多行输入的实时内容高（onContentSizeChange 驱动，1~120px 自动增高）
   const [inputH, setInputH] = useState(22);
+  // 输入框焦点：键盘期底部导航隐藏，此时输入条不需要为导航让位
+  const [inputFocused, setInputFocused] = useState(false);
   // 返回底部箭头（用户上滑阅读后出现）
   const [showJump, setShowJump] = useState(false);
   // 长按操作：open 控制弹层显隐（关闭动画期间保留目标消息，避免滑出动画里空白）
@@ -674,6 +677,13 @@ export function ChatScreen(props: {
     Keyboard.dismiss();
   };
 
+  // 空会话占位：v7 壳启动会复用 0 消息草稿会话（markHistoryLoaded 后 messages 恒为空），
+  // 没有空态时整屏空白；这里与旧壳 loadHistory(空) 同款，用欢迎语顶上。
+  const displayMessages =
+    !chat.loadingHistory && chat.messages.length === 0
+      ? buildWelcomeMessages()
+      : chat.messages;
+
   return (
     /* 根改常规流列布局：键盘避让走壳层 KAV padding（收缩容器→常规流的输入条原生上移），
        不再用绝对定位 + keyboardH 手动偏移（部分安卓 edge-to-edge 设备键盘事件不触发） */
@@ -733,7 +743,7 @@ export function ChatScreen(props: {
           </Pressable>
         )}
         {chat.loadingHistory && <Text style={styles.loadingTxt}>正在读取对话…</Text>}
-        {chat.messages.map(m =>
+        {displayMessages.map(m =>
           m.role === 'user' ? (
             /* 用户消息：右对齐列 = 时间 → 黑泡（附件 chip 收在泡内）；长按开消息操作 */
             <Pressable
@@ -848,8 +858,15 @@ export function ChatScreen(props: {
           </Pressable>
         )}
 
-      {/* 4. 底部输入条 + 加号面板：常规流布局（键盘让位走壳层 KAV padding），margin 让位底部导航 */}
-      <View style={styles.compDock}>
+      {/* 4. 底部输入条 + 加号面板：常规流布局（键盘让位走壳层 KAV padding）。
+             底部悬浮导航高 44、距底 insets.bottom+12，键盘期隐藏；输入条按焦点让位，
+             否则会被导航 pill 压住（真机截图的遮挡 bug）。 */}
+      <View
+        style={[
+          styles.compDock,
+          { marginBottom: inputFocused ? 8 : insets.bottom + 68 },
+        ]}
+      >
         {/* 待发送图片预览行：缩略图 + × 移除；上传中显示占位 */}
         {(attachments.pendingAttachments.length > 0 || attachments.uploadingImage) && (
           <View style={styles.pendingRow}>
@@ -892,8 +909,14 @@ export function ChatScreen(props: {
             placeholderTextColor={t.mut}
             multiline
             textAlignVertical="center"
-            onFocus={() => props.onInputFocusChange?.(true)}
-            onBlur={() => props.onInputFocusChange?.(false)}
+            onFocus={() => {
+              setInputFocused(true);
+              props.onInputFocusChange?.(true);
+            }}
+            onBlur={() => {
+              setInputFocused(false);
+              props.onInputFocusChange?.(false);
+            }}
             blurOnSubmit={false}
             onSubmitEditing={doSend}
             onContentSizeChange={e =>
