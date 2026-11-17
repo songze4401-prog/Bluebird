@@ -211,29 +211,29 @@ describe('P0-1 事实更正：旧事实不得继续被检索，且改前先取�
   });
 });
 
-describe('P2-2 拒写成因可观测：每条被拒的候选都要带稳定短码', () => {
-  test('没有任何一次拒写不带短码', () => {
+describe('P2-2 未写入成因可观测：每条未写入候选都要带稳定短码', () => {
+  test('没有任何一次未写入缺少短码', () => {
     assert.equal(
-      p2().rejectedWithoutReason,
+      p2().nonWrittenWithoutReason,
       0,
-      `这些拒写没带回短码：${JSON.stringify(p2().rejectedWithoutReasonKeys)}；` +
-        `全部拒写 ${p2().rejectedAttempts} 次`
+      `这些未写入候选没带回短码：${JSON.stringify(p2().nonWrittenWithoutReasonKeys)}；` +
+        `全部未写入 ${p2().nonWrittenAttempts} 次`
     );
     assert.equal(
-      p2().rejectedWithReason,
-      p2().rejectedAttempts,
-      '有拒写既没算进有短码也没算进无短码，统计口径漏了'
+      p2().nonWrittenWithReason,
+      p2().nonWrittenAttempts,
+      '有未写入既没算进有短码也没算进无短码，统计口径漏了'
     );
   });
 
-  test('三类成因能被区分：模型没提取 / 被锚点拒 / 被置信度拒', () => {
+  test('三类成因能被区分：模型没提取 / 被锚点拒 / 低证据候选待确认', () => {
     const reasons = p2().gateProbeReasons;
 
     for (const code of [
       'not_triggered',
       'model_empty',
       'ungrounded_content',
-      'low_confidence',
+      'low_confidence_candidate',
     ]) {
       assert.ok(
         reasons.some(item => item.endsWith(`=${code}`)),

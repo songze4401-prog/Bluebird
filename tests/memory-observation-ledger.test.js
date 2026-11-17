@@ -156,7 +156,7 @@ test('损坏隔离：坏 JSON 隔离为 .corrupt-<ts> 并回退空台账', async
 
 test('集成：processMemory 的 low_confidence 拒写自动入台账并跨会话累计', async () => {
   seed([]);
-  // 0.5 低于默认门槛 0.85，也低于显式意图门槛 0.6——必走 low_confidence 拒写
+  // 0.5 低于稳定事实的候选保留底线——经安全接地后记入低置信度拒写台账。
   const reply = validReply({ confidence: 0.5 });
   const key = ledger.observationKey('用户叫宋泽');
 
@@ -422,7 +422,7 @@ test('模型推断与用户直述：不同来源证据不会被混并', async ()
   assert.deepEqual(memory.getMemories(), []);
 });
 
-test('低置信候选：已有 active 同事实时不新建重复 pending', async () => {
+test('低置信候选：已有 active 同事实时用独立会话证据增强原条目', async () => {
   seed([]);
   const existing = await processReply(
     validReply({ confidence: 0.95 }),
@@ -438,11 +438,12 @@ test('低置信候选：已有 active 同事实时不新建重复 pending', asyn
     'existing-active-b',
     'msg-existing-active-low'
   );
-  assert.equal(repeatedLowConfidence.written, false);
-  assert.equal(repeatedLowConfidence.reason, 'low_confidence');
+  assert.equal(repeatedLowConfidence.written, true);
+  assert.equal(repeatedLowConfidence.action, 'merged');
 
   const saved = memory.getMemories({ includePending: true });
   assert.equal(saved.length, 1);
   assert.equal(saved[0].id, existing.id);
   assert.equal(saved[0].status, 'active');
+  assert.equal(saved[0].evidence.independentSessions, 2);
 });

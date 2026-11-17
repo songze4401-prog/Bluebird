@@ -319,7 +319,7 @@ describe('写入侧：贡献归属登记 + 更正不越会话', { concurrency: 1
     }
   });
 
-  test('同一事实被第二个会话重述：追加贡献，两个会话都合法可见', async () => {
+  test('第二会话的重述与本会话反例冲突：待确认且不改写共享事实', async () => {
     const target = memory
       .getMemories()
       .find(item => item.content === '用户喝咖啡只喝美式');
@@ -336,25 +336,26 @@ describe('写入侧：贡献归属登记 + 更正不越会话', { concurrency: 1
       SESSION_B
     );
 
-    assert.equal(outcome.action, 'merged', '同一事实的重述应就地合并而不是新增');
-    assert.equal(outcome.id, target.id);
+    assert.equal(outcome.action, 'pending');
+    assert.equal(outcome.reason, 'contradictory_evidence_requires_confirmation');
+    assert.notEqual(outcome.id, target.id, 'pending 候选应有独立 id');
+    assert.equal(outcome.targetId, target.id, '冲突目标只作为待确认引用');
 
-    const merged = memory.getMemories().find(item => item.id === target.id);
+    const unchanged = memory.getMemories().find(item => item.id === target.id);
 
     assert.deepEqual(
-      merged.contributions.map(item => item.sessionId).sort(),
-      [SESSION_A, SESSION_B]
+      unchanged.contributions.map(item => item.sessionId),
+      [SESSION_A],
+      '待确认候选不能提前并入 active 事实'
     );
 
-    // 共享事实：两个会话都能读到同一条 —— 这是归属正确的证据，不是串读
+    // B 的待确认候选不可见；A 的共享事实与 B 自有的反例各留在原作用域。
     const a = await allThreePaths(COFFEE_QUERY, SESSION_A);
     const b = await allThreePaths(COFFEE_QUERY, SESSION_B);
 
     assert.ok(a.scoped.includes('用户喝咖啡只喝美式'));
-    assert.ok(b.scoped.includes('用户喝咖啡只喝美式'));
-    // 会话 B 自己的「拿铁」还在，合并不能把它抹掉
+    assert.ok(!b.scoped.includes('用户喝咖啡只喝美式'));
     assert.ok(b.scoped.includes('用户喝咖啡只喝拿铁'), `会话 B 丢了自有记忆：${JSON.stringify(b.scoped)}`);
-    // 会话 A 依然看不到会话 B 独有的「拿铁」
     assert.ok(!a.scoped.includes('用户喝咖啡只喝拿铁'));
   });
 
@@ -365,9 +366,9 @@ describe('写入侧：贡献归属登记 + 更正不越会话', { concurrency: 1
         type: 'preference',
         keywords: ['编辑器', 'Sublime'],
         confidence: 0.91,
-        sourceQuote: '编辑器我用 Sublime',
+      sourceQuote: '编辑器改用 Sublime',
       }),
-      '记住，编辑器我用 Sublime',
+      '记住，编辑器改用 Sublime',
       SESSION_A
     );
 

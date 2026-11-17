@@ -275,13 +275,13 @@ const Q_PLATE = '我的车牌号是多少';
 const Q_CITY = '我住在哪个城市';
 const Q_ALL = [Q_BIRTHDAY, Q_PLATE, Q_CITY];
 const CORRECTION = {
-  userText: '记住：我的生日其实是6月20日，之前说错了',
+  userText: '记住：更正，我的生日改为6月20日，之前说错了',
   reply: {
     content: BIRTHDAY_NEW,
     type: 'fact',
     keywords: ['生日'],
     confidence: 0.95,
-    sourceQuote: '我的生日其实是6月20日',
+    sourceQuote: '我的生日改为6月20日',
   },
 };
 

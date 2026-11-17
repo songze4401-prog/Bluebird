@@ -133,7 +133,7 @@ describe('旧数据迁移：补齐身份与时效字段，不改写任何已有�
       fakeClient({
         content: '用户叫宋泽',
         type: 'identity',
-        keywords: ['名字'],
+        keywords: ['名字', '宋泽'],
         confidence: 0.95,
         sourceQuote: '我叫宋泽',
       }),

@@ -205,7 +205,7 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-126 files, 2496 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
+126 files, 2499 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
 node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js tests/monitoring.test.js   # node:test suites (231)
@@ -235,7 +235,7 @@ node tests/delete-semantics.test.js        # 55
 node tests/memory-agent-write.test.js      # 13
 node tests/memory-api-recall.test.js       # 41
 node tests/memory-context-injection.test.js # 11
-node tests/memory-evidence-policy.test.js  # 16
+node tests/memory-evidence-policy.test.js  # 19
 node tests/memory-eval-baseline.test.js    # 22
 node tests/memory-id-migration.test.js     # 20
 node tests/memory-id-order.test.js         # 10

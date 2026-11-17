@@ -82,7 +82,7 @@ test('strict：单次偏好进入候选，不直接晋升 active', async () => {
   assert.equal(saved.provenance, 'user_asserted');
   assert.equal(saved.pendingReason, 'single_preference_candidate');
   assert.equal(saved.evidence.persistentIntent, false);
-  assert.equal(saved.policyVersion, 'p1.0');
+  assert.equal(saved.policyVersion, 'p2.0');
 });
 
 test('strict：显式持久意图可直接写入，低模型置信度也可', async () => {
@@ -173,6 +173,46 @@ test('strict：模型推断保留 provenance，不得伪装成用户直述', asy
   assert.notEqual(saved.provenance, 'user_asserted');
 });
 
+test('自动抽取：inferred=true 保留为模型推断并进入待确认', async () => {
+  const fakeClient = {
+    chat: {
+      completions: {
+        create: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  content: '我喜欢简洁方案',
+                  type: 'preference',
+                  keywords: ['简洁方案'],
+                  confidence: 0.9,
+                  inferred: true,
+                  uncertainty: 'none',
+                  sourceQuote: '我喜欢简洁方案',
+                }),
+              },
+            },
+          ],
+        }),
+      },
+    },
+  };
+  const outcome = await memory.processMemory(
+    fakeClient,
+    '记一下，我喜欢简洁方案',
+    's-inferred-extraction',
+    { messageId: 'm-p2-inferred-extraction' }
+  );
+
+  assert.equal(outcome.written, false);
+  assert.equal(outcome.reason, 'model_inference_requires_confirmation');
+  const [saved] = allMemories();
+  assert.equal(saved.status, 'pending');
+  assert.equal(saved.provenance, 'model_inferred');
+  assert.equal(saved.category, 'model_inference');
+  assert.equal(saved.contributions[0].sourceQuote, '我喜欢简洁方案');
+});
+
 test('strict：带“方案”字样的偏好仍按长期偏好处理', async () => {
   const result = await memory.applyCandidate(
     candidate({
@@ -205,7 +245,7 @@ test('strict：模糊表述进入行为模式待确认', async () => {
 
   assert.equal(result.written, false);
   assert.equal(result.status, 'pending');
-  assert.equal(result.reason, 'behavior_pattern_requires_confirmation');
+  assert.equal(result.reason, 'user_hedged_requires_confirmation');
 
   const saved = allMemories()[0];
   assert.equal(saved.category, 'behavior_pattern');
@@ -301,7 +341,6 @@ test('无可信 userId：待确认候选仍按会话作用域隔离', async () =
     actor: 'test',
     userText: '我喜欢喝美式咖啡',
     requireUserGrounding: true,
-    retainLowConfidenceCandidate: true,
     messageId,
   });
   const first = await memory.applyCandidate(
@@ -326,7 +365,65 @@ test('无可信 userId：待确认候选仍按会话作用域隔离', async () =
   );
 });
 
-test('自动抽取：原话有不确定语气时 inferred:false 不能保留为确定偏好', async () => {
+test('P2：与当前 active 条目冲突但未明确更正时先待确认', async () => {
+  const createdAt = '2026-10-20T08:00:00.000Z';
+  seed([
+    {
+      id: 'mem-p2-existing-editor',
+      content: '用户偏好使用 Emacs 编辑器',
+      type: 'preference',
+      keywords: ['编辑器', '使用', 'Emacs'],
+      confidence: 0.95,
+      status: 'active',
+      userId: 'local-owner',
+      contributions: [
+        { sessionId: 's-old', sourceQuote: '我用 Emacs 编辑器', createdAt },
+      ],
+      createdAt,
+      updatedAt: createdAt,
+    },
+  ]);
+
+  const result = await memory.applyCandidate(
+    candidate({
+      content: '用户偏好使用 Vim 编辑器',
+      keywords: ['编辑器', '使用', 'Vim'],
+      sourceQuote: '我用 Vim 编辑器',
+      explicitCorrection: true,
+    }),
+    options('s-new', '其实我用 Vim 编辑器', { messageId: 'm-p2-conflict' })
+  );
+
+  assert.equal(result.written, false);
+  assert.equal(result.status, 'pending');
+  assert.equal(result.reason, 'contradictory_evidence_requires_confirmation');
+  const saved = allMemories();
+  assert.equal(saved.find(item => item.id === 'mem-p2-existing-editor').status, 'active');
+  const pending = saved.find(item => item.id === result.id);
+  assert.equal(pending.evidence.counterEvidence, 1);
+  assert.equal(pending.evidence.consistency, 0.5);
+  assert.equal(pending.evidence.explicitCorrection, false);
+});
+
+test('P2：过期来源证据不因高模型置信度直接写入', async () => {
+  const result = await memory.applyCandidate(
+    {
+      content: '用户住在台北',
+      type: 'identity',
+      keywords: ['住址', '台北'],
+      confidence: 0.98,
+      sourceQuote: '我住在台北',
+      observedAt: '2010-01-01T00:00:00.000Z',
+    },
+    options('s-stale', '我住在台北', { messageId: 'm-p2-stale' })
+  );
+
+  assert.equal(result.written, false);
+  assert.equal(result.reason, 'stale_evidence');
+  assert.deepEqual(allMemories(), []);
+});
+
+test('自动抽取：原话有不确定语气时保留可能标记、原话和待确认状态', async () => {
   const fakeClient = {
     chat: {
       completions: {
@@ -360,9 +457,20 @@ test('自动抽取：原话有不确定语气时 inferred:false 不能保留为�
 
   assert.equal(first.written, false);
   assert.equal(second.written, false);
-  assert.equal(first.reason, 'low_confidence');
-  assert.equal(second.reason, 'low_confidence');
-  assert.equal(allMemories().length, 0);
+  assert.equal(first.reason, 'user_hedged_requires_confirmation');
+  assert.equal(second.reason, 'user_hedged_requires_confirmation');
+  const saved = allMemories();
+  assert.equal(saved.length, 2);
+  for (const item of saved) {
+    assert.equal(item.status, 'pending');
+    assert.equal(item.pendingReason, 'user_hedged_requires_confirmation');
+    assert.equal(item.uncertainty, 'source_hedged');
+    assert.match(item.content, /可能/);
+    assert.equal(item.contributions[0].sourceQuote, '我可能喜欢喝美式咖啡');
+    assert.equal(item.provenance, 'user_asserted');
+    assert.equal(item.evidence.hedged, true);
+    assert.equal(item.evidence.independentSessions, 1);
+  }
 });
 
 test('strict：同一 messageId 的重复抽取被幂等拒绝', async () => {
@@ -396,15 +504,16 @@ test('strict：临时状态偏好仍被拒绝', async () => {
   assert.equal(allMemories().length, 0);
 });
 
-test('strict：无显式意图的低置信偏好不写入', async () => {
+test('strict：无显式意图的低置信偏好作为待确认候选保留', async () => {
   const result = await memory.applyCandidate(
     candidate({ confidence: 0.7 }),
     options('s-a', '我喜欢喝美式咖啡', { messageId: 'm-p1-low' })
   );
 
   assert.equal(result.written, false);
-  assert.equal(result.reason, 'low_confidence');
-  assert.equal(allMemories().length, 0);
+  assert.equal(result.reason, 'single_preference_candidate');
+  assert.equal(result.status, 'pending');
+  assert.equal(allMemories().length, 1);
 });
 
 test('compat：默认保持单次偏好直接 active', async () => {
@@ -451,14 +560,18 @@ test('证据向量是分量，且决策记录带策略版本', async () => {
     'sensitivity',
     'modelConfidence',
     'persistentIntent',
+    'counterEvidence',
+    'quoteGrounded',
+    'hedged',
+    'explicitCorrection',
     'policyMode',
   ]) {
     assert.ok(key in saved.evidence, `缺少证据分量 ${key}`);
   }
   assert.equal('score' in saved.evidence, false);
-  assert.equal(saved.policyVersion, 'p1.0');
-  assert.equal(saved.decisionVersion, 'p1.0');
+  assert.equal(saved.policyVersion, 'p2.0');
+  assert.equal(saved.decisionVersion, 'p2.0');
   assert.ok(saved.observedAt);
-  assert.equal(saved.lastDecision.policyVersion, 'p1.0');
+  assert.equal(saved.lastDecision.policyVersion, 'p2.0');
   assert.ok(saved.lastDecision.evidence);
 });

@@ -385,7 +385,7 @@ describe('processMemory 提取流程（假 client 拦截）', SERIAL, () => {
     assert.deepEqual(memory.getMemories(), [], 'sourceQuote 必须来自用户原话');
   });
 
-  test('置信度低于 0.85 时拒绝保存', async () => {
+  test('类别证据不足时拒绝置信度 0.5 的候选', async () => {
     await quiesce();
     seed([]);
     const { client } = fakeClient(validReply({ confidence: 0.5 }));

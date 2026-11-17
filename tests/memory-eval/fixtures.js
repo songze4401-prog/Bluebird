@@ -265,13 +265,13 @@ const PHASE2_WRITES = [
   {
     key: 'birthdayCorrection',
     newId: 'N19',
-    userText: '记住：我的生日其实是6月20日，之前说错了',
+    userText: '记住：更正，我的生日改为6月20日，之前说错了',
     reply: {
       content: '用户的生日是6月20日',
       type: 'fact',
       keywords: ['生日'],
       confidence: 0.95,
-      sourceQuote: '我的生日其实是6月20日',
+      sourceQuote: '我的生日改为6月20日',
     },
     replaces: 'M19',
     probeQuery: '我的生日是哪天',
@@ -308,9 +308,9 @@ const PHASE2_WRITES = [
 
 // ---- 固定题库 ----
 /**
- * 拒写原因鉴别探针（phase 2 末尾，独立 reseed 后跑）。
- * 每个探针只改一道闸门，其余条件全部相同，跑完能直接读出这次拒写属于哪一类，
- * 这样「模型没提取 / 被锚点拒 / 被置信度拒」在基线里就是三个可核对的短码，
+ * 未写入原因鉴别探针（phase 2 末尾，独立 reseed 后跑）。
+ * 每个探针只改一道闸门，其余条件全部相同，跑完能直接读出这次未写入属于哪一类，
+ * 这样「模型没提取 / 被锚点拒 / 低证据候选待确认」在基线里就是可核对的短码，
  * 而不是同一行 Memory skipped。
  *
  * expectWritten + expectReason 是硬判据：探针写进了不该写的、或该写的没写进，
@@ -343,7 +343,7 @@ const GATE_PROBES = [
       sourceQuote: '我最近在学弹吉他',
     },
     expectWritten: false,
-    expectReason: 'low_confidence',
+      expectReason: 'low_confidence_candidate',
   },
   {
     key: 'anchorGateProbe',

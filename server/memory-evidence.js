@@ -6,8 +6,8 @@
  */
 const { DECISION } = require('./memory-decision');
 
-const POLICY_VERSION = 'p1.0';
-const DECISION_VERSION = 'p1.0';
+const POLICY_VERSION = 'p2.0';
+const DECISION_VERSION = 'p2.0';
 // S9：反馈纠正路径（user_correction 重写记忆）使用的版本。它与首次写入的
 // POLICY_VERSION / DECISION_VERSION 分开治理；值固定为 'p5.0' 以兼容已存数据。
 const FEEDBACK_POLICY_VERSION = 'p5.0';
@@ -43,6 +43,21 @@ const DECISION_RE = /(决定|采用|选择|方案|架构|迁移|上线|改用|�
 const HEDGE_RE = /(可能|也许|似乎|大概|倾向于|应该是|估计|或许|不确定)/;
 const PERSISTENT_INTENT_RE =
   /(记住|记下|记着|别忘|不要忘|以后|今后|从今以后|长期|始终|一直|永远|每次|往后)/;
+const EXPLICIT_CORRECTION_RE =
+  /(更正|纠正|改成|改为|改(?:喝|用|叫|住|选)|换成|现在(?:我|用户)?(?:喜欢|用|叫|住|选择)|不再|已经不|不是.{0,20}(而是|改为|换成))/;
+const ACTIVE_CONFIDENCE = Object.freeze({
+  [CATEGORY.STABLE_FACT]: 0.82,
+  [CATEGORY.LONG_TERM_PREFERENCE]: 0.88,
+  [CATEGORY.PROJECT_DECISION]: 0.86,
+});
+const PENDING_CONFIDENCE = Object.freeze({
+  [CATEGORY.STABLE_FACT]: 0.55,
+  [CATEGORY.LONG_TERM_PREFERENCE]: 0.62,
+  [CATEGORY.PROJECT_DECISION]: 0.58,
+  [CATEGORY.BEHAVIOR_PATTERN]: 0.6,
+  [CATEGORY.MODEL_INFERENCE]: 0.55,
+  [CATEGORY.LEGACY]: 0.65,
+});
 
 function normalizeText(value) {
   return typeof value === 'string'
@@ -68,6 +83,10 @@ function hasTemporaryMarker(text) {
 
 function detectPersistentIntent(text) {
   return PERSISTENT_INTENT_RE.test(String(text || ''));
+}
+
+function detectExplicitCorrection(text) {
+  return EXPLICIT_CORRECTION_RE.test(String(text || ''));
 }
 
 function resolveProvenance(candidate = {}, options = {}) {
@@ -107,7 +126,10 @@ function classifyCategory(candidate = {}, provenance) {
   ) {
     return CATEGORY.BEHAVIOR_PATTERN;
   }
-  if (hasTemporaryMarker(text)) return CATEGORY.TEMPORARY_STATE;
+  if (MOOD_RE.test(text)) return CATEGORY.TEMPORARY_STATE;
+  if (TEMPORARY_RE.test(text) && type !== 'goal') {
+    return CATEGORY.TEMPORARY_STATE;
+  }
   if (type === 'identity' || type === 'relationship') {
     return CATEGORY.STABLE_FACT;
   }
@@ -207,11 +229,27 @@ function contributionStats(existing, candidate) {
   };
 }
 
+function recencyOf(candidate, now = Date.now()) {
+  if (candidate.validTo) {
+    const expiresAt = Date.parse(candidate.validTo);
+    if (Number.isFinite(expiresAt) && expiresAt <= now) return 0;
+  }
+  const observedAt = Date.parse(candidate.observedAt || candidate.createdAt || '');
+  if (!Number.isFinite(observedAt)) return 0.6;
+  const ageDays = Math.max(0, (now - observedAt) / 86400000);
+  if (ageDays <= 30) return 1;
+  if (ageDays <= 180) return 0.85;
+  if (ageDays <= 365) return 0.65;
+  if (ageDays <= 730) return 0.4;
+  return 0.2;
+}
+
 function buildEvidence({
   candidate,
   decision,
   existing = null,
   userText = '',
+  counterEvidence = 0,
   policyMode = 'compat',
 } = {}) {
   const firstContribution =
@@ -222,67 +260,210 @@ function buildEvidence({
     (firstContribution && firstContribution.sourceQuote) || candidate.sourceQuote
   );
   const normalizedUser = normalizeText(userText);
-  const grounded = Boolean(quote && normalizedUser && normalizedUser.includes(quote));
+  const quoteGrounded = Boolean(
+    quote && normalizedUser && normalizedUser.includes(quote)
+  );
   const stats = contributionStats(existing, candidate);
+  const counterexamples = Math.max(
+    0,
+    Number.isFinite(counterEvidence) ? counterEvidence : 0
+  );
+  const resolvedByUserCorrection =
+    candidate.provenance === PROVENANCE.USER_ASSERTED &&
+    candidate.sourceType === 'user' &&
+    candidate.explicitCorrection === true;
   const consistency =
-    decision && [DECISION.SUPERSEDE, DECISION.NEEDS_CONFIRMATION].includes(decision.decision)
+    !resolvedByUserCorrection &&
+    (counterexamples > 0 ||
+      (decision &&
+        [DECISION.SUPERSEDE, DECISION.NEEDS_CONFIRMATION].includes(
+          decision.decision
+        )))
       ? 0.5
       : 1;
 
   return {
-    directness: directnessOf(candidate.provenance, grounded),
+    directness: directnessOf(candidate.provenance, quoteGrounded),
     sourceReliability: sourceReliabilityOf(candidate.provenance),
     repetition: stats.repetition,
     independentSessions: stats.independentSessions,
     consistency,
-    recency: 1,
+    counterEvidence: counterexamples,
+    recency: recencyOf(candidate),
     specificity: specificityOf(candidate),
     utility: categoryUtility(candidate.category),
     sensitivity: candidate.sensitive === true ? 1 : 0,
     modelConfidence: Number(candidate.confidence),
     persistentIntent: candidate.persistentIntent === true,
+    quotePresent: Boolean(quote),
+    quoteGrounded,
+    hedged: candidate.uncertainty === 'source_hedged' || hasHedge(quote),
+    explicitCorrection: candidate.explicitCorrection === true,
     policyMode,
   };
 }
 
-// compat 只收紧“推断/行为模式必须确认”；strict 额外要求单次偏好先成为候选。
+function withDecision(decision, action, reason) {
+  return { ...decision, decision: action, reason };
+}
+
+function pending(decision, reason) {
+  return withDecision(decision, DECISION.NEEDS_CONFIRMATION, reason);
+}
+
+function reject(decision, reason) {
+  return withDecision(decision, DECISION.REJECT, reason);
+}
+
+function needsReview(decision, reason) {
+  // 已有同事实 active 条目时，不因低置信候选再造一份重复 pending。
+  return decision.decision === DECISION.MERGE
+    ? reject(decision, 'low_confidence')
+    : pending(decision, reason);
+}
+
 function applyEvidencePolicy({
   candidate,
   decision,
   evidence,
   policyMode = 'compat',
 } = {}) {
+  if (!decision || decision.decision === DECISION.REJECT) return decision;
+  if (evidence.sensitivity > 0) return reject(decision, 'sensitive_content');
+  if (candidate.category === CATEGORY.TEMPORARY_STATE) {
+    return reject(decision, 'temporary_state');
+  }
+  if (evidence.recency < 0.25) return reject(decision, 'stale_evidence');
+  if (evidence.utility < 0.3) return reject(decision, 'low_utility');
+  if (evidence.specificity < 0.18) {
+    return reject(decision, 'insufficient_specificity');
+  }
+  if (
+    evidence.sourceReliability < 0.5 &&
+    evidence.independentSessions < 2 &&
+    candidate.category !== CATEGORY.MODEL_INFERENCE
+  ) {
+    return reject(decision, 'weak_source_evidence');
+  }
+  const confidence = Number(evidence.modelConfidence);
+  const categoryFloor = PENDING_CONFIDENCE[candidate.category] || 0.65;
+  const repetitionCredit = evidence.independentSessions >= 2 ? 0.1 : 0;
+  const intentCredit = evidence.persistentIntent ? 0.08 : 0;
+  if (confidence + repetitionCredit + intentCredit < categoryFloor) {
+    return reject(decision, 'low_confidence');
+  }
+  if (candidate.requiresConfirmation) {
+    return pending(
+      decision,
+      candidate.confirmationReason || 'ambiguous_candidate'
+    );
+  }
+  // 推断和带犹豫语气的原话不能自动成为确定事实；重复也不抹掉原话中的不确定性。
   if (
     candidate.provenance === PROVENANCE.MODEL_INFERRED ||
     candidate.category === CATEGORY.MODEL_INFERENCE
   ) {
-    return {
-      decision: DECISION.NEEDS_CONFIRMATION,
-      reason: 'model_inference_requires_confirmation',
-    };
+    return pending(decision, 'model_inference_requires_confirmation');
   }
-
-  if (candidate.category === CATEGORY.BEHAVIOR_PATTERN) {
-    return {
-      decision: DECISION.NEEDS_CONFIRMATION,
-      reason: 'behavior_pattern_requires_confirmation',
-    };
+  if (evidence.hedged || candidate.category === CATEGORY.BEHAVIOR_PATTERN) {
+    return pending(decision, 'user_hedged_requires_confirmation');
   }
+  if (decision.decision === DECISION.NEEDS_CONFIRMATION) return decision;
 
-  if (
-    policyMode === 'strict' &&
+  const directUserEvidence =
+    candidate.provenance === PROVENANCE.USER_ASSERTED &&
+    candidate.sourceType === 'user' &&
+    evidence.quotePresent &&
+    evidence.directness >= 0.9 &&
+    evidence.sourceReliability >= 0.95;
+  // Agent 工具只有在原话确实接地到当前用户消息时，才可作为较低可靠度的直接来源；
+  // 对已有 active 记忆的更新/合并仍由 memory.js 的用户确认门禁拦住。
+  const directAgentQuoteEvidence =
+    candidate.provenance === PROVENANCE.AGENT_OBSERVED &&
+    candidate.sourceType === 'agent' &&
+    evidence.quoteGrounded &&
+    evidence.directness >= 0.79 &&
+    evidence.sourceReliability >= 0.7;
+  const directEvidence = directUserEvidence || directAgentQuoteEvidence;
+  // 长期偏好允许用户用一条明确记忆意图更新旧偏好；这不是通用冲突豁免，
+  // 必须是直接用户原话、原话接地、近期且高置信，并有足够具体信息。
+  const currentPreferenceUpdate =
     candidate.category === CATEGORY.LONG_TERM_PREFERENCE &&
-    decision.decision === DECISION.CREATE &&
-    candidate.persistentIntent !== true &&
-    evidence.independentSessions < 2
+    decision.decision === DECISION.SUPERSEDE &&
+    directUserEvidence &&
+    evidence.quoteGrounded &&
+    evidence.persistentIntent &&
+    confidence >= 0.9 &&
+    evidence.recency >= 0.8 &&
+    evidence.specificity >= 0.25;
+  const corroborated =
+    directEvidence &&
+    evidence.independentSessions >= 2 &&
+    evidence.consistency >= 0.9 &&
+    evidence.recency >= 0.5;
+  const hasUnresolvedConflict = evidence.counterEvidence > 0;
+  if (
+    hasUnresolvedConflict &&
+    !(directUserEvidence && evidence.explicitCorrection && confidence >= 0.7) &&
+    !currentPreferenceUpdate
   ) {
-    return {
-      decision: DECISION.NEEDS_CONFIRMATION,
-      reason: 'single_preference_candidate',
-    };
+    return pending(decision, 'contradictory_evidence_requires_confirmation');
+  }
+  if (!directEvidence) {
+    return pending(decision, 'source_evidence_requires_confirmation');
   }
 
-  return { decision: decision.decision, reason: decision.reason };
+  const stableOrDirect = evidence.consistency >= 0.9 && evidence.recency >= 0.6;
+  switch (candidate.category) {
+    case CATEGORY.STABLE_FACT: {
+      const supported =
+        (confidence >= ACTIVE_CONFIDENCE[CATEGORY.STABLE_FACT] && stableOrDirect) ||
+        (evidence.persistentIntent && confidence >= 0.65 && stableOrDirect) ||
+        (corroborated && confidence >= 0.65);
+      return supported
+        ? { decision: decision.decision, reason: decision.reason }
+        : needsReview(decision, 'low_confidence_candidate');
+    }
+    case CATEGORY.LONG_TERM_PREFERENCE: {
+      const repeated = corroborated && confidence >= 0.7;
+      const explicit = evidence.persistentIntent && confidence >= 0.65 && stableOrDirect;
+      const corrected = evidence.explicitCorrection && confidence >= 0.65 && stableOrDirect;
+      const compatibleSingleStatement =
+        policyMode === 'compat' &&
+        confidence >= 0.9 &&
+        evidence.consistency >= 0.9 &&
+        evidence.recency >= 0.6;
+      const supported =
+        repeated ||
+        explicit ||
+        corrected ||
+        currentPreferenceUpdate ||
+        compatibleSingleStatement;
+      return supported
+        ? { decision: decision.decision, reason: decision.reason }
+        : needsReview(
+            decision,
+            policyMode === 'strict' &&
+            !repeated &&
+            !explicit &&
+            !corrected &&
+            !currentPreferenceUpdate
+              ? 'single_preference_candidate'
+              : 'low_confidence_candidate'
+          );
+    }
+    case CATEGORY.PROJECT_DECISION: {
+      const supported =
+        (confidence >= ACTIVE_CONFIDENCE[CATEGORY.PROJECT_DECISION] && stableOrDirect) ||
+        (evidence.persistentIntent && confidence >= 0.7 && stableOrDirect) ||
+        (corroborated && confidence >= 0.72);
+      return supported
+        ? { decision: decision.decision, reason: decision.reason }
+        : needsReview(decision, 'low_confidence_candidate');
+    }
+    default:
+      return pending(decision, 'category_requires_confirmation');
+  }
 }
 
 module.exports = {
@@ -299,10 +480,13 @@ module.exports = {
   DECISION_RE,
   HEDGE_RE,
   PERSISTENT_INTENT_RE,
+  ACTIVE_CONFIDENCE,
+  PENDING_CONFIDENCE,
   getPolicyMode,
   hasHedge,
   hasTemporaryMarker,
   detectPersistentIntent,
+  detectExplicitCorrection,
   resolveProvenance,
   classifyCategory,
   buildEvidence,
