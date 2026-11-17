@@ -41,6 +41,7 @@ let agentApiBase;
 let pendingTimers = [];
 // S7：同一 goal 首次请求返回 429，用于验证 retrying 退避与重试上限。
 const rateLimitedGoals = new Set();
+let lastChatCompletionRequest = null;
 
 function json(res, status, payload) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -104,6 +105,7 @@ test.before(async () => {
     });
     req.on('end', () => {
       const parsed = JSON.parse(body);
+      lastChatCompletionRequest = parsed;
       const messages = parsed.messages || [];
       const text = lastUserText(messages);
       const hasToolResult = messages.some(message => message.role === 'tool');
@@ -117,6 +119,36 @@ test.before(async () => {
       }
       if (text.includes('FAIL_TASK')) {
         json(res, 500, { error: 'provider_failed' });
+        return;
+      }
+      if (text.includes('MEMORY_QUERY_TOOL') && !hasToolResult) {
+        json(res, 200, {
+          id: 'chatcmpl-memory-query-tool',
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: 'worker-test-model',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: null,
+                tool_calls: [
+                  {
+                    id: 'call_memory_search_from_bot',
+                    type: 'function',
+                    function: {
+                      name: 'memory_search',
+                      arguments: JSON.stringify({ query: '咖啡偏好' }),
+                    },
+                  },
+                ],
+              },
+              finish_reason: 'tool_calls',
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
         return;
       }
       if (text.includes('TOOL_DENY') && !hasToolResult) {
@@ -229,6 +261,22 @@ test.before(async () => {
     const server = app.listen(0, '127.0.0.1', () => resolve(server));
   });
   agentApiBase = `http://127.0.0.1:${agentApiServer.address().port}`;
+});
+
+test('Memory Bot direct chat：模型即使伪造 memory_search 调用也无法执行查询', async () => {
+  const result = await runtime.chat('memory', {
+    message: 'MEMORY_QUERY_TOOL 请检索我的咖啡记忆',
+    userId: 'worker-memory-query-user',
+  });
+  assert.equal(result.toolSteps.length, 1);
+  assert.equal(result.toolSteps[0].name, 'memory_search');
+  assert.equal(result.toolSteps[0].ok, false);
+  assert.match(result.toolSteps[0].summary, /策略不允许/);
+  const names = (lastChatCompletionRequest.tools || [])
+    .map(tool => tool.function && tool.function.name)
+    .filter(Boolean);
+  assert.ok(!names.includes('memory_search'));
+  assert.ok(names.includes('memory_remember'));
 });
 
 test.after(async () => {
@@ -425,6 +473,37 @@ test('网关：策略白名单进一步收窄', () => {
   });
   assert.equal(authorize('knowledge_search').code, 'policy_tool_denied');
   assert.equal(authorize('memory_search').ok, true);
+});
+
+test('Memory Bot Runtime：查询禁用 memory_search，明确维护任务保留原有检索能力', async () => {
+  const manifest = require('../server/agents/manifest').MEMORY_BOT_MANIFEST;
+  const config = { toolAllowlist: manifest.toolAllowlist };
+  const botTools = runtime.allowedToolsFor(config, manifest, null, 'memory');
+  assert.ok(!botTools.includes('memory_search'));
+  assert.ok(botTools.includes('memory_remember'));
+  assert.ok(botTools.includes('knowledge_search'));
+  const queryTools = runtime.allowedToolsFor(config, manifest, null, 'memory', {
+    mode: 'delegated_task',
+    taskType: 'memory.search',
+    goal: '查一下我的咖啡偏好',
+  });
+  assert.ok(!queryTools.includes('memory_search'));
+  const maintenanceTools = runtime.allowedToolsFor(config, manifest, null, 'memory', {
+    mode: 'delegated_task',
+    taskType: 'memory.search',
+    goal: '记录我刚提供的偏好',
+  });
+  assert.ok(maintenanceTools.includes('memory_search'));
+  assert.ok(maintenanceTools.includes('memory_remember'));
+  assert.ok(runtime.allowedToolsFor(config, manifest, null, 'researcher').includes('memory_search'));
+
+  const knowledgeTool = require('../server/tool-knowledge-search');
+  const denied = await knowledgeTool.definition.handler(
+    { query: '咖啡偏好', sources: ['memory'], limit: 5 },
+    { agentId: 'memory', sessionId: 'bs_memory_query_guard' }
+  );
+  assert.equal(denied.ok, false);
+  assert.equal(denied.code, 'memory_source_disabled');
 });
 
 // ---- D. Worker 会话：owner / 作用域 / 生命周期 ----

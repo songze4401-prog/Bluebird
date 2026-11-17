@@ -87,7 +87,7 @@ function makeNodes({ failFirst = false, reviewFailMarker = false } = {}) {
   const first = {
     key: 'find',
     taskType: 'memory.search',
-    goal: failFirst ? 'FAILSCENARIO 检索场景' : '检索发票抬头',
+    goal: failFirst ? 'FAILSCENARIO 记录场景' : '记录发票抬头偏好',
   };
   const second = {
     key: 'sum',
@@ -407,7 +407,7 @@ test('g. 发布门：awaiting_publish → 全部命中节点批准后根交付',
   resetAll();
   const compiled = planCompiler.compilePlan({
     mode: 'single',
-    nodes: [{ key: 'find', taskType: 'memory.search', goal: '发布门编排场景' }],
+    nodes: [{ key: 'find', taskType: 'memory.search', goal: '记录发布门维护事项' }],
   });
   // 给同一血缘追加带发布门的 v2（同步骤内容）。
   const head = workflowStore.getVersion(compiled.planId, compiled.planVersion);
@@ -495,7 +495,7 @@ test('i. deliverPlanOutcome 幂等：重复调用不重复追加消息', async (
 
 test('j. HTTP：POST 编排 + GET 读回 + 未带令牌 401', async () => {
   resetAll();
-  const compiled = planCompiler.compilePlan({ mode: 'single', nodes: [{ key: 'n', taskType: 'memory.search', goal: 'HTTP 编排场景' }] });
+  const compiled = planCompiler.compilePlan({ mode: 'single', nodes: [{ key: 'n', taskType: 'memory.search', goal: '记录 HTTP 编排维护事项' }] });
   const app = express();
   app.use(express.json());
   app.use(

@@ -507,14 +507,14 @@ test('dispatch：创建 Worker 会话 → 任务 → 事件 → 入队', () => {
     {
       agentId: 'memory',
       taskType: 'memory.search',
-      goal: '查咖啡偏好',
+      goal: '记录我提供的咖啡偏好',
       parentSessionId: 's_main',
       priority: 'high',
     },
     { source: 'api' }
   );
   assert.equal(env.sessionsCreated.length, 1);
-  assert.equal(env.sessionsCreated[0].title, '查咖啡偏好');
+  assert.equal(env.sessionsCreated[0].title, '记录我提供的咖啡偏好');
   assert.equal(env.created.length, 1);
   assert.equal(env.created[0].workerSessionId, 'bs_fake_1');
   assert.equal(env.created[0].parentSessionId, 's_main');
@@ -540,7 +540,7 @@ test('dispatch：调用方传入的 parentUserId 原样落库（Worker 按它读
     {
       agentId: 'memory',
       taskType: 'memory.search',
-      goal: '查咖啡偏好',
+      goal: '记录我提供的咖啡偏好',
       parentSessionId: 's_main',
       parentUserId: 'trusted-user-42',
     },
@@ -548,6 +548,28 @@ test('dispatch：调用方传入的 parentUserId 原样落库（Worker 按它读
   );
   assert.equal(env.created.length, 1);
   assert.equal(env.created[0].parentUserId, 'trusted-user-42');
+});
+
+test('dispatch：Memory Bot 查询在建会话/任务前拒绝，非查询维护不受影响', () => {
+  const env = fakeDispatchEnv();
+  assert.throws(
+    () => env.router.dispatch({ agentId: 'memory', taskType: 'memory.search', goal: '查咖啡偏好' }),
+    error => error instanceof AgentError && error.code === 'memory_query_requires_main_agent'
+  );
+  assert.equal(env.sessionsCreated.length, 0);
+  assert.equal(env.created.length, 0);
+  assert.equal(env.started.length, 0);
+  const rejected = env.events.find(event => event.eventType === 'route.rejected');
+  assert.equal(rejected.payload.security, 'memory_query_direct_only');
+
+  const maintenance = fakeDispatchEnv();
+  maintenance.router.dispatch({
+    agentId: 'memory',
+    taskType: 'memory.search',
+    goal: '记录用户明确提供的咖啡偏好',
+  });
+  assert.equal(maintenance.created.length, 1);
+  assert.equal(maintenance.started.length, 1);
 });
 
 test('dispatch：被拒绝时不建会话、不建任务，并写 route.rejected', () => {
@@ -572,7 +594,7 @@ test('dispatch：幂等命中时不新建会话/任务，也不重复入队', ()
   const result = env.router.dispatch({
     agentId: 'memory',
     taskType: 'memory.search',
-    goal: '查咖啡',
+    goal: '记录咖啡偏好更新',
     idempotencyKey: 'same-key',
   });
   assert.equal(result.idempotent, true);
@@ -600,7 +622,7 @@ test('dispatch：真实任务存储落库 route/budget，并可按幂等键复�
   const first = router.dispatch({
     agentId: 'memory',
     taskType: 'memory.search',
-    goal: '查咖啡偏好',
+    goal: '记录咖啡偏好更新',
     idempotencyKey: 'real-idem',
   });
   assert.equal(started.length, 1);
@@ -611,7 +633,7 @@ test('dispatch：真实任务存储落库 route/budget，并可按幂等键复�
   const second = router.dispatch({
     agentId: 'memory',
     taskType: 'memory.search',
-    goal: '查咖啡偏好',
+    goal: '记录咖啡偏好更新',
     idempotencyKey: 'real-idem',
   });
   assert.equal(second.task.taskId, first.task.taskId);
@@ -648,7 +670,7 @@ test('dispatch：路由事件不记录任务正文', () => {
   router.dispatch({
     agentId: 'memory',
     taskType: 'memory.search',
-    goal: '机密目标-咖啡豆',
+    goal: '机密目标-记录咖啡豆偏好',
     context: '机密上下文-浅烘',
   });
   const events = tasks.listEvents('memory');
@@ -702,7 +724,7 @@ test('兼容层：delegate_to_bot 工具名与必填参数保持不变', () => {
 
 test('兼容层：没有主控会话时仍返回 session_required', async () => {
   const result = await dispatchTool.definition.handler(
-    { botId: 'memory', taskType: 'memory.search', goal: '查咖啡' },
+    { botId: 'memory', taskType: 'memory.search', goal: '记录咖啡偏好' },
     {}
   );
   assert.equal(result.ok, false);
@@ -712,8 +734,8 @@ test('兼容层：没有主控会话时仍返回 session_required', async () => 
 test('兼容层：Agent 未就绪时返回既有 bot_not_ready 短码', async () => {
   const main = mainSessions.createSession({ title: 'Router 兼容层测试' });
   const result = await dispatchTool.definition.handler(
-    { botId: 'memory', taskType: 'memory.search', goal: '查咖啡' },
-    { sessionId: main.id, userText: '查咖啡' }
+    { botId: 'memory', taskType: 'memory.search', goal: '记录咖啡偏好' },
+    { sessionId: main.id, userText: '请记录咖啡偏好' }
   );
   assert.equal(result.ok, false);
   assert.equal(result.code, 'bot_not_ready');

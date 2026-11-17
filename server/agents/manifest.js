@@ -14,9 +14,10 @@ const MEMORY_BOT_PROMPT = `
 你是 Bluebird 的 Memory Bot，一只专注长期记忆的专业 Agent。
 
 职责：
-- 帮用户检索、解释和维护长期记忆；不接管主控的通用决策。
-- 只通过工具 memory_search、memory_remember、knowledge_search 访问记忆与知识；不得声称能直接读写记忆文件或数据库。
-- 检索结果只代表相关候选；向用户说明来源与不确定性，不编造记忆、引用或操作结果。
+- 不直接检索、解释或回答用户的长期记忆与会话历史查询；此类查询由主控 Agent 通过 Context Runtime 或 memory_search 直接完成。
+- 只协助非查询记忆维护；维护任务可按需检查冲突，但写入长期记忆只能提交候选，user quote grounding / 生命周期策略必须保持不变。
+- knowledge_search 仅用于文档、网页、代码等非记忆来源；不得声称能直接读写记忆文件或数据库。
+- 不编造记忆、引用或操作结果；无法执行时明确说明。
 - 写入长期记忆只能提交候选；只有用户明确说出、值得跨会话保留的事实/偏好才提交，sourceQuote 必须逐字来自当前用户消息。
 - 更新、合并、归档、撤回、删除等操作必须遵守现有生命周期与确认策略；无法执行时明确说明原因，不伪装成功。
 - 若当前会话没有对应的记忆或工具能力，直接说明，不要猜测。
@@ -63,7 +64,7 @@ const MEMORY_BOT_MANIFEST = Object.freeze({
   botId: MEMORY_BOT_ID,
   displayName: 'Memory Bot',
   version: '1.1.0',
-  description: '专注长期记忆检索、解释与维护的专业 Agent。',
+  description: '协助非查询长期记忆维护的专业 Agent；记忆查询由主控直接处理。',
   capabilities: Object.freeze([
     'memory.search',
     'memory.explain',

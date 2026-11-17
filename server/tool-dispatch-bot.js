@@ -10,6 +10,7 @@ const { getManifest } = require('./agents/manifest');
 const orchestrator = require('./agents/orchestrator');
 const mainSessions = require('./sessions');
 const { textLength } = require('./text-utils');
+const { isMemoryQueryDelegation } = require('./delegation-intent');
 
 const BOT_ID = 'memory';
 const GOAL_MAX = 2000;
@@ -41,6 +42,12 @@ function validate(args) {
   if (!goal) return { ok: false, error: '缺少必填参数 goal' };
   if (textLength(goal) > GOAL_MAX) {
     return { ok: false, error: `goal 超过 ${GOAL_MAX} 字上限` };
+  }
+  if (isMemoryQueryDelegation(args.taskType, goal)) {
+    return {
+      ok: false,
+      error: '记忆查询由主控 Agent 直接通过 memory_search/Context Runtime 执行，不派发给 Memory Bot',
+    };
   }
   const context =
     typeof args.context === 'string' ? args.context.trim() : '';
@@ -78,9 +85,9 @@ function validate(args) {
 const definition = Object.freeze({
   name: 'delegate_to_bot',
   description:
-    '把一个需要长期记忆检索、解释或维护的任务派发给 Memory Bot。只创建排队任务，' +
+    '把一个明确的非查询记忆维护任务派发给 Memory Bot。记忆查询与解释由主控 Agent 直接通过 memory_search/Context Runtime 执行，' +
     '不会在当前轮同步返回执行结果；任务完成后结果会写入当前会话，用户也可以在任务页查看。' +
-    '仅当用户明确要求 Memory Bot 处理、或任务明显属于记忆维护时使用。',
+    '不要用此工具处理记忆查询。',
   parameters: Object.freeze({
     type: 'object',
     properties: Object.freeze({
@@ -118,6 +125,13 @@ const definition = Object.freeze({
   risk: 'reversible_write',
   validate,
   async handler(args, context) {
+    if (isMemoryQueryDelegation(args && args.taskType, args && args.goal)) {
+      return {
+        ok: false,
+        code: 'memory_query_requires_main_agent',
+        error: '记忆查询由主控 Agent 直接执行，不派发给 Memory Bot',
+      };
+    }
     const mainSessionId =
       context && typeof context.sessionId === 'string' ? context.sessionId.trim() : '';
     if (!mainSessionId || !mainSessions.getSession(mainSessionId)) {

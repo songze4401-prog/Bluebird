@@ -315,7 +315,7 @@ async function main() {
       makeChildRouter().dispatch({
         agentId: 'memory',
         taskType: 'memory.search',
-        goal: 'C3 计划落盘窗口',
+        goal: '记录 C3 计划落盘维护事项',
         idempotencyKey: 'c3-plan-after-save',
       });
       print({ unexpected: '计划落盘后没有被杀' });

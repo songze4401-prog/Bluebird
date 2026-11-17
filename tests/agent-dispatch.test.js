@@ -190,10 +190,13 @@ test.before(async () => {
                         taskType: 'memory.search',
                         goal: lastText.includes('MEMORY_SCOPE')
                           ? 'MEMORY_SCOPE 检索主控深烘咖啡偏好'
+                          : lastText.includes('MEMORY_MAINTENANCE')
+                            ? '记录一条记忆维护事项'
                           : lastText.includes('MEMORY_WRITE')
                             ? 'MEMORY_WRITE 记录浅烘咖啡偏好'
                             : '主 Agent 派发测试',
-                        allowedTools: lastText.includes('MEMORY_WRITE')
+                        allowedTools:
+                          lastText.includes('MEMORY_WRITE') || lastText.includes('MEMORY_MAINTENANCE')
                           ? ['memory_search', 'memory_remember']
                           : ['memory_search'],
                       }),
@@ -330,6 +333,15 @@ test('派发工具：校验 Bot/任务类型/边界，且不暴露给 Bot 自身
   );
   assert.equal(
     tool.validate({ botId: 'memory', taskType: 'memory.search', goal: '查一下' }).ok,
+    false
+  );
+  assert.equal(
+    tool.validate({
+      botId: 'memory',
+      taskType: 'memory.search',
+      goal: '记录我喜欢浅烘咖啡',
+      allowedTools: ['memory_remember'],
+    }).ok,
     true
   );
   assert.equal(
@@ -346,13 +358,13 @@ test('主控派发：创建带 parentSessionId 的任务，Bot Runtime 完成后
     {
       botId: 'memory',
       taskType: 'memory.search',
-      goal: '整理我的咖啡偏好',
-      context: '只返回与咖啡相关的记忆。',
-      allowedTools: ['memory_search'],
+      goal: '记录我当前提供的咖啡偏好',
+      context: '保存用户当前提供的信息，不检索历史记忆。',
+      allowedTools: ['memory_remember'],
     },
     {
       sessionId: main.id,
-      userText: '请让 Memory Bot 整理我的咖啡偏好',
+      userText: '请让 Memory Bot 记录我的咖啡偏好',
       userMessageId: 'main-user-1',
     }
   );
@@ -398,17 +410,17 @@ test('主控派发：创建带 parentSessionId 的任务，Bot Runtime 完成后
   assert.equal(tasks.listTasks('memory', { parentSessionId: 'other' }).length, 0);
 });
 
-test('主 Agent 工具循环：模型可调用 delegate_to_bot 并把任务交给 Bot Runtime', async () => {
+test('主 Agent 工具循环：明确的记忆维护仍可委派给 Bot Runtime', async () => {
   const main = mainSessions.createSession({ title: '主 Agent 工具派发' });
   const outcome = await agentRuntime.runAgentTurn({
     providerId,
     modelId: 'dispatch-test-model',
     sessionId: main.id,
     userId: 'trusted-user-dispatch',
-    userText: 'DELEGATE 请整理一条记忆',
+    userText: 'DELEGATE MEMORY_MAINTENANCE 请让记忆机器人记住我的偏好',
     messages: [
       { role: 'system', content: '你可以调用 delegate_to_bot。' },
-      { role: 'user', content: 'DELEGATE 请整理一条记忆' },
+      { role: 'user', content: 'DELEGATE MEMORY_MAINTENANCE 请让记忆机器人记住我的偏好' },
     ],
     policy: {
       schemaVersion: 1,
@@ -437,7 +449,15 @@ test('主 Agent 工具循环：模型可调用 delegate_to_bot 并把任务交�
 });
 
 test('委派意图识别：显式请求命中，否定/元问题/旧任务回看不触发', () => {
-  const { detectExplicitDelegation } = require('../server/delegation-intent');
+  const { detectExplicitDelegation, isMemoryQueryDelegation } = require('../server/delegation-intent');
+
+  assert.equal(isMemoryQueryDelegation('memory.search', '查一下我的咖啡偏好'), true);
+  assert.equal(isMemoryQueryDelegation('memory.explain', '解释我为什么喜欢深烘'), true);
+  assert.equal(isMemoryQueryDelegation('memory.search', '记住我的偏好'), false);
+  assert.equal(
+    isMemoryQueryDelegation('memory.search', '记录我刚提供的偏好，不要查旧记忆'),
+    false
+  );
 
   assert.deepEqual(
     detectExplicitDelegation('让记忆机器人帮我查一下我喜欢的咖啡'),
@@ -474,8 +494,8 @@ test('委派意图识别：显式请求命中，否定/元问题/旧任务回看
   assert.equal(detectExplicitDelegation('她是谁', { contextText: botContext }), null);
 });
 
-test('显式子 agent 请求：模型不主动调用工具时，运行时仍真实派发', async () => {
-  const main = mainSessions.createSession({ title: '强制委派测试' });
+test('显式记忆查询：点名 Memory Bot 也不强制派发任务', async () => {
+  const main = mainSessions.createSession({ title: '记忆查询直查测试' });
 
   capturedChatRequests.length = 0;
 
@@ -491,7 +511,7 @@ test('显式子 agent 请求：模型不主动调用工具时，运行时仍真�
     policy: {
       schemaVersion: 1,
       mode: 'bounded_autonomy',
-      tools: { allowedTools: ['delegate_to_bot'], maxToolCalls: 2, maxReadOnlyRetries: 0 },
+      tools: { allowedTools: ['delegate_to_bot', 'memory_search'], maxToolCalls: 2, maxReadOnlyRetries: 0 },
       budgets: { maxRounds: 2, maxTotalMs: 10000 },
     },
     credentialKey: 'dispatch-bot-key',
@@ -499,36 +519,26 @@ test('显式子 agent 请求：模型不主动调用工具时，运行时仍真�
     enforceExplicitDelegation: true,
   });
 
-  assert.equal(outcome.delegationEnforced, true);
-  assert.equal(outcome.toolSteps.length, 1);
-  assert.equal(outcome.toolSteps[0].name, 'delegate_to_bot');
-  assert.ok(outcome.rawReply.includes('已处理'));
+  assert.equal(outcome.delegationEnforced, false);
+  assert.equal(outcome.toolSteps.length, 0);
+  assert.equal(tasks.listTasks('memory', { parentSessionId: main.id }).length, 0);
+  assert.ok(outcome.rawReply);
 
-  const task = tasks.listTasks('memory', { parentSessionId: main.id })[0];
-  assert.ok(task);
-  assert.equal(task.taskType, 'memory.search');
-  assert.ok(task.goal.includes('让记忆机器人'));
-
-  // 模型自己没发起工具调用：第一次模型请求发生在强制派发之后，
-  // delegate_to_bot 已从工具列表移除，并带上了"系统已实际调用"的说明。
   assert.ok(capturedChatRequests.length >= 1);
   const firstRequest = capturedChatRequests[0];
   const firstToolNames = (firstRequest.tools || [])
     .map(item => item.function && item.function.name)
     .filter(Boolean);
   assert.equal(firstToolNames.includes('delegate_to_bot'), false);
+  assert.ok(firstToolNames.includes('memory_search'));
   assert.ok(
     (firstRequest.messages || []).some(
       message =>
         message.role === 'system' &&
         typeof message.content === 'string' &&
-        message.content.includes('系统已经在本次请求中实际调用 delegate_to_bot')
+        message.content.includes('记忆查询由主控直接处理')
     )
   );
-
-  const finished = await waitForTask(task.taskId);
-  assert.equal(finished.status, 'completed');
-  assert.equal(finished.parentSessionId, main.id);
 });
 
 test('显式委派意图但策略未允许工具：不创建任务，并明确注入无法派发说明', async () => {
@@ -565,12 +575,12 @@ test('显式委派意图但策略未允许工具：不创建任务，并明确�
         message =>
           message.role === 'system' &&
           typeof message.content === 'string' &&
-          message.content.includes('当前 Agent 策略不允许调用 delegate_to_bot')
+          message.content.includes('记忆查询由主控直接处理')
       )
   );
 });
 
-test('主控记忆 → 委派 Bot：memory_search 使用父主控会话 scope', async () => {
+test('主控记忆查询：memory_search 在主控会话直接执行，不创建 Bot 任务', async () => {
   const main = mainSessions.createSession({ title: '主控记忆 scope 回归' });
   const seeded = await memory.applyCandidate(
     {
@@ -595,39 +605,31 @@ test('主控记忆 → 委派 Bot：memory_search 使用父主控会话 scope', 
     providerId,
     modelId: 'dispatch-test-model',
     sessionId: main.id,
-    userText: 'DELEGATE MEMORY_SCOPE 请检索我的深烘咖啡偏好',
+    userText: 'MEMORY_SCOPE 请检索我的深烘咖啡偏好',
     messages: [
-      { role: 'system', content: '你可以调用 delegate_to_bot。' },
-      { role: 'user', content: 'DELEGATE MEMORY_SCOPE 请检索我的深烘咖啡偏好' },
+      { role: 'system', content: '你可以调用 memory_search。' },
+      { role: 'user', content: 'MEMORY_SCOPE 请检索我的深烘咖啡偏好' },
     ],
     policy: {
       schemaVersion: 1,
       mode: 'bounded_autonomy',
-      tools: { allowedTools: ['delegate_to_bot'], maxToolCalls: 2, maxReadOnlyRetries: 0 },
+      tools: { allowedTools: ['memory_search'], maxToolCalls: 2, maxReadOnlyRetries: 0 },
       budgets: { maxRounds: 2, maxTotalMs: 10000 },
     },
     credentialKey: 'dispatch-bot-key',
     timeout: 10000,
   });
   assert.equal(outcome.toolSteps.length, 1);
-  assert.equal(outcome.toolSteps[0].name, 'delegate_to_bot');
-
-  const task = tasks.listTasks('memory', { parentSessionId: main.id })[0];
-  assert.ok(task);
-  assert.notEqual(task.sessionId, main.id);
-  const finished = await waitForTask(task.taskId);
-  assert.equal(finished.status, 'completed');
-  assert.equal(finished.parentSessionId, main.id);
+  assert.equal(outcome.toolSteps[0].name, 'memory_search');
+  assert.equal(outcome.toolSteps[0].ok, true);
+  assert.equal(tasks.listTasks('memory', { parentSessionId: main.id }).length, 0);
   assert.ok(
-    finished.result.evidence.some(
-      item => item.kind === 'memory' && item.id === seeded.id
+    capturedChatRequests.some(request =>
+      (request.messages || []).some(message =>
+        message.role === 'tool' && String(message.content).includes(seeded.id)
+      )
     ),
-    JSON.stringify(finished.result.evidence)
-  );
-  assert.ok(
-    mainSessions
-      .getMessages(main.id)
-      .some(message => message.content.includes('【Memory Bot 任务完成】'))
+    '主控工具结果应包含刚写入的用户记忆证据'
   );
 });
 
@@ -920,10 +922,10 @@ test('主控结果 SSE：snapshot 重连可见，实时结果无需轮询', asyn
     {
       botId: 'memory',
       taskType: 'memory.search',
-      goal: '生成一条 SSE 结果',
-      allowedTools: ['memory_search'],
+      goal: '记录一条 SSE 测试记忆',
+      allowedTools: ['memory_remember'],
     },
-    { sessionId: main.id, userText: '生成结果', userMessageId: 'sse-user-1' }
+    { sessionId: main.id, userText: '记录一条 SSE 测试记忆', userMessageId: 'sse-user-1' }
   );
   await waitForTask(first.taskId);
 
@@ -955,10 +957,10 @@ test('主控结果 SSE：snapshot 重连可见，实时结果无需轮询', asyn
       {
         botId: 'memory',
         taskType: 'memory.search',
-        goal: '实时 SSE 结果',
-        allowedTools: ['memory_search'],
+        goal: '记录实时 SSE 测试记忆',
+        allowedTools: ['memory_remember'],
       },
-      { sessionId: live.id, userText: '实时结果', userMessageId: 'sse-user-2' }
+      { sessionId: live.id, userText: '记录实时 SSE 测试记忆', userMessageId: 'sse-user-2' }
     );
     const liveEvent = await readSseFrame(
       liveStream,
@@ -977,10 +979,10 @@ test('失败回传：Bot 执行失败时主控会话收到失败原因，不伪�
     {
       botId: 'memory',
       taskType: 'memory.search',
-      goal: 'FAIL_TASK 触发失败',
-      allowedTools: ['memory_search'],
+      goal: 'FAIL_TASK 记录失败路径测试',
+      allowedTools: ['memory_remember'],
     },
-    { sessionId: main.id, userText: '触发失败', userMessageId: 'sse-user-fail' }
+    { sessionId: main.id, userText: 'FAIL_TASK 记录失败路径测试', userMessageId: 'sse-user-fail' }
   );
   const finished = await waitForTask(result.taskId);
   assert.equal(finished.status, 'failed');
@@ -1021,11 +1023,11 @@ test('结果投递失败不伪造完成：主控会话被删除时记录 deliver
   const result = await tool.handler(
     {
       botId: 'memory',
-      taskType: 'memory.explain',
-      goal: '解释一条记忆',
-      allowedTools: ['memory_search'],
+      taskType: 'memory.search',
+      goal: '记录一条待删除会话测试记忆',
+      allowedTools: ['memory_remember'],
     },
-    { sessionId: main.id, userText: '解释一下', userMessageId: 'main-user-2' }
+    { sessionId: main.id, userText: '记录待删除会话测试记忆', userMessageId: 'main-user-2' }
   );
   assert.equal(result.ok, true);
   mainSessions.deleteSession(main.id);

@@ -20,6 +20,7 @@ const LIMITS = Object.freeze({
 });
 
 const SOURCES = Object.freeze(['memory', 'conversation', 'document', 'web', 'code']);
+const MEMORY_BOT_BLOCKED_SOURCES = new Set(['memory', 'conversation']);
 
 function validateSources(value) {
   if (value === undefined) return { ok: true, value: null };
@@ -121,7 +122,16 @@ const definition = Object.freeze({
     // 长期记忆是用户级：userId 来自服务端可信身份，用于匹配 visibility='user' 的 chunk。
     const userId = context && context.userId ? context.userId : null;
     let sources = args.sources;
-    if (!sessionId) {
+    if (context && context.agentId === 'memory') {
+      sources = (sources || SOURCES).filter(item => !MEMORY_BOT_BLOCKED_SOURCES.has(item));
+      if (!sources.length) {
+        return {
+          ok: false,
+          code: 'memory_source_disabled',
+          error: 'Memory Bot 不能检索长期记忆或会话历史；请由主控 Agent 直接查询',
+        };
+      }
+    } else if (!sessionId) {
       sources = (sources || SOURCES).filter(
         item => item !== 'memory' && item !== 'conversation'
       );
