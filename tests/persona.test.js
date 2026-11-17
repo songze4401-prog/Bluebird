@@ -1087,8 +1087,10 @@ async function main() {
   const BUILTIN_SYSTEM_PROMPT = metaBody.systemPrompt?.default || '';
 
   check(
-    'GET 下发内置后端提示词、生效值与上限',
+    'GET 下发默认提示词与按需结构化规则',
     BUILTIN_SYSTEM_PROMPT.includes('【情绪标签】') &&
+      BUILTIN_SYSTEM_PROMPT.includes('日常闲聊多用口语短句') &&
+      BUILTIN_SYSTEM_PROMPT.includes('也可以用简短列表或标题') &&
       metaBody.systemPrompt.effective === BUILTIN_SYSTEM_PROMPT &&
       metaBody.systemPrompt.customized === false &&
       metaBody.limits.systemPromptMaxChars === SYSTEM_MAX

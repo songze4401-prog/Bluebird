@@ -25,7 +25,6 @@ Expo ships breaking changes every SDK release. APIs you remember are likely rena
 | `启停单个服务商 POST /model-providers/:id/enabled` | 模型服务商 | 无 | 接口可用但界面没有开关；启停只能通过接口调用。 |
 | `待确认候选 GET /memory/pending` | 记忆 | 无 | 待确认候选有界面入口（Memory Center 的确认动作走 /memory/confirm），但没有独立的待确认列表界面。 |
 | `Bot 权限查看 GET /agents/:botId/permissions` | Memory Bot | 无 | 权限模型目前是单用户 local-owner，界面不展示权限详情。 |
-| `取消任务 POST /agent-tasks/:taskId/cancel` | Agent 任务 | 无 | 取消能力在服务端可用，任务页只读展示状态，没有取消按钮。 |
 | `索引状态 / 来源 / 检索 / 摄取 / 同步 / 重建 / 向量回填` | 统一检索 | 无 | 统一检索由 Agent 的 knowledge_search 工具在后台使用，没有独立的检索界面。 |
 | `监控元信息 GET /monitoring/meta` | 系统监控 | 无 | 元信息只供排查使用，监控页不展示。 |
 | `指标序列 GET /monitoring/metrics` | 系统监控 | 无 | 指标接口可用，监控页只读总览与 Trace，没有指标曲线。 |

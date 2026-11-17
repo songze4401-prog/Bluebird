@@ -326,15 +326,18 @@
           "ui": true,
           "consumers": [
             "components/TasksPanel.tsx",
-            "components/MemoryBotScreen.tsx"
+            "components/MemoryBotScreen.tsx",
+            "app/HomeScreen.tsx"
           ]
         },
         {
           "name": "取消任务 POST /agent-tasks/:taskId/cancel",
           "probe": "API_PATHS.agentTaskCancel",
-          "ui": false,
-          "consumers": [],
-          "note": "取消能力在服务端可用，任务页只读展示状态，没有取消按钮。"
+          "ui": true,
+          "consumers": [
+            "components/TaskDetailSheet.tsx"
+          ],
+          "note": "取消能力在服务端可用；v7 任务详情对可取消状态提供「取消任务」入口（R5 接入）。"
         }
       ]
     },

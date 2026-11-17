@@ -292,7 +292,7 @@ test('withdraw：部分/全部撤回、墓碑与重新写入', async () => {
   assert.ok(tombstone.idempotencyKey);
 });
 
-test('delete restart：墓碑加载后仍阻止同源复活', async () => {
+test('delete/reject restart：墓碑加载后阻止同源复活且保留来源隔离', async () => {
   const created = await memory.applyCandidate(
     {
       content: '用户删除后不得复活',
@@ -323,6 +323,73 @@ test('delete restart：墓碑加载后仍阻止同源复活', async () => {
   assert.equal(retry.written, false);
   assert.equal(retry.reason, 'deleted_source');
   assert.equal(memory.getMemories().length, 0);
+
+  const rejectedText = '可能想保存这个候选';
+  const rejectedCandidate = {
+    content: '用户希望保存这个候选偏好',
+    type: 'preference',
+    keywords: ['保存', '候选'],
+    confidence: 0.7,
+    sourceQuote: rejectedText,
+  };
+  const pending = await memory.applyCandidate(
+    rejectedCandidate,
+    options('s-reject', rejectedText, {
+      sourceType: 'agent',
+      messageId: 'm-p2-reject',
+    })
+  );
+  assert.equal(pending.status, STATUS_PENDING);
+
+  const tombstonesBeforeForeignReject = JSON.parse(
+    fs.readFileSync(TOMBSTONE_FILE, 'utf8')
+  );
+  const foreignReject = await memory.rejectPending(pending.id, 'user-other');
+  assert.equal(foreignReject.reason, 'forbidden');
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(TOMBSTONE_FILE, 'utf8')),
+    tombstonesBeforeForeignReject
+  );
+  assert.equal(
+    allMemories().find(item => item.id === pending.id).status,
+    STATUS_PENDING
+  );
+
+  const rejected = await memory.rejectPending(pending.id, OWNER);
+  assert.equal(rejected.removed, 1);
+  const rejectionTombstone = JSON.parse(
+    fs.readFileSync(TOMBSTONE_FILE, 'utf8')
+  ).find(item => item.entryId === pending.id);
+  assert.ok(rejectionTombstone);
+  assert.equal(rejectionTombstone.reason, 'reject_pending');
+  assert.deepEqual(rejectionTombstone.scope, {
+    userId: OWNER,
+    sessionIds: ['s-reject'],
+  });
+  assert.equal(JSON.stringify(rejectionTombstone).includes(rejectedText), false);
+  assert.equal(
+    JSON.stringify(rejectionTombstone).includes(rejectedCandidate.content),
+    false
+  );
+
+  memory.loadMemories();
+  const sameSourceRetry = await memory.applyCandidate(rejectedCandidate, {
+    ...options('s-reject', rejectedText, { messageId: 'm-p2-reject' }),
+    sourceType: 'agent',
+  });
+  assert.equal(sameSourceRetry.written, false);
+  assert.equal(sameSourceRetry.reason, 'deleted_source');
+  assert.equal(memory.getPendingMemories().length, 0);
+
+  const newSource = await memory.applyCandidate(
+    { ...rejectedCandidate, sourceQuote: '我现在明确希望保存这个偏好' },
+    options('s-reassert', '我现在明确希望保存这个偏好', {
+      sourceType: 'agent',
+      messageId: 'm-p2-reassert',
+    })
+  );
+  assert.equal(newSource.status, STATUS_PENDING);
+  assert.equal(memory.getPendingMemories().length, 1);
 });
 
 test('异步竞态：删除先于抽取 / 抽取先于删除', async () => {

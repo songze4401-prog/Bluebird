@@ -26,7 +26,8 @@ const AGENTS_FILE = path.join(ROOT, 'AGENTS.md');
 const REGION_START = '<!-- sync:api-capabilities -->';
 const REGION_END = '<!-- /sync:api-capabilities -->';
 
-const FRONTEND_ROOTS = ['lib', 'components', 'hooks'];
+// 前端消费者扫描根：app/ 是 v7 新壳目录（R5 起纳入能力消费对账）
+const FRONTEND_ROOTS = ['app', 'lib', 'components', 'hooks'];
 // endpoints.ts 只定义路径，不消费路径；它不算前端消费者。
 const FRONTEND_EXCLUDE = new Set(['lib/api/endpoints.ts']);
 

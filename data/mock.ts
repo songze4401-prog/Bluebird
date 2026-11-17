@@ -201,11 +201,9 @@ export function createInitialState(): UiState {
     },
     tone: '自然',
     model: 'DeepSeek',
-    tasks: [
-      { t: '08:00', l: '早报摘要', on: true },
-      { t: '12:30', l: '股票提醒', on: true },
-      { t: '22:00', l: '每日记忆整理', on: false },
-    ],
+    // 定时任务：真系统暂无定时任务后端——初始为空，＋ 添加的是用户本机自建的
+    // 本地提醒（诚实口径，不预置假数据）
+    tasks: [],
     // 进行中/已完成：真实系统当前没有任何任务，mock 不再伪造（假任务在真机预览里
     // 会被当成真数据）。列表为空时 HomeScreen 整段隐藏；接 /agent-tasks 后由真数据驱动。
     running: [],
