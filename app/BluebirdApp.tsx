@@ -99,10 +99,8 @@ function InnerShell() {
   const ui = useUi();
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  // 键盘弹出时隐藏底部导航（否则会浮在键盘上方压住输入条）
-  // 键盘期隐藏底部导航：改由输入框焦点驱动（焦点事件 100% 可靠，不依赖
-  // 安卓 edge-to-edge 下可能不触发的键盘高度事件）
-  const [chatInputFocused, setChatInputFocused] = useState(false);
+  // 底部导航常驻：键盘弹出时它被键盘自然盖住即可。此前按输入框焦点卸载导航，
+  // 但 BACK 收键盘时 onBlur 不一定触发，会把导航永久藏掉（真机复现）。
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   // ---- 真实聊天链路（与旧壳 App.tsx 同款组合）----
@@ -324,7 +322,6 @@ function InnerShell() {
             <ChatScreen
               chat={{ ...chat, messages: visibleMessages }}
               sessionId={currentSessionId}
-              onInputFocusChange={setChatInputFocused}
               modelLabel={selectedModelLabel}
               models={modelProviders}
               currentModel={selectedModel}
@@ -352,8 +349,7 @@ function InnerShell() {
       </View>
 
       {/* 底部悬浮导航：空白处点击穿透（pointerEvents box-none），pill 本体可按。
-          键盘弹出时整体隐藏，避免浮在键盘上方压住输入条。 */}
-      {!chatInputFocused && (
+          常驻渲染；键盘弹出时会被键盘覆盖，不需要额外卸载。 */}
       <View
         pointerEvents="box-none"
         style={{
@@ -392,7 +388,6 @@ function InnerShell() {
           <NavTab icon="settings" label="设置" width={40} labelWidth={0} labelOpacity={0} active={false} onPress={() => setSettingsOpen(true)} />
         </View>
       </View>
-      )}
 
       <SettingsScreen
         visible={settingsOpen}

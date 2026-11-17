@@ -433,8 +433,6 @@ export function ChatScreen(props: {
   isFavorite?: (message: Message) => boolean;
   onToggleFavorite?: (message: Message) => void;
   onHideMessage?: (message: Message) => void;
-  // 输入框焦点变化：壳用它隐藏底部导航（不依赖安卓键盘高度事件）
-  onInputFocusChange?: (focused: boolean) => void;
 }) {
   const ui = useUi();
   const chat = props.chat;
@@ -464,8 +462,11 @@ export function ChatScreen(props: {
   const [input, setInput] = useState('');
   // 多行输入的实时内容高（onContentSizeChange 驱动，1~120px 自动增高）
   const [inputH, setInputH] = useState(22);
-  // 输入框焦点：键盘期底部导航隐藏，此时输入条不需要为导航让位
-  const [inputFocused, setInputFocused] = useState(false);
+  // 键盘实测高度：Expo Go 里 adjustResize 不生效（app.json 是原生清单属性），
+  // 只能按键盘高度把输入条顶上去，否则键盘会直接盖住输入框（真机复现）。
+  // 底部导航不再靠焦点开关显隐（BACK 收键盘时 onBlur/keyboardDidHide 都可能不触发，
+  // 会把导航永久藏掉）：导航常驻，键盘弹出时被键盘自然盖住即可。
+  const [keyboardH, setKeyboardH] = useState(0);
   // 返回底部箭头（用户上滑阅读后出现）
   const [showJump, setShowJump] = useState(false);
   // 长按操作：open 控制弹层显隐（关闭动画期间保留目标消息，避免滑出动画里空白）
@@ -565,6 +566,18 @@ export function ChatScreen(props: {
       ) : null
     );
   };
+
+  // 键盘高度：Expo Go 的窗口不随键盘 resize，输入条必须按实测高度抬起来
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidShow', e => {
+      setKeyboardH(e.endCoordinates?.height ?? 0);
+    });
+    const hide = Keyboard.addListener('keyboardDidHide', () => setKeyboardH(0));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
 
   // 「模型切换」的延迟打开定时器（关面板 260ms 后开抽屉），卸载时清掉
   const modelTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -864,7 +877,12 @@ export function ChatScreen(props: {
       <View
         style={[
           styles.compDock,
-          { marginBottom: inputFocused ? 8 : insets.bottom + 68 },
+          {
+            marginBottom:
+              keyboardH > 0
+                ? Math.max(8, keyboardH - insets.bottom)
+                : insets.bottom + 68,
+          },
         ]}
       >
         {/* 待发送图片预览行：缩略图 + × 移除；上传中显示占位 */}
@@ -909,14 +927,6 @@ export function ChatScreen(props: {
             placeholderTextColor={t.mut}
             multiline
             textAlignVertical="center"
-            onFocus={() => {
-              setInputFocused(true);
-              props.onInputFocusChange?.(true);
-            }}
-            onBlur={() => {
-              setInputFocused(false);
-              props.onInputFocusChange?.(false);
-            }}
             blurOnSubmit={false}
             onSubmitEditing={doSend}
             onContentSizeChange={e =>
