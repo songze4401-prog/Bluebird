@@ -115,49 +115,16 @@ test('a. 目标 → 计划落盘：有序步骤 + 能力要求 + 依赖，返回
   }));
 });
 
-test('b. 计划 → 任务批量创建：共用同一计划版本，dependsOn 为真实 taskId', () => {
-  const before = planCount();
-  const result = planner.planAndCreate({
-    goal: '检索并总结我去年的旅行偏好',
-    agentId: 'memory',
-  });
-  assert.equal(result.planVersion, 1);
-  assert.equal(result.order.length, 2);
-
-  const upstream = tasks.getRawTask(result.tasks[result.order[0]].taskId);
-  const downstream = tasks.getRawTask(result.tasks[result.order[1]].taskId);
-  assert.equal(upstream.status, 'queued');
-  assert.equal(downstream.status, 'queued');
-  assert.deepEqual(upstream.dependsOn, []);
-  assert.deepEqual(downstream.dependsOn, [upstream.taskId]);
-  assert.equal(upstream.planId, result.planId);
-  assert.equal(downstream.planId, result.planId);
-  assert.equal(upstream.planVersion, result.planVersion);
-  assert.equal(downstream.planVersion, result.planVersion);
-  // pinned workflowPlan 复用已有版本：不因「每个任务各 append 一份单步计划」新增血缘。
-  assert.equal(planCount(), before + 1, '整批任务只应新增 1 个计划血缘');
-
-  console.log('[Planner-b 批量任务]', JSON.stringify({
-    planId: result.planId,
-    planVersion: result.planVersion,
-    order: result.order,
-    tasks: [
-      {
-        taskId: upstream.taskId,
-        dependsOn: upstream.dependsOn,
-        planId: upstream.planId,
-        planVersion: upstream.planVersion,
-        status: upstream.status,
-      },
-      {
-        taskId: downstream.taskId,
-        dependsOn: downstream.dependsOn,
-        planId: downstream.planId,
-        planVersion: downstream.planVersion,
-        status: downstream.status,
-      },
-    ],
-  }));
+test('b. Planner 的记忆查询计划不能创建 Memory Bot 任务', () => {
+  const before = tasks.allTasks().length;
+  assert.throws(
+    () => planner.planAndCreate({
+      goal: '检索并总结我去年的旅行偏好',
+      agentId: 'memory',
+    }),
+    error => error.code === 'memory_query_requires_main_agent'
+  );
+  assert.equal(tasks.allTasks().length, before, '拒绝查询计划不得创建任何任务');
 });
 
 test('c. 拆不出来 → 显式失败（capability_not_found），零计划、零任务', () => {

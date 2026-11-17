@@ -107,7 +107,7 @@ test('交付物1a 唯一入口按能力选出主体并创建任务', () => {
   resetAgentStore();
   const orchestrator = makeOrchestrator();
   const result = orchestrator.orchestrate({
-    intent: '帮我回忆一下上次说的咖啡偏好',
+    intent: '帮我记录刚刚提供的咖啡偏好',
     parentSessionId: 's_main',
   });
 
@@ -154,7 +154,7 @@ test('交付物1c 迁移路径与旧 Router 路径行为不变', () => {
   const viaOrchestrator = orchestrator.orchestrate({
     agentId: 'memory',
     taskType: 'memory.search',
-    goal: '查咖啡偏好',
+    goal: '记录咖啡偏好',
     priority: 'high',
     parentSessionId: 's_main',
   });
@@ -174,7 +174,7 @@ test('交付物1c 迁移路径与旧 Router 路径行为不变', () => {
   const legacy = routerOnly.dispatch({
     agentId: 'memory',
     taskType: 'memory.search',
-    goal: '查咖啡偏好（兼容路径）',
+    goal: '记录咖啡偏好（兼容路径）',
     priority: 'high',
     parentSessionId: 's_main',
   });
@@ -193,7 +193,7 @@ test('交付物1d 轨迹落盘：候选集、匹配依据、最终选择', () =>
   resetAgentStore();
   const orchestrator = makeOrchestrator();
   const result = orchestrator.orchestrate({
-    intent: '帮我回忆一下上次说的咖啡偏好',
+    intent: '帮我记录刚刚提供的咖啡偏好',
     parentSessionId: 's_main',
   });
 
@@ -553,7 +553,7 @@ test('交付物2d 单主体路径行为不变：与 Router 纯决策对齐，新
   const input = {
     agentId: 'memory',
     taskType: 'memory.search',
-    goal: '查咖啡偏好',
+    goal: '记录咖啡偏好',
     priority: 'high',
     parentSessionId: 's_main',
   };
@@ -575,7 +575,7 @@ test('交付物2d 单主体路径行为不变：与 Router 纯决策对齐，新
   const legacyDecision = legacyRouter.decide({
     agentId: 'memory',
     taskType: 'memory.search',
-    goal: '查咖啡偏好',
+    goal: '记录咖啡偏好',
     priority: 'high',
   });
 

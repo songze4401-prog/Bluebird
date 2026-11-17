@@ -216,40 +216,40 @@ test('a. plan schema 扩展 digest 中性：旧计划复读不损坏，publishGa
   );
 });
 
-test('b. planner stepKey 透传：planAndCreate 的任务可映射回计划节点', () => {
+test('b. Planner 生成的记忆查询不得派发给 Memory Bot', () => {
   resetAll();
-  const created = planner.planAndCreate({ goal: '检索一下之前保存的发票抬头' });
-  const first = Object.values(created.tasks)[0];
-  const raw = tasks.getRawTask(first.taskId);
-  assert.equal(raw.stepKey, created.steps[0].stepKey);
-  assert.equal(raw.planId, created.planId);
-  assert.equal(raw.planVersion, created.planVersion);
+  const before = tasks.allTasks().length;
+  assert.throws(
+    () => planner.planAndCreate({ goal: '检索一下之前保存的发票抬头' }),
+    error => error.code === 'memory_query_requires_main_agent'
+  );
+  assert.equal(tasks.allTasks().length, before, '拒绝查询计划不得创建 Memory Bot 任务');
 });
 
 test('c. 修订主链：验证拒绝终态 → v2 + 只重跑缺证节点 + 上游产物显式共享', async () => {
   resetAll();
   const step1 = makeStep({
     toolName: 'memory.search',
-    args: { goal: '检索发票抬头', capability: 'memory.search', role: '检索' },
-    label: '检索',
-    goal: '检索发票抬头',
+    args: { goal: '记录发票抬头偏好', capability: 'memory.search', role: '维护' },
+    label: '维护',
+    goal: '记录发票抬头偏好',
     capability: 'memory.search',
     taskType: 'memory.search',
   });
   const step2 = makeStep({
-    toolName: 'memory.explain',
-    args: { goal: '解释发票抬头', capability: 'memory.explain', role: '总结' },
-    label: '总结',
-    goal: '解释发票抬头',
-    capability: 'memory.explain',
-    taskType: 'memory.explain',
+    toolName: 'memory.search',
+    args: { goal: '记录发票抬头更新结果', capability: 'memory.search', role: '维护' },
+    label: '维护',
+    goal: '记录发票抬头更新结果',
+    capability: 'memory.search',
+    taskType: 'memory.search',
     dependsOn: [step1.stepKey],
   });
   const saved = workflowStore.appendVersion({ plan: makePlan([step1, step2]) });
   const T1 = tasks.createTask({
     botId: 'memory',
     taskType: 'memory.search',
-    goal: '检索发票抬头',
+    goal: '记录发票抬头偏好',
     allowedTools: [],
     planId: saved.planId,
     planVersion: saved.planVersion,
@@ -261,8 +261,8 @@ test('c. 修订主链：验证拒绝终态 → v2 + 只重跑缺证节点 + 上�
   assert.equal(doneT1.status, 'completed', `上游必须真实完成：${doneT1.errorCode}`);
   const T2 = tasks.createTask({
     botId: 'memory',
-    taskType: 'memory.explain',
-    goal: '解释发票抬头',
+    taskType: 'memory.search',
+    goal: '记录发票抬头更新结果',
     allowedTools: [],
     planId: saved.planId,
     planVersion: saved.planVersion,
@@ -396,9 +396,9 @@ test('e. 守卫：修订上限 2 次 + 开放修订不重复（storm 守卫先�
   resetAll();
   const step = makeStep({
     toolName: 'memory.search',
-    args: { goal: '风暴守卫', capability: 'memory.search', role: '检索' },
-    label: '检索',
-    goal: '风暴守卫',
+    args: { goal: '记录风暴守卫测试偏好', capability: 'memory.search', role: '维护' },
+    label: '维护',
+    goal: '记录风暴守卫测试偏好',
     capability: 'memory.search',
     taskType: 'memory.search',
   });

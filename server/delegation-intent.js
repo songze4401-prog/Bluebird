@@ -57,6 +57,10 @@ const PAST_REFERENCE_RE = /(?:上次|之前|刚才|刚刚|昨天|前天|早先)/
 const FRESH_ACTION_RE = /(?:这次|现在|重新|再|帮我|帮忙|去)/;
 const EXPLAIN_RE = /(?:解释|说明|为什么|为何|怎么回事|依据|来源|怎么记得|回顾|分析|梳理|总结|explain)/i;
 
+const MEMORY_LOOKUP_ACTION_RE = /(?:查(?:询|找|一下|一查)?|搜索|检索|回忆|回想|找出|读取|解释|说明|为何|为什么|retrieve|search|look\s*up|recall|explain)/i;
+const NEGATED_MEMORY_LOOKUP_RE = /(?:不要|不用|不需要|无需|不必|别|禁止|不准|不能)[^。！？\n]{0,12}(?:查|搜索|检索|回忆|回想|查询)|(?:do not|don't|never|without)\s*(?:search|look\s*up|recall|retrieve)/i;
+const MEMORY_MAINTENANCE_ACTION_RE = /(?:记住|记下来|记录|保存|存下|写入|新增|创建|更新|更正|修改|修正|合并|归档|撤回|删除|维护|remember|save|write|create|update|merge|archive|withdraw|delete|maintain)/i;
+
 const GOAL_MAX_CHARS = 2000;
 
 function detectExplicitDelegation(text, { contextText = '' } = {}) {
@@ -91,4 +95,18 @@ function detectExplicitDelegation(text, { contextText = '' } = {}) {
   };
 }
 
-module.exports = { detectExplicitDelegation, GOAL_MAX_CHARS };
+function isMemoryQueryDelegation(taskType, goal) {
+  if (taskType === 'memory.explain') return true;
+  if (taskType !== 'memory.search') return false;
+
+  const text = typeof goal === 'string' ? goal.trim() : '';
+  const explicitLookup =
+    MEMORY_LOOKUP_ACTION_RE.test(text) && !NEGATED_MEMORY_LOOKUP_RE.test(text);
+  if (explicitLookup) return true;
+  if (MEMORY_MAINTENANCE_ACTION_RE.test(text)) return false;
+
+  // memory.search 默认为查询用途；只有明确的非查询维护动作才能通过。
+  return true;
+}
+
+module.exports = { detectExplicitDelegation, isMemoryQueryDelegation, GOAL_MAX_CHARS };

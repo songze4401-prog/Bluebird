@@ -465,39 +465,76 @@ async function main() {
   );
   check('model 回执保持原语义', plain.json.model === 'deepseek-chat');
 
-  // ================= A2. 显式子 agent 请求强制派发 =================
-  ORIG_LOG('\nA2. 显式子 agent 请求：模型不调用工具也真实派发');
+  // ================= A2. 记忆查询始终由主控直接执行 =================
+  ORIG_LOG('\nA2. 显式点名 Memory Bot 的记忆查询走主控直接检索');
   resetScript();
-  // 模型只回文本、不发起任何 tool_calls：模拟此前"嘴上说派了"的情况。
-  scripted.push({ content: '[calm] 这条任务我没法自己完成。' });
+  const tasks = require(path.join(SERVER, 'agents/tasks.js'));
+  const botTaskCountBefore = tasks.listTasks('memory', { limit: 100 }).length;
+  scripted.push({
+    toolCalls: [tc('call_named_memory_search', 'memory_search', { query: '咖啡偏好' })],
+  });
+  scripted.push({ content: '[calm] 你之前说喜欢喝拿铁，不加糖。' });
 
-  const forcedDelegate = await req('/chat', {
+  const namedBotQuery = await req('/chat', {
     method: 'POST',
     body: { message: '让记忆机器人查一下我的咖啡偏好' },
   });
 
-  check('显式委派请求仍正常返回', forcedDelegate.status === 200);
+  check('点名 Memory Bot 的查询仍正常回答', namedBotQuery.status === 200 && namedBotQuery.json.reply.includes('拿铁'));
   check(
-    '模型未发起工具调用时仍执行 delegate_to_bot',
-    Array.isArray(forcedDelegate.json.toolSteps) &&
-      forcedDelegate.json.toolSteps[0]?.name === 'delegate_to_bot'
+    '点名查询由主控 memory_search 直接执行',
+    namedBotQuery.json.toolSteps?.[0]?.name === 'memory_search' && namedBotQuery.json.toolSteps[0].ok
   );
   check(
-    '派发结果如实标记失败（测试环境未配置 Memory Bot）',
-    forcedDelegate.json.toolSteps[0]?.ok === false
+    '显式查询没有创建 Memory Bot 任务',
+    tasks.listTasks('memory', { limit: 100 }).length === botTaskCountBefore
   );
   check(
-    '强制派发后模型请求不再暴露 delegate_to_bot',
+    '查询请求暴露 memory_search 而不暴露 delegate_to_bot',
     Array.isArray(stubCalls[0].tools) &&
+      stubCalls[0].tools.some(tool => tool.function.name === 'memory_search') &&
       !stubCalls[0].tools.some(tool => tool.function.name === 'delegate_to_bot')
   );
   check(
-    '强制派发说明已注入 system',
+    '主控直接查询说明已注入 system',
     stubCalls[0].messages.some(
       message =>
         message.role === 'system' &&
-        String(message.content).includes('系统已经在本次请求中实际调用 delegate_to_bot')
+        String(message.content).includes('记忆查询由主控直接处理')
     )
+  );
+
+  // 即使模型忽略提示并把查询伪装成维护委派，服务器也拒绝后仍可用主控工具直查。
+  resetScript();
+  scripted.push({
+    toolCalls: [
+      tc('call_bad_memory_delegate', 'delegate_to_bot', {
+        botId: 'memory',
+        taskType: 'memory.search',
+        goal: '记录新提供的咖啡偏好',
+      }),
+    ],
+  });
+  scripted.push({
+    toolCalls: [tc('call_direct_recovery', 'memory_search', { query: '咖啡偏好' })],
+  });
+  scripted.push({ content: '[calm] 你之前说喜欢喝拿铁，不加糖。' });
+  const attemptedDelegate = await req('/chat', {
+    method: 'POST',
+    body: { message: '我喜欢喝什么咖啡？' },
+  });
+  check('模型尝试委派后仍由主控直接检索并回答', attemptedDelegate.status === 200 && attemptedDelegate.json.reply.includes('拿铁'));
+  check(
+    '模型伪装成维护目标的委派仍在创建任务前被拒绝',
+    attemptedDelegate.json.toolSteps?.[0]?.name === 'delegate_to_bot' &&
+      attemptedDelegate.json.toolSteps[0].ok === false &&
+      attemptedDelegate.json.toolSteps[0].summary.includes('记忆查询必须由主控 Agent 直接执行') &&
+      tasks.listTasks('memory', { limit: 100 }).length === botTaskCountBefore
+  );
+  check(
+    '被拒绝的委派后主控 memory_search 成功执行',
+    attemptedDelegate.json.toolSteps?.[1]?.name === 'memory_search' &&
+      attemptedDelegate.json.toolSteps[1].ok === true
   );
 
   // ================= B. 紧急开关 =================
@@ -572,12 +609,12 @@ async function main() {
   check('恰好 2 轮模型调用', stubCalls.length === 2, `calls=${stubCalls.length}`);
   check('首轮带 tools 与 tool_choice=auto', Array.isArray(stubCalls[0].tools) && stubCalls[0].tool_choice === 'auto');
   check(
-    '首轮 tools 含白名单 memory_search / memory_remember / knowledge_search / delegate_to_bot / web_search / web_fetch',
-    stubCalls[0].tools.length === 6 &&
+    '记忆查询首轮工具包含直接检索，并隐藏 delegate_to_bot',
+    stubCalls[0].tools.length === 5 &&
       stubCalls[0].tools.some(tool => tool.function.name === 'memory_search') &&
       stubCalls[0].tools.some(tool => tool.function.name === 'memory_remember') &&
       stubCalls[0].tools.some(tool => tool.function.name === 'knowledge_search') &&
-      stubCalls[0].tools.some(tool => tool.function.name === 'delegate_to_bot') &&
+      !stubCalls[0].tools.some(tool => tool.function.name === 'delegate_to_bot') &&
       stubCalls[0].tools.some(tool => tool.function.name === 'web_search') &&
       stubCalls[0].tools.some(tool => tool.function.name === 'web_fetch')
   );

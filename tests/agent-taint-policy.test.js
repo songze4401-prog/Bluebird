@@ -366,7 +366,7 @@ test('用例j：读取引用不可解析 → 任务 taint 加 unknown，不误�
 test('用例g：污点任务请求副作用工具被拒，只读工具放行', async () => {
   const task = makeTask({
     agentId: BOT,
-    goal: 'TAINT-G 污点阻断',
+    goal: '记录外部来源内容（TAINT-G 污点阻断）',
     allowedTools: ['memory_remember', 'memory_search'],
     taintLabels: ['external:web'],
   });

@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const { runAgentTurn } = require('../agent-runtime');
 const { classifyError } = require('../model-adapter');
 const { getManifest } = require('./manifest');
+const { isMemoryQueryDelegation } = require('../delegation-intent');
 const { assertRunnable } = require('./registry');
 const { getCredentialKey } = require('./credentials');
 const sessions = require('./sessions');
@@ -468,9 +469,17 @@ async function waitForReviewTask(taskId, timeoutMs) {
   return tasks.getRawTask(taskId);
 }
 
-function allowedToolsFor(config, manifest, taskTools) {
+function allowedToolsFor(config, manifest, taskTools, agentId = null, taskContext = {}) {
   const manifestSet = new Set(manifest.toolAllowlist);
-  const configTools = config.toolAllowlist.filter(name => manifestSet.has(name));
+  const allowMaintenanceSearch =
+    agentId === 'memory' &&
+    taskContext.mode === 'delegated_task' &&
+    !isMemoryQueryDelegation(taskContext.taskType, taskContext.goal);
+  const configTools = config.toolAllowlist.filter(
+    name =>
+      manifestSet.has(name) &&
+      !(agentId === 'memory' && name === 'memory_search' && !allowMaintenanceSearch)
+  );
   if (!Array.isArray(taskTools)) return configTools;
   const taskSet = new Set(taskTools);
   return configTools.filter(name => taskSet.has(name));
@@ -589,6 +598,8 @@ async function execute({
   userId = null,
   userText = '',
   taskId = null,
+  taskType = null,
+  goal = '',
   taskTools = null,
   budget = null,
   mode = 'direct_chat',
@@ -613,7 +624,11 @@ async function execute({
     config.modelProfile.providerId
   );
   const toolsSupported = Boolean(model.capabilities && model.capabilities.tools === true);
-  const allowedTools = allowedToolsFor(config, manifest, taskTools);
+  const allowedTools = allowedToolsFor(config, manifest, taskTools, botId, {
+    mode,
+    taskType,
+    goal,
+  });
   const policy = buildPolicy({ config, allowedTools, toolsSupported, budget });
   const evidence = [];
   const changes = [];
@@ -637,6 +652,7 @@ async function execute({
     outcome = await runAgentTurn({
       providerId: config.modelProfile.providerId,
       modelId: config.modelProfile.modelId,
+      agentId: botId,
       messages,
       sessionId,
       memoryScopeSessionId,
@@ -1343,6 +1359,8 @@ async function runTask(taskId) {
       // 写入接地优先使用主控用户原话；旧任务或直接任务才回落到 goal。
       userText: projection.userText,
       taskId: task.taskId,
+      taskType: task.taskType,
+      goal: task.goal,
       taskTools: task.allowedTools,
       runId,
       // 路由层冻结的 Fast/Slow 预算随任务落库，执行时不再读当前配置。

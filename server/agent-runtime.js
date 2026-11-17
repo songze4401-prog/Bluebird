@@ -39,7 +39,8 @@ const knowledgeSearchTool = require('./tool-knowledge-search');
 const delegateToBotTool = require('./tool-dispatch-bot');
 const { truncateText } = require('./text-utils');
 const { buildPolicyInstruction } = require('./agent-policy');
-const { detectExplicitDelegation } = require('./delegation-intent');
+const { detectExplicitDelegation, isMemoryQueryDelegation } = require('./delegation-intent');
+const { classifyIntent, INTENTS } = require('./context/orchestrator');
 const { parseTextualToolCalls } = require('./textual-tool-calls');
 
 const FORCED_DELEGATION_INSTRUCTION = `
@@ -55,6 +56,11 @@ const FORCED_DELEGATION_DENIED_INSTRUCTION = `
 【本次无法调用子 agent】
 用户明确要求把任务交给 Memory Bot / 子 agent，但当前 Agent 策略不允许调用 delegate_to_bot，系统无法派发任务。
 你必须如实说明当前无法派发及原因；绝不能说已经派发、已经在队列里或正在处理。
+`.trim();
+
+const DIRECT_MEMORY_QUERY_INSTRUCTION = `
+【记忆查询由主控直接处理】
+不要把记忆查询委派给 Memory Bot。主控可直接使用当前 Context Runtime 上下文和 memory_search 工具检索，再基于实际证据回答。
 `.trim();
 
 // ---- 可调参数（环境变量，加载时读取；开关除外——开关每请求重读） ----
@@ -890,6 +896,7 @@ async function runAgentTurn({
   modelId,
   messages,
   sessionId,
+  agentId = null,
   userId = null,
   userText = '',
   userMessageId = null,
@@ -1001,6 +1008,7 @@ async function runAgentTurn({
     console.log(`[agent-dispatch] round=${round} name=${toolName} dispatched=true`);
 
     const toolContext = {
+      agentId,
       sessionId,
       memoryScopeSessionId: memoryScopeSessionId || sessionId,
       userId,
@@ -1015,7 +1023,14 @@ async function runAgentTurn({
       sideEffect,
       failOpen,
     };
-    let result = await executeToolCall(toolName, rawArgs, toolContext);
+    let result =
+      toolName === 'delegate_to_bot' && memoryQueryRequest
+        ? {
+            ok: false,
+            code: 'memory_query_requires_main_agent',
+            error: '记忆查询必须由主控 Agent 直接执行，不能派发给 Memory Bot',
+          }
+        : await executeToolCall(toolName, rawArgs, toolContext);
     toolCallCount += 1;
 
     const toolDef = tools.get(toolName);
@@ -1104,6 +1119,9 @@ async function runAgentTurn({
   // 只在调用方显式开启（主控聊天）时生效；策略关闭或不允许该工具时不派发。
   let forcedDelegationDispatched = false;
   let forcedDelegationNotice = '';
+  let memoryQueryRequest =
+    classifyIntent(userText) === INTENTS.MEMORY_QUERY &&
+    isMemoryQueryDelegation('memory.search', userText);
 
   if (
     enforceExplicitDelegation &&
@@ -1120,7 +1138,14 @@ async function runAgentTurn({
         .join('\n'),
     });
 
-    if (intent) {
+    if (
+      intent &&
+      (memoryQueryRequest || isMemoryQueryDelegation(intent.taskType, intent.goal))
+    ) {
+      memoryQueryRequest = true;
+      forcedDelegationNotice = DIRECT_MEMORY_QUERY_INSTRUCTION;
+      console.log('[agent-delegate] enforced=false reason=memory_query_direct');
+    } else if (intent) {
       if (
         tools.has('delegate_to_bot') &&
         policyAllowsTool(activePolicy, 'delegate_to_bot')
@@ -1165,6 +1190,9 @@ async function runAgentTurn({
     }
   }
 
+  if (memoryQueryRequest && !forcedDelegationNotice) {
+    forcedDelegationNotice = DIRECT_MEMORY_QUERY_INSTRUCTION;
+  }
   const systemInstructions = [instruction, forcedDelegationNotice]
     .filter(Boolean)
     .join('\n\n');
@@ -1177,8 +1205,8 @@ async function runAgentTurn({
     });
   }
 
-  // 已由运行时派发后不再把 delegate_to_bot 暴露给模型，避免同一任务被重复提交。
-  const requestSpecs = forcedDelegationDispatched
+  // 已派发或正在查询记忆时不把 delegate_to_bot 暴露给模型；查询始终由主控直查。
+  const requestSpecs = forcedDelegationDispatched || memoryQueryRequest
     ? specs.filter(spec => spec.function.name !== 'delegate_to_bot')
     : specs;
 

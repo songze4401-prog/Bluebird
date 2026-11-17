@@ -75,7 +75,7 @@ function validInput(overrides = {}) {
   return {
     agentId: 'memory',
     taskType: 'memory.search',
-    goal: '查一下我的咖啡偏好',
+    goal: '记录用户提供的咖啡偏好',
     ...overrides,
   };
 }

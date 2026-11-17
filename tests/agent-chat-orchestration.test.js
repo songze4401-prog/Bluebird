@@ -34,7 +34,7 @@ process.env.BLUEBIRD_MONITORING = '0';
 
 const PLAN_BLOCK = [
   '```bluebird-plan',
-  '{"mode":"dag","goal":"三步编排","nodes":[{"key":"n1","taskType":"memory.search","goal":"检索材料"},{"key":"n2","taskType":"summary.synthesize","goal":"汇总材料","dependsOn":["n1"]}]}',
+  '{"mode":"dag","goal":"三步编排","nodes":[{"key":"n1","taskType":"memory.search","goal":"记录用户新提供的偏好"},{"key":"n2","taskType":"summary.synthesize","goal":"汇总材料","dependsOn":["n1"]}]}',
   '```',
 ].join('\n');
 
@@ -67,7 +67,7 @@ require.cache[openaiTarget] = {
               // 用户消息带 bad-plan 标记 → 返回未知 taskType 的坏计划（测降级）。
               const plan = userText.includes('orch-bad-')
                 ? '{"mode":"dag","goal":"坏计划","nodes":[{"key":"n1","taskType":"nope.missing","goal":"g"}]}'
-                : '{"mode":"dag","goal":"三步编排","nodes":[{"key":"n1","taskType":"memory.search","goal":"检索材料"},{"key":"n2","taskType":"summary.synthesize","goal":"汇总材料","dependsOn":["n1"]}]}';
+                : '{"mode":"dag","goal":"三步编排","nodes":[{"key":"n1","taskType":"memory.search","goal":"记录用户新提供的偏好"},{"key":"n2","taskType":"summary.synthesize","goal":"汇总材料","dependsOn":["n1"]}]}';
               content = `好的，这个任务可以拆开并行处理。\n\`\`\`bluebird-plan\n${plan}\n\`\`\``;
             }
             return {

@@ -482,7 +482,7 @@ test('Bot 会话：创建、读取、追加与跨 Bot/不存在会话拒绝', ()
   assert.equal(sessions.listSessions('memory').length, 1);
 });
 
-test('直接对话：使用 Bot 独立 Key，真实工具循环与事件可追溯', async () => {
+test('直接对话：Bot 独立 Key 隔离，记忆查询工具调用被拒绝', async () => {
   const session = sessions.createSession('memory', { title: '工具检索' });
   const now = new Date().toISOString();
   // 记忆归属"主控的另一会话"：Bot 直接对话要按用户级读到它，
@@ -530,10 +530,14 @@ test('直接对话：使用 Bot 独立 Key，真实工具循环与事件可追�
   assert.equal(result.ok, true);
   assert.equal(result.sessionId, session.id);
   assert.equal(result.message.role, 'assistant');
-  assert.ok(result.toolSteps.some(step => step.name === 'memory_search'));
-  assert.ok(
+  const deniedSearch = result.toolSteps.find(step => step.name === 'memory_search');
+  assert.ok(deniedSearch, '即使模型伪造查询调用也应留下拒绝结果');
+  assert.equal(deniedSearch.ok, false);
+  assert.match(deniedSearch.summary, /策略不允许/);
+  assert.equal(
     result.evidence.some(item => item.id === 'm-memory-bot-test'),
-    '可信用户身份下，Bot 直接对话应能跨会话读到用户的长期记忆'
+    false,
+    'Memory Bot 直聊不得读取用户长期记忆'
   );
   assert.ok(seenAuth.length >= 2);
   assert.ok(seenAuth.every(auth => auth === `Bearer ${BOT_KEY}`));
@@ -546,6 +550,7 @@ test('直接对话：使用 Bot 独立 Key，真实工具循环与事件可追�
     sessionId: anonymousSession.id,
     message: '请检索我关于咖啡的长期记忆。',
   });
+  assert.ok(anonymous.toolSteps.some(step => step.name === 'memory_search' && !step.ok));
   assert.equal(
     anonymous.evidence.some(item => item.id === 'm-memory-bot-test'),
     false,
@@ -558,7 +563,6 @@ test('直接对话：使用 Bot 独立 Key，真实工具循环与事件可追�
   assert.equal(history[1].role, 'assistant');
 
   const events = tasks.listEvents('memory', { limit: 20 });
-  assert.ok(events.some(event => event.eventType === 'tool.completed'));
   assert.ok(events.some(event => event.eventType === 'model.completed'));
   assert.ok(!JSON.stringify(events).includes(BOT_KEY));
 });
@@ -626,7 +630,7 @@ test('工具预算：超出旧上限后保留无工具总结轮，不返回 empt
     const task = tasks.createTask({
       botId: 'memory',
       taskType: 'memory.search',
-      goal: '检索咖啡偏好并总结',
+      goal: '记录用户提供的咖啡偏好并核对现有冲突',
       allowedTools: ['memory_search', 'memory_remember', 'knowledge_search'],
       deadlineMs: 20000,
     });
@@ -856,12 +860,27 @@ test('HTTP API：鉴权由外层注入，配置/凭证/会话/任务均走真实
   assert.ok(toolStreamText.includes('"type":"done"'));
 
   providerMode = 'text';
-  const task = await api('/agent-tasks', {
+  const beforeQueryTasks = tasks.allTasks().length;
+  const rejectedQuery = await api('/agent-tasks', {
     method: 'POST',
     body: {
       botId: 'memory',
       taskType: 'memory.search',
       goal: '查一下我的咖啡偏好',
+      allowedTools: ['memory_search'],
+      deadlineMs: 20000,
+    },
+  });
+  assert.equal(rejectedQuery.status, 403);
+  assert.equal(rejectedQuery.json.code, 'memory_query_requires_main_agent');
+  assert.equal(tasks.allTasks().length, beforeQueryTasks, '查询请求不得创建 Memory Bot 任务');
+
+  const task = await api('/agent-tasks', {
+    method: 'POST',
+    body: {
+      botId: 'memory',
+      taskType: 'memory.search',
+      goal: '记录用户提供的咖啡偏好并核对现有冲突',
       allowedTools: ['memory_search'],
       deadlineMs: 20000,
     },
