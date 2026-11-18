@@ -9,6 +9,8 @@
  *                  跨会话泄漏 / 删除后残留 / 无答案问题。
  *   PHASE2_WRITES —— 事实更正题需要的候选记忆（喂给假 client，让真实
  *                  processMemory 的判定与去重逻辑自己跑）。
+ *   PROMO_PROBES —— 写入质量探针（Notion §13.1，喂给真实 processMemory，
+ *                  判分以落盘状态为准：hedged/推断/临时冲突/更正/持久意图/重复/hedged 跨会话）。
  *
  * 条数刻意 > SMALL_MEMORY_LIMIT(15)：否则 buildMemoryContext 走
  * 「全量注入、跳过相关性过滤」分支（server/memory.js:639-641），
@@ -697,6 +699,157 @@ const SAFETY_PROBES = [
   },
 ];
 
+// ---- Phase 5 写入质量探针（Notion 目标架构 §13.1，2026-11-19 补）----
+/**
+ * 每条探针喂给真实 processMemory（假 client 固定 JSON），判分以落盘状态为准：
+ *   expect        = 'active'（应晋升）| 'pending'（应待确认）| 'rejected'（应拒写）
+ *   expectReason  = pending/rejected 时的稳定短码；数组表示可接受的短码集合
+ *   expectSupersede = 期望更正走 supersede 的旧条目 id（M 系列）
+ *   multi         = 两段式探针（重复表达 / hedged 跨会话重复），按序两次调用，
+ *                   calls[] 可覆写 session / userText / sourceQuote
+ * 评测跑在 BLUEBIRD_MEMORY_EVIDENCE_POLICY 默认 compat 下：
+ *   hedged / inferred / 矛盾候选三种「不自动晋升」与模式无关；
+ *   singlePreferenceCompatProbe 钉住 compat 的「单次明确直述直接晋升」口径
+ *   （strict 模式下它会翻成 pending，属文档化行为差异，不在本评测断言）。
+ * 临时冲突探针的判据是「稳定偏好不被覆盖 + 新候选不晋升」（实际保护机制为
+ * temporary_state 拒写，#101 文档写的是待确认——保护结果一致、机制以实测为准）。
+ */
+const PROMO_PROBES = [
+  {
+    key: 'hedgedPreferenceProbe',
+    kind: 'hedged',
+    userText: '记住：我好像挺喜欢喝气泡水的',
+    reply: {
+      content: '用户喜欢喝气泡水',
+      type: 'preference',
+      keywords: ['气泡水'],
+      confidence: 0.95,
+      sourceQuote: '我好像挺喜欢喝气泡水的',
+    },
+    expect: 'pending',
+    expectReason: 'user_hedged_requires_confirmation',
+  },
+  {
+    key: 'inferredPreferenceProbe',
+    kind: 'inferred',
+    userText: '记住：我的团队下周要搬去新办公室',
+    reply: {
+      content: '用户的团队下周要搬去新办公室',
+      type: 'fact',
+      keywords: ['办公室'],
+      confidence: 0.95,
+      sourceQuote: '我的团队下周要搬去新办公室',
+      inferred: true,
+    },
+    expect: 'pending',
+    expectReason: 'model_inference_requires_confirmation',
+  },
+  {
+    key: 'temporaryConflictProbe',
+    kind: 'temporaryConflict',
+    userText: '记住：今天换换口味，来杯美式',
+    reply: {
+      content: '用户今天想喝美式',
+      type: 'preference',
+      keywords: ['咖啡', '美式'],
+      confidence: 0.95,
+      sourceQuote: '今天换换口味，来杯美式',
+    },
+    expect: 'rejected',
+    expectReason: ['temporary_state', 'contradictory_evidence_requires_confirmation'],
+    stableId: 'M01',
+  },
+  {
+    key: 'explicitCorrectionProbe',
+    kind: 'correction',
+    userText: '记住：更正，我以后改喝美式了，拿铁不喝了',
+    reply: {
+      content: '用户喝咖啡改喝美式，不再喝拿铁',
+      type: 'preference',
+      keywords: ['咖啡', '美式'],
+      confidence: 0.95,
+      sourceQuote: '我以后改喝美式了，拿铁不喝了',
+    },
+    expect: 'active',
+    expectSupersede: 'M01',
+  },
+  {
+    key: 'persistentIntentProbe',
+    kind: 'persistentIntent',
+    userText: '记住：以后都用深色主题写代码',
+    reply: {
+      content: '用户以后都用深色主题写代码',
+      type: 'preference',
+      keywords: ['深色主题'],
+      confidence: 0.95,
+      sourceQuote: '以后都用深色主题写代码',
+    },
+    expect: 'active',
+  },
+  {
+    key: 'duplicateVerbatimProbe',
+    kind: 'duplicate',
+    multi: true,
+    userText: '记住：我最喜欢的编辑器是 VS Code',
+    reply: {
+      content: '用户最喜欢的编辑器是 VS Code',
+      type: 'preference',
+      keywords: ['VS Code', '编辑器'],
+      confidence: 0.95,
+      sourceQuote: '我最喜欢的编辑器是 VS Code',
+    },
+    expect: 'active',
+    expectSecondAction: 'merged',
+  },
+  {
+    key: 'duplicateParaphraseProbe',
+    kind: 'duplicate',
+    multi: true,
+    calls: [
+      { userText: '记住：我每天都在用 Bluebird 记笔记', sourceQuote: '我每天都在用 Bluebird 记笔记' },
+      { userText: '记住：我记笔记一直用的都是 Bluebird', sourceQuote: '我记笔记一直用的都是 Bluebird' },
+    ],
+    reply: {
+      content: '用户每天都在用 Bluebird 记笔记',
+      type: 'fact',
+      keywords: ['Bluebird', '笔记'],
+      confidence: 0.95,
+    },
+    expect: 'active',
+    expectSecondAction: 'merged',
+  },
+  {
+    key: 'hedgedRepeatProbe',
+    kind: 'hedged',
+    multi: true,
+    calls: [{ session: 'main' }, { session: 'work' }],
+    userText: '记住：我好像挺喜欢喝气泡水的',
+    reply: {
+      content: '用户喜欢喝气泡水',
+      type: 'preference',
+      keywords: ['气泡水'],
+      confidence: 0.95,
+      sourceQuote: '我好像挺喜欢喝气泡水的',
+    },
+    expect: 'pending',
+    expectReason: 'user_hedged_requires_confirmation',
+    expectRepeatSessions: 2,
+  },
+  {
+    key: 'singlePreferenceCompatProbe',
+    kind: 'singlePreferenceCompat',
+    userText: '记住：我喝咖啡只喝冷萃',
+    reply: {
+      content: '用户喝咖啡只喝冷萃',
+      type: 'preference',
+      keywords: ['冷萃'],
+      confidence: 0.95,
+      sourceQuote: '我喝咖啡只喝冷萃',
+    },
+    expect: 'active',
+  },
+];
+
 module.exports = {
   BASE_TIME,
   SEEDS,
@@ -705,6 +858,7 @@ module.exports = {
   PHASE2_WRITES,
   GATE_PROBES,
   SAFETY_PROBES,
+  PROMO_PROBES,
   at,
   contrib,
   seed,
