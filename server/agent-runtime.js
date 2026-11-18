@@ -147,6 +147,7 @@ function registerTool(definition) {
     readOnly,
     risk,
     failOpenEligible,
+    pendingConfirmation,
   } = definition;
 
   if (!TOOL_NAME_RE.test(name || '')) {
@@ -179,6 +180,11 @@ function registerTool(definition) {
 
   if (failOpenEligible !== undefined && typeof failOpenEligible !== 'boolean') {
     throw new TypeError(`[agent] 工具 failOpenEligible 必须是布尔值：${name}`);
+  }
+  // pendingConfirmation：主聊直连路径的「写前确认」流（任务书接法 a）——true 时
+  // 高风险工具在主聊放行到 handler 创建待确认写入，其余路径仍 deny-only。
+  if (pendingConfirmation !== undefined && typeof pendingConfirmation !== 'boolean') {
+    throw new TypeError(`[agent] 工具 pendingConfirmation 必须是布尔值：${name}`);
   }
 
   // failOpenEligible：该工具是否作为"预授权动作"参与 allowlist 判定（§33）。
@@ -520,7 +526,18 @@ async function executeToolCall(name, rawArgs, context) {
       policyVersion: gate.policyVersion ?? null,
     };
   }
-  if (def.risk === 'high_risk') {
+  // 任务书接法 a（2026-11-19）：声明 pendingConfirmation 且 high_risk 的工具在
+  // 主聊直连路径（有 sessionId+userText 来源、无任务执行器账本）放行到 handler
+  // 创建待确认写入；pendingFlow 同时决定 handler 收到的 workspacePendingFlow——
+  // 非 high_risk 工具即使误声明 pendingConfirmation 也永远进不了确认流
+  // （oracle 低-3），任务执行器/无来源上下文维持 deny-only。
+  const pendingFlow =
+    def.pendingConfirmation === true &&
+    def.risk === 'high_risk' &&
+    Boolean(context && context.sessionId) &&
+    Boolean(context && context.userText) &&
+    !(context && context.sideEffect);
+  if (def.risk === 'high_risk' && !pendingFlow) {
     monitor.complete({
       ok: false,
       code: 'confirmation_required',
@@ -763,6 +780,7 @@ async function executeToolCall(name, rawArgs, context) {
         userText: context.userText,
         userMessageId: context.userMessageId,
         signal: controller.signal,
+        workspacePendingFlow: pendingFlow === true,
       })
     )
     .catch(error => {
@@ -1100,6 +1118,18 @@ async function runAgentTurn({
       ok: result.ok === true,
       summary: truncateText(summary, 120),
       durationMs: Date.now() - startedAtTool,
+      // pending 确认凭据：确认行前端凭 id 调 confirm/reject；只含元数据，
+      // 不含文件正文（content 留在服务端待确认存储里）。
+      ...(result && result.pending === true && result.confirmationId
+        ? {
+            pendingConfirmation: {
+              id: result.confirmationId,
+              path: result.path,
+              mode: result.mode,
+              bytes: result.bytes,
+            },
+          }
+        : {}),
     });
 
     conversation.push(

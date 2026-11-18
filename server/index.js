@@ -14,6 +14,8 @@ const orchestrationChat = require('./orchestration-chat');
 const agentApprovals = require('./agents/approvals');
 const agentTasks = require('./agents/tasks');
 const { auditTaskClaims } = require('./task-claim-guard');
+const toolWorkspace = require('./tool-workspace');
+const workspacePending = require('./workspace-pending');
 
 // 生产级可观测性：独立模块 + 只读查询 API。记录失败绝不影响主业务；
 // BLUEBIRD_MONITORING=0 可关闭，前端会显示 disabled 而不是健康。
@@ -2107,6 +2109,114 @@ app.post('/memory/confirm', requireAuth, async (req, res) =>
 app.post('/memory/reject', requireAuth, async (req, res) =>
   lifecycleWriteResponse(req, res, rejectPending, 'reject', 409)
 );
+
+// ---- 工作区写入确认（任务书接法 a：主聊轻量确认往返，2026-11-19）----
+// pending 记录由 /chat 里的 workspace_write 工具调用创建（带 sessionId+userId
+// 归属），这两条路由是用户在聊天里「确认写入 / 取消」的执行端点。错误形状
+// 沿用 memory confirm 的 lifecycleWriteResponse 口径：404 / 403（明确不伪装
+// 成不存在）/ 409；写入在确认时重查沙箱与配额，未过则 409 带原短码。
+app.post('/workspace/pending/:id/confirm', requireAuth, async (req, res) => {
+  const sessionId =
+    req.body && typeof req.body.sessionId === 'string' ? req.body.sessionId : '';
+  if (!sessionId) {
+    return res.status(400).json({ error: '缺少 sessionId', code: 'bad_request' });
+  }
+  const outcome = workspacePending.consumePendingWrite(req.params.id, {
+    sessionId,
+    userId: resolveUserId(req),
+  });
+  if (outcome.status === 'not_found') {
+    return res.status(404).json({
+      error: '待确认写入不存在或已被处理',
+      code: 'workspace_pending_not_found',
+      reason: 'not_found',
+    });
+  }
+  if (outcome.status === 'expired') {
+    return res.status(409).json({
+      error: '待确认写入已过期，请重新发起',
+      code: 'workspace_pending_expired',
+      reason: 'expired',
+    });
+  }
+  if (outcome.status === 'forbidden') {
+    return res.status(403).json({
+      error: '无权确认该写入',
+      code: 'workspace_pending_forbidden',
+      reason: 'forbidden',
+    });
+  }
+  const result = await toolWorkspace.executeConfirmedWrite({
+    path: outcome.record.path,
+    mode: outcome.record.mode,
+    content: outcome.record.content,
+  });
+  if (!result.ok) {
+    // pending 已被消费：本次确认不可重试，文案明确「请重新发起」（oracle 低-4）。
+    return res.status(409).json({
+      ok: false,
+      error: `${result.error}；pending 已消费，请重新发起写入`,
+      code: result.code,
+      reason: result.code,
+    });
+  }
+  return res.json({
+    ok: true,
+    id: outcome.record.id,
+    path: result.path,
+    mode: result.mode,
+    bytes: result.bytes,
+    backup: result.backup || null,
+    summary: result.summary,
+  });
+});
+
+app.post('/workspace/pending/:id/reject', requireAuth, (req, res) => {
+  const sessionId =
+    req.body && typeof req.body.sessionId === 'string' ? req.body.sessionId : '';
+  if (!sessionId) {
+    return res.status(400).json({ error: '缺少 sessionId', code: 'bad_request' });
+  }
+  const outcome = workspacePending.cancelPendingWrite(req.params.id, {
+    sessionId,
+    userId: resolveUserId(req),
+  });
+  if (outcome.status === 'not_found') {
+    return res.status(404).json({
+      error: '待确认写入不存在或已被处理',
+      code: 'workspace_pending_not_found',
+      reason: 'not_found',
+    });
+  }
+  if (outcome.status === 'expired') {
+    return res.status(409).json({
+      error: '待确认写入已过期',
+      code: 'workspace_pending_expired',
+      reason: 'expired',
+    });
+  }
+  if (outcome.status === 'forbidden') {
+    return res.status(403).json({
+      error: '无权取消该写入',
+      code: 'workspace_pending_forbidden',
+      reason: 'forbidden',
+    });
+  }
+  try {
+    monitoring.recordWorkspaceOp({
+      tool: 'workspace_write',
+      path: String(outcome.record.path || '').slice(0, 200),
+      mode: outcome.record.mode || null,
+      bytes: Number.isFinite(outcome.record.bytes) ? outcome.record.bytes : null,
+      status: 'cancelled',
+      code: 'workspace_write_rejected',
+      confirmed: false,
+    });
+  } catch (_) {
+    /* 监控失败不影响取消结果 */
+  }
+  return res.json({ ok: true, id: outcome.record.id, cancelled: true, summary: '已取消该写入' });
+});
 
 app.post('/memory/archive', requireAuth, async (req, res) =>
   lifecycleWriteResponse(req, res, archiveMemory, 'archive', 409)

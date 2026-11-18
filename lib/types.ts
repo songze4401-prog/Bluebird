@@ -39,6 +39,14 @@ export type ToolStep = {
   ok: boolean;
   summary: string;
   durationMs: number;
+  // 工作区写入确认凭据（仅 workspace_write 的 pending 流；服务端
+  // sessions.js sanitizeToolSteps 白名单字段，只含元数据不含文件正文）
+  pendingConfirmation?: {
+    id: string;
+    path: string;
+    mode: 'create' | 'overwrite' | 'append';
+    bytes: number;
+  };
 };
 
 // 渲染用形状：落盘的 ToolStep 与流式期 tool_start / tool_end 现场拼出来的
@@ -51,6 +59,14 @@ export type ToolStepView = {
   running: boolean;
   // 落盘摘要带真实耗时；流式现场态没有该字段
   durationMs?: number;
+  pendingConfirmation?: {
+    id: string;
+    path: string;
+    mode: 'create' | 'overwrite' | 'append';
+    bytes: number;
+  };
+  // 本地消费标记：确认/取消成功后由 useChatSession 就地更新，不落盘
+  resolved?: 'confirmed' | 'rejected';
 };
 
 // SSE 的工具进度事件（服务端 agent-runtime.js 的 onToolEvent 载荷）。

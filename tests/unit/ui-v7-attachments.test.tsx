@@ -29,6 +29,8 @@ function makeChat(sendMessage: jest.Mock = jest.fn(async () => undefined)): Chat
     liveToolSteps: [],
     sendMessage,
     stopGeneration: jest.fn(),
+    confirmWorkspaceWrite: jest.fn(async () => undefined),
+    rejectWorkspaceWrite: jest.fn(async () => undefined),
     loadHistory: jest.fn(async () => ({ ok: true, status: 200 })),
     loadOlderHistory: jest.fn(async () => ({ ok: false, status: 200 })),
     hasMoreHistory: false,

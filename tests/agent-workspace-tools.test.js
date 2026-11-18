@@ -360,19 +360,61 @@ test('p. 开关关闭时工具不注册（子进程验证两种开关态）', ()
   assert.deepEqual(on.sort(), ['workspace_list', 'workspace_read', 'workspace_write']);
 });
 
-test('q. 运行层写前确认：workspace_write 走 high_risk deny-only，文件不产生', async () => {
+test('q. 运行层确认往返：主聊建 pending 不落盘；worker/无来源仍 deny-only', async () => {
+  // 主聊直连（sessionId+userText、无 sideEffect）：pending 流（接法 a）——
+  // 不写文件，返回确认凭据，参数进入待确认存储。
+  const pending = await agentRuntime.executeToolCall(
+    'workspace_write',
+    { path: 'confirmed.md', content: 'should-not-write-yet' },
+    { cache: new Map(), sessionId: 'session-1', userText: '在工作区建一个文件' }
+  );
+  assert.equal(pending.ok, true);
+  assert.equal(pending.pending, true);
+  assert.equal(pending.code, 'workspace_write_pending');
+  assert.match(pending.confirmationId, /^wsw_[0-9a-f]{24}$/);
+  assert.equal(
+    fs.existsSync(workspacePath('confirmed.md')),
+    false,
+    '确认前绝不落盘'
+  );
+  const storePath = path.join(TMP, 'workspace-pending.json');
+  const storeAfterCreate = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+  assert.equal(storeAfterCreate.pending.length, 1);
+  assert.equal(storeAfterCreate.pending[0].sessionId, 'session-1');
+  assert.equal(storeAfterCreate.pending[0].path, 'confirmed.md');
+
+  // 任务执行器路径（sideEffect 注入）：维持 deny-only，也不建 pending。
+  const beforeWorker = storeAfterCreate.pending.length;
   const denied = await agentRuntime.executeToolCall(
     'workspace_write',
-    { path: 'confirmed.md', content: 'should-not-write' },
-    { cache: new Map(), sessionId: 'session-1', userText: '在工作区建一个文件' }
+    { path: 'worker.md', content: 'x' },
+    {
+      cache: new Map(),
+      sessionId: 'session-1',
+      userText: 'x',
+      sideEffect: {
+        splitOverride: a => ({ args: a, override: null }),
+        before: () => ({ mode: 'execute', opKey: 'k' }),
+        blocked: () => false,
+      },
+    }
   );
   assert.equal(denied.ok, false);
   assert.equal(denied.code, 'confirmation_required');
   assert.equal(
-    fs.existsSync(workspacePath('confirmed.md')),
-    false,
-    '确认协议接上之前绝不能落盘'
+    JSON.parse(fs.readFileSync(storePath, 'utf8')).pending.length,
+    beforeWorker,
+    'worker 路径不产生 pending'
   );
+
+  // 缺来源上下文：维持 deny-only（ungrounded 不得进入确认流）。
+  const ungrounded = await agentRuntime.executeToolCall(
+    'workspace_write',
+    { path: 'g.md', content: 'x' },
+    { cache: new Map() }
+  );
+  assert.equal(ungrounded.ok, false);
+  assert.equal(ungrounded.code, 'confirmation_required');
 
   // 只读工具不受影响：list 在同一运行层可正常执行。
   const listed = await agentRuntime.executeToolCall('workspace_list', {}, { cache: new Map() });
@@ -493,4 +535,21 @@ test('u. Windows 专有绕过：.HISTORY 大小写与 NTFS ADS（含冒号路径
     path: 'notes.md:hide.js',
   });
   assert.equal(adsRead.code, 'workspace_path_invalid');
+});
+
+test('v. pending 预检：非白名单扩展名在建 pending 时即拒绝（oracle 低-2）', async () => {
+  const pending = await agentRuntime.executeToolCall(
+    'workspace_write',
+    { path: 'run.exe', content: 'MZ' },
+    { cache: new Map(), sessionId: 'session-1', userText: '建一个 exe' }
+  );
+  assert.equal(pending.ok, false);
+  assert.equal(pending.code, 'workspace_extension_not_allowed');
+  const storePath = path.join(TMP, 'workspace-pending.json');
+  const store = JSON.parse(fs.readFileSync(storePath, 'utf8'));
+  assert.equal(
+    store.pending.some(item => item.path === 'run.exe'),
+    false,
+    '预检拒绝的写入不得进入待确认存储'
+  );
 });

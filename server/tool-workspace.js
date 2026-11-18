@@ -23,6 +23,7 @@
 const fs = require('fs');
 const path = require('path');
 const monitoring = require('./monitoring');
+const workspacePending = require('./workspace-pending');
 
 const LIMITS = Object.freeze({
   readMaxBytes: 64 * 1024,
@@ -233,7 +234,7 @@ function pruneHistory(base) {
   }
 }
 
-function recordOp({ tool, relPath, mode = null, bytes = null, truncated = null, status, code = null }) {
+function recordOp({ tool, relPath, mode = null, bytes = null, truncated = null, status, code = null, confirmed = null }) {
   try {
     monitoring.recordWorkspaceOp({
       tool,
@@ -243,6 +244,7 @@ function recordOp({ tool, relPath, mode = null, bytes = null, truncated = null, 
       truncated,
       status,
       code,
+      confirmed,
     });
   } catch (_) {
     // 监控失败不影响工具结果。
@@ -461,6 +463,9 @@ const workspaceWriteDefinition = Object.freeze({
   timeoutMs: 5000,
   readOnly: false,
   risk: 'high_risk',
+  // 任务书接法 a：主聊直连路径走待确认往返（executeToolCall 据此放行到
+  // handler 创建 pending），任务执行器/无来源上下文仍 deny-only。
+  pendingConfirmation: true,
 
   validate(args) {
     if (!args || typeof args !== 'object' || Array.isArray(args)) {
@@ -482,7 +487,19 @@ const workspaceWriteDefinition = Object.freeze({
     return { ok: true, args: { path: args.path, content: args.content, mode } };
   },
 
-  async handler(args) {
+  async handler(args, context = {}) {
+    // 任务书接法 a（2026-11-19）：主聊直连路径（运行层注入 workspacePendingFlow）
+    // 不直接落盘——创建待确认写入，用户在聊天里确认后才由确认路由执行真写入。
+    if (context && context.workspacePendingFlow === true) {
+      return createPendingWriteResult(args, context);
+    }
+    return executeWrite(args, { confirmed: false });
+  },
+});
+
+// 直写执行体（原 handler 主体抽到这里）：确认路由与单测共用同一条沙箱路径。
+// confirmed 只影响监控标记（true = 经用户确认往返执行）。
+async function executeWrite(args, { confirmed = false } = {}) {
     let resolved = null;
     try {
       const incoming = Buffer.byteLength(args.content, 'utf8');
@@ -491,7 +508,7 @@ const workspaceWriteDefinition = Object.freeze({
           'workspace_file_too_large',
           `单文件写入上限 ${LIMITS.writeMaxBytes} 字节，本次 ${incoming} 字节`
         );
-        recordOp({ tool: 'workspace_write', relPath: args.path.slice(0, 200), mode: args.mode, status: 'failed', code: result.code });
+        recordOp({ tool: 'workspace_write', relPath: args.path.slice(0, 200), mode: args.mode, status: 'failed', code: result.code, confirmed });
         return result;
       }
 
@@ -501,7 +518,7 @@ const workspaceWriteDefinition = Object.freeze({
       const rootWithSep = rootReal.endsWith(path.sep) ? rootReal : rootReal + path.sep;
       if (absolutePath === rootReal || !absolutePath.startsWith(rootWithSep)) {
         const result = toolError('workspace_path_invalid', '写入目标必须是根目录内的文件路径');
-        recordOp({ tool: 'workspace_write', relPath: relativePath, mode: args.mode, status: 'failed', code: result.code });
+        recordOp({ tool: 'workspace_write', relPath: relativePath, mode: args.mode, status: 'failed', code: result.code, confirmed });
         return result;
       }
 
@@ -514,13 +531,13 @@ const workspaceWriteDefinition = Object.freeze({
 
       if (stat && stat.isDirectory()) {
         const result = toolError('workspace_is_a_directory', `目标是目录，不能当文件写：${relativePath}`);
-        recordOp({ tool: 'workspace_write', relPath: relativePath, mode: args.mode, status: 'failed', code: result.code });
+        recordOp({ tool: 'workspace_write', relPath: relativePath, mode: args.mode, status: 'failed', code: result.code, confirmed });
         return result;
       }
 
       if (args.mode === 'create' && stat) {
         const result = toolError('workspace_exists', `文件已存在（改用 overwrite 或 append）：${relativePath}`);
-        recordOp({ tool: 'workspace_write', relPath: relativePath, mode: args.mode, status: 'failed', code: result.code });
+        recordOp({ tool: 'workspace_write', relPath: relativePath, mode: args.mode, status: 'failed', code: result.code, confirmed });
         return result;
       }
       if (args.mode === 'append' && !stat) {
@@ -547,7 +564,7 @@ const workspaceWriteDefinition = Object.freeze({
         }
       } catch (error) {
         const result = toolError('workspace_io_failed', `写入失败：${error && error.code || 'io_error'}`);
-        recordOp({ tool: 'workspace_write', relPath: relativePath, mode: args.mode, status: 'failed', code: result.code });
+        recordOp({ tool: 'workspace_write', relPath: relativePath, mode: args.mode, status: 'failed', code: result.code, confirmed });
         return result;
       }
 
@@ -557,6 +574,7 @@ const workspaceWriteDefinition = Object.freeze({
         mode: args.mode,
         bytes: incoming,
         status: 'success',
+        confirmed,
       });
       return {
         ok: true,
@@ -582,15 +600,77 @@ const workspaceWriteDefinition = Object.freeze({
           mode: args.mode,
           status: 'denied',
           code: error.code,
+          confirmed,
         });
         return error;
       }
       const result = toolError('workspace_io_failed', `写入失败：${error && error.code || 'io_error'}`);
-      recordOp({ tool: 'workspace_write', relPath: relForLog, mode: args.mode, status: 'failed', code: result.code });
+      recordOp({ tool: 'workspace_write', relPath: relForLog, mode: args.mode, status: 'failed', code: result.code, confirmed });
       return result;
     }
-  },
-});
+}
+
+// 主聊 pending 流（接法 a）：把写入参数存进待确认存储，返回带 confirmationId 的
+// 结构化结果，模型据此告知用户去聊天里确认。沙箱在这里预检一次（给模型即时
+// 反馈）；确认执行时会用同一套逻辑重查（防创建→确认之间目录状态变化）。
+function createPendingWriteResult(args, context) {
+  const relForLog = typeof args.path === 'string' ? args.path.slice(0, 200) : null;
+  const incoming = Buffer.byteLength(args.content, 'utf8');
+  if (incoming > LIMITS.writeMaxBytes) {
+    const result = toolError(
+      'workspace_file_too_large',
+      `单文件写入上限 ${LIMITS.writeMaxBytes} 字节，本次 ${incoming} 字节`
+    );
+    recordOp({ tool: 'workspace_write', relPath: relForLog, mode: args.mode, status: 'failed', code: result.code });
+    return result;
+  }
+  try {
+    // 沙箱预检（含扩展名白名单，oracle 低-2）：给模型即时反馈；
+    // 确认执行时会用同一套逻辑重查（防创建→确认之间目录状态变化）。
+    const precheck = resolveWithinRoot(args.path);
+    assertTextExtension(precheck.absolutePath);
+    const record = workspacePending.createPendingWrite({
+      sessionId: context.sessionId,
+      userId: context.userId || null,
+      path: args.path,
+      mode: args.mode,
+      content: args.content,
+    });
+    recordOp({
+      tool: 'workspace_write',
+      relPath: relForLog,
+      mode: args.mode,
+      bytes: incoming,
+      status: 'needs_confirmation',
+      code: 'workspace_write_pending',
+    });
+    return {
+      ok: true,
+      pending: true,
+      code: 'workspace_write_pending',
+      confirmationId: record.id,
+      path: record.path,
+      mode: record.mode,
+      bytes: incoming,
+      expiresAt: record.expiresAt,
+      summary: '已创建待确认写入，等用户在聊天里确认后才会落盘',
+    };
+  } catch (error) {
+    if (error && typeof error === 'object' && String(error.code || '').startsWith('workspace_')) {
+      recordOp({ tool: 'workspace_write', relPath: relForLog, mode: args.mode, status: 'denied', code: error.code });
+      return error;
+    }
+    // 确认存储写不下 → fail-closed：不推进流程，也不落盘。
+    const result = toolError('workspace_pending_unavailable', `确认存储不可用：${error && error.code || 'io_error'}`);
+    recordOp({ tool: 'workspace_write', relPath: relForLog, mode: args.mode, status: 'failed', code: result.code });
+    return result;
+  }
+}
+
+// 确认路由专用：按待确认记录里的原参数执行真写入（confirmed=true 打监控标记）。
+function executeConfirmedWrite(args) {
+  return executeWrite(args, { confirmed: true });
+}
 
 module.exports = {
   LIMITS,
@@ -603,4 +683,5 @@ module.exports = {
   workspaceListDefinition,
   workspaceReadDefinition,
   workspaceWriteDefinition,
+  executeConfirmedWrite,
 };

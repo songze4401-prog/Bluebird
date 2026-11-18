@@ -137,6 +137,11 @@ export const API_PATHS = {
     monitoringQuery('/monitoring/models', { from, to }),
   monitoringAlerts: '/monitoring/alerts',
   monitoringHealth: '/monitoring/health',
+  // 任务书接法 a：工作区写入确认往返（pending 凭据在 toolSteps.pendingConfirmation）
+  workspacePendingConfirm: (id: string) =>
+    `/workspace/pending/${encodeURIComponent(id)}/confirm`,
+  workspacePendingReject: (id: string) =>
+    `/workspace/pending/${encodeURIComponent(id)}/reject`,
 } as const;
 
 function monitoringQuery(

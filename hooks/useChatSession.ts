@@ -135,6 +135,9 @@ export type ChatSessionApi = {
   clearHistory: () => void;
   recallMessage: (message: Message) => void;
   receiveExternalMessage: (targetSessionId: string, message: AgentChatMessage) => void;
+  // 任务书接法 a：工作区写入确认往返（pending 凭据在 toolSteps.pendingConfirmation）
+  confirmWorkspaceWrite: (confirmationId: string) => Promise<void>;
+  rejectWorkspaceWrite: (confirmationId: string) => Promise<void>;
   resetMessages: () => void;
 };
 
@@ -831,6 +834,68 @@ export function useChatSession({
     ]);
   };
 
+  // 任务书接法 a：工作区写入确认往返。确认/取消都按当前会话（请求入口快照
+  // sessionId）调用；成功后本地把对应 toolStep 标记为已消费（服务端 pending
+  // 记录已被删除，旧消息上的确认行随之消失、pill 文案改为结果）。
+  const markWorkspacePendingResolved = (
+    confirmationId: string,
+    outcome: 'confirmed' | 'rejected'
+  ) => {
+    setMessages(prev =>
+      prev.map(m => {
+        if (!m.toolSteps?.some(s => s.pendingConfirmation?.id === confirmationId)) {
+          return m;
+        }
+        return {
+          ...m,
+          toolSteps: m.toolSteps.map(s =>
+            s.pendingConfirmation?.id === confirmationId
+              ? {
+                  ...s,
+                  resolved: outcome,
+                  summary: outcome === 'confirmed' ? '已确认写入' : '已取消',
+                }
+              : s
+          ),
+        };
+      })
+    );
+  };
+
+  const confirmWorkspaceWrite = async (confirmationId: string) => {
+    const requestSessionId = sessionIdRef.current;
+    try {
+      await apiFetch(API_PATHS.workspacePendingConfirm(confirmationId), {
+        method: 'POST',
+        body: JSON.stringify({ sessionId: requestSessionId }),
+      });
+    } catch (error) {
+      // oracle 中-1：pending 已被处理（404）或过期/状态冲突（409）时也把确认行
+      // 收尾成已消费，避免重启/切会话后旧行「点了没反应」；错误仍上抛给 UI 提示。
+      if (error instanceof ApiError && (error.status === 404 || error.status === 409)) {
+        markWorkspacePendingResolved(confirmationId, 'confirmed');
+      }
+      throw error;
+    }
+    markWorkspacePendingResolved(confirmationId, 'confirmed');
+  };
+
+  const rejectWorkspaceWrite = async (confirmationId: string) => {
+    const requestSessionId = sessionIdRef.current;
+    try {
+      await apiFetch(API_PATHS.workspacePendingReject(confirmationId), {
+        method: 'POST',
+        body: JSON.stringify({ sessionId: requestSessionId }),
+      });
+    } catch (error) {
+      if (error instanceof ApiError && (error.status === 404 || error.status === 409)) {
+        markWorkspacePendingResolved(confirmationId, 'rejected');
+      }
+      throw error;
+    }
+    markWorkspacePendingResolved(confirmationId, 'rejected');
+  };
+
   return {
     messages: messagesState,
     loadingHistory,
@@ -848,6 +913,8 @@ export function useChatSession({
     clearHistory,
     recallMessage,
     receiveExternalMessage,
+    confirmWorkspaceWrite,
+    rejectWorkspaceWrite,
     resetMessages,
   };
 }

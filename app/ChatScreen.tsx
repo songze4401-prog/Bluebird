@@ -6,6 +6,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   Animated,
   Clipboard,
   Easing,
@@ -65,6 +66,13 @@ function formatTime(iso?: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+// 任务书接法 a：待确认写入的模式文案（create/overwrite/append → 新建/覆盖/追加）
+function wsModeLabel(mode: 'create' | 'overwrite' | 'append'): string {
+  if (mode === 'append') return '追加';
+  if (mode === 'overwrite') return '覆盖';
+  return '新建';
 }
 
 // 行内表情包图片（旧壳 InlineSticker 同源：/sticker-repo/:id/image + 鉴权头）。
@@ -280,6 +288,21 @@ const createStyles = (t: V7Tokens, fd: number) =>
     tool: { flexDirection: 'row', alignItems: 'center', gap: 8 },
     toolCk: { fontSize: 12, fontWeight: '700', color: t.ink },
     toolTxt: { fontSize: 12, color: t.sec },
+    // 任务书接法 a：待确认写入行（surface 卡 + 确认/取消；颜色全走 tokens）
+    wsPending: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      borderRadius: 12,
+      backgroundColor: t.surface,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      ...V7_SHADOWS.md,
+    },
+    wsPendingTxt: { flex: 1, fontSize: 12, color: t.sec },
+    wsPendingBtns: { flexDirection: 'row', gap: 12 },
+    wsPendingOk: { fontSize: 12, fontWeight: '700', color: t.ink },
+    wsPendingNo: { fontSize: 12, color: t.down },
 
     // 悬浮身份组外壳（原型 .chatbrand：top 由安全区+4 在 JSX 给；点击穿透交给 box-none）
     headerWrap: { position: 'absolute', left: 0, right: 0 },
@@ -452,6 +475,22 @@ export function ChatScreen(props: {
   const [editOpen, setEditOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [toolOpen, setToolOpen] = useState(false);
+  // 任务书接法 a：工作区写入确认行的忙态（按 confirmationId 防双击）
+  const [wsBusyId, setWsBusyId] = useState<string | null>(null);
+  const handleWorkspacePending = async (id: string, confirm: boolean) => {
+    setWsBusyId(id);
+    try {
+      if (confirm) await chat.confirmWorkspaceWrite(id);
+      else await chat.rejectWorkspaceWrite(id);
+    } catch (error) {
+      Alert.alert(
+        '操作失败',
+        error instanceof Error && error.message ? error.message : '请稍后再试。'
+      );
+    } finally {
+      setWsBusyId(null);
+    }
+  };
   const [tool, setTool] = useState<string | null>(null);
   const [stickersOpen, setStickersOpen] = useState(false);
   // 表情包仓库列表（GET /sticker-repo，打开选择器时拉取）
@@ -826,25 +865,59 @@ export function ChatScreen(props: {
                   <Text style={styles.failTxt}>发送失败 · 点击重试</Text>
                 </Pressable>
               )}
-              {(m.toolSteps ?? []).map((step, ti) => (
-                <Pressable
-                  key={ti}
-                  style={styles.tool}
-                  onPress={() => {
-                    setTool(step.name + ' · ' + step.summary);
-                    setToolOpen(true);
-                  }}
-                  accessibilityRole="button"
-                  accessibilityLabel={'工具调用详情：' + step.name}
-                >
-                  <Text style={[styles.toolCk, { color: step.ok ? t.ink : t.down }]}>
-                    {step.running ? '●' : step.ok ? '✓' : '✕'}
-                  </Text>
-                  <Text numberOfLines={1} style={styles.toolTxt}>
-                    {step.name + (step.summary ? ' · ' + step.summary : '')}
-                  </Text>
-                </Pressable>
-              ))}
+              {(m.toolSteps ?? []).map((step, ti) => {
+                const pending = step.pendingConfirmation;
+                if (!pending || step.resolved) {
+                  return (
+                    <Pressable
+                      key={ti}
+                      style={styles.tool}
+                      onPress={() => {
+                        setTool(step.name + ' · ' + step.summary);
+                        setToolOpen(true);
+                      }}
+                      accessibilityRole="button"
+                      accessibilityLabel={'工具调用详情：' + step.name}
+                    >
+                      <Text style={[styles.toolCk, { color: step.ok ? t.ink : t.down }]}>
+                        {step.running ? '●' : step.ok ? '✓' : '✕'}
+                      </Text>
+                      <Text numberOfLines={1} style={styles.toolTxt}>
+                        {step.name + (step.summary ? ' · ' + step.summary : '')}
+                      </Text>
+                    </Pressable>
+                  );
+                }
+                return (
+                  // 任务书接法 a：待确认写入行——确认后由 /workspace/pending/:id/confirm
+                  // 重查沙箱并落盘；取消只删除服务端 pending 记录。
+                  <View key={ti} style={styles.wsPending}>
+                    <Text numberOfLines={1} style={styles.wsPendingTxt}>
+                      {`待确认写入：${pending.path}（${wsModeLabel(pending.mode)} · ${pending.bytes} 字节）`}
+                    </Text>
+                    <View style={styles.wsPendingBtns}>
+                      <Pressable
+                        onPress={() => void handleWorkspacePending(pending.id, true)}
+                        disabled={wsBusyId === pending.id}
+                        accessibilityRole="button"
+                        accessibilityLabel={`确认写入 ${pending.path}`}
+                      >
+                        <Text style={styles.wsPendingOk}>
+                          {wsBusyId === pending.id ? '…' : '确认写入'}
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        onPress={() => void handleWorkspacePending(pending.id, false)}
+                        disabled={wsBusyId === pending.id}
+                        accessibilityRole="button"
+                        accessibilityLabel={`取消写入 ${pending.path}`}
+                      >
+                        <Text style={styles.wsPendingNo}>取消</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                );
+              })}
               {props.isFavorite?.(m) && <Text style={styles.favStar}>★ 已收藏</Text>}
             </Pressable>
           )

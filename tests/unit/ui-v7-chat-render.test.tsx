@@ -23,9 +23,15 @@ jest.mock('react-native-safe-area-context', () =>
 function scriptChat(overrides: {
   messages: Message[];
   sendMessage?: ChatSessionApi['sendMessage'];
+  confirmWorkspaceWrite?: ChatSessionApi['confirmWorkspaceWrite'];
+  rejectWorkspaceWrite?: ChatSessionApi['rejectWorkspaceWrite'];
 }): ChatSessionApi {
   const sendMessage: ChatSessionApi['sendMessage'] =
     overrides.sendMessage ?? (async () => undefined);
+  const confirmWorkspaceWrite: ChatSessionApi['confirmWorkspaceWrite'] =
+    overrides.confirmWorkspaceWrite ?? (async () => undefined);
+  const rejectWorkspaceWrite: ChatSessionApi['rejectWorkspaceWrite'] =
+    overrides.rejectWorkspaceWrite ?? (async () => undefined);
   return {
     messages: overrides.messages,
     loadingHistory: false,
@@ -34,6 +40,8 @@ function scriptChat(overrides: {
     liveToolSteps: [],
     sendMessage,
     stopGeneration: jest.fn(),
+    confirmWorkspaceWrite,
+    rejectWorkspaceWrite,
     loadHistory: jest.fn(async () => ({ ok: true, status: 200 })),
     loadOlderHistory: jest.fn(async () => ({ ok: false, status: 200 })),
     hasMoreHistory: false,
@@ -161,5 +169,62 @@ describe('v7 聊天屏渲染契约', () => {
 
     expect(utils.getByText('✓')).toBeTruthy();
     expect(utils.getByText('memory_search · 命中 2 条')).toBeTruthy();
+  });
+
+  it('任务书接法 a：待确认写入行渲染，确认按钮调 confirmWorkspaceWrite', async () => {
+    const pendingId = 'wsw_' + 'a'.repeat(24);
+    const confirmWorkspaceWrite = jest.fn(async () => undefined);
+    const rejectWorkspaceWrite = jest.fn(async () => undefined);
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: '在工作区建一个 todo.md' },
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '好的，请确认写入。',
+        toolSteps: [
+          {
+            name: 'workspace_write',
+            ok: true,
+            running: false,
+            summary: '已创建待确认写入，等用户在聊天里确认后才会落盘',
+            pendingConfirmation: { id: pendingId, path: 'todo.md', mode: 'create', bytes: 42 },
+          },
+        ],
+      },
+    ];
+    const utils = await renderChat(
+      scriptChat({ messages, confirmWorkspaceWrite, rejectWorkspaceWrite })
+    );
+
+    expect(utils.getByText('待确认写入：todo.md（新建 · 42 字节）')).toBeTruthy();
+    fireEvent.press(utils.getByLabelText('确认写入 todo.md'));
+    await waitFor(() => expect(confirmWorkspaceWrite).toHaveBeenCalledWith(pendingId));
+    expect(rejectWorkspaceWrite).not.toHaveBeenCalled();
+  });
+
+  it('任务书接法 a：已消费的 pending 收起确认行，pill 文案为结果', async () => {
+    const pendingId = 'wsw_' + 'b'.repeat(24);
+    const messages: Message[] = [
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: '',
+        toolSteps: [
+          {
+            name: 'workspace_write',
+            ok: true,
+            running: false,
+            summary: '已确认写入',
+            pendingConfirmation: { id: pendingId, path: 'todo.md', mode: 'overwrite', bytes: 7 },
+            resolved: 'confirmed',
+          },
+        ],
+      },
+    ];
+    const utils = await renderChat(scriptChat({ messages }));
+
+    expect(utils.queryByLabelText('确认写入 todo.md')).toBeNull();
+    expect(utils.queryByLabelText('取消写入 todo.md')).toBeNull();
+    expect(utils.getByText('workspace_write · 已确认写入')).toBeTruthy();
   });
 });
