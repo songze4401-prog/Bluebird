@@ -40,7 +40,10 @@ const TEMPORARY_RE =
   /(今天|今晚|明天|昨天|此刻|现在|目前|这周|本周|这个月|临时|暂时|短期|一次性|最近|这几天)/;
 const MOOD_RE = /(心情|情绪|有点累|累了|困了|饿了|开心|难过|生气|焦虑|无聊)/;
 const DECISION_RE = /(决定|采用|选择|方案|架构|迁移|上线|改用|换成)/;
-const HEDGE_RE = /(可能|也许|似乎|大概|倾向于|应该是|估计|或许|不确定)/;
+// 「好像」在 memory-confidence-candidates.md 的犹豫语气词清单里，2026-11-19 补齐：
+// 此前漏列导致 hedged 候选（如「我好像挺喜欢…」）在 compat 下被直接晋升为 active，
+// 由评测 Phase5 探针实证实锤后修复。
+const HEDGE_RE = /(可能|也许|似乎|大概|好像|倾向于|应该是|估计|或许|不确定)/;
 const PERSISTENT_INTENT_RE =
   /(记住|记下|记着|别忘|不要忘|以后|今后|从今以后|长期|始终|一直|永远|每次|往后)/;
 const EXPLICIT_CORRECTION_RE =

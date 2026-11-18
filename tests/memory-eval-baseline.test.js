@@ -73,6 +73,7 @@ const p1 = () => report.metrics.phase1;
 const p2 = () => report.metrics.phase2;
 const p3 = () => report.metrics.phase3;
 const p4 = () => report.metrics.phase4;
+const p5 = () => report.metrics.phase5;
 
 describe('评测脚本自证', () => {
   test('跑完的题目数与种子数符合题库（防止题库被悄悄删题）', () => {
@@ -81,6 +82,11 @@ describe('评测脚本自证', () => {
     assert.equal(report.perQuestion.phase1.length, 19);
     assert.ok(report.perQuestion.phase2.length >= 2, '更正类题目不能为空');
     assert.ok(report.perQuestion.phase3.length >= 2, '删除类题目不能为空');
+    assert.equal(
+      report.perQuestion.phase5.length,
+      9,
+      '写入质量探针应有 9 条（hedged/推断/临时冲突/更正/持久意图/重复×2/hedged 跨会话/compat 口径）'
+    );
   });
 
   test('检索回来的正文全部落在题库映射里（unmapped 必须为空）', () => {
@@ -349,6 +355,175 @@ describe('P2-1 Context Engine：打开引擎后记忆要真能进上下文', () 
     assert.ok(
       p4().engine.selected <= p4().scopedDirect.count,
       '注入条数超过直连可见条数，说明引擎凭空造了候选'
+    );
+  });
+
+  test('同义重复事实被跨条目去重裁掉一条（冗余注入 = 0）', () => {
+    const dup = p4().duplicateScenario;
+
+    assert.ok(dup, 'duplicateScenario 缺失');
+    assert.equal(dup.ok, true, `duplicateScenario 引擎报错：${dup.error}`);
+    // 分组确实发生了的直接证据：skipped 里出现 duplicate_retrieval_item。
+    // 没有这条，「注入无冗余」可能只是阈值没触发而不是去重赢了。
+    assert.ok(
+      dup.skippedDuplicates >= 1,
+      `同义重复情景（引擎口径 jaccard ≥0.85）skipped 里没有 duplicate_retrieval_item：` +
+        '去重没有发生，两条近似措辞全被注入'
+    );
+    assert.equal(
+      dup.selected,
+      1,
+      `同义重复情景 selected=${dup.selected}：组内必须只留一个赢家`
+    );
+    assert.equal(
+      dup.redundantPairs,
+      0,
+      `同义重复情景注入了 ${dup.redundantPairs} 对近似重复条目` +
+        '（引擎口径 tokenSet jaccard ≥0.85，与生产去重同源同实现）：冗余注入回归'
+    );
+    assert.ok(
+      dup.selected <= dup.scopedDirectCount,
+      '注入条数超过直连可见条数，说明引擎凭空造了候选'
+    );
+  });
+});
+
+describe('Notion §13.1 写入质量：证据驱动的晋升语义', () => {
+  const probe = key =>
+    (report.perQuestion.phase5 || []).find(item => item.key === key) ||
+    (report.phase5Probes || []).find(item => item.key === key);
+
+  test('hedged / 推断 / 临时冲突三类候选绝不自动晋升 active（误晋升 = 0）', () => {
+    assert.equal(
+      p5().preferenceFalsePromotions,
+      0,
+      '犹豫语气、模型推断或单次临时表达以 active 落盘：单次表达被永久定型，' +
+        '这是证据驱动准入的第一道闸门失效'
+    );
+  });
+
+  test('hedged 与推断候选带正确短码并落盘为 pending，不静默丢弃', () => {
+    assert.deepEqual(
+      p5().pendingDurabilityFailures,
+      [],
+      'hedged / 推断候选没有以 pending 状态留在库里：要么被静默拒掉（证据丢了），要么被误晋升'
+    );
+
+    const hedged = probe('hedgedPreferenceProbe');
+    assert.ok(hedged, 'hedged 探针行缺失');
+    assert.equal(hedged.finalStatus, 'pending');
+    assert.equal(
+      hedged.calls[hedged.calls.length - 1].reason,
+      'user_hedged_requires_confirmation'
+    );
+
+    const inferred = probe('inferredPreferenceProbe');
+    assert.ok(inferred, '推断探针行缺失');
+    assert.equal(inferred.finalStatus, 'pending');
+    assert.equal(
+      inferred.calls[inferred.calls.length - 1].reason,
+      'model_inference_requires_confirmation'
+    );
+  });
+
+  test('hedged 跨会话重复仍保持待确认（重复不改判，但贡献要留痕）', () => {
+    const row = probe('hedgedRepeatProbe');
+    assert.ok(row, 'hedged 跨会话探针行缺失');
+    assert.equal(row.finalStatus, 'pending');
+    assert.ok(
+      row.repeatSessions >= 1,
+      '跨会话重复后一条贡献都没留下：证据累积链断了'
+    );
+    assert.ok(
+      row.calls.every(item => item.reason === 'user_hedged_requires_confirmation'),
+      '跨会话重复中有一次调用偏离了 hedged 短码'
+    );
+    // 已知缺口（2026-11-19 实证）：跨会话的同一 hedged 候选目前不合并，
+    // 各会话自成 pending 条目（repeatSessions=1）；设计与实现矛盾
+    // （findPendingCandidateForPromotion 的 eligibleReason 包含 hedged），
+    // 修复需翻转 memory-evidence-policy 钉死的两条 pending 断言，待 Owner 拍板。
+  });
+
+  test('临时状态不覆盖稳定偏好（冲突防护满召回，且走临时状态拒写路径）', () => {
+    assert.equal(
+      p5().conflictDetectionRecall,
+      1,
+      '单次临时表达覆盖或挤掉了稳定偏好：Golden Path #2 失效'
+    );
+    const row = probe('temporaryConflictProbe');
+    assert.equal(row.stableIntact, true, '稳定偏好（喝咖啡只喝拿铁）被动了');
+    assert.equal(row.finalStatus, 'rejected');
+    // 机制钉子：保护走的是 temporary_state 拒写（#101 文档写的是待确认，
+    // 实测机制不同但保护结果一致）。短码漂移说明这条判定路径变了，要重新论证。
+    assert.equal(
+      row.calls[0].reason,
+      'temporary_state',
+      '临时冲突候选不再走 temporary_state 拒写路径，保护机制变了'
+    );
+  });
+
+  test('用户明确更正走 supersede：旧事实留档退场，新事实 active', () => {
+    const row = probe('explicitCorrectionProbe');
+    assert.ok(row, '更正探针行缺失');
+    assert.equal(row.finalStatus, 'active');
+    assert.equal(row.supersededOld, true, '更正没有把旧条目转 superseded 留档');
+    assert.equal(row.calls[0].action, 'superseded');
+  });
+
+  test('重复表达不产生重复条目：逐字与同义改写都只合并不新增', () => {
+    assert.equal(
+      p5().duplicateMemoryRate,
+      0,
+      '重复表达各自成条：dedupe/merge 语义回归'
+    );
+    for (const key of ['duplicateVerbatimProbe', 'duplicateParaphraseProbe']) {
+      const row = probe(key);
+      assert.ok(row, `${key} 探针行缺失`);
+      assert.equal(row.calls[0].action, 'inserted', `${key} 首次写入应直接插入`);
+      assert.equal(row.calls[1].action, 'merged', `${key} 第二次表达应合并进已有条目`);
+    }
+  });
+
+  test('晋升精确率 = 1：所有以 active 收尾的探针都是期望晋升的', () => {
+    assert.equal(
+      p5().promotionPrecision,
+      1,
+      `晋升精确率 ${p5().promotionPrecision}（分母 ${p5().promotionDenominator}）：` +
+        '有不该晋升的候选晋升了，或晋升判定漂移'
+    );
+    // 分母钉死 = 5（更正/持久意图/compat 直述三条 + 重复两条的首写）：
+    // 加探针时同步改这里，防止分母悄悄变小让空集按 1 过闸
+    assert.equal(
+      p5().promotionDenominator,
+      5,
+      '晋升分母与探针清单不符：该在场以 active 收尾的探针少了'
+    );
+  });
+
+  test('compat 单次明确直述直接晋升（口径钉子：strict 下会翻 pending，属文档化差异）', () => {
+    const row = probe('singlePreferenceCompatProbe');
+    assert.ok(row, 'compat 口径探针行缺失');
+    assert.equal(row.finalStatus, 'active');
+    assert.equal(row.calls[0].action, 'inserted');
+  });
+});
+
+describe('Notion §13.2 注入成本：token 口径可复算', () => {
+  test('平均注入 token 有上界，且与生产注入预算同一估算器', () => {
+    const tokens = p1().avgInjectedTokens;
+
+    assert.ok(tokens, 'avgInjectedTokens 指标缺失');
+    assert.ok(
+      typeof tokens.estimator === 'string' && tokens.estimator.length > 0,
+      'token 估算器版本号缺失'
+    );
+    assert.ok(
+      tokens.injectScoped.mean <= 2000,
+      `injectScoped 平均注入 token=${tokens.injectScoped.mean} 超过 totalMax 预算线 2000`
+    );
+    assert.ok(
+      tokens.injectScoped.mean > 0,
+      '平均注入 token 为 0：注入路径空转或口径错了'
     );
   });
 });
