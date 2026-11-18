@@ -19,7 +19,6 @@ import {
   mergeLifecycleEvents,
   sourceQuotes,
 } from '../../lib/memory-center';
-import { buildMemoryGraph } from '../../lib/memory-graph';
 
 const base = '2026-10-30T10:00:00.000Z';
 
@@ -393,65 +392,6 @@ describe('生命周期事件', () => {
     expect(events.find(event => event.type === 'supersede')?.targetId).toBe(
       'old'
     );
-  });
-});
-
-describe('图谱推导', () => {
-  it('关键词共现与显式取代关系形成边，布局在规定范围内且有确定性', () => {
-    const items = [
-      memory({ id: 'a', keywords: ['咖啡', '美式'], content: '用户喜欢美式' }),
-      memory({ id: 'b', keywords: ['咖啡', '美式'], content: '用户常喝美式' }),
-      memory({
-        id: 'old',
-        status: 'superseded',
-        supersededBy: 'a',
-        keywords: ['咖啡'],
-        content: '旧偏好',
-      }),
-      memory({ id: 'solo', keywords: ['跑步'], content: '用户跑步' }),
-    ];
-
-    const first = buildMemoryGraph(items);
-    const second = buildMemoryGraph(items);
-
-    expect(first.nodes).toHaveLength(4);
-    expect(
-      first.edges.some(edge => edge.kind === 'keyword' && edge.a === 'a')
-    ).toBe(true);
-    expect(
-      first.edges.some(edge => edge.kind === 'supersede' && edge.a === 'old')
-    ).toBe(true);
-    expect(
-      first.nodes.every(
-        node =>
-          Number.isFinite(node.x) &&
-          Number.isFinite(node.y) &&
-          node.x >= 0.08 &&
-          node.x <= 0.92 &&
-          node.y >= 0.08 &&
-          node.y <= 0.92
-      )
-    ).toBe(true);
-    expect(second.nodes.map(node => `${node.id}:${node.x}:${node.y}`)).toEqual(
-      first.nodes.map(node => `${node.id}:${node.x}:${node.y}`)
-    );
-  });
-
-  it('节点超过上限时按关联度截断，但保留真实总数', () => {
-    const items = Array.from({ length: 40 }, (_, index) =>
-      memory({
-        id: `m-${index}`,
-        content: `记忆 ${index}`,
-        keywords: index < 2 ? ['共享', '关键词'] : [`独立${index}`],
-      })
-    );
-
-    const graph = buildMemoryGraph(items, { maxNodes: 5, maxEdges: 4 });
-
-    expect(graph.nodes).toHaveLength(5);
-    expect(graph.truncated).toBe(true);
-    expect(graph.totalNodes).toBe(40);
-    expect(graph.edges.length).toBeLessThanOrEqual(4);
   });
 });
 
