@@ -448,29 +448,81 @@ test('自动抽取：原话有不确定语气时保留可能标记、原话和�
   };
   const message = '记一下，我可能喜欢喝美式咖啡';
 
+  // 生产路径（server/index.js:3157-3162）会把可信 userId 一路带到
+  // applyCandidate；测试同样显式传入，否则写侧按会话级 fail-closed，
+  // 跨会话合并根本不参与判定（那道隔离由 :360 的测试单独钉住）。
   const first = await memory.processMemory(fakeClient, message, 's-a', {
     messageId: 'm-p1-hedged-a',
+    userId: 'local-owner',
   });
   const second = await memory.processMemory(fakeClient, message, 's-b', {
     messageId: 'm-p1-hedged-b',
+    userId: 'local-owner',
   });
 
   assert.equal(first.written, false);
   assert.equal(second.written, false);
   assert.equal(first.reason, 'user_hedged_requires_confirmation');
   assert.equal(second.reason, 'user_hedged_requires_confirmation');
+  // 跨会话的同一 hedged 候选合并成一条 pending：贡献累积两个会话，
+  // 但状态保持待确认（hedged 重复不改判；2026-11-19 Owner 拍板翻转）。
+  // 此前实现被「可能：」前缀卡死配对、两条各自成单——见 findPendingCandidateForPromotion。
   const saved = allMemories();
-  assert.equal(saved.length, 2);
-  for (const item of saved) {
-    assert.equal(item.status, 'pending');
-    assert.equal(item.pendingReason, 'user_hedged_requires_confirmation');
-    assert.equal(item.uncertainty, 'source_hedged');
-    assert.match(item.content, /可能/);
-    assert.equal(item.contributions[0].sourceQuote, '我可能喜欢喝美式咖啡');
-    assert.equal(item.provenance, 'user_asserted');
-    assert.equal(item.evidence.hedged, true);
-    assert.equal(item.evidence.independentSessions, 1);
-  }
+  assert.equal(saved.length, 1);
+  const merged = saved[0];
+  assert.equal(merged.status, 'pending');
+  assert.equal(merged.pendingReason, 'user_hedged_requires_confirmation');
+  assert.equal(merged.uncertainty, 'source_hedged');
+  assert.match(merged.content, /可能/);
+  assert.equal(merged.provenance, 'user_asserted');
+  assert.equal(merged.evidence.hedged, true);
+  assert.deepEqual(
+    merged.contributions.map(item => item.sessionId).sort(),
+    ['s-a', 's-b']
+  );
+  assert.equal(merged.evidence.independentSessions, 2);
+
+  // 后续自信直述（无犹豫语气）触发晋升：hedged 期攒的证据兑现为 active，
+  // 正文剥掉「可能：」前缀——active 事实不再带犹豫标记。
+  const confidentClient = {
+    chat: {
+      completions: {
+        create: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  content: '用户喜欢喝美式咖啡',
+                  type: 'preference',
+                  keywords: ['咖啡', '美式'],
+                  confidence: 0.95,
+                  inferred: false,
+                  sourceQuote: '我喜欢喝美式咖啡',
+                }),
+              },
+            },
+          ],
+        }),
+      },
+    },
+  };
+  const third = await memory.processMemory(confidentClient, '记一下，我喜欢喝美式咖啡', 's-c', {
+    messageId: 'm-p1-hedged-c',
+    userId: 'local-owner',
+  });
+  assert.equal(third.written, true);
+  assert.equal(third.action, 'reinforced');
+  assert.equal(third.status, 'active');
+
+  const promoted = allMemories();
+  assert.equal(promoted.length, 1);
+  assert.equal(promoted[0].status, 'active');
+  assert.equal(promoted[0].content, '用户喜欢喝美式咖啡');
+  assert.equal(
+    promoted[0].contributions.length,
+    3,
+    '晋升后三个会话的贡献都要留在证据链上'
+  );
 });
 
 test('strict：同一 messageId 的重复抽取被幂等拒绝', async () => {
