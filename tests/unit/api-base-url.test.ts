@@ -12,7 +12,6 @@ import { API_BASE } from '../../lib/api/client';
 import { API_PATHS } from '../../lib/api/endpoints';
 import { imageUrl, stickerImageUrl } from '../../lib/uploads';
 import { streamChatRequest } from '../../lib/stream';
-import { sendAgentChatStream } from '../../lib/agent-stream';
 import { subscribeAgentResults } from '../../lib/agent-results-stream';
 
 class FakeXHR {
@@ -83,24 +82,6 @@ describe('XHR 打开的 URL 全部来自 API_BASE + API_PATHS', () => {
 
     controller.abort();
     await expect(promise).resolves.toEqual({ kind: 'aborted' });
-  });
-
-  it('agent-stream.ts：/agents/:id/chat/stream（botId 编码）', async () => {
-    const controller = new AbortController();
-    const promise = sendAgentChatStream(
-      'memory',
-      { message: 'hi' },
-      { signal: controller.signal }
-    );
-
-    expect(FakeXHR.last?.openedMethod).toBe('POST');
-    expect(FakeXHR.last?.openedUrl).toBe(
-      `${API_BASE}${API_PATHS.agentChatStream('memory')}`
-    );
-    expect(FakeXHR.last?.openedUrl).toContain('/agents/memory/chat/stream');
-
-    controller.abort();
-    await promise;
   });
 
   it('agent-results-stream.ts：/agent-results/stream（sessionId 编码）', async () => {

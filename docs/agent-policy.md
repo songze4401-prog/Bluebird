@@ -115,6 +115,8 @@ Context Trace 新增（不记录正文）：
 | `npx tsc --noEmit` | 0 错误 |
 | `npm run lint` | 0 errors |
 
+> 注：2026-11-19 旧壳删除后，`agent-policy-ui` 前端测试与控制面板 UI 已一并移除；`/agent-policy` 当前为 api-only（登记册如实标注）。上表为该能力当时的验收记录，保留原文。
+
 ## 7. 未验证 / 边界
 
 1. **真实手机验收未执行**：当前环境没有移动设备；已做 Expo Web 实际运行、前端组件测试、TypeScript 与 lint，未声称真机通过。

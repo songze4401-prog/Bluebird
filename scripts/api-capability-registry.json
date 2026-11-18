@@ -132,9 +132,8 @@
           "probe": "API_PATHS.modelProviders",
           "ui": true,
           "consumers": [
-            "components/ModelScreen.tsx",
             "hooks/useModelSelection.ts",
-            "components/MemoryBotScreen.tsx"
+            "components/ModelManageSheet.tsx"
           ]
         },
         {
@@ -156,7 +155,7 @@
           "probe": "API_PATHS.memory",
           "ui": true,
           "consumers": [
-            "components/MemoryCenterScreen.tsx"
+            "components/MemoryCenterSheet.tsx"
           ]
         },
         {
@@ -178,7 +177,7 @@
           "probe": "API_PATHS.profile",
           "ui": true,
           "consumers": [
-            "components/MemoryCenterScreen.tsx"
+            "components/MemoryCenterSheet.tsx"
           ],
           "note": "P6 Memory Center 画像页；从 memory.json 派生，includeInactive 可查看历史。"
         },
@@ -187,7 +186,7 @@
           "probe": "API_PATHS.profileFeedback",
           "ui": true,
           "consumers": [
-            "components/MemoryCenterScreen.tsx"
+            "components/MemoryCenterSheet.tsx"
           ],
           "note": "Memory Center 画像页的确认/否认/纠正；feedbackId 幂等，结果写审计。"
         }
@@ -231,10 +230,9 @@
         {
           "name": "读取 / 保存人格",
           "probe": "API_PATHS.persona",
-          "ui": true,
-          "consumers": [
-            "components/ControlPanelScreen.tsx"
-          ]
+          "ui": false,
+          "consumers": [],
+          "note": "旧壳控制面板删除后暂无界面消费者；v7 编辑页的人设输入目前只落本机（ui-state），不写 /persona。"
         }
       ]
     },
@@ -246,11 +244,9 @@
         {
           "name": "读取 / 保存 / 重置策略",
           "probe": "API_PATHS.agentPolicy",
-          "ui": true,
-          "consumers": [
-            "components/ControlPanelScreen.tsx",
-            "components/AgentToolsScreen.tsx"
-          ]
+          "ui": false,
+          "consumers": [],
+          "note": "旧壳控制面板/工具页删除后暂无界面消费者；策略由服务端与 Agent 工具层使用。"
         }
       ]
     },
@@ -278,18 +274,16 @@
         {
           "name": "Bot 列表",
           "probe": "API_PATHS.agents",
-          "ui": true,
-          "consumers": [
-            "components/AgentTeamScreen.tsx"
-          ]
+          "ui": false,
+          "consumers": [],
+          "note": "旧壳 Agent 团队页删除后暂无界面消费者；Bot 结果经 /agent-results 流入会话。"
         },
         {
           "name": "Bot 配置 / 凭证 / 会话 / 事件 / 审批 / 对话",
           "probe": "API_PATHS.agentConfig(",
-          "ui": true,
-          "consumers": [
-            "components/MemoryBotScreen.tsx"
-          ]
+          "ui": false,
+          "consumers": [],
+          "note": "旧壳 Memory Bot 屏删除后暂无界面消费者；Bot 对话暂无界面入口。"
         },
         {
           "name": "Bot 权限查看 GET /agents/:botId/permissions",
@@ -308,10 +302,9 @@
         {
           "name": "审批通过 / 驳回 / 执行",
           "probe": "API_PATHS.agentApprovalApprove",
-          "ui": true,
-          "consumers": [
-            "components/MemoryBotScreen.tsx"
-          ]
+          "ui": false,
+          "consumers": [],
+          "note": "旧壳 Memory Bot 屏删除后暂无界面消费者；审批走服务端与 API。"
         }
       ]
     },
@@ -325,8 +318,6 @@
           "probe": "API_PATHS.agentTasks",
           "ui": true,
           "consumers": [
-            "components/TasksPanel.tsx",
-            "components/MemoryBotScreen.tsx",
             "app/HomeScreen.tsx"
           ]
         },
@@ -380,7 +371,7 @@
           "probe": "API_PATHS.monitoringOverview",
           "ui": true,
           "consumers": [
-            "components/MonitoringScreen.tsx"
+            "components/MonitoringSheet.tsx"
           ]
         },
         {
