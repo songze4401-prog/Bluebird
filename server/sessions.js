@@ -715,9 +715,32 @@ function sanitizeAttachments(list) {
 
 // Agent 工具摘要：这是 appendMessages 白名单里继 attachments 之后第二个可选字段——
 // 之前未知字段会被静默丢弃，导致摘要存不下、读不回（已实测确认）。
-// 硬约束：只存 {name, ok, summary, durationMs}，禁敏感参数原文、
-// 记忆原文与模型内部推理；条数、字段长度全部钳制。
+// 硬约束：只存 {name, ok, summary, durationMs} + 受控例外 pendingConfirmation
+// （工作区写入确认往返的凭据：id/path/mode/bytes，无文件正文），
+// 禁敏感参数原文、记忆原文与模型内部推理；条数、字段长度全部钳制。
 const TOOL_STEPS_MAX = 10;
+
+// pendingConfirmation 白名单：只有形状完全合法的凭据才透传，其余静默丢弃
+// （缺凭据的确认行前端无法执行，存脏数据不如不存）。
+function sanitizePendingConfirmation(raw) {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const id =
+    typeof raw.id === 'string' && /^wsw_[0-9a-f]{24}$/.test(raw.id) ? raw.id : '';
+  const relPath =
+    typeof raw.path === 'string' && raw.path.trim() && raw.path.length <= 512
+      ? raw.path
+      : '';
+  const mode =
+    raw.mode === 'create' || raw.mode === 'overwrite' || raw.mode === 'append'
+      ? raw.mode
+      : '';
+  const bytes =
+    typeof raw.bytes === 'number' && Number.isFinite(raw.bytes) && raw.bytes >= 0
+      ? Math.round(raw.bytes)
+      : -1;
+  if (!id || !relPath || !mode || bytes < 0) return undefined;
+  return { id, path: relPath, mode, bytes };
+}
 
 function sanitizeToolSteps(list) {
   if (!Array.isArray(list) || !list.length) return undefined;
@@ -742,7 +765,14 @@ function sanitizeToolSteps(list) {
         ? Math.max(0, Math.round(raw.durationMs))
         : 0;
 
-    items.push({ name, ok, summary, durationMs });
+    const pendingConfirmation = sanitizePendingConfirmation(raw.pendingConfirmation);
+    items.push({
+      name,
+      ok,
+      summary,
+      durationMs,
+      ...(pendingConfirmation ? { pendingConfirmation } : {}),
+    });
   }
 
   return items.length ? items : undefined;

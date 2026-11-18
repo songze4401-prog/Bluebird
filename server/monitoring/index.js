@@ -1538,6 +1538,7 @@ function recordWorkspaceOp({
   truncated = null,
   status = 'success',
   code = null,
+  confirmed = null,
 } = {}) {
   if (!ACTIVE) return;
   try {
@@ -1557,6 +1558,7 @@ function recordWorkspaceOp({
         mode: typeof mode === 'string' ? mode : null,
         bytes: typeof bytes === 'number' && Number.isFinite(bytes) ? bytes : null,
         truncated: truncated === true ? true : truncated === false ? false : null,
+        confirmed: confirmed === true ? true : confirmed === false ? false : null,
         code: typeof code === 'string' ? code : null,
       },
     });

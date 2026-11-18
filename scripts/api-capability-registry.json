@@ -459,6 +459,31 @@
           "note": "状态机：running → completed/partial/awaiting_publish/blocked_review；根交付经 deliverPlanOutcome 幂等通道（bot-result-<planId>）。"
         }
       ]
+    },
+    {
+      "id": "workspace",
+      "title": "工作区写入确认",
+      "prefix": "/workspace",
+      "capabilities": [
+        {
+          "name": "POST /workspace/pending/:id/confirm 确认执行待确认写入",
+          "probe": "API_PATHS.workspacePendingConfirm",
+          "ui": true,
+          "consumers": [
+            "hooks/useChatSession.ts"
+          ],
+          "note": "主聊轻量确认往返的执行端点：确认后按 pending 记录原参数重查沙箱并落盘。"
+        },
+        {
+          "name": "POST /workspace/pending/:id/reject 取消待确认写入",
+          "probe": "API_PATHS.workspacePendingReject",
+          "ui": true,
+          "consumers": [
+            "hooks/useChatSession.ts"
+          ],
+          "note": "取消并删除 pending 记录；监控记 cancelled。"
+        }
+      ]
     }
   ]
 }
