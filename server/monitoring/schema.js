@@ -74,6 +74,7 @@ const EVENTS = Object.freeze({
   MEMORY_SEARCH_STARTED: 'memory.search.started',
   MEMORY_SEARCH_COMPLETED: 'memory.search.completed',
   MEMORY_WRITE_COMPLETED: 'memory.write.completed',
+  WORKSPACE_OP_COMPLETED: 'workspace.op.completed',
   MODEL_ROUTE: 'model.route',
   MODEL_REQUEST_STARTED: 'model.request.started',
   MODEL_REQUEST_COMPLETED: 'model.request.completed',

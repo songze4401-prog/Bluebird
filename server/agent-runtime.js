@@ -238,6 +238,16 @@ if (webTools.isConfigured()) {
   registerTool(webTools.webSearchDefinition);
   registerTool(webTools.webFetchDefinition);
 }
+// 任务书 2026-11-18：工作区文件工具。默认关，BLUEBIRD_WORKSPACE_TOOLS=1 才注册；
+// 注册后同样受 BLUEBIRD_AGENT_TOOLS 总开关与 Agent 策略约束。
+// workspace_write 标 risk:'high_risk'——运行层既有 deny-only confirmation_required
+// 语义就是它的「写前确认」，在用户确认协议接上之前不会被任何路径执行。
+const workspaceTools = require('./tool-workspace');
+if (workspaceTools.isEnabled()) {
+  registerTool(workspaceTools.workspaceListDefinition);
+  registerTool(workspaceTools.workspaceReadDefinition);
+  registerTool(workspaceTools.workspaceWriteDefinition);
+}
 
 // ---- 工具执行 ----
 
