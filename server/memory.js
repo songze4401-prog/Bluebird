@@ -74,6 +74,17 @@ const MEMORY_TOMBSTONE_FILE = path.join(DATA_DIR, 'memory-tombstones.json');
 const MEMORY_LIMIT = 100;
 // 待确认候选只有高度相似的后续表达才合并，避免将相近但不同的事实并成一条。
 const PENDING_CANDIDATE_MATCH_MIN = 0.9;
+// hedged 候选落盘时正文带的不确定性前缀（见 processMemory 的 sourceHedged 分支）。
+// 合并配对必须先把前缀剥掉再算相似度：不剥的话「可能：X」对「X」相似度只有
+// 0.70 左右，跨会话的同一候选永远配不上对，同正文 pending 按会话各自成条
+// （2026-11-19 记忆评测 Phase5 实证实锤；fix 由 Owner 拍板落地）。
+const HEDGE_PENDING_MARK = '可能：';
+
+function stripHedgePendingMark(value) {
+  return typeof value === 'string' && value.startsWith(HEDGE_PENDING_MARK)
+    ? value.slice(HEDGE_PENDING_MARK.length)
+    : value;
+}
 // 被更正的旧条目不立刻删除（审计与回滚要看得见的），但只留最近的这么多条。
 const SUPERSEDED_HISTORY = 20;
 // 待确认、冲突与已归档条目也属于历史留档，必须有显式上限，避免无限堆积。
@@ -822,11 +833,16 @@ function findPendingCandidateForPromotion(
   const matches = current.filter(item => {
     if (!item || item.status !== STATUS_PENDING) return false;
 
+    // hedged 直述（「我好像挺喜欢…」）统一归 behavior_pattern 类（classifyCategory），
+    // 但 provenance 仍是 user_asserted——用户自己的原话，跨会话重复应当并入
+    // 同一条 pending 累积贡献。晋升不会被重复撬开：pending-merge 的 promote
+    // 要求 decision !== NEEDS_CONFIRMATION，hedged 候选每次都被策略钉在
+    // 待确认，重复只攒证据不改判（2026-11-19 Owner 拍板翻转；此前被
+    // behavior_pattern 排除 + 「可能：」前缀破坏相似度双重卡死，各会话自成一条）。
     const eligibleReason =
       item.pendingReason === 'low_confidence_candidate' ||
       item.pendingReason === 'model_inference_requires_confirmation' ||
-      (item.pendingReason === 'user_hedged_requires_confirmation' &&
-        candidate.category !== CATEGORY.BEHAVIOR_PATTERN) ||
+      item.pendingReason === 'user_hedged_requires_confirmation' ||
       (item.pendingReason === 'single_preference_candidate' &&
         policyMode === 'strict' &&
         candidate.category === CATEGORY.LONG_TERM_PREFERENCE);
@@ -836,8 +852,11 @@ function findPendingCandidateForPromotion(
       scopeOf(item, writeScope) !== 'excluded' &&
       item.type === candidate.type &&
       item.provenance === candidate.provenance &&
-      similarity(item.content, candidate.content) >=
-        PENDING_CANDIDATE_MATCH_MIN
+      // 双侧剥掉 hedged 前缀再比对：库里的条目与后续候选都可能带「可能：」
+      similarity(
+        stripHedgePendingMark(item.content),
+        stripHedgePendingMark(candidate.content)
+      ) >= PENDING_CANDIDATE_MATCH_MIN
     );
   });
 
@@ -1325,7 +1344,7 @@ uncertainty 在原话有犹豫表达时必须为 source_hedged，否则为 none�
     const uncertainty = sourceHedged ? 'source_hedged' : 'none';
     // 模型漏掉语气词时用显式说明补回语义，且策略会把此条限制在待确认状态。
     if (sourceHedged && !hasHedge(content)) {
-      content = `可能：${content}`;
+      content = `${HEDGE_PENDING_MARK}${content}`;
     }
 
     if (content.length > 100) return skip('content_too_long', { length: content.length });
@@ -1697,6 +1716,10 @@ async function applyCandidate(raw, options = {}) {
         delete updated.pendingAt;
         delete updated.pendingTargetId;
         delete updated.pendingMutation;
+        // 晋升即转正：正文剥掉待确认期的「可能：」前缀，active 事实不再
+        // 带犹豫标记（uncertainty 字段保留溯源）。合并自 hedged pending、
+        // 由后续自信直述触发晋升时，残留前缀会低估已确认事实。
+        updated.content = stripHedgePendingMark(updated.content);
       }
 
       next[index] = updated;

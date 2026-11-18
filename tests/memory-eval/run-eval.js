@@ -7,7 +7,7 @@
  *      npm run eval:memory（同一入口）
  *      tests/memory-eval-baseline.test.js 把关键指标做成 CI 闸门
  *
- * 它做且只做四件事：
+ * 它做且只做五件事：
  *   1. 把固定种子记忆写进临时 BLUEBIRD_DATA_DIR 的 memory.json，再用生产代码
  *      server/memory.js 的 loadMemories() 读进来（不自己实现任何算分逻辑）；
  *   2. 对 26 道固定题分别调用三条真实读路径 ——
@@ -17,9 +17,12 @@
  *   注：inject / injectScoped 两条不是 /chat 的线上注入路径——线上走 Context Runtime v3
  *   （server/context/engine.js）。buildMemoryContext 在生产聊天链路里没有调用点，
  *   这里保留它是为了给固定评测集一个可复现的注入渲染基线（审计 P3-06）。
- *   3. 算 Recall@K / Precision@K / 跨会话泄漏数 / 更正残留 / 删除残留 / 检索延迟；
+ *   3. 算 Recall@K / Precision@K / 跨会话泄漏数 / 无答案误召回 / 更正残留 / 删除残留 /
+ *      检索延迟 / 平均注入 token / 注入冗余对；
  *   4. 事实更正与删除类题目走真实写路径（processMemory + 假 client、
- *      recallMemoryBySourceQuote、deleteMemory、clearMemories、clearSessionMemories），跑完再检索。
+ *      recallMemoryBySourceQuote、deleteMemory、clearMemories、clearSessionMemories），跑完再检索；
+ *   5. Phase 5 写入质量（Notion 目标架构 §13.1）：hedged/推断/临时冲突候选的
+ *      不自动晋升、更正走 supersede、持久意图直接写入、重复表达去重、pending 落盘。
  *
  * 指标「不达标」不会让本脚本非零退出：只有脚本自身异常才 exit 1，
  * 门槛判定交给 tests/memory-eval-baseline.test.js。
@@ -45,6 +48,12 @@ console.error = () => {};
 const memory = require(path.join(__dirname, '..', '..', 'server', 'memory.js'));
 const engine = require(path.join(__dirname, '..', '..', 'server', 'context', 'engine.js'));
 const fixtures = require('./fixtures');
+
+// token 口径与生产注入预算同一实现（heuristic-cjk-ascii），复用 server/text-utils 导出；
+// 冗余对判定与引擎跨条目去重同一实现（tokenSet jaccard，server/context/text.js），
+// 阈值镜像 server/context/config.json 的 pairwiseDedupeThreshold=0.85。
+const { estimateTokens, TOKEN_ESTIMATOR_VERSION } = require('../../server/text-utils.js');
+const { jaccard: engineJaccard } = require('../../server/context/text.js');
 
 // 与 server/tool-memory-search.js:15-22 的 LIMITS 逐项一致：
 // 工具层把 limitMax=10 作为 maxItems 传进 searchMemories。
@@ -122,6 +131,7 @@ function injectedRetrieve(query, sessionId = null) {
 
   return {
     ids: contents.map(idOf).filter(Boolean),
+    contents,
     count: contents.length,
     sessionId: sessionId || null,
     dtMs,
@@ -237,6 +247,8 @@ function runPhase1() {
   seedStore();
 
   const latencies = { scoped: [], inject: [], injectScoped: [] };
+  // §13.2 平均注入 token：每题 injectScoped 注入的记忆条目正文 token 估算总量
+  const injectScopedTokens = [];
   const per = {
     recall: {
       scoped: { 5: [], 10: [] },
@@ -268,6 +280,7 @@ function runPhase1() {
     latencies.scoped.push(scoped.dtMs);
     latencies.inject.push(inject.dtMs);
     latencies.injectScoped.push(injectScoped.dtMs);
+    injectScopedTokens.push(estimateTokens(injectScoped.contents.join('\n')));
 
     const forbid = Array.from(
       new Set([...(question.forbid || []), ...effectiveForbid(question.session)])
@@ -433,6 +446,13 @@ function runPhase1() {
       inject: stats(latencies.inject),
       injectScoped: stats(latencies.injectScoped),
       unit: '毫秒，进程内直接调用真实函数，不含 HTTP/模型开销',
+    },
+    avgInjectedTokens: {
+      injectScoped: stats(injectScopedTokens),
+      estimator: TOKEN_ESTIMATOR_VERSION,
+      definition:
+        'injectScoped 注入路径每题记忆条目正文的 token 估算总量（heuristic-cjk-ascii，' +
+        '与生产注入预算同一实现）；含所有注入行，不管是否被模型引用',
     },
   };
 
@@ -1133,6 +1153,99 @@ async function runPhase4() {
   const skipped = engineOut.memory ? engineOut.memory.skipped : [];
   const skippedBy = reason => skipped.filter(item => item.reason === reason).length;
 
+  // 冗余注入对（§13.2）：注入结果里互为近似重复（引擎口径 tokenSet jaccard
+  // ≥ pairwiseDedupeThreshold=0.85）的条目对数。注意：矛盾对（拿铁/美式）
+  // 按 Phase 4 裁决文案刻意双注入，且其引擎口径相似度不达 0.85，不计冗余；
+  // 本指标在矛盾情景只作观测位。真正的冗余闸门在下面的同义重复情景。
+  const injectedLines = rendered
+    .split('\n')
+    .filter(line => line.startsWith('- '))
+    .map(line => line.slice(2).trim());
+  let engineRedundantPairs = 0;
+  for (let i = 0; i < injectedLines.length; i += 1) {
+    for (let j = i + 1; j < injectedLines.length; j += 1) {
+      if (engineJaccard(injectedLines[i], injectedLines[j]) >= 0.85) {
+        engineRedundantPairs += 1;
+      }
+    }
+  }
+
+  // 同义重复情景：同一事实的两种措辞（引擎口径 tokenSet 完全一致，jaccard=1.000 ≥
+  // pairwiseDedupeThreshold 0.85——normalizeForMatch 会剥掉句尾句号，同源 memory），
+  // 引擎跨条目去重（server/context/coverage.js:86-95）应裁掉低相关的一条 —— skipped 里
+  // 出现 duplicate_retrieval_item 是「去重发生了」的直接证据。
+  // 这是「冗余注入 = 0」的闸门场景；矛盾对（拿铁/美式）按裁决文案刻意双注入，
+  // 只报告不计冗余。
+  const duplicateStore = [
+    {
+      content: '用户常用的编辑器是 VS Code',
+      type: 'preference',
+      keywords: ['编辑器'],
+      confidence: 0.95,
+      contributions: [
+        {
+          sessionId: fixtures.SESSIONS.main,
+          sourceQuote: '我常用的编辑器是 VS Code',
+          createdAt: fixtures.at(-60),
+        },
+      ],
+      createdAt: fixtures.at(-60),
+      updatedAt: fixtures.at(-60),
+    },
+    {
+      content: '用户常用的编辑器是 VS Code。',
+      type: 'preference',
+      keywords: ['编辑器'],
+      confidence: 0.95,
+      contributions: [
+        {
+          sessionId: fixtures.SESSIONS.main,
+          sourceQuote: '我常用的编辑器是 VS Code。',
+          createdAt: fixtures.at(-30),
+        },
+      ],
+      createdAt: fixtures.at(-30),
+      updatedAt: fixtures.at(-30),
+    },
+  ];
+  const duplicateContentToId = new Map([
+    ['用户常用的编辑器是 VS Code', 'D1'],
+    ['用户常用的编辑器是 VS Code。', 'D2'],
+  ]);
+  reg = duplicateContentToId;
+  seedStore(duplicateStore);
+  const duplicateQuery = '我用什么编辑器写代码';
+  const duplicateScoped = scopedRetrieve(duplicateQuery, fixtures.SESSIONS.main);
+  const duplicateEngineOut = await engine.runContextRuntime({
+    task: duplicateQuery,
+    sessionId: fixtures.SESSIONS.main,
+    projectedMessages: [],
+    renderMessage: () => null,
+    systemBlocks: [
+      { id: 'core', kind: 'core', priority: 100, critical: true, text: '你是云岫。' },
+    ],
+    currentMessage: { role: 'user', content: duplicateQuery },
+  });
+  const duplicateRendered = duplicateEngineOut.systemPrompt || '';
+  const duplicateInjectedLines = duplicateRendered
+    .split('\n')
+    .filter(line => line.startsWith('- '))
+    .map(line => line.slice(2).trim());
+  let duplicateRedundantPairs = 0;
+  for (let i = 0; i < duplicateInjectedLines.length; i += 1) {
+    for (let j = i + 1; j < duplicateInjectedLines.length; j += 1) {
+      if (engineJaccard(duplicateInjectedLines[i], duplicateInjectedLines[j]) >= 0.85) {
+        duplicateRedundantPairs += 1;
+      }
+    }
+  }
+  const duplicateSkipped = duplicateEngineOut.memory
+    ? duplicateEngineOut.memory.skipped.filter(
+        item => item.reason === 'duplicate_retrieval_item'
+      ).length
+    : 0;
+  reg = previousRegistry;
+
   report.phase4 = {
     query,
     storeSize: conflictStore.length,
@@ -1156,10 +1269,27 @@ async function runPhase4() {
         .split('\n')
         .filter(line => line.startsWith('- '))
         .map(line => line.slice(2).trim()),
+      redundantPairs: engineRedundantPairs,
       unknownFreshnessMarks: (rendered.match(/（时效未知）/g) || []).length,
     },
+    duplicateScenario: {
+      query: duplicateQuery,
+      ok: duplicateEngineOut.ok,
+      error: duplicateEngineOut.error || null,
+      scopedDirectCount: duplicateScoped.ids.length,
+      selected: duplicateEngineOut.memory
+        ? duplicateEngineOut.memory.accepted.length
+        : 0,
+      // 去重发生过的直接证据：skipped 里 duplicate_retrieval_item 的条数（≥1）
+      skippedDuplicates: duplicateSkipped,
+      injectedLines: duplicateInjectedLines,
+      // 冗余注入闸门口径：同义重复事实组内只应留一个赢家 → 应为 0
+      redundantPairs: duplicateRedundantPairs,
+    },
     verdict:
-      '同组近似候选按来源/时间/覆盖关系裁决；未覆盖的补充事实保留，不整组丢弃',
+      '矛盾对（拿铁/美式）按裁决文案刻意双注入（补充事实保留，不整组丢弃），' +
+      '只报告不计冗余；同义重复情景（引擎口径 jaccard ≥0.85）必须被跨条目去重' +
+      '裁掉一条（skipped 出现 duplicate_retrieval_item），注入里不得有冗余对',
   };
 
   origLog(
@@ -1172,6 +1302,194 @@ async function runPhase4() {
       `标记「时效未知」的行数=${report.phase4.engine.unknownFreshnessMarks}`
   );
   origLog(report.phase4.verdict);
+}
+
+// ---------------------------------------------------------------- Phase 5
+// 写入质量（Notion 目标架构 §13.1）：hedged/推断/临时冲突候选不自动晋升、
+// 更正走 supersede、持久意图直接写入、重复表达去重、pending 落盘不丢失。
+// 判分以落盘状态为准 —— pending 候选在 getMemories 默认视图里不可见，必须读盘。
+async function runPhase5() {
+  origLog('');
+  origLog('== Phase 5 写入质量（真实写路径：processMemory + 假 client，判分以落盘为准）==');
+
+  const rows = [];
+
+  for (const probe of fixtures.PROMO_PROBES) {
+    seedStore();
+    const before = memory.getMemories().length;
+
+    const callSpecs = probe.multi
+      ? (probe.calls || [{}, {}]).map(call => ({
+          session: call.session
+            ? fixtures.SESSIONS[call.session]
+            : fixtures.SESSIONS.main,
+          userText: call.userText || probe.userText,
+          sourceQuote: call.sourceQuote || probe.reply.sourceQuote,
+        }))
+      : [
+          {
+            session: fixtures.SESSIONS.main,
+            userText: probe.userText,
+            sourceQuote: probe.reply.sourceQuote,
+          },
+        ];
+
+    const calls = [];
+    for (const spec of callSpecs) {
+      const outcome = await memory.processMemory(
+        fakeClient({ ...probe.reply, sourceQuote: spec.sourceQuote }),
+        spec.userText,
+        spec.session
+      );
+      calls.push({
+        written: outcome ? outcome.written === true : false,
+        action: outcome ? outcome.action : null,
+        reason: outcome ? outcome.reason || null : null,
+        status: outcome ? outcome.status || null : null,
+      });
+    }
+
+    const after = memory.getMemories().length;
+    const diskArr = Array.isArray(diskItems()) ? diskItems() : [];
+    const liveList = memory.getMemories();
+    // 判分按 sourceQuote 匹配：落盘保留用户原话，不受 hedged「可能：」正文前缀
+    // （server/memory.js:1328）影响，也不会撞上正文恰好相同的种子条目。
+    const probeQuotes = callSpecs.map(spec => spec.sourceQuote);
+    const quoteOf = item =>
+      (item.contributions || []).some(c => probeQuotes.includes(c.sourceQuote));
+    const diskEntry = diskArr.find(quoteOf);
+    const liveEntry = liveList.find(quoteOf);
+    // 判分状态：磁盘 status 优先（pending 落盘可见）；种子形态无 status 字段时按 active 记；
+    // 不在盘上也不在活跃视图里 = rejected。
+    const finalStatus = diskEntry
+      ? diskEntry.status || 'active'
+      : liveEntry
+        ? 'active'
+        : 'rejected';
+    const storeDelta = after - before;
+
+    // 重复探针：命中任一探针原话的条目 > 1 即产生重复条目
+    const sameContentCount = diskArr.filter(quoteOf).length;
+    const extraEntryCreated = probe.kind === 'duplicate' && sameContentCount > 1;
+
+    // 稳定靶子完好 = 仍在 getMemories 活跃视图（pending/superseded 都不可见）
+    let stableIntact = null;
+    let supersededOld = null;
+    if (probe.stableId) {
+      const stableSeed = fixtures.SEEDS.find(item => item.id === probe.stableId);
+      stableIntact = stableSeed
+        ? liveList.some(item => item.content === stableSeed.content)
+        : null;
+    }
+    if (probe.expectSupersede) {
+      const oldSeed = fixtures.SEEDS.find(item => item.id === probe.expectSupersede);
+      const oldDisk = oldSeed
+        ? diskArr.find(item => item.content === oldSeed.content)
+        : null;
+      supersededOld = oldDisk ? oldDisk.status === 'superseded' : false;
+    }
+
+    const row = {
+      key: probe.key,
+      kind: probe.kind,
+      expect: probe.expect,
+      expectReason: probe.expectReason || null,
+      calls,
+      finalStatus,
+      storeDelta,
+      extraEntryCreated,
+      stableIntact,
+      supersededOld,
+      repeatSessions:
+        probe.expectRepeatSessions && diskEntry && Array.isArray(diskEntry.contributions)
+          ? new Set(diskEntry.contributions.map(item => item.sessionId)).size
+          : null,
+    };
+
+    // 短码核对（pending/rejected）：最后一通调用的 reason 落在期望集合内
+    const expectReasons = Array.isArray(probe.expectReason)
+      ? probe.expectReason
+      : [probe.expectReason].filter(Boolean);
+    const lastCall = calls[calls.length - 1];
+    row.reasonMatches = expectReasons.length
+      ? expectReasons.includes(lastCall.reason)
+      : true;
+
+    rows.push(row);
+
+    origLog(
+      `${probe.key} [${probe.kind}] 期望=${probe.expect}` +
+        `${probe.expectReason ? `/${JSON.stringify(probe.expectReason)}` : ''} → ` +
+        `落盘=${finalStatus} 动作=${(lastCall.action ?? '-') } 短码=${lastCall.reason ?? '-'}` +
+        `${probe.multi ? ` 两段=${calls.map(c => `${c.action ?? c.reason ?? '-'}`).join('→')}` : ''}` +
+        `${probe.stableId ? ` 稳定靶子完好=${stableIntact}` : ''}` +
+        `${probe.expectSupersede ? ` 旧条目 superseded=${supersededOld}` : ''}` +
+        `${probe.expectRepeatSessions ? ` 跨会话贡献=${row.repeatSessions}` : ''}`
+    );
+  }
+
+  const endedActive = rows.filter(item => item.finalStatus === 'active');
+  const conflictRows = rows.filter(item => item.kind === 'temporaryConflict');
+  const duplicateRows = rows.filter(item => item.kind === 'duplicate');
+  const pendingRows = rows.filter(item =>
+    ['hedged', 'inferred'].includes(item.kind)
+  );
+
+  report.phase5 = {
+    perProbe: rows,
+    metrics: {
+      // 晋升精确率 = 晋升里该晋升的占比（期望 active 的行全部按期望晋升才算对）
+      promotionPrecision: endedActive.length
+        ? endedActive.filter(item => item.expect === 'active').length /
+          endedActive.length
+        : 1,
+      promotionDenominator: endedActive.length,
+      // 误晋升 = hedged/推断/临时冲突三类候选以 active 收尾的行数（必须为 0）
+      preferenceFalsePromotions: rows.filter(
+        item =>
+          ['hedged', 'inferred', 'temporaryConflict'].includes(item.kind) &&
+          item.finalStatus === 'active'
+      ).length,
+      // 冲突防护 = 临时冲突行「新候选未晋升 + 稳定靶子完好」的占比
+      conflictDetectionRecall: conflictRows.length
+        ? conflictRows.filter(
+            item => item.finalStatus !== 'active' && item.stableIntact === true
+          ).length / conflictRows.length
+        : 1,
+      // 重复记忆率 = 重复表达产生额外条目的占比（合并语义下应为 0）
+      duplicateMemoryRate: duplicateRows.length
+        ? duplicateRows.filter(item => item.extraEntryCreated === true).length /
+          duplicateRows.length
+        : 0,
+      // pending 落盘不丢失：hedged/推断候选必须以 pending 状态留在库里
+      pendingDurabilityFailures: pendingRows
+        .filter(item => item.finalStatus !== 'pending')
+        .map(item => item.key),
+      // known-gap 观测位（期望值待 Owner 拍板后翻 true）：hedged pending 跨会话
+      // 现不合并（可能： 前缀破坏相似度匹配），repeatSessions=1，仅报告不设闸
+      hedgedRepeatStillPending: rows.some(
+        item =>
+          item.key === 'hedgedRepeatProbe' &&
+          item.finalStatus === 'pending' &&
+          item.repeatSessions === 2
+      ),
+      definition:
+        '写入质量四指标（Notion §13.1）：误晋升数（hedged/推断/临时冲突 → active）、' +
+        '冲突防护召回（临时表达不覆盖稳定偏好）、重复记忆率（重复表达产生额外条目）、' +
+        '晋升精确率（晋升里该晋升的占比）。判分以落盘状态为准，按 sourceQuote 匹配，' +
+        '短码按最后一通调用核对。重复记忆率只计 duplicate 探针；hedged 跨会话重复' +
+        '各自成条的 known gap 不计入（见 hedgedRepeatStillPending 观测位）。',
+    },
+  };
+
+  origLog(
+    `写入质量：误晋升=${report.phase5.metrics.preferenceFalsePromotions} ` +
+      `冲突防护召回=${report.phase5.metrics.conflictDetectionRecall} ` +
+      `重复记忆率=${report.phase5.metrics.duplicateMemoryRate} ` +
+      `晋升精确率=${report.phase5.metrics.promotionPrecision}` +
+      `（分母 ${report.phase5.metrics.promotionDenominator}） ` +
+      `pending 落盘失败=${JSON.stringify(report.phase5.metrics.pendingDurabilityFailures)}`
+  );
 }
 
 // ---------------------------------------------------------------- driver
@@ -1211,6 +1529,7 @@ async function main() {
   await runPhase2();
   await runPhase3();
   await runPhase4();
+  await runPhase5();
 
   origLog('');
   origLog('== 基线指标汇总 ==');
@@ -1221,6 +1540,7 @@ async function main() {
         phase2: report.phase2.metrics,
         phase3: report.phase3.metrics,
         phase4: report.phase4,
+        phase5: report.phase5.metrics,
       },
       null,
       2
@@ -1250,14 +1570,17 @@ async function main() {
             phase2: report.phase2.metrics,
             phase3: report.phase3.metrics,
             phase4: report.phase4,
+            phase5: report.phase5 ? report.phase5.metrics : {},
           },
           perQuestion: {
             phase1: report.phase1.perQuestion,
             phase2: report.phase2.perQuestion,
             phase3: report.phase3.perQuestion,
+            phase5: report.phase5 ? report.phase5.perProbe : [],
           },
           // 闸门判据不符时，CI 报告里要能直接看到每个探针的期望/实际，不用重跑
           gateProbes: report.phase2.gateProbes,
+          phase5Probes: report.phase5 ? report.phase5.perProbe : [],
         },
         null,
         2
