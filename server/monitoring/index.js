@@ -1525,6 +1525,46 @@ function recordMemoryWrite({
   }
 }
 
+/**
+ * 工作区文件工具（workspace_list/read/write）每次调用的结果埋点。
+ * 只记工具名、相对路径、写入模式、字节数与结果短码——文件正文永远不进监控；
+ * 相对路径里的敏感模式由 schema 的 sanitizeAttributes 统一脱敏。
+ */
+function recordWorkspaceOp({
+  tool = null,
+  path = null,
+  mode = null,
+  bytes = null,
+  truncated = null,
+  status = 'success',
+  code = null,
+} = {}) {
+  if (!ACTIVE) return;
+  try {
+    recordEvent({
+      event_name: EVENTS.WORKSPACE_OP_COMPLETED,
+      component: 'agent',
+      status,
+      error_code:
+        status === 'failed' || status === 'denied'
+          ? typeof code === 'string' && code
+            ? code
+            : 'workspace_op_failed'
+          : null,
+      attributes: {
+        tool: typeof tool === 'string' ? tool : null,
+        path: typeof path === 'string' ? path : null,
+        mode: typeof mode === 'string' ? mode : null,
+        bytes: typeof bytes === 'number' && Number.isFinite(bytes) ? bytes : null,
+        truncated: truncated === true ? true : truncated === false ? false : null,
+        code: typeof code === 'string' ? code : null,
+      },
+    });
+  } catch (_) {
+    INTERNAL_ERRORS += 1;
+  }
+}
+
 // ---- 查询 ----
 
 function emptyQuery(reason) {
@@ -2166,6 +2206,7 @@ module.exports = {
   recordAgentRun,
   recordTask,
   recordMemoryWrite,
+  recordWorkspaceOp,
   buildOverview,
   queryMetrics,
   getTraces,

@@ -86,6 +86,7 @@
 - `session.loaded`
 - `context.build.started/completed/rejected`、`context.sent`
 - `memory.search.started/completed`、`memory.write.completed`
+- `workspace.op.completed`（工作区文件工具每次调用：`tool` / 相对 `path` / `mode` / `bytes` / `truncated`；只记相对路径与字节数，不记文件正文）
 - `model.route`（请求模型 → 实际模型、是否视觉自动路由及原因）
 - `model.request.started/completed`
 - `tool.call.requested/completed`、`tool.result.returned`
