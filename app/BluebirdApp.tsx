@@ -8,7 +8,9 @@ import {
   Alert,
   Animated,
   Easing,
+  Keyboard,
   KeyboardAvoidingView,
+  Pressable,
   Text,
   useWindowDimensions,
   View,
@@ -47,25 +49,18 @@ function NavTab(props: {
   active: boolean;
 }) {
   return (
-    <Animated.View
-      style={{
-        width: props.width,
-        height: 36,
-        flexDirection: 'row',
-        justifyContent: 'center',
-        alignItems: 'center',
-        zIndex: 1,
-      }}
-    >
-      <Text
+    <Animated.View style={{ width: props.width, height: 36, zIndex: 1 }}>
+      {/* 命中区必须铺满整个 tab：此前 onPress 挂在 Text 上，未选中标签宽度为 0，
+          可点区域只剩图标那一小块，真机上点「主页」经常点不中。 */}
+      <Pressable
         onPress={props.onPress}
+        accessibilityRole="button"
+        accessibilityLabel={props.label}
         style={{
+          flex: 1,
           flexDirection: 'row',
+          justifyContent: 'center',
           alignItems: 'center',
-          color: '#ffffff',
-          fontSize: 12,
-          fontWeight: '600',
-          opacity: props.active ? 1 : 0.6,
         }}
       >
         <NavIcon kind={props.icon} />
@@ -85,12 +80,13 @@ function NavTab(props: {
               color: '#ffffff',
               fontSize: 12,
               fontWeight: '600',
+              opacity: props.active ? 1 : 0.6,
             }}
           >
             {props.label}
           </Text>
         </Animated.View>
-      </Text>
+      </Pressable>
     </Animated.View>
   );
 }
@@ -99,9 +95,21 @@ function InnerShell() {
   const ui = useUi();
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  // 底部导航常驻：键盘弹出时它被键盘自然盖住即可。此前按输入框焦点卸载导航，
-  // 但 BACK 收键盘时 onBlur 不一定触发，会把导航永久藏掉（真机复现）。
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // 键盘可见时收起底部导航：导航是悬浮层，不收起会被 KAV 顶到输入条上方挤占空间。
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+  // 弹层（聊天/主页）打开时也收起导航：弹层在 pane 内，层级盖不过壳层导航，
+  // 否则弹层底部会被导航压住。
+  const [sheetOpen, setSheetOpen] = useState(false);
+  useEffect(() => {
+    const show = Keyboard.addListener('keyboardDidShow', () => setKeyboardVisible(true));
+    const hide = Keyboard.addListener('keyboardDidHide', () => setKeyboardVisible(false));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
 
   // ---- 真实聊天链路（与旧壳 App.tsx 同款组合）----
   const [currentSessionId, setCurrentSessionId] = useState<string>(DEFAULT_SESSION_ID);
@@ -210,7 +218,8 @@ function InnerShell() {
     [chat.messages, currentSessionId, hiddenMessageIds]
   );
 
-  // 启动引导（与旧壳同款）：复用空白会话当草稿 → 否则新建 → 失败回退默认会话
+  // 启动引导：回到最近一次有内容的对话（会话列表按服务端 updatedAt 倒序）。
+  // 没有有内容会话时复用空白草稿，再没有才新建；失败回退默认会话。
   const [bootstrapped, setBootstrapped] = useState(false);
   useEffect(() => {
     let cancelled = false;
@@ -218,6 +227,17 @@ function InnerShell() {
       try {
         const sessions = await sessionList.refresh();
         if (cancelled) return;
+        const recent = sessions?.find(item => item.messageCount > 0);
+        if (recent) {
+          const result = await chat.loadHistory(recent.id, { keepLoading: true });
+          if (cancelled) return;
+          if (result.ok && !result.stale) {
+            setCurrentSessionId(recent.id);
+            chat.markHistoryLoaded();
+            return;
+          }
+          chat.markHistoryLoaded();
+        }
         const draftSession = sessions?.find(item => item.messageCount === 0);
         if (draftSession) {
           setCurrentSessionId(draftSession.id);
@@ -316,6 +336,14 @@ function InnerShell() {
                 }
                 void actions.selectSession(sessionId);
               }}
+              onNewChat={() => {
+                if (actions.busy) {
+                  ui.toast('正在回复中，请稍后新建');
+                  return;
+                }
+                void actions.createNewChat();
+              }}
+              onSheetOpenChange={setSheetOpen}
             />
           </View>
           <View style={{ width }}>
@@ -343,51 +371,56 @@ function InnerShell() {
               isFavorite={m => favoriteIds.has(m.id)}
               onToggleFavorite={toggleFavorite}
               onHideMessage={hideMessage}
+              onSheetOpenChange={setSheetOpen}
             />
           </View>
         </Animated.View>
       </View>
 
-      {/* 底部悬浮导航：空白处点击穿透（pointerEvents box-none），pill 本体可按。
-          常驻渲染；键盘弹出时会被键盘覆盖，不需要额外卸载。 */}
-      <View
-        pointerEvents="box-none"
-        style={{
-          position: 'absolute',
-          left: 0,
-          right: 0,
-          bottom: insets.bottom + 12,
-          alignItems: 'center',
-        }}
-      >
+      {/* 底部悬浮导航：绝对定位覆盖在内容之上（原型 .tb）；主页/聊天各自在内容底部
+          预留导航高度，消息与输入条不会被它压住。空白处点击穿透，pill 本体可按。
+          键盘弹出时收起，避免被顶到输入条上方。 */}
+      {!keyboardVisible && !sheetOpen && (
         <View
+          pointerEvents="box-none"
           style={{
-            height: 44,
-            borderRadius: 18,
-            backgroundColor: ui.tokens.card,
-            flexDirection: 'row',
-            paddingHorizontal: 6,
-            overflow: 'hidden',
-            ...V7_SHADOWS.card,
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: insets.bottom + 12,
+            alignItems: 'center',
           }}
         >
-          <Animated.View
+          <View
             style={{
-              position: 'absolute',
-              left: 6,
-              top: 4,
-              width: 66,
-              height: 36,
-              borderRadius: 12,
-              backgroundColor: 'rgba(255,255,255,0.18)',
-              transform: [{ translateX: pillX }],
+              height: 44,
+              borderRadius: 18,
+              backgroundColor: ui.tokens.card,
+              flexDirection: 'row',
+              paddingHorizontal: 6,
+              overflow: 'hidden',
+              ...V7_SHADOWS.card,
             }}
-          />
-          <NavTab icon="home" label="主页" width={homeWidth} labelWidth={homeLabelW} labelOpacity={homeLabel} active={ui.view === 'home'} onPress={() => ui.setView('home')} />
-          <NavTab icon="chat" label="聊天" width={chatWidth} labelWidth={chatLabelW} labelOpacity={chatLabel} active={ui.view === 'chat'} onPress={() => ui.setView('chat')} />
-          <NavTab icon="settings" label="设置" width={40} labelWidth={0} labelOpacity={0} active={false} onPress={() => setSettingsOpen(true)} />
+          >
+            <Animated.View
+              pointerEvents="none"
+              style={{
+                position: 'absolute',
+                left: 6,
+                top: 4,
+                width: 66,
+                height: 36,
+                borderRadius: 12,
+                backgroundColor: 'rgba(255,255,255,0.18)',
+                transform: [{ translateX: pillX }],
+              }}
+            />
+            <NavTab icon="home" label="主页" width={homeWidth} labelWidth={homeLabelW} labelOpacity={homeLabel} active={ui.view === 'home'} onPress={() => ui.setView('home')} />
+            <NavTab icon="chat" label="聊天" width={chatWidth} labelWidth={chatLabelW} labelOpacity={chatLabel} active={ui.view === 'chat'} onPress={() => ui.setView('chat')} />
+            <NavTab icon="settings" label="设置" width={40} labelWidth={0} labelOpacity={0} active={false} onPress={() => setSettingsOpen(true)} />
+          </View>
         </View>
-      </View>
+      )}
 
       <SettingsScreen
         visible={settingsOpen}

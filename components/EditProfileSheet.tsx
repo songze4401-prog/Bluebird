@@ -13,6 +13,7 @@ import {
   type TextInputInstance,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { SheetScaffold } from './SheetScaffold';
 import { useUi } from '../app/ui-state';
@@ -29,6 +30,7 @@ export function EditProfileSheet(props: {
   const ui = useUi();
   const t = ui.tokens;
   const bot = ui.bots[0];
+  const insets = useSafeAreaInsets();
 
   const nameRef = useRef<TextInputInstance>(null);
 
@@ -58,13 +60,16 @@ export function EditProfileSheet(props: {
 
   return (
     <SheetScaffold visible={props.visible} onClose={props.onClose} title="编辑">
-      <View style={styles.body}>
-        {/* 头像区：圆 64 头像按钮（card 底 + card 阴影）+ 名字行，底部分隔线 */}
+      {/* 滚动由 SheetScaffold 提供；底部留出安全区，保证「人设」与字数能完整滚到 */}
+      <View style={[styles.body, { paddingBottom: insets.bottom + 24 }]}>
+        {/* 头像区：圆 72 头像按钮（card 底 + card 阴影）+ 名字行 + 更换提示 */}
         <View style={styles.phead}>
           <TouchableOpacity
             style={[styles.pava, { backgroundColor: t.card }, V7_SHADOWS.card]}
             onPress={pickAvatar}
             activeOpacity={0.85}
+            accessibilityRole="button"
+            accessibilityLabel="更换头像"
           >
             <Image
               style={styles.pavaImg}
@@ -87,6 +92,7 @@ export function EditProfileSheet(props: {
               <Text style={styles.pencilTxt}>✎</Text>
             </TouchableOpacity>
           </View>
+          <Text style={styles.phint}>点击头像更换</Text>
         </View>
 
         {/* 模型清单：真实服务商/模型，右侧 ✓（当前项 up 色）；停用模型不可点 */}
@@ -137,39 +143,41 @@ export function EditProfileSheet(props: {
 // 原型 .phead/.pava/.pname-in/.pglabel/.mrow/.madd/.ptexta/.pcount 的 RN 移植
 const createStyles = (t: V7Tokens) =>
   StyleSheet.create({
-    // sh-body 的 gap 16 列容器
-    body: { gap: 16 },
+    // sh-body 的 gap 16 列容器；左右留 20，模型/人设不再顶到屏幕边缘
+    body: { gap: 16, paddingHorizontal: 20, paddingTop: 4 },
     // 原型 .phead：列居中 gap8 + 底部分隔线 + 下 margin 12
     phead: {
       alignItems: 'center',
       gap: 8,
-      paddingBottom: 12,
+      paddingTop: 4,
+      paddingBottom: 18,
       borderBottomWidth: 1,
       borderBottomColor: t.soft,
-      marginBottom: 12,
     },
-    // 原型 .pava：圆 64（card 阴影由调用处叠 V7_SHADOWS.card）
+    // 原型 .pava：圆 72（card 阴影由调用处叠 V7_SHADOWS.card）
     pava: {
-      width: 64,
-      height: 64,
-      borderRadius: 32,
+      width: 72,
+      height: 72,
+      borderRadius: 36,
       overflow: 'hidden',
       alignItems: 'center',
       justifyContent: 'center',
     },
     pavaImg: { width: '100%', height: '100%' },
-    pnamerow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-    // 原型 .pname-in：16 w800 ink 居中（TextInput 原生无边框，容器不给底色）
+    pnamerow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
+    // 原型 .pname-in：17 w800 ink 居中（TextInput 原生无边框，容器不给底色）
     pname: {
       minWidth: 56,
       maxWidth: 220,
       paddingVertical: 2,
       paddingHorizontal: 4,
-      fontSize: 16,
+      fontSize: 17,
       fontWeight: '800',
       color: t.ink,
       textAlign: 'center',
     },
+    // 头像更换提示
+    phint: { fontSize: 10, color: t.mut },
     // 原型 .pencil：线条小铅笔 14 mut
     pencil: { padding: 4 },
     pencilTxt: { fontSize: 14, color: t.mut },
@@ -178,37 +186,37 @@ const createStyles = (t: V7Tokens) =>
       fontSize: 10,
       fontWeight: '700',
       color: t.mut,
-      marginTop: 12,
-      marginBottom: 6,
+      marginTop: 4,
+      marginBottom: 2,
       letterSpacing: 1,
     },
-    // 原型 .mrow：soft 底 r12 p10/12 mb6，两端对齐
+    // 原型 .mrow：soft 底 r14 p12/14 mb8，两端对齐
     mrow: {
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
       backgroundColor: t.soft,
-      borderRadius: 12,
-      paddingVertical: 10,
-      paddingHorizontal: 12,
-      marginBottom: 6,
+      borderRadius: 14,
+      paddingVertical: 12,
+      paddingHorizontal: 14,
+      marginBottom: 8,
     },
     mname: { fontSize: 12, fontWeight: '600', color: t.ink, flex: 1 },
     // 原型 .mchk：12 w800（颜色由调用处给：选中 up / 未选透明）
     mchk: { fontSize: 12, fontWeight: '800' },
     mrowDisabled: { opacity: 0.45 },
     mempty: { fontSize: 12, color: t.mut, paddingVertical: 10 },
-    // 原型 .ptexta：1.5 soft 框 r12 p9/11 12px，minHeight 84
+    // 原型 .ptexta：1.5 soft 框 r14 p11/13 13px，minHeight 96
     ptexta: {
       borderWidth: 1.5,
       borderColor: t.soft,
-      borderRadius: 12,
-      paddingVertical: 9,
-      paddingHorizontal: 11,
-      fontSize: 12,
-      lineHeight: 19,
+      borderRadius: 14,
+      paddingVertical: 11,
+      paddingHorizontal: 13,
+      fontSize: 13,
+      lineHeight: 20,
       color: t.ink,
-      minHeight: 84,
+      minHeight: 96,
       textAlignVertical: 'top',
     },
     // 原型 .pcount：10 mut 右对齐 mt3
