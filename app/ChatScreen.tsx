@@ -284,11 +284,10 @@ const createStyles = (t: V7Tokens, fd: number) =>
     // 悬浮身份组外壳（原型 .chatbrand：top 由安全区+4 在 JSX 给；点击穿透交给 box-none）
     headerWrap: { position: 'absolute', left: 0, right: 0 },
 
-    // 底部输入容器（原型 .comp：bottom 由安全区+12 在 JSX 给；加号面板绝对定位在其中）
     // v7 屏根：常规流列布局（键盘避让走壳层 KAV padding）
     screen: { flex: 1 },
-    // 输入坞：常规流贴容器底，margin 让位底部导航（44+12）
-    compDock: { marginBottom: 0 },
+    // 悬浮输入坞：脱离常规流贴在消息流上方，bottom 由 JSX 按安全区/键盘给
+    compDock: { position: 'absolute', left: 0, right: 0 },
     pendingRow: {
       flexDirection: 'row',
       gap: 8,
@@ -376,7 +375,7 @@ const createStyles = (t: V7Tokens, fd: number) =>
     },
     // 面板内容（原型 .ppi：列 gap 4 p10；透明度延迟淡入由动画值驱动）
     ppi: { flex: 1, gap: 4, padding: 10 },
-    ppxRow: { flexShrink: 1, flexDirection: 'row', justifyContent: 'flex-end' },
+    ppxRow: { flexDirection: 'row', justifyContent: 'flex-end' },
     // 右上 ✕（原型 .ppx：30 圆 surface 底阴影 md）
     ppx: {
       width: 30,
@@ -389,10 +388,8 @@ const createStyles = (t: V7Tokens, fd: number) =>
     },
     ppxTxt: { fontSize: 14, color: t.ink },
     // 面板选项行（原型 .prow：行 gap 12 p11/10 r14，按下泛 soft 底）。
-    // 原型 .ppi 高 190 装不下 30+3×54 的内容，靠 CSS flex 默认收缩把行压紧；
-    // RN 默认 flexShrink 0，这里显式给 1 复刻同款压缩。
+    // 面板高度按内容给足（见 ppHeight），行不再收缩，避免文字叠在一起。
     prow: {
-      flexShrink: 1,
       flexDirection: 'row',
       alignItems: 'center',
       gap: 12,
@@ -410,8 +407,8 @@ const createStyles = (t: V7Tokens, fd: number) =>
       justifyContent: 'center',
     },
     piTxt: { fontSize: 14, color: t.on },
-    pl: { flex: 1, fontSize: 13, fontWeight: '500', color: t.ink },
-    pv: { fontSize: 12, color: t.mut },
+    pl: { flexShrink: 0, fontSize: 13, fontWeight: '500', color: t.ink },
+    pv: { flexShrink: 1, fontSize: 12, color: t.mut },
   });
 
 export function ChatScreen(props: {
@@ -432,6 +429,8 @@ export function ChatScreen(props: {
   // 消息长按操作（旧壳 MessageActionSheet 语义）：收藏/隐藏为可选（桩测试可不传）
   isFavorite?: (message: Message) => boolean;
   onToggleFavorite?: (message: Message) => void;
+  // 弹层打开/关闭通知：壳层的悬浮导航在 pane 之上，弹层需要它临时收起
+  onSheetOpenChange?: (open: boolean) => void;
   onHideMessage?: (message: Message) => void;
 }) {
   const ui = useUi();
@@ -464,14 +463,32 @@ export function ChatScreen(props: {
   const [inputH, setInputH] = useState(22);
   // 键盘实测高度：Expo Go 里 adjustResize 不生效（app.json 是原生清单属性），
   // 只能按键盘高度把输入条顶上去，否则键盘会直接盖住输入框（真机复现）。
-  // 底部导航不再靠焦点开关显隐（BACK 收键盘时 onBlur/keyboardDidHide 都可能不触发，
-  // 会把导航永久藏掉）：导航常驻，键盘弹出时被键盘自然盖住即可。
+  // 底部导航由壳层在键盘弹出时收起（悬浮层，避免被顶到输入条上方）。
   const [keyboardH, setKeyboardH] = useState(0);
   // 返回底部箭头（用户上滑阅读后出现）
   const [showJump, setShowJump] = useState(false);
   // 长按操作：open 控制弹层显隐（关闭动画期间保留目标消息，避免滑出动画里空白）
   const [actionOpen, setActionOpen] = useState(false);
   const [actionMsg, setActionMsg] = useState<Message | null>(null);
+
+  // 任一弹层打开时通知壳层收起悬浮导航：弹层在聊天 pane 内，层级上盖不过壳层导航，
+  // 不收起会把弹层底部（如「人设」字数）压在导航下面。
+  const onSheetOpenChange = props.onSheetOpenChange;
+  useEffect(() => {
+    onSheetOpenChange?.(
+      editOpen || modelOpen || toolOpen || actionOpen || stickersOpen
+    );
+  }, [editOpen, modelOpen, toolOpen, actionOpen, stickersOpen, onSheetOpenChange]);
+
+  // 线程滚动引用：内容撑高后「仅在用户本就停留在底部附近」才跟随滚到底——
+  // 流式增量期间用户上滑阅读不被逐帧拽回（旧壳 follow 三态机的轻量版）。
+  const scrollRef = useRef<ScrollViewInstance>(null);
+  const followRef = useRef(true);
+  // 向上翻页的一次性闸门：到顶自动触发后关闭，加载结束才重开（防滚动事件连发刷请求）
+  const olderGuard = useRef(true);
+  const scrollToBottom = () => {
+    if (followRef.current) scrollRef.current?.scrollToEnd({ animated: false });
+  };
 
   // 会话切换时清掉长按目标：跨会话的撤回/隐藏会打错目标（oracle 建议）。
   // 用 React 官方「渲染期对比 prev props 调整 state」模式（effect 内同步 setState 会被禁）。
@@ -480,7 +497,14 @@ export function ChatScreen(props: {
     setPrevSessionId(props.sessionId);
     setActionMsg(null);
     setActionOpen(false);
+    setShowJump(false);
   }
+
+  // 切会话/首次载入历史后必须跟到底部：沿用上一个会话的上滑状态会把新会话停在中间。
+  // ref 不能在渲染期写，放到会话变化后的 effect 里复位。
+  useEffect(() => {
+    followRef.current = true;
+  }, [props.sessionId]);
 
   // 长按入口：记录目标消息并打开弹层
   const openMsgActions = (m: Message) => {
@@ -494,16 +518,6 @@ export function ChatScreen(props: {
   const [progress] = useState(() => new Animated.Value(0));
   const [ppFade] = useState(() => new Animated.Value(0));
   const [fade] = useState(() => new Animated.Value(0));
-
-  // 线程滚动引用：内容撑高后「仅在用户本就停留在底部附近」才跟随滚到底——
-  // 流式增量期间用户上滑阅读不被逐帧拽回（旧壳 follow 三态机的轻量版）。
-  const scrollRef = useRef<ScrollViewInstance>(null);
-  const followRef = useRef(true);
-  // 向上翻页的一次性闸门：到顶自动触发后关闭，加载结束才重开（防滚动事件连发刷请求）
-  const olderGuard = useRef(true);
-  const scrollToBottom = () => {
-    if (followRef.current) scrollRef.current?.scrollToEnd({ animated: false });
-  };
 
   // 消息附件媒体（旧壳 BubbleAttachments 同源：uploads / 表情包仓库路由 + 鉴权头；
   // 仓库条目被物理删除时 GET /history 标注 expired → 占位）
@@ -589,7 +603,9 @@ export function ChatScreen(props: {
 
   // 面板形变三值：宽 34↔248、高 34↔190、圆角 17↔20（原型 openPlus/closePlus）
   const ppWidth = progress.interpolate({ inputRange: [0, 1], outputRange: [34, 248] });
-  const ppHeight = progress.interpolate({ inputRange: [0, 1], outputRange: [34, 190] });
+  // 内容实际高度：padding 20 + 关闭行 30 + 4 行（32 图标 + 22 内边距）= 282，
+  // 原来固定 190 会把四行压扁、文字互相叠住（真机复现）。
+  const ppHeight = progress.interpolate({ inputRange: [0, 1], outputRange: [34, 284] });
   const ppRadius = progress.interpolate({ inputRange: [0, 1], outputRange: [17, 20] });
 
   const openPanel = () => {
@@ -707,8 +723,9 @@ export function ChatScreen(props: {
         style={styles.thread}
         contentContainerStyle={[
           styles.threadContent,
-          // 底部让位 = 底部导航（44+12）+ 输入条高 + 余量；键盘让位交给壳层 KAV
-          { paddingTop: insets.top + 76, paddingBottom: insets.bottom + 130 },
+          // 顶部给悬浮身份组让位；底部预留 = 导航（44+12）+ 输入条（≈48）+ 上下间距，
+          // 输入条与导航都是悬浮层，消息滚到底时停在它们上方，不被遮挡。
+          { paddingTop: insets.top + 76, paddingBottom: insets.bottom + 128 },
         ]}
         showsVerticalScrollIndicator={false}
         onScroll={e => {
@@ -736,9 +753,16 @@ export function ChatScreen(props: {
           }
         }}
         scrollEventThrottle={100}
+        onLayout={() => scrollToBottom()}
         onContentSizeChange={() => {
-          if (followRef.current) scrollToBottom();
-          else setShowJump(true);
+          if (followRef.current) {
+            scrollToBottom();
+            // 消息 + 底部预留 padding 量高会跨一帧：下一帧再贴一次底，
+            // 避免首屏历史停在中间、最后一条被悬浮输入条压住
+            requestAnimationFrame(() => scrollToBottom());
+          } else {
+            setShowJump(true);
+          }
         }}
       >
         {/* 历史分页头：有更早消息时的手动入口（滚动到顶也会自动触发，旧壳 MessageList 同语义） */}
@@ -858,7 +882,7 @@ export function ChatScreen(props: {
         {/* 返回底部：用户上滑阅读、新内容到达时出现（旧壳「返回底部」箭头的轻量版） */}
         {showJump && !panelOpen && (
           <Pressable
-            style={[styles.jumpBtn, { bottom: insets.bottom + 122 }]}
+            style={[styles.jumpBtn, { bottom: insets.bottom + 120 }]}
             onPress={() => {
               followRef.current = true;
               setShowJump(false);
@@ -871,17 +895,17 @@ export function ChatScreen(props: {
           </Pressable>
         )}
 
-      {/* 4. 底部输入条 + 加号面板：常规流布局（键盘让位走壳层 KAV padding）。
-             底部悬浮导航高 44、距底 insets.bottom+12，键盘期隐藏；输入条按焦点让位，
-             否则会被导航 pill 压住（真机截图的遮挡 bug）。 */}
+      {/* 4. 底部输入条 + 加号面板：悬浮在消息流之上（原型 .comp 绝对定位），
+             底部让出导航 pill（44+12）；消息的 paddingBottom 已预留同等高度，
+             滚到底时最后一条气泡停在输入条上方。键盘弹出时按实测高度整体上移。 */}
       <View
         style={[
           styles.compDock,
           {
-            marginBottom:
+            bottom:
               keyboardH > 0
-                ? Math.max(8, keyboardH - insets.bottom)
-                : insets.bottom + 68,
+                ? keyboardH + 8
+                : insets.bottom + 64,
           },
         ]}
       >
@@ -1012,7 +1036,10 @@ export function ChatScreen(props: {
                 <Text style={styles.piTxt}>◉</Text>
               </View>
               <Text style={styles.pl}>模型切换</Text>
-              <Text style={styles.pv}>{props.modelLabel}</Text>
+              {/* 模型名可能很长（含服务商前缀），单行省略，不能把标签挤掉 */}
+              <Text numberOfLines={1} style={styles.pv}>
+                {props.modelLabel}
+              </Text>
             </Pressable>
           </Animated.View>
         </Animated.View>

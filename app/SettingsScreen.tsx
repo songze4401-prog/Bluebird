@@ -16,12 +16,10 @@ import {
   StyleSheet,
   Text,
   View,
-  type PressableInstance,
   type ViewInstance,
 } from 'react-native';
 
 import { AvatarSheet } from '../components/AvatarSheet';
-import { MemoryCenterSheet } from '../components/MemoryCenterSheet';
 import { ModelManageSheet } from '../components/ModelManageSheet';
 import { MonitoringSheet } from '../components/MonitoringSheet';
 import { SheetScaffold } from '../components/SheetScaffold';
@@ -31,8 +29,7 @@ import { ACCENT_LIST, APP_VERSION, type FontPref, type ThemePref } from '../data
 import { useUi } from './ui-state';
 import { V7_SHADOWS, type V7Tokens } from './ui-theme';
 
-// 主题圆形扩散的圆心（与 app/ui-state.tsx 的 Origin 同形：窗口绝对坐标）
-type Origin = { x: number; y: number };
+// 主题分段不再需要扩散圆心（主题直接切换）
 
 // 原型 --spring：knob 位移等共用的弹簧曲线
 const SPRING = Easing.bezier(0.3, 1.1, 0.45, 1);
@@ -285,7 +282,7 @@ function SetRow(props: {
 }
 
 // ---- 系统外观三分段（原型 .seg）----
-function ThemeSeg(props: { value: ThemePref; onPick: (v: ThemePref, origin: Origin) => void }) {
+function ThemeSeg(props: { value: ThemePref; onPick: (v: ThemePref) => void }) {
   const { tokens: t } = useUi();
   const styles = createStyles(t);
   return (
@@ -295,28 +292,21 @@ function ThemeSeg(props: { value: ThemePref; onPick: (v: ThemePref, origin: Orig
           key={s.v}
           on={s.v === props.value}
           label={s.label}
-          onPress={origin => props.onPick(s.v, origin)}
+          onPress={() => props.onPick(s.v)}
         />
       ))}
     </View>
   );
 }
 
-// 分段选项：按下时 measureInWindow 取选项中心（窗口绝对坐标）作为主题扩散圆心
-// （原型 setThemeWithReveal 的 getBoundingClientRect + 中心点）
-function SegOption(props: { on: boolean; label: string; onPress: (origin: Origin) => void }) {
+// 分段选项（主题直接切换，不再按选项中心做圆形扩散）
+function SegOption(props: { on: boolean; label: string; onPress: () => void }) {
   const { tokens: t } = useUi();
   const styles = createStyles(t);
-  const ref = useRef<PressableInstance>(null);
   return (
     <Pressable
-      ref={ref}
       style={[styles.segOpt, props.on ? { backgroundColor: t.card } : null]}
-      onPress={() => {
-        ref.current?.measureInWindow((x, y, w, h) => {
-          props.onPress({ x: x + w / 2, y: y + h / 2 });
-        });
-      }}
+      onPress={props.onPress}
       accessibilityRole="button"
       accessibilityLabel={props.label}
     >
@@ -347,10 +337,9 @@ export function SettingsScreen(props: {
 
   // 更换头像弹层（原型 setAvatar → dSheet 的 RN 版独立弹层）
   const [avatarOpen, setAvatarOpen] = useState(false);
-  // R6 真数据弹层：系统监控 / 模型与 API / 记忆中心
+  // R6 真数据弹层：系统监控 / 模型与 API
   const [monitoringOpen, setMonitoringOpen] = useState(false);
   const [modelManageOpen, setModelManageOpen] = useState(false);
-  const [memoryCenterOpen, setMemoryCenterOpen] = useState(false);
   // 二级面板：kind 记最后一次打开的种类（关闭动画期间内容不闪空）
   const [subOpen, setSubOpen] = useState(false);
   const [sub, setSub] = useState<SubKind>('accounts');
@@ -379,22 +368,21 @@ export function SettingsScreen(props: {
           {/* 1. 3D 倾斜用户卡（原型 .ucard/.tcard） */}
           <TiltUserCard onAvatarPress={() => setAvatarOpen(true)} />
 
-          {/* 2. 账号 / 监控 / 模型与 API / 记忆中心 / 通知（原型 setgroup 第一组） */}
+          {/* 2. 账号 / 监控 / 模型与 API / 通知（原型 setgroup 第一组） */}
           <View style={styles.setgroup}>
             <SetRow label="切换账号" value={user.account} onPress={() => openSub('accounts')} />
             <SetRow label="系统监控" value="只读" onPress={() => setMonitoringOpen(true)} />
             <SetRow label="模型与 API" onPress={() => setModelManageOpen(true)} />
-            <SetRow label="记忆中心" onPress={() => setMemoryCenterOpen(true)} />
             <SetRow
               label="通知"
               right={<NotifyToggle on={ui.notify} onToggle={() => setNotify(!ui.notify)} />}
             />
           </View>
 
-          {/* 3. 系统外观三分段：按下取选项中心作为主题圆形扩散的圆心 */}
+          {/* 3. 系统外观三分段：直接切换主题（无扩散动画，避免遮罩残留） */}
           <View style={styles.setgroup}>
             <Text style={styles.setlabel}>系统外观</Text>
-            <ThemeSeg value={ui.theme} onPick={(v, origin) => requestTheme(v, origin)} />
+            <ThemeSeg value={ui.theme} onPick={v => requestTheme(v)} />
           </View>
 
           {/* 4. 壁纸横滑行（公共组件，自读 store） */}
@@ -463,12 +451,6 @@ export function SettingsScreen(props: {
           toast('默认模型已同步');
         }}
       />
-      {/* 记忆中心（真数据：/memory 总览/管理/写入/画像） */}
-      <MemoryCenterSheet
-        visible={memoryCenterOpen}
-        onClose={() => setMemoryCenterOpen(false)}
-      />
-
       {/* 二级面板（原型 #dSheet）：与主面板并存，后渲染者自然在上层 */}
       <SheetScaffold
         visible={subOpen}

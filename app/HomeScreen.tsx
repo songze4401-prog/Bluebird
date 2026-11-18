@@ -371,12 +371,18 @@ export function HomeScreen({
   loadingSessions,
   sessionsError,
   onSelectSession,
+  onNewChat,
+  onSheetOpenChange,
 }: {
   sessions: SessionMeta[];
   currentSessionId: string;
   loadingSessions: boolean;
   sessionsError: string;
   onSelectSession: (sessionId: string) => void;
+  // 首页「对话」入口 = 新开一条空会话（打开历史请走下方「对话记录」）
+  onNewChat: () => void;
+  // 弹层打开/关闭通知：壳层悬浮导航在 pane 之上，弹层打开时需要它临时收起
+  onSheetOpenChange?: (open: boolean) => void;
 }) {
   const ui = useUi();
   const t = ui.tokens;
@@ -387,6 +393,13 @@ export function HomeScreen({
   const [taskAddOpen, setTaskAddOpen] = useState(false);
   const [vizOpen, setVizOpen] = useState(false);
   const [memOpen, setMemOpen] = useState(false);
+  // 任务详情（真实任务）：点行开详情，可取消状态给「取消任务」入口（live 状态在后面派生）
+  const [realDetailId, setRealDetailId] = useState<string | null>(null);
+
+  // 任一弹层打开时收起壳层悬浮导航（弹层在 pane 内，盖不过壳层导航）
+  useEffect(() => {
+    onSheetOpenChange?.(taskAddOpen || vizOpen || memOpen || realDetailId !== null);
+  }, [taskAddOpen, vizOpen, memOpen, realDetailId, onSheetOpenChange]);
 
   // ---- 真实任务（/agent-tasks，与旧壳 TasksPanel 同源）----
   // 主页是全局视图：拉 memory Bot 的任务（不挂 parentSessionId）。
@@ -412,7 +425,6 @@ export function HomeScreen({
   }, [ui.view, loadAgentTasks]);
 
   const runningTasks = agentTasks.filter(t => RUNNING_STATUSES.has(t.status));
-  const doneTasks = agentTasks.filter(t => !RUNNING_STATUSES.has(t.status));
 
   const realRowModel = (t: AgentTask): TaskRowModel => {
     const label = TASK_STATUS_LABEL[t.status] ?? t.status;
@@ -438,15 +450,9 @@ export function HomeScreen({
     };
   };
 
-  // 任务详情（真实任务）：点行开详情，可取消状态给「取消任务」入口。
-  // 轮询每 6s 重建 agentTasks——详情按 taskId 从最新列表派生 live 状态，
+  // 任务详情 live 状态：轮询每 6s 重建 agentTasks——详情按 taskId 从最新列表派生，
   // 打开期间任务终态化时 statusLabel/cancellable 跟着变（不持陈旧引用）
-  const [realDetailId, setRealDetailId] = useState<string | null>(null);
   const realDetailLive = agentTasks.find(t => t.taskId === realDetailId) ?? null;
-
-  // 对话入口取「最近一条有内容的会话」（服务端 updatedAt 倒序）；
-  // 全是空白草稿时才退回第一条，避免点开一个空对话。
-  const latestSession = sessions.find(item => item.messageCount > 0) ?? sessions[0];
 
   // 股票涨跌配色（柱状图与涨跌幅共用）
   const chgColor = ui.stock.chg >= 0 ? t.up : t.down;
@@ -455,7 +461,7 @@ export function HomeScreen({
     <>
       <ScrollView
         style={styles.page}
-        contentContainerStyle={[styles.content, { paddingTop: insets.top + 8, paddingBottom: 76 }]}
+        contentContainerStyle={[styles.content, { paddingTop: insets.top + 8, paddingBottom: insets.bottom + 74 }]}
         showsVerticalScrollIndicator={false}
       >
         {/* 1. 问候语 */}
@@ -465,11 +471,9 @@ export function HomeScreen({
         <View style={styles.entryRow}>
           <Pressable
             style={styles.entryCard}
-            onPress={() =>
-              latestSession ? onSelectSession(latestSession.id) : ui.toast('还没有对话记录')
-            }
+            onPress={onNewChat}
             accessibilityRole="button"
-            accessibilityLabel="对话"
+            accessibilityLabel="新对话"
           >
             <View style={styles.entryIcon}>
               <EntryIcon kind="chat" />
@@ -628,23 +632,7 @@ export function HomeScreen({
           </>
         )}
 
-        {/* 7. 已完成任务（真实终态任务；无任务时整段隐藏） */}
-        {doneTasks.length > 0 && (
-          <>
-            <View style={styles.sechead}>
-              <Text style={styles.secTxt}>已完成任务</Text>
-              <View style={{ flex: 1 }} />
-              <Text style={styles.secCount}>{doneTasks.length} 个已完成</Text>
-            </View>
-            <View style={styles.listCol}>
-              {doneTasks.map(t => (
-                <TaskRow key={t.taskId} model={realRowModel(t)} onPress={() => setRealDetailId(t.taskId)} />
-              ))}
-            </View>
-          </>
-        )}
-
-        {/* 8. 对话记录（真实会话列表：数据由 useSessionList 注入，点击切换会话） */}
+        {/* 7. 对话记录（真实会话列表：数据由 useSessionList 注入，点击切换会话） */}
         <View style={styles.sechead}>
           <Text style={styles.secTxt}>对话记录</Text>
           {sessions.length > 0 && (

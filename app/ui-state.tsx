@@ -3,7 +3,7 @@
 //   - state：原型 state 对象的逐字段镜像（user/ui/bot/model/tasks/running/done/
 //     viz/stock/weather/news/bots/convs/messages/panels/persona/customModels + mems）
 //   - 动作：原型每个 addEventListener 的一一移植
-//   - 全局系统：主题圆形扩散动画、Toast、壁纸层由 Provider 统一渲染，
+//   - 全局系统：Toast、壁纸层由 Provider 统一渲染，
 //     三屏与弹层只通过 useUi() 取数据与动作。
 // 不接任何真实后端；接后端时只需替换本文件的数据来源。
 
@@ -16,11 +16,9 @@ import React, {
 } from 'react';
 import {
   Animated,
-  Easing,
   Image,
   Text,
   useColorScheme,
-  useWindowDimensions,
   View,
 } from 'react-native';
 import Svg, { Defs, LinearGradient, RadialGradient, Rect, Stop } from 'react-native-svg';
@@ -106,7 +104,7 @@ export type UiStore = {
   setModel: (m: string) => void;
   addCustomModel: (m: string) => void;
   setPersonaPrompt: (s: string) => void;
-  requestTheme: (next: ThemePref, origin?: Origin) => void;
+  requestTheme: (next: ThemePref) => void;
   setWallpaper: (w: WallpaperId, uri?: string) => void;
   setAccent: (c: string) => void;
   setFont: (f: FontPref) => void;
@@ -120,9 +118,6 @@ export type UiStore = {
   redoDone: (t: DoneTask) => void;
   toast: (msg: string) => void;
 };
-
-// 主题揭示的圆心坐标
-type Origin = { x: number; y: number };
 
 const UiCtx = createContext<UiStore | null>(null);
 
@@ -162,45 +157,11 @@ export function UiStateProvider({ children }: { children: React.ReactNode }) {
     }, 2200);
   };
 
-  // ---- 主题圆形扩散（原型 setThemeWithReveal 的移植）----
-  // 切深色：深色圆从选项中心扩散覆盖全屏，动画结束后才提交主题；
-  // 切浅色：主题立即提交，深色圆沿同一圆心（revealOrigin 原路）收回。
-  const [reveal, setReveal] = useState<{ toDark: boolean; x: number; y: number } | null>(null);
-  const [revealAnim] = useState(() => new Animated.Value(0));
-  const [revealOrigin, setRevealOrigin] = useState<Origin | null>(null);
-
-  const requestTheme = (next: ThemePref, origin?: Origin) => {
-    const willDark = next === 'dark' || (next === 'system' && scheme === 'dark');
-    const cur = s.ui.theme;
-    const curDark = cur === 'dark' || (cur === 'system' && scheme === 'dark');
-    if (willDark === curDark) {
-      // 只翻分段高亮，不需要动画
-      patch(prev => ({ ...prev, ui: { ...prev.ui, theme: next } }));
-      return;
-    }
-    if (!willDark) {
-      // 切浅色：主题立即提交，深色圆在上层沿原路收回
-      patch(prev => ({ ...prev, ui: { ...prev.ui, theme: next } }));
-    }
-    const o = origin ?? revealOrigin ?? { x: 0, y: 0 };
-    if (willDark) setRevealOrigin(o);
-    setReveal({ toDark: willDark, x: o.x, y: o.y });
-    revealAnim.stopAnimation();
-    revealAnim.setValue(willDark ? 0 : 1);
-    Animated.timing(revealAnim, {
-      toValue: willDark ? 1 : 0,
-      duration: 800,
-      easing: Easing.bezier(0.3, 1.1, 0.45, 1),
-      useNativeDriver: true,
-    }).start(({ finished }) => {
-      // 被打断的旧动画不得提交主题（快速连点深→浅的竞态守卫）
-      if (!finished) return;
-      if (willDark) {
-        // 盖满全屏后才提交深色主题
-        patch(prev => ({ ...prev, ui: { ...prev.ui, theme: next } }));
-      }
-      setReveal(null);
-    });
+  // ---- 主题切换（直接提交，不做圆形扩散）----
+  // 原型用深色圆扩散过渡，但真机上圆在 800ms 内盖住整屏（期间看起来就是黑屏），
+  // 打断/快速连点还会残留遮罩。主题样式是纯 token 重算，直接切换既无闪烁也无残留。
+  const requestTheme = (next: ThemePref) => {
+    patch(prev => ({ ...prev, ui: { ...prev.ui, theme: next } }));
   };
 
   // ---- 演示层回复（原型 fakeReply：不接接口，但让模型/人设设置真的体现在对话里）----
@@ -487,12 +448,6 @@ export function UiStateProvider({ children }: { children: React.ReactNode }) {
         {/* 壁纸层：铺在最底层，内容页透明即可透出（全局系统 #2） */}
         <WallpaperLayer tokens={tokens} wallpaper={s.ui.wallpaper} customWall={s.ui.customWall} />
         {children}
-        {/* 主题圆形扩散覆盖层 */}
-        {reveal && (
-          <View pointerEvents="none" style={{ ...ABS_FILL, zIndex: 98 }}>
-            <RevealCircle anim={revealAnim} toDark={reveal.toDark} x={reveal.x} y={reveal.y} />
-          </View>
-        )}
         {/* Toast：强调色 pill（原型 .toast） */}
         {toastMsg !== null && (
           <Animated.View
@@ -598,37 +553,4 @@ function WallpaperLayer({
   );
 }
 
-// ---- 主题揭示圆（全局系统 #1 的动画本体）----
-function RevealCircle({
-  anim,
-  toDark,
-  x,
-  y,
-}: {
-  anim: Animated.Value;
-  toDark: boolean;
-  x: number;
-  y: number;
-}) {
-  const { width, height } = useWindowDimensions();
-  const R = Math.sqrt(Math.max(x, width - x) ** 2 + Math.max(y, height - y) ** 2);
-  // 圆恒为深色底：切深色时从 0 放大盖满；切浅色时从盖满收回到 0（露出底下浅色）
-  const scale = anim.interpolate({
-    inputRange: [0, 1],
-    outputRange: toDark ? [0.001, 1] : [1, 0.001],
-  });
-  return (
-    <Animated.View
-      style={{
-        position: 'absolute',
-        left: x - R,
-        top: y - R,
-        width: R * 2,
-        height: R * 2,
-        borderRadius: R,
-        backgroundColor: '#17171a',
-        transform: [{ scale }],
-      }}
-    />
-  );
-}
+// ---- 主题揭示圆已移除：直接切换主题（见 requestTheme）----

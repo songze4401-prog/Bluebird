@@ -43,6 +43,7 @@ function renderHome(overrides: Partial<HomeProps> = {}) {
     loadingSessions: false,
     sessionsError: '',
     onSelectSession: jest.fn(),
+    onNewChat: jest.fn(),
     ...overrides,
   };
 
@@ -82,20 +83,14 @@ describe('v7 主页对话记录（真实会话）', () => {
     expect(onSelectSession).toHaveBeenCalledWith('session-b');
   });
 
-  it('对话入口卡打开最近一条有内容的会话，跳过空白草稿', async () => {
+  it('对话入口卡新开一条空会话，不打开历史会话', async () => {
     const onSelectSession = jest.fn();
-    const utils = await renderHome({
-      // 空白草稿排在最前（服务端按 updatedAt 倒序），入口卡不应打开它
-      sessions: [
-        { ...SESSIONS[1], id: 'session-draft', updatedAt: '2026-11-15T04:00:00.000Z' },
-        SESSIONS[0],
-      ],
-      currentSessionId: 'session-draft',
-      onSelectSession,
-    });
+    const onNewChat = jest.fn();
+    const utils = await renderHome({ onSelectSession, onNewChat });
 
-    fireEvent.press(utils.getByLabelText('对话'));
-    expect(onSelectSession).toHaveBeenCalledWith('session-a');
+    fireEvent.press(utils.getByLabelText('新对话'));
+    expect(onNewChat).toHaveBeenCalledTimes(1);
+    expect(onSelectSession).not.toHaveBeenCalled();
   });
 
   it('无会话时显示空态文案', async () => {
