@@ -14,7 +14,7 @@ Bluebird 是一个以统一智能体运行时为核心的个人 AI 基础设施�
 
 ## Stack
 
-- Client: React Native 0.88 / Expo 58 / TypeScript；单入口 `App.tsx`，无 Expo Router。
+- Client: React Native 0.88 / Expo 58 / TypeScript；单入口 `index.ts` → `app/BluebirdApp.tsx`（v7 壳），无 Expo Router。
 - API: Node.js / Express 5.2，默认 `:3000`，**必须单进程运行**（数据目录由进程内缓存整文件重写，启动时强制单实例锁）。
 - Models: 内置 DeepSeek（`DEEPSEEK_API_KEY`）+ 用户配置的 OpenAI Chat Completions 兼容服务。
 - Storage: `server/data/`（或 `BLUEBIRD_DATA_DIR`）下的 JSON 文件 + `uploads/` + `sticker-repo/`。
@@ -37,8 +37,8 @@ npx expo start             # Metro :8081
 ## Quality gates
 
 ```bash
-npm test                    # backend: auto-discovers tests/*.test.js (127 files / 2526 checks)
-npm run test:unit -- --ci   # frontend: 27 suites / 209 cases
+npm test                    # backend: auto-discovers tests/*.test.js (126 files / 2505 checks)
+npm run test:unit -- --ci   # frontend: 18 suites / 139 cases
 npx tsc --noEmit            # TypeScript
 npm run lint                # Expo ESLint
 npm run eval:context        # real-model capability eval (needs DEEPSEEK_API_KEY; not in CI)
