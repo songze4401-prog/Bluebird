@@ -10,6 +10,7 @@
  * - 任务状态、取消与安全事件。
  */
 const fs = require('fs');
+const { applyStubKeepAlive } = require('./helpers/stub-keepalive');
 const os = require('os');
 const path = require('path');
 const http = require('http');
@@ -240,12 +241,9 @@ let apiServer;
 let apiBase;
 
 test.before(async () => {
-  // 本地 stub 的默认 keepAliveTimeout（5s）会在子测试间隙掐掉空闲 keep-alive 连接；
-  // model-adapter 的 openai SDK 是 maxRetries:0，复用到一条已被服务端掐死的 socket
-  // 会直接以 model_connection 失败，并进一步让排队任务退避到 retrying——其余任务
-  // 完成后无人再触发调度，队列就此卡死（memory-bot/agent-worker 偶发的根因）。
-  // 把服务端空闲超时抬到测试时长之上，杜绝这条竞态。
-  providerServer.keepAliveTimeout = 30000;
+  // 把服务端空闲超时抬到测试时长之上，杜绝这条竞态（根因与机制见
+  // tests/helpers/stub-keepalive.js 头注释——memory-bot/agent-worker 偶发的根因）。
+  applyStubKeepAlive(providerServer);
   await new Promise(resolve => providerServer.listen(0, '127.0.0.1', resolve));
   providerPort = providerServer.address().port;
 
@@ -300,10 +298,9 @@ test.before(async () => {
     })
   );
   apiServer = http.createServer(app);
-  // 主 API server 与 provider 桩同款修复：默认 keepAliveTimeout(5s) 会在子测试间隙
-  // （waitForTask 轮询、退避等待等 >5s 的空窗）掐死 keep-alive 池中连接——
-  // api() 复用死 socket 时 undici 偶发请求悬挂（全量跑里表现为 120s 被 spawnSync 击杀）。
-  apiServer.keepAliveTimeout = 30000;
+  // 主 API server 与 provider 桩同款修复：api() 复用死 socket 时 undici 偶发
+  // 请求悬挂（全量跑里表现为 120s 被 spawnSync 击杀）。机制见 helper 头注释。
+  applyStubKeepAlive(apiServer);
   await new Promise(resolve => apiServer.listen(0, '127.0.0.1', resolve));
   apiBase = `http://127.0.0.1:${apiServer.address().port}`;
 });

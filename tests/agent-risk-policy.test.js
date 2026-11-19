@@ -18,6 +18,7 @@ const path = require('path');
 const http = require('http');
 const test = require('node:test');
 const assert = require('node:assert');
+const { applyStubKeepAlive } = require('./helpers/stub-keepalive');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-agent-risk-policy-'));
 process.env.BLUEBIRD_DATA_DIR = TMP;
@@ -98,9 +99,7 @@ async function setupProvider(botId = 'memory') {
       }));
     });
   });
-  // keepAliveTimeout 抬到 30s：默认 5s 会在测试间隙掐死 keep-alive 池中连接
-  // （openai SDK maxRetries:0，复用死 socket 直接 model_connection 失败——见 memory-bot 同款修复）
-  providerServer.keepAliveTimeout = 30000;
+  applyStubKeepAlive(providerServer);
   await new Promise(resolve => providerServer.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${providerServer.address().port}/v1`;
   const apiConfigs = require('../server/api-configs');

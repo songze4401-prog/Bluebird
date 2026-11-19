@@ -30,6 +30,7 @@
  * 运行：node tests/agent-tools.test.js
  */
 const fs = require('fs');
+const { applyStubKeepAlive } = require('./helpers/stub-keepalive');
 const os = require('os');
 const path = require('path');
 const http = require('http');
@@ -418,9 +419,7 @@ async function main() {
   ORIG_LOG(`测试服务端口=${PORT}`);
 
   // 本地 mock 服务商（H3 组）+ "视觉+工具"双声明模型
-  // keepAliveTimeout 抬到 30s：默认 5s 会在测试间隙掐死 keep-alive 池中连接
-  // （openai SDK maxRetries:0，复用死 socket 直接 model_connection 失败——见 memory-bot 同款修复）
-  mockServer.keepAliveTimeout = 30000;
+  applyStubKeepAlive(mockServer);
   await new Promise(resolve => mockServer.listen(0, '127.0.0.1', resolve));
   const MOCK_BASE = `http://127.0.0.1:${mockServer.address().port}`;
   process.env.BLUEBIRD_ALLOW_PRIVATE_BASE_URL = '1';

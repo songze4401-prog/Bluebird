@@ -5,6 +5,7 @@
  * 主控会话投递与事件 outbox，不依赖外部模型。
  */
 const fs = require('fs');
+const { applyStubKeepAlive } = require('./helpers/stub-keepalive');
 const os = require('os');
 const path = require('path');
 const http = require('http');
@@ -228,10 +229,7 @@ test.before(async () => {
       });
     });
   });
-  // 同 memory-bot/agent-worker：默认 keepAliveTimeout（5s）掐掉的空闲连接会被
-  // SDK（maxRetries:0）复用后连接失败；REPAIR_ROADMAP §6.7 记录的 agent-dispatch
-  // SSE 偶发与本修复同族，一并杜绝。
-  providerServer.keepAliveTimeout = 30000;
+  applyStubKeepAlive(providerServer);
   await new Promise(resolve => providerServer.listen(0, '127.0.0.1', resolve));
   providerPort = providerServer.address().port;
   providerBase = `http://127.0.0.1:${providerPort}/v1`;

@@ -12,6 +12,7 @@
  *  e) stepKey 透传：planner → createTaskGraph → task 训录可映射回计划节点。
  */
 const fs = require('fs');
+const { applyStubKeepAlive } = require('./helpers/stub-keepalive');
 const os = require('os');
 const path = require('path');
 const http = require('http');
@@ -149,9 +150,7 @@ test.before(async () => {
       }, 20);
     });
   });
-  // keepAliveTimeout 抬到 30s：默认 5s 会在测试间隙掐死 keep-alive 池中连接
-  // （openai SDK maxRetries:0，复用死 socket 直接 model_connection 失败——见 memory-bot 同款修复）
-  stubServer.keepAliveTimeout = 30000;
+  applyStubKeepAlive(stubServer);
   await new Promise(resolve => stubServer.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${stubServer.address().port}/v1`;
   const added = apiConfigs.addModelProvider({

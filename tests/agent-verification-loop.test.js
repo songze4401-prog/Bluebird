@@ -20,6 +20,7 @@
  * 使用真实任务 / 真实产物存储 / 真实审批记录；模型用本地 HTTP stub，不依赖外部 API。
  */
 const fs = require('fs');
+const { applyStubKeepAlive } = require('./helpers/stub-keepalive');
 const os = require('os');
 const path = require('path');
 const http = require('http');
@@ -161,9 +162,7 @@ test.before(async () => {
       json(res, 200, completion(`已处理：${taskGoal(messages)}`));
     });
   });
-  // 本地 stub 默认 keepAliveTimeout（5s）掐掉的空闲连接会被 SDK（maxRetries:0）
-  // 复用后连接失败——抬高服务端空闲超时，杜绝这条竞态（同 memory-bot）。
-  providerServer.keepAliveTimeout = 30000;
+  applyStubKeepAlive(providerServer);
   await new Promise(resolve => providerServer.listen(0, '127.0.0.1', resolve));
   providerBase = `http://127.0.0.1:${providerServer.address().port}/v1`;
 

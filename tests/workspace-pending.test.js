@@ -17,6 +17,7 @@
  * 测试只用临时目录（BLUEBIRD_DATA_DIR 指向 mkdtemp），不碰真实 server/data。
  */
 const fs = require('fs');
+const { applyStubKeepAlive } = require('./helpers/stub-keepalive');
 const os = require('os');
 const path = require('path');
 const http = require('http');
@@ -138,9 +139,7 @@ function tc(id, name, args) {
 }
 
 test.before(async () => {
-  // openai SDK maxRetries:0 复用连接池：默认 keepAliveTimeout 5s 会在测试间隙
-  // 招死空闲连接（agent-tools 同款修复）
-  mockServer.keepAliveTimeout = 30000;
+  applyStubKeepAlive(mockServer);
   await new Promise(resolve => mockServer.listen(0, '127.0.0.1', resolve));
   const MOCK_BASE = `http://127.0.0.1:${mockServer.address().port}`;
   globalThis.__wsProvider = configs.addModelProvider({
