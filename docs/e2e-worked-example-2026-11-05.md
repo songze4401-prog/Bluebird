@@ -4,8 +4,8 @@
 > 本次运行使用仓库内的本地 OpenAI 兼容 HTTP stub（127.0.0.1 随机端口），不是真实模型服务。
 > Token 为 provider 实际返回的 `usage`；本地 stub 无计价口径，成本记为「未采集」，未做任何估算。
 
-- 运行脚本：`node scripts/run-worked-example.js --out docs/e2e-worked-example-run-2026-11-05.json`
-- 机器可读记录：`docs/e2e-worked-example-run-2026-11-05.json`
+- 运行脚本：`node scripts/run-worked-example.js --out docs/archive/e2e-worked-example-run-2026-11-05.json`
+- 机器可读记录：`docs/archive/e2e-worked-example-run-2026-11-05.json`
 - 自动化用例：`tests/agent-worked-example-e2e.test.js`
 - traceId：`trace_77086298-25a5-4ec1-82ab-5efdafbc3cbf`
 - 运行时间：`2026-11-05T14:07:12.473Z` 起，总耗时 805 ms
@@ -32,7 +32,7 @@
 
 ## 可复核方式
 
-1. 打开 `docs/e2e-worked-example-run-2026-11-05.json`，按 `steps[0..8]` 逐步核对输入/输出摘要与事件 id。
+1. 打开 `docs/archive/e2e-worked-example-run-2026-11-05.json`，按 `steps[0..8]` 逐步核对输入/输出摘要与事件 id。
 2. 重跑脚本后与新记录比对九步形状与裁决结论（产物 id 每次不同，属正常）：
    `node scripts/run-worked-example.js --out <临时路径>`
 3. 运行用例：`node --test tests/agent-worked-example-e2e.test.js`

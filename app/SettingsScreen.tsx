@@ -24,7 +24,7 @@ import { ModelManageSheet } from '../components/ModelManageSheet';
 import { MonitoringSheet } from '../components/MonitoringSheet';
 import { SheetScaffold } from '../components/SheetScaffold';
 import { WallpaperPicker } from '../components/WallpaperPicker';
-import { ACCENT_LIST, APP_VERSION, type FontPref, type ThemePref } from '../data/mock';
+import { ACCENT_LIST, APP_VERSION, type FontPref, type ThemePref } from '../data/ui-contract';
 
 import { useUi } from './ui-state';
 import { V7_SHADOWS, type V7Tokens } from './ui-theme';

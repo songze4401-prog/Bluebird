@@ -1,7 +1,10 @@
-// 蓝鸟 UI 移植 · 假数据包（清单小件 #5）
+// 蓝鸟 v7 · UI 状态契约（原 data/mock.ts，2026-11-19 健康度审计后更名）
 // 原型 bluebird-home-v7.html 里 state 对象及常量的原样移植。
-// 规矩：不接任何真实后端——这里的所有数据都是 mock，接口位置留给后续轮次
-// （组件只依赖本文件的类型与初值，接后端时替换数据源即可）。
+// 内容 = 类型定义 + 常量 + 初始状态工厂；名字里的「mock」在 #96/#102 清退
+// 假数据后已经名不副实（审计指出 DoneTask/RunningTask 这类真实视图模型住在
+// mock 文件里误导性强），更名后本文件即 v7 前端的状态契约单一来源。
+// 仍属占位的只有 viz 面板三件（stock/weather/news——它们没有后端能力），
+// 其余字段全部由真实 hooks/后端驱动。
 
 // ---- 视图 ----
 export type ViewId = 'home' | 'chat';
@@ -142,7 +145,7 @@ export const AVATAR_PRESETS = [
   { t: 'char', v: 'A' },
 ] as const;
 
-// 记忆面板假数据（字段名对齐 lib/memory-center.ts 的候选/已记住语义）
+// 记忆面板占位数据（字段名对齐 lib/memory-center.ts 的候选/已记住语义）
 export const INITIAL_MEMS: Mem[] = [
   { x: '对花生过敏，点餐时会避开', i: '🥜', p: true },
   { x: '希望晨间提醒在 7 点半', i: '⏰', p: true },
@@ -161,7 +164,7 @@ export function nowStr(): string {
   );
 }
 
-/** 股票走势假数据（原型 genPts：随机游走 24 点） */
+/** 股票走势占位数据（原型 genPts：随机游走 24 点） */
 export function genPts(): number[] {
   const p: number[] = [];
   let v = 100;
@@ -204,7 +207,7 @@ export function createInitialState(): UiState {
     // 定时任务：真系统暂无定时任务后端——初始为空，＋ 添加的是用户本机自建的
     // 本地提醒（诚实口径，不预置假数据）
     tasks: [],
-    // 进行中/已完成：真实系统当前没有任何任务，mock 不再伪造（假任务在真机预览里
+    // 进行中/已完成：真实系统当前没有任何任务，不伪造（假任务在真机预览里
     // 会被当成真数据）。列表为空时 HomeScreen 整段隐藏；接 /agent-tasks 后由真数据驱动。
     running: [],
     done: [],

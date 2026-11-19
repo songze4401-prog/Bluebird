@@ -45,7 +45,7 @@
 | tests/agent-publish-gate.test.js | 4 | a gateForTask 命中面；b+c 主链（真实 worker 运行→waiting_approval→R2 审批→批准交付→delivery committed→重复执行拒绝）；d 拒绝 fail-closed（cancelled+产物 pending-commit+无 completed 事件）；e 零行为变化（无门任务直接 completed） |
 | tests/agent-worked-example-e2e.test.js | 1（更新） | 十三步真跑：九步原有断言全保留 + 修订 v2/只重跑缺证节点/发布门 waiting_approval/R2/批准交付 committed/重复执行拒绝/拒绝 fail-closed |
 
-worked example 运行记录：`docs/e2e-worked-example-run-2026-11-13-p5c2.json`（stepCount=13，parallel=true，全部断言在脚本内抛错式校验）。
+worked example 运行记录：`docs/archive/e2e-worked-example-run-2026-11-13-p5c2.json`（stepCount=13，parallel=true，全部断言在脚本内抛错式校验）。
 
 ## 4. 边界与如实标注
 

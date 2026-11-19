@@ -8,7 +8,7 @@ import { StyleSheet, Text, View } from 'react-native';
 
 import { useUi } from '../app/ui-state';
 import type { V7Tokens } from '../app/ui-theme';
-import { greetingWord } from '../data/mock';
+import { greetingWord } from '../data/ui-contract';
 
 export function Greeting() {
   const { user, tasks, tokens: t } = useUi();

@@ -15,7 +15,7 @@
  *  - Token 取 provider 返回的真实 usage；成本因本地 stub 无计价，记「未采集」。
  *
  * 用法：
- *   node scripts/run-worked-example.js --out docs/e2e-worked-example-run-2026-11-05.json
+ *   node scripts/run-worked-example.js --out docs/archive/e2e-worked-example-run-2026-11-05.json
  *   node scripts/run-worked-example.js --json        # 输出到 stdout
  */
 const fs = require('fs');
