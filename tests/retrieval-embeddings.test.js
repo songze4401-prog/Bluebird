@@ -10,6 +10,7 @@
  * 真实模型 API 的验收结论由 tests/embedding-open-domain-eval.js 提供。
  */
 const fs = require('fs');
+const { applyStubKeepAlive } = require('./helpers/stub-keepalive');
 const os = require('os');
 const path = require('path');
 const http = require('http');
@@ -138,10 +139,8 @@ let embeddingPort = 0;
 let rerankPort = 0;
 
 test.before(async () => {
-  // keepAliveTimeout 抬到 30s：默认 5s 会在测试间隙掐死 keep-alive 池中连接
-  // （复用死 socket 直接连接失败——见 tests/memory-bot.test.js 同款修复）
-  embeddingServer.keepAliveTimeout = 30000;
-  rerankServer.keepAliveTimeout = 30000;
+  applyStubKeepAlive(embeddingServer);
+  applyStubKeepAlive(rerankServer);
   await new Promise(resolve => embeddingServer.listen(0, '127.0.0.1', resolve));
   await new Promise(resolve => rerankServer.listen(0, '127.0.0.1', resolve));
   embeddingPort = embeddingServer.address().port;

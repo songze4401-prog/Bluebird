@@ -13,6 +13,7 @@
  * 隔离纪律：BLUEBIRD_DATA_DIR 在 require server/ 之前指向临时目录。
  */
 const assert = require('node:assert');
+const { applyStubKeepAlive } = require('./helpers/stub-keepalive');
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
@@ -253,9 +254,7 @@ async function setupProvider() {
       });
     });
   });
-  // keepAliveTimeout 抬到 30s：默认 5s 会在测试间隙掐死 keep-alive 池中连接
-  // （openai SDK maxRetries:0，复用死 socket 直接 model_connection 失败——见 memory-bot 同款修复）
-  providerServer.keepAliveTimeout = 30000;
+  applyStubKeepAlive(providerServer);
   await new Promise(resolve => providerServer.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${providerServer.address().port}/v1`;
 

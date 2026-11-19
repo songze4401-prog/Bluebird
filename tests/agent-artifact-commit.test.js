@@ -16,6 +16,7 @@
  * 只在 b 注入 fs 层写入错误（不替换业务函数）；c 只注入 transitionTask 失败。
  */
 const fs = require('fs');
+const { applyStubKeepAlive } = require('./helpers/stub-keepalive');
 const os = require('os');
 const path = require('path');
 const http = require('http');
@@ -85,9 +86,7 @@ test.before(async () => {
       json(res, 200, completion(`已处理：${taskGoal(parsed.messages || [])}`));
     });
   });
-  // 本地 stub 默认 keepAliveTimeout（5s）掐掉的空闲连接会被 SDK（maxRetries:0）
-  // 复用后连接失败——抬高服务端空闲超时，杜绝这条竞态（同 memory-bot）。
-  providerServer.keepAliveTimeout = 30000;
+  applyStubKeepAlive(providerServer);
   await new Promise(resolve => providerServer.listen(0, '127.0.0.1', resolve));
   const providerBase = `http://127.0.0.1:${providerServer.address().port}/v1`;
 

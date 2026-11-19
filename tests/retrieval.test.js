@@ -6,6 +6,7 @@
  * 文档/代码根目录显式配置为仓库 + 临时 fixture，绝不扫描真实用户目录。
  */
 const fs = require('fs');
+const { applyStubKeepAlive } = require('./helpers/stub-keepalive');
 const os = require('os');
 const path = require('path');
 const http = require('http');
@@ -507,8 +508,7 @@ test('网页连接器：抓取正文快照、引用 URL，删除来源时清理�
         '<body><h1>部署手册</h1><p>生产部署需要先运行健康检查 HEALTH-CHECK-7788。</p></body></html>'
     );
   });
-  // keepAliveTimeout 抬到 30s：默认 5s 会掐死 keep-alive 池中连接（见 memory-bot 同款修复）
-  server.keepAliveTimeout = 30000;
+  applyStubKeepAlive(server);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const port = server.address().port;
 

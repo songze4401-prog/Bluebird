@@ -7,6 +7,7 @@
  * 并发隔离与单 Worker 异常隔离。使用真实 HTTP stub Provider，不依赖外部模型。
  */
 const fs = require('fs');
+const { applyStubKeepAlive } = require('./helpers/stub-keepalive');
 const os = require('os');
 const path = require('path');
 const http = require('http');
@@ -193,9 +194,7 @@ test.before(async () => {
       json(res, 200, payload);
     });
   });
-  // 本地 stub 默认 keepAliveTimeout（5s）掐掉的空闲连接会被 SDK（maxRetries:0）
-  // 复用后以 model_connection 失败——抬高服务端空闲超时，杜绝这条竞态（同 memory-bot）。
-  providerServer.keepAliveTimeout = 30000;
+  applyStubKeepAlive(providerServer);
   await new Promise(resolve => providerServer.listen(0, '127.0.0.1', resolve));
   providerBase = `http://127.0.0.1:${providerServer.address().port}/v1`;
 

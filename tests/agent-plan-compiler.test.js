@@ -13,6 +13,7 @@
  *  h) HTTP：POST 编译 + GET 读回端到端；未带令牌 401。
  */
 const fs = require('fs');
+const { applyStubKeepAlive } = require('./helpers/stub-keepalive');
 const os = require('os');
 const path = require('path');
 const test = require('node:test');
@@ -213,8 +214,7 @@ test('i. HTTP 端到端：POST 编译 + GET 读回；未带令牌 401', async ()
     })
   );
   const server = http.createServer(app);
-  // keepAliveTimeout 抬到 30s：默认 5s 会掐死 keep-alive 池中连接（openai SDK maxRetries:0）
-  server.keepAliveTimeout = 30000;
+  applyStubKeepAlive(server);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   try {
@@ -263,8 +263,7 @@ test('j. HTTP 编译失败按错误契约返回（未知 taskType → 400 capabi
     })
   );
   const server = http.createServer(app);
-  // keepAliveTimeout 抬到 30s：默认 5s 会掐死 keep-alive 池中连接（openai SDK maxRetries:0）
-  server.keepAliveTimeout = 30000;
+  applyStubKeepAlive(server);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
     const response = await fetch(`${base64x(server)}`, {
