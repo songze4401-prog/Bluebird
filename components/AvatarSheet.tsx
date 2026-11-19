@@ -8,7 +8,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { SheetScaffold } from './SheetScaffold';
 import { useUi } from '../app/ui-state';
 import type { V7Tokens } from '../app/ui-theme';
-import { AVATAR_PRESETS } from '../data/mock';
+import { AVATAR_PRESETS } from '../data/ui-contract';
 
 export function AvatarSheet(props: { visible: boolean; onClose: () => void }) {
   const ui = useUi();

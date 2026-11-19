@@ -3,7 +3,7 @@
  * v7「默认模型」抽屉接真数据：
  *   ① 只列启用中的服务商；行文案 = 服务商 · 模型名；当前默认模型标「当前」
  *   ② 点击非当前模型调用 onSelect(providerId, modelId)；成功才关闭抽屉
- *   ③ 停用模型不可点；空列表显示明确文案，不再回落 data/mock 的 MODELS
+ *   ③ 停用模型不可点；空列表显示明确文案，不再回落状态契约文件（data/ui-contract）的 MODELS
  */
 import React from 'react';
 import { fireEvent, render, waitFor, within } from '@testing-library/react-native';

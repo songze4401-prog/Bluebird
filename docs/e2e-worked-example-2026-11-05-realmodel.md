@@ -5,9 +5,9 @@
 > 凭据仅在运行期间从 `server/.env`（已被 `.gitignore` 覆盖）读取，运行结束即删除；本记录不含凭据明文或片段。
 > Token 取 provider 返回的 `usage`；成本按 provider 上报口径记录（未返回则写「provider 未返回」，不估算）。
 
-- 运行脚本：`node scripts/run-worked-example.js --real-provider --out docs/e2e-worked-example-run-2026-11-05-realmodel.json`
-- 机器可读记录：`docs/e2e-worked-example-run-2026-11-05-realmodel.json`
-- 并列保留的 stub 记录：`docs/e2e-worked-example-2026-11-05.md` / `docs/e2e-worked-example-run-2026-11-05.json`（未覆盖）
+- 运行脚本：`node scripts/run-worked-example.js --real-provider --out docs/archive/e2e-worked-example-run-2026-11-05-realmodel.json`
+- 机器可读记录：`docs/archive/e2e-worked-example-run-2026-11-05-realmodel.json`
+- 并列保留的 stub 记录：`docs/e2e-worked-example-2026-11-05.md` / `docs/archive/e2e-worked-example-run-2026-11-05.json`（未覆盖）
 - traceId：`trace_9b0c48ab-f21f-46db-b9f6-b72763691210`
 - 运行时间：`2026-11-05T16:05:32.215Z` 起，`2026-11-05T16:06:15.876Z` 止，总耗时 **43,661 ms**
 
@@ -59,12 +59,12 @@
 可核实作废 Token 合计：**17,870**（不含第 1 轮未采集部分）；另有 Reviewer/Worker 在失败轮中未回传 usage 的消耗未计入。
 
 失败轮记录文件：
-- `docs/e2e-worked-example-run-2026-11-05-realmodel-round1-failed.json`
-- `docs/e2e-worked-example-run-2026-11-05-realmodel-round2-failed.json`
-- `docs/e2e-worked-example-run-2026-11-05-realmodel-round3-failed.json`
-- `docs/e2e-worked-example-run-2026-11-05-realmodel-round4-failed.json`（九步记录，并行断言退出）
-- `docs/e2e-worked-example-run-2026-11-05-realmodel-round5-failed.json`
-- `docs/e2e-worked-example-run-2026-11-05-realmodel-round6-wasted-metrics.json`（九步记录，Worker B 延迟未取到）
+- `docs/archive/e2e-worked-example-run-2026-11-05-realmodel-round1-failed.json`
+- `docs/archive/e2e-worked-example-run-2026-11-05-realmodel-round2-failed.json`
+- `docs/archive/e2e-worked-example-run-2026-11-05-realmodel-round3-failed.json`
+- `docs/archive/e2e-worked-example-run-2026-11-05-realmodel-round4-failed.json`（九步记录，并行断言退出）
+- `docs/archive/e2e-worked-example-run-2026-11-05-realmodel-round5-failed.json`
+- `docs/archive/e2e-worked-example-run-2026-11-05-realmodel-round6-wasted-metrics.json`（九步记录，Worker B 延迟未取到）
 
 ## 脚本改动（保持默认 stub 行为不变）
 
@@ -76,7 +76,7 @@
 
 ## 可复核方式
 
-1. 打开 `docs/e2e-worked-example-run-2026-11-05-realmodel.json`，按 `steps[0..8]` 核对输入/输出摘要、trace 与事件 id。
+1. 打开 `docs/archive/e2e-worked-example-run-2026-11-05-realmodel.json`，按 `steps[0..8]` 核对输入/输出摘要、trace 与事件 id。
 2. 复跑（需本机 `server/.env` 中有 LongCat 凭据；跑完删除）：
    `node scripts/run-worked-example.js --real-provider --out <临时路径>`
 3. 默认 stub 回归：

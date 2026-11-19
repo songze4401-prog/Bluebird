@@ -49,7 +49,8 @@ const artifactStore = require('../server/agents/artifact-store');
 const artifactCommit = require('../server/agents/artifact-commit');
 const runtime = require('../server/agents/runtime');
 
-const OUTPUT = argOf('--out') || 'docs/e2e-taint-propagation-2026-11-05.json';
+// 运行记录统一落 docs/archive/（2026-11-19 归档轮：docs 顶层不再堆运行 JSON）
+const OUTPUT = argOf('--out') || 'docs/archive/e2e-taint-propagation-2026-11-05.json';
 
 function nowIso() {
   return new Date().toISOString();

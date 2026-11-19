@@ -8,7 +8,7 @@ import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SheetScaffold } from './SheetScaffold';
 import { useUi } from '../app/ui-state';
 import { V7_SHADOWS, type V7Tokens } from '../app/ui-theme';
-import type { VizKind } from '../data/mock';
+import type { VizKind } from '../data/ui-contract';
 
 // 面板类型三选一（与原型 select 的三个 option 一一对应）
 const VIZ_TYPES: { k: VizKind; label: string }[] = [

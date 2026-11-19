@@ -369,6 +369,22 @@ const TARGETS = [
     build: ctx =>
       `# 回归兜底：覆盖率脚本单次执行后端 ${ctx.files} 个测试文件（${ctx.backendTotal} 项）+ 前端 ${ctx.frontend.suites} 套单元测试（${ctx.frontend.tests} 项）`,
   },
+  {
+    // ARCHITECTURE.md 曾长期漂移（2026-11-19 健康度审计实锤：119/2420、22套/190
+    // 停在 2026-11-08 快照）——纳入锚点体系后随基线自动再生。
+    file: 'ARCHITECTURE.md',
+    id: 'architecture-backend-totals',
+    find: /- \*\*后端测试\*\* — \d+ 文件 \/ \d+ 项；真实 HTTP \+ stub（通过）/,
+    build: ctx =>
+      `- **后端测试** — ${ctx.files} 文件 / ${ctx.backendTotal} 项；真实 HTTP + stub（通过）`,
+  },
+  {
+    file: 'ARCHITECTURE.md',
+    id: 'architecture-frontend-totals',
+    find: /- \*\*前端测试\*\* — \d+ 套 \/ \d+ 项；apiFetch mock（通过 \/ 无 App E2E）/,
+    build: ctx =>
+      `- **前端测试** — ${ctx.frontend.suites} 套 / ${ctx.frontend.tests} 项；apiFetch mock（通过 / 无 App E2E）`,
+  },
 ];
 
 function applyTargets(text, targets, ctx) {

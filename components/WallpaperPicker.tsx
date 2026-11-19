@@ -15,7 +15,7 @@ import {
 
 import { useUi } from '../app/ui-state';
 import { V7_SHADOWS, type V7Tokens } from '../app/ui-theme';
-import type { WallpaperId } from '../data/mock';
+import type { WallpaperId } from '../data/ui-contract';
 
 // 缩略图里的半透明圆层（与 WallpaperLayer 的 deep/light 色值一致，位置按 92x44 近似）
 type ThumbCircle = {

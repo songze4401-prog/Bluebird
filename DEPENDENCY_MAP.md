@@ -3,6 +3,8 @@
 > 基线：`a3569e340945baa9d9aa5e50357b1f8f08e098b7`  
 > 静态解析范围：`server/**/*.js` 与 `App.tsx/hooks/lib/components` 的相对 require/import；动态 require 单独标注。
 
+> ⚠ **快照文档（2026-11-19 健康度审计定级）**：本文件只反映基线提交时点的结构（77 文件 / 226 边），**不随主干更新**——数字早已过时（当前 142 模块）。现行权威计数以 `scripts/test-coverage-baseline.json` + AGENTS.md 为准；需要新鲜依赖图时用当时的静态解析脚本现跑，不要引用本文数字。
+
 ## 1. 依赖规模
 
 - 后端：77 个文件，226 条相对依赖边。

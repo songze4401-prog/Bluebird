@@ -1,6 +1,6 @@
 # Bluebird 系统架构现状
 
-> 基线：`main` @ `0a61e9f`（2026-11-08，PR #72 合并提交）  
+> 基线：`main`（滚动更新——测试计数已并入 sync-doc-counts 锚点体系，随基线自动再生；本文件初稿基于 0a61e9f / 2026-11-08，PR #72 合并提交）  
 > 本文件只描述当前实际实现；未实现的边界显式标注。
 
 ## 1. 系统上下文
@@ -47,8 +47,8 @@ flowchart LR
     - **持久化** — sessions/memory/tasks/events/outbox/index（原子写；保留策略已实现：会话 200 / 消息 1000 / 分页 200）
     - **监控** — trace、metrics、alerts、health（已验证 / 只读）
   - **工程保障** — 测试、CI、覆盖率、文档（通过；计数对齐 scripts/test-coverage-baseline.json 单一基线）
-    - **后端测试** — 119 文件 / 2420 项；真实 HTTP + stub（通过）
-    - **前端测试** — 22 套 / 190 项；apiFetch mock（通过 / 无 App E2E）
+    - **后端测试** — 128 文件 / 2552 项；真实 HTTP + stub（通过）
+    - **前端测试** — 18 套 / 141 项；apiFetch mock（通过 / 无 App E2E）
     - **CI** — GitHub Actions；push 仅 main、PR 指向 main，覆盖率脚本单次执行（通过）
     - **文档** — AGENTS/docs/README 计数同源（scripts/sync-doc-counts.js 单一基线，CI --check 兜底）
 

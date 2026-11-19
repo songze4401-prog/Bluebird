@@ -5,8 +5,8 @@
 > 凭据仅在运行期间从 `server/.env`（`.gitignore` 覆盖）读取，运行结束即删除；本记录不含凭据明文或片段。
 > 本记录只写实跑命中/未命中，不使用「应该会传播」这类推断。
 
-- 运行脚本：`node scripts/run-taint-propagation-realmodel.js --out docs/e2e-taint-propagation-2026-11-05.json`
-- 机器可读记录：`docs/e2e-taint-propagation-2026-11-05.json`
+- 运行脚本：`node scripts/run-taint-propagation-realmodel.js --out docs/archive/e2e-taint-propagation-2026-11-05.json`
+- 机器可读记录：`docs/archive/e2e-taint-propagation-2026-11-05.json`
 - 运行时间：`2026-11-05T16:09:21.402Z` 起，`2026-11-05T16:09:59.732Z` 止，整轮 **38,330 ms**
 - 结果：`outcome=passed`，五项检查全部命中
 
@@ -59,7 +59,7 @@
 
 ## 可复核方式
 
-1. 打开 `docs/e2e-taint-propagation-2026-11-05.json`，按 `checks.*` 核对 `beforeRead/afterRead`、taint 数组、审计条目、`tool.denied` 事件。
+1. 打开 `docs/archive/e2e-taint-propagation-2026-11-05.json`，按 `checks.*` 核对 `beforeRead/afterRead`、taint 数组、审计条目、`tool.denied` 事件。
 2. 复跑（需本机 `server/.env` 中有 LongCat 凭据；跑完删除）：
    `node scripts/run-taint-propagation-realmodel.js --out <临时路径>`
 3. 不依赖模型的既有回归：

@@ -11,7 +11,7 @@ import { useUi } from '../app/ui-state';
 import { apiFetch } from '../lib/api/client';
 import { API_PATHS } from '../lib/api/endpoints';
 import type { V7Tokens } from '../app/ui-theme';
-import type { DoneTask, RunningTask, StageMark } from '../data/mock';
+import type { DoneTask, RunningTask, StageMark } from '../data/ui-contract';
 
 // 阶段标记 / 配色 token / 状态词（原型 smark/scol/slabel）
 const STAGE_MARK: Record<StageMark, string> = { done: '✓', active: '●', wait: '○', fail: '✕' };

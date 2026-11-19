@@ -32,7 +32,7 @@ import { API_PATHS } from '../lib/api/endpoints';
 import { formatMessageTime } from '../lib/utils';
 import type { AgentTask, AgentTasksResponse } from '../lib/api/types';
 import type { SessionMeta } from '../lib/types';
-import type { VizKind } from '../data/mock';
+import type { VizKind } from '../data/ui-contract';
 
 // 真实任务状态语义（与旧壳 TasksPanel 同源）：进行中 = 非终态；终态进「已完成」段。
 // 注意 recovery（待核对）在服务端是正式终态（status-vocabulary.js S5）——

@@ -1,7 +1,7 @@
 // 蓝鸟 UI 移植 · 弹簧抽屉「默认模型」（原型 #mSheet）
 // 抽屉壳由 SheetScaffold 的 draggable 承担（半屏吸附 / 快速下滑关闭）；
 // 本组件只负责模型行列表：真实服务商/模型来自 useModelSelection（/model-providers），
-// 不再读 data/mock 的 MODELS。选择动作由父级注入（PUT /model-providers/default）。
+// 不再读状态契约文件（data/ui-contract）的 MODELS。选择动作由父级注入（PUT /model-providers/default）。
 
 import React, { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';

@@ -46,7 +46,7 @@ import {
   type VizKind,
   type ViewId,
   type WallpaperId,
-} from '../data/mock';
+} from '../data/ui-contract';
 
 import { getTokens, V7_SHADOWS, type V7Tokens } from './ui-theme';
 
