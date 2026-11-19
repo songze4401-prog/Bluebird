@@ -21,6 +21,26 @@
       "file": "server/monitoring/routes.js",
       "mount": "/monitoring",
       "mountExpr": "app.use('/monitoring'"
+    },
+    {
+      "file": "server/routes/sessions.js",
+      "mount": "",
+      "mountExpr": "app.use(createSessionsRouter"
+    },
+    {
+      "file": "server/routes/uploads.js",
+      "mount": "",
+      "mountExpr": "app.use(createUploadsRouter"
+    },
+    {
+      "file": "server/routes/model-providers.js",
+      "mount": "",
+      "mountExpr": "app.use(createModelProvidersRouter"
+    },
+    {
+      "file": "server/routes/memory.js",
+      "mount": "",
+      "mountExpr": "app.use(createMemoryRouter"
     }
   ],
   "families": [
