@@ -41,6 +41,11 @@
       "file": "server/routes/memory.js",
       "mount": "",
       "mountExpr": "app.use(createMemoryRouter"
+    },
+    {
+      "file": "server/routes/skills.js",
+      "mount": "/skills",
+      "mountExpr": "app.use('/skills', createSkillsRouter({ requireAuth }))"
     }
   ],
   "families": [
@@ -502,6 +507,31 @@
             "hooks/useChatSession.ts"
           ],
           "note": "取消并删除 pending 记录；监控记 cancelled。"
+        }
+      ]
+    },
+    {
+      "id": "skills",
+      "title": "技能",
+      "prefix": "/skills",
+      "capabilities": [
+        {
+          "name": "GET /skills 技能清单与启用状态",
+          "probe": "API_PATHS.skillsList",
+          "ui": true,
+          "consumers": [
+            "components/SkillsSheet.tsx"
+          ],
+          "note": "设置页技能面板数据源；技能来自 skills/<slug>/SKILL.md 扫描。"
+        },
+        {
+          "name": "PUT /skills 切换技能启用状态",
+          "probe": "API_PATHS.skillsUpdate",
+          "ui": true,
+          "consumers": [
+            "components/SkillsSheet.tsx"
+          ],
+          "note": "写 persona.enabledSkills（走 saveConfig 全量校验），重启后仍生效。"
         }
       ]
     }

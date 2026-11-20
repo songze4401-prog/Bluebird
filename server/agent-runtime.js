@@ -255,6 +255,13 @@ if (workspaceTools.isEnabled()) {
   registerTool(workspaceTools.workspaceWriteDefinition);
 }
 
+// 任务书 2026-11-21：技能系统。BLUEBIRD_SKILLS=1 才注册 load_skill（只读）；
+// 系统提示词的技能清单块由 index.js 用同一 flag 控制；仍受 BLUEBIRD_AGENT_TOOLS 总开关约束。
+const skillsTool = require('./tool-skill');
+if (skillsTool.isEnabled()) {
+  registerTool(skillsTool.loadSkillDefinition);
+}
+
 // ---- 工具执行 ----
 
 class ToolTimeoutError extends Error {}

@@ -142,6 +142,9 @@ export const API_PATHS = {
     `/workspace/pending/${encodeURIComponent(id)}/confirm`,
   workspacePendingReject: (id: string) =>
     `/workspace/pending/${encodeURIComponent(id)}/reject`,
+  // 任务书 2026-11-21：技能系统（设置页技能面板）
+  skillsList: '/skills',
+  skillsUpdate: '/skills',
 } as const;
 
 function monitoringQuery(

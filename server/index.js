@@ -14,6 +14,11 @@ const orchestrationChat = require('./orchestration-chat');
 const agentApprovals = require('./agents/approvals');
 const toolWorkspace = require('./tool-workspace');
 const workspacePending = require('./workspace-pending');
+const skillsLoader = require('./skills-loader');
+const { createSkillsRouter } = require('./routes/skills');
+// 启用状态经依赖注入进入 skills-loader（拆接口，SCC 冻结门禁 R1）：
+// 组装根持有 persona，技能层不回指配置层，避免闭出新循环圈。
+skillsLoader.setEnablementProvider(() => getPersonaConfig().enabledSkills || []);
 
 // 生产级可观测性：独立模块 + 只读查询 API。记录失败绝不影响主业务；
 // BLUEBIRD_MONITORING=0 可关闭，前端会显示 disabled 而不是健康。
@@ -141,6 +146,8 @@ app.use('/retrieval', createRetrievalRouter({ requireAuth }));
 app.use(createAgentRouter({ requireAuth, auditAction }));
 // 只读监控 API：复用现有 Bearer 鉴权与全局限流；没有任何写接口。
 app.use('/monitoring', createMonitoringRouter({ requireAuth }));
+// 技能：清单与启用开关（设置页技能面板用）；load_skill 工具由 BLUEBIRD_SKILLS 控制注册。
+app.use('/skills', createSkillsRouter({ requireAuth }));
 
 // 定期清理过期限流桶，防止内存无限增长
 setInterval(() => {
@@ -1001,6 +1008,12 @@ async function prepareChatRequest(req) {
   // 后端提示词由用户在控制面板编辑；空值回退内置默认。
   const activeSystemPrompt = personaConfig.systemPrompt || BLUEBIRD_SYSTEM_PROMPT;
 
+  // 技能清单（任务书 2026-11-21）：只注入已启用技能的 name+description（非全文，
+  // 正文由模型按需 load_skill）；BLUEBIRD_SKILLS 关或未启用任何技能时不加块，
+  // 行为与旧版完全一致。
+  const skillsContext =
+    process.env.BLUEBIRD_SKILLS === '1' ? skillsLoader.buildPromptList() : null;
+
   const baseSystemBlocks = [
     {
       id: 'core',
@@ -1025,6 +1038,9 @@ async function prepareChatRequest(req) {
       : []),
     ...(personaContext
       ? [{ id: 'persona', kind: 'persona', priority: 25, critical: false, text: personaContext }]
+      : []),
+    ...(skillsContext
+      ? [{ id: 'skills', kind: 'skills', priority: 30, critical: false, text: skillsContext }]
       : []),
     ...(visionInstructions.length
       ? [

@@ -6,10 +6,9 @@
 // 更换头像走公共 AvatarSheet。颜色走 tokens，唯一例外是倾斜卡面——
 // 原型刻意的浅暖白卡面（白卡上高光才可见），不随主题翻转。
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
 import {
   Animated,
-  Easing,
   Image,
   PanResponder,
   Pressable,
@@ -20,9 +19,11 @@ import {
 } from 'react-native';
 
 import { AvatarSheet } from '../components/AvatarSheet';
+import { KnobToggle } from '../components/KnobToggle';
 import { ModelManageSheet } from '../components/ModelManageSheet';
 import { MonitoringSheet } from '../components/MonitoringSheet';
 import { SheetScaffold } from '../components/SheetScaffold';
+import { SkillsSheet } from '../components/SkillsSheet';
 import { WallpaperPicker } from '../components/WallpaperPicker';
 import { ACCENT_LIST, APP_VERSION, type FontPref, type ThemePref } from '../data/ui-contract';
 
@@ -30,14 +31,8 @@ import { useUi } from './ui-state';
 import { V7_SHADOWS, type V7Tokens } from './ui-theme';
 
 // 主题分段不再需要扩散圆心（主题直接切换）
+// 注：knob 开关（原型 .tg）已抽到 components/KnobToggle.tsx 供设置与技能面板共用
 
-// 原型 --spring：knob 位移等共用的弹簧曲线
-const SPRING = Easing.bezier(0.3, 1.1, 0.45, 1);
-// 原型 tgStretch 回程的 cubic-bezier(.3,1.08,.5,1)
-const STRETCH_OUT_EASE = Easing.bezier(0.3, 1.08, 0.5, 1);
-// tgStretch 0.36s 在 38% 处到达顶点 1.18
-const STRETCH_IN_MS = 137;
-const STRETCH_OUT_MS = 223;
 // 3D 倾斜卡的最大倾角（原型 MAX=9）
 const TILT_MAX = 9;
 
@@ -167,79 +162,6 @@ function TiltUserCard(props: { onAvatarPress: () => void }) {
   );
 }
 
-// ---- 通知开关（原型 .tg 的 RN 移植）----
-// knob left 2↔14 260ms 弹簧位移；按下整条 scaleX 1→1.18→1 弹一下（原型 tgStretch）。
-function NotifyToggle(props: { on: boolean; onToggle: () => void }) {
-  const { tokens: t } = useUi();
-  // 动画值用 useState 惰性初始化持有（渲染期读 ref.current 被 react-hooks/refs 禁止）
-  const [knob] = useState(() => new Animated.Value(props.on ? 14 : 2));
-  const [stretch] = useState(() => new Animated.Value(1));
-
-  // on 翻转（本行按下或 store 侧 setNotify）→ knob 260ms 弹簧位移
-  useEffect(() => {
-    Animated.timing(knob, {
-      toValue: props.on ? 14 : 2,
-      duration: 260,
-      easing: SPRING,
-      useNativeDriver: false,
-    }).start();
-  }, [props.on, knob]);
-
-  const press = () => {
-    stretch.setValue(1);
-    Animated.sequence([
-      Animated.timing(stretch, {
-        toValue: 1.18,
-        duration: STRETCH_IN_MS,
-        easing: SPRING,
-        useNativeDriver: false,
-      }),
-      Animated.timing(stretch, {
-        toValue: 1,
-        duration: STRETCH_OUT_MS,
-        easing: STRETCH_OUT_EASE,
-        useNativeDriver: false,
-      }),
-    ]).start();
-    props.onToggle();
-  };
-
-  return (
-    <Pressable
-      onPress={press}
-      accessibilityRole="switch"
-      accessibilityState={{ checked: props.on }}
-      accessibilityLabel="通知"
-      style={toggleStyles.hit}
-      hitSlop={6}
-    >
-      <Animated.View
-        style={[
-          toggleStyles.track,
-          { backgroundColor: props.on ? t.up : t.soft },
-          { transform: [{ scaleX: stretch }] },
-        ]}
-      >
-        <Animated.View style={[toggleStyles.knob, { left: knob }]} />
-      </Animated.View>
-    </Pressable>
-  );
-}
-
-// 开关的尺寸样式（不随主题，颜色在组件里按 on 状态给）
-const toggleStyles = StyleSheet.create({
-  hit: { width: 30, height: 18, flexShrink: 0 },
-  track: { width: 30, height: 18, borderRadius: 9 },
-  knob: {
-    position: 'absolute',
-    top: 2,
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    backgroundColor: '#ffffff',
-  },
-});
-
 // ---- 设置行（原型 .setrow）----
 // 左标签 + 右值 + ›；通知行右侧放开关（right 位置）；危险行（退出登录）左字 down 色且无 ›；
 // 无 onPress 时渲染为纯展示行（通知行）。
@@ -340,6 +262,8 @@ export function SettingsScreen(props: {
   // R6 真数据弹层：系统监控 / 模型与 API
   const [monitoringOpen, setMonitoringOpen] = useState(false);
   const [modelManageOpen, setModelManageOpen] = useState(false);
+  // 任务书 2026-11-21：技能面板（GET/PUT /skills，开关写 persona.enabledSkills）
+  const [skillsOpen, setSkillsOpen] = useState(false);
   // 二级面板：kind 记最后一次打开的种类（关闭动画期间内容不闪空）
   const [subOpen, setSubOpen] = useState(false);
   const [sub, setSub] = useState<SubKind>('accounts');
@@ -373,9 +297,10 @@ export function SettingsScreen(props: {
             <SetRow label="切换账号" value={user.account} onPress={() => openSub('accounts')} />
             <SetRow label="系统监控" value="只读" onPress={() => setMonitoringOpen(true)} />
             <SetRow label="模型与 API" onPress={() => setModelManageOpen(true)} />
+            <SetRow label="技能" value="可开关" onPress={() => setSkillsOpen(true)} />
             <SetRow
               label="通知"
-              right={<NotifyToggle on={ui.notify} onToggle={() => setNotify(!ui.notify)} />}
+              right={<KnobToggle on={ui.notify} onToggle={() => setNotify(!ui.notify)} label="通知" />}
             />
           </View>
 
@@ -450,6 +375,11 @@ export function SettingsScreen(props: {
           props.onDefaultsChanged?.();
           toast('默认模型已同步');
         }}
+      />
+      {/* 技能（任务书 2026-11-21：GET/PUT /skills，开关写 persona.enabledSkills） */}
+      <SkillsSheet
+        visible={skillsOpen}
+        onClose={() => setSkillsOpen(false)}
       />
       {/* 二级面板（原型 #dSheet）：与主面板并存，后渲染者自然在上层 */}
       <SheetScaffold
