@@ -1,6 +1,6 @@
 # Orchestrator 大工程立项书（2026-11-13）
 
-> 依据：Notion《Bluebird Agent Worker Orchestrator & Workers》+ 现状映射（`docs/orchestrator-proposal-mapping-2026-11-13.md`）。
+> 依据：Notion《Bluebird Agent Worker Orchestrator & Workers》+ 现状映射（`docs/archive/orchestrator-proposal-mapping-2026-11-13.md`）。
 > 授权记录：Owner 2026-11-13 明确「开搂，除非重大决策，其余自行裁决，按推荐方案执行」；本文即推荐方案的固化。轮次执行期间 Owner 不逐轮审批，只在**重大决策**（真实模型钥匙用途指向、台账口径变更、偏离本文范围）时上报。
 > 基线：`main` = `a0082b0`；backend 2437 / nodeSuite 230 / runner 2207 / frontend 190 / 120 文件；台账 1=20 / 0.5=5（A-07、A-11、A-12、A-13、B-07）。
 

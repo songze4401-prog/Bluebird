@@ -6,7 +6,7 @@
 ## 相关文档（链位置）
 
 - 上游：[交接文档](handover-2026-11-03.md)（仓库基线与硬约束）、Notion 架构页 v1.0 §0–§9 / v1.1 §10–§22（审计对象，`verification: unverified`）。
-- 下游：[v1.3 裁决与待验证清单](v1.3-decisions-and-verification-checklist-2026-11-03.md)（缺口收口）、[ADR-0001](adr/0001-runtime-contract-decisions-2026-11-03.md)（§3.6/§4）、[产物与完成提交链审计](artifact-commit-chain-audit-2026-11-03.md)（转引 §4.4 五步口径）、[协议收敛方案](protocol-convergence-plan-2026-11-03.md)、[文档链总索引](doc-chain-index-2026-11-03.md)。
+- 下游：[v1.3 裁决与待验证清单](v1.3-decisions-and-verification-checklist-2026-11-03.md)（缺口收口）、[ADR-0001](../adr/0001-runtime-contract-decisions-2026-11-03.md)（§3.6/§4）、[产物与完成提交链审计](artifact-commit-chain-audit-2026-11-03.md)（转引 §4.4 五步口径）、[协议收敛方案](protocol-convergence-plan-2026-11-03.md)、[文档链总索引](doc-chain-index-2026-11-03.md)。
 - 本文件位置：Phase 0 的**前置调研 / 差距证据**，按 v1.0/v1.1 口径得出，不覆盖 v1.2/v1.3；文末有「勘误（后续查证 2026-11-03）」追加段，引用相关位置时请同时引该段。
 
 ---
@@ -461,7 +461,7 @@
 
 ## 勘误（后续查证 2026-11-03）
 
-> 本节为**追加段**，不重写 §0–§12 原文，不修改原结论的文字与日期。来源：`docs/artifact-commit-chain-audit-2026-11-03.md`（下称「产物链审计」）的只读查证 + 本次对 `server/agents/worker-result.js`、`server/agents/runtime.js`、`server/agents/tasks.js` 的定点复核。
+> 本节为**追加段**，不重写 §0–§12 原文，不修改原结论的文字与日期。来源：`docs/archive/artifact-commit-chain-audit-2026-11-03.md`（下称「产物链审计」）的只读查证 + 本次对 `server/agents/worker-result.js`、`server/agents/runtime.js`、`server/agents/tasks.js` 的定点复核。
 > **勘误 #6 及「勘误的勘误」另据一手原文核对（2026-11-03，来源 Notion 页面 `40da9575-23c2-8135-9607-e23f6a3c784f`，v1.1 §11）。**
 > 除下表明确标注「字面失效」的表述外，原文其余判断保持不变。
 
@@ -503,5 +503,5 @@
 2. 引用 `result.artifacts` 时写「对象数组，元素形状 `{ kind, id }`」。
 3. 引用 §11 五步时写「1–3 缺失；第 4 步部分实现；第 5 步完全缺失」（旧「4–5 部分实现」已由「勘误的勘误」更正），不再用「均未实现」。
 4. 讨论一致性风险时必须同时提「先内存后落盘 + catch 吞错 + 重启重跑」，并保留「重跑未实测」标注。
-5. 本勘误未修改原文任何一行；如需追溯，以本段与 `docs/artifact-commit-chain-audit-2026-11-03.md` 为准。
+5. 本勘误未修改原文任何一行；如需追溯，以本段与 `docs/archive/artifact-commit-chain-audit-2026-11-03.md` 为准。
 6. 引用 §11 时必须注明「一手原文：v1.1 §11，5 条并列」；不得再用旧转引的四段式映射。

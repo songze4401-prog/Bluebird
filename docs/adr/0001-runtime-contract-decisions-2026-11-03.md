@@ -9,8 +9,8 @@
 
 ## 相关文档（链位置）
 
-- 上游：[v1.3 裁决与待验证清单](../v1.3-decisions-and-verification-checklist-2026-11-03.md)（§31.1/§31.2/§32/§33/§36/§41/§42）、[Phase 0 基线审计](../phase0-baseline-audit-2026-11-03.md)（§3.6/§4）、Notion 架构页 v1.2/v1.1/v1.0（`verification: unverified`）。
-- 下游：[文档链总索引](../doc-chain-index-2026-11-03.md)；[协议收敛方案](../protocol-convergence-plan-2026-11-03.md)（Phase 1 前置 ① 的实施落点）。
+- 上游：[v1.3 裁决与待验证清单](../archive/v1.3-decisions-and-verification-checklist-2026-11-03.md)（§31.1/§31.2/§32/§33/§36/§41/§42）、[Phase 0 基线审计](../archive/phase0-baseline-audit-2026-11-03.md)（§3.6/§4）、Notion 架构页 v1.2/v1.1/v1.0（`verification: unverified`）。
+- 下游：[文档链总索引](../archive/doc-chain-index-2026-11-03.md)；[协议收敛方案](../archive/protocol-convergence-plan-2026-11-03.md)（Phase 1 前置 ① 的实施落点）。
 - 本文件位置：三条裁决的**决策记录**；D1 以 §2.1.2 为准，§2.1.1 初稿已 `Superseded`，只作追溯。
 
 ## 修订记录
@@ -36,9 +36,9 @@
 | `docs/agent-runtime-stage2.md` §2 | ADR-01 ~ ADR-04 | 阶段 2 局部决策 |
 | `docs/agent-runtime-stage3.md` §2 | ADR-01 ~ ADR-05 | 阶段 3 局部决策 |
 | `docs/agent-runtime-stage4.md` §2 | ADR-01 ~ ADR-05 | 阶段 4 局部决策 |
-| `docs/v1.3-decisions-and-verification-checklist-2026-11-03.md` | 无 ADR 编号；§31–§42 | 跨阶段裁决与待验证清单；**2026-11-03 已封版** |
+| `docs/archive/v1.3-decisions-and-verification-checklist-2026-11-03.md` | 无 ADR 编号；§31–§42 | 跨阶段裁决与待验证清单；**2026-11-03 已封版** |
 
-阶段 ADR 采用“每份阶段文档从 01 重新编号”的局部格式，没有全局编号，也没有统一目录。`docs/v1.3-decisions-and-verification-checklist-2026-11-03.md` 已经包含与本次三项裁决高度重叠的内容（§31 版本优先级、§32 R3 资源约束、§33 fail-open 策略表），但它不是 ADR 目录，也没有使用 ADR 编号；**该文已于 2026-11-03 封版，并在 §31.1 明确 `v1.3 > v1.2 > v1.1 > v1.0`**。
+阶段 ADR 采用“每份阶段文档从 01 重新编号”的局部格式，没有全局编号，也没有统一目录。`docs/archive/v1.3-decisions-and-verification-checklist-2026-11-03.md` 已经包含与本次三项裁决高度重叠的内容（§31 版本优先级、§32 R3 资源约束、§33 fail-open 策略表），但它不是 ADR 目录，也没有使用 ADR 编号；**该文已于 2026-11-03 封版，并在 §31.1 明确 `v1.3 > v1.2 > v1.1 > v1.0`**。
 
 因此按任务指定路径新建全局编号 `ADR-0001`，把本次三条裁决作为**独立、可引用的 ADR 记录**；不追加到阶段文档，也不修改既有 v1.3 封版文件。两者的关系见 0.2。
 
@@ -50,7 +50,7 @@
 ### 0.2 与 v1.3 封版清单的关系
 
 【记录者分析】
-- `docs/v1.3-decisions-and-verification-checklist-2026-11-03.md` 是已封版（2026-11-03）的决策文档，覆盖范围比本 ADR 更广（还包括 §34–§42 的验收矩阵、数值分类、来源裁决、Owner 等）。
+- `docs/archive/v1.3-decisions-and-verification-checklist-2026-11-03.md` 是已封版（2026-11-03）的决策文档，覆盖范围比本 ADR 更广（还包括 §34–§42 的验收矩阵、数值分类、来源裁决、Owner 等）。
 - 该文 §31.1 明确：版本优先级为 `v1.3 > v1.2 > v1.1 > v1.0`；高版本明确修订的，低版本对应表述失效但原文保留。
 - 用户 2026-11-03 后续裁决确认了该优先级；本 ADR 初稿的 `v1.2 > v1.1 > v1.0` 是当时的上限，现被高版本覆盖，状态为 **Superseded by** 本次修订；旧值保留在 2.1.1 供追溯。
 - 本 ADR 采纳 v1.3 的以下条款作为修订依据：§31.1（版本优先级）、§31.2（阈值治理与留痕）、§32（R3 审批与资源期限）、§33（fail-open 七字段与 fail-closed）、§36（A/B 类数值）、§37（来源优先级）、§38（orphan TTL）、§41（Owner）、§42（验收证据矩阵）。
@@ -63,7 +63,7 @@
 | 架构文档 | Notion page `40da9575-23c2-8135-9607-e23f6a3c784f` |
 | 页面标题 | 仍为「Bluebird Agent Runtime｜混合式多 Agent 目标架构 **v1.0**」 |
 | 实际内容 | §0–§9（v1.0）、§10–§22（v1.1）、§23–§30（v1.2 运行契约补充） |
-| v1.3 依据 | `docs/v1.3-decisions-and-verification-checklist-2026-11-03.md`，2026-11-03 已封版；§31–§42 |
+| v1.3 依据 | `docs/archive/v1.3-decisions-and-verification-checklist-2026-11-03.md`，2026-11-03 已封版；§31–§42 |
 | 读取时间 | 2026-11-03（本次任务执行时） |
 | 页面元数据 | `verification.state = unverified` |
 
@@ -74,7 +74,7 @@
 | 标注 | 含义 |
 | --- | --- |
 | 【用户裁决】 | 用户给出的正式裁决，语义不得改写 |
-| 【v1.3 封版依据】 | `docs/v1.3-decisions-and-verification-checklist-2026-11-03.md` 中标注为“条款正文（v1.3 生效）”的内容 |
+| 【v1.3 封版依据】 | `docs/archive/v1.3-decisions-and-verification-checklist-2026-11-03.md` 中标注为“条款正文（v1.3 生效）”的内容 |
 | 【文档依据】 | 架构文档 v1.2 / v1.1 / v1.0 的条款原文或直接推论 |
 | 【记录者分析】 | 记录者为解释背景、影响和落点所做的分析，不是用户裁决 |
 | 【推断】 | 记录者对实现位置、校验点等的推断，未经验证 |
@@ -106,7 +106,7 @@
 
 > **版本优先级**：**`v1.3 > v1.2 > v1.1 > v1.0`**。v1.3 高于 v1.2；2/2/3/30min 仍属**初始默认硬阈值**，Phase 0 可基于实测调整；**调整必须留版本记录，不能静默修改**。
 
-【v1.3 封版依据】依据 `docs/v1.3-decisions-and-verification-checklist-2026-11-03.md` §31.1（2026-11-03 封版）与用户 2026-11-03 后续裁决：`v1.3 > v1.2 > v1.1 > v1.0`；高版本明确修订的，低版本对应表述失效但原文保留。
+【v1.3 封版依据】依据 `docs/archive/v1.3-decisions-and-verification-checklist-2026-11-03.md` §31.1（2026-11-03 封版）与用户 2026-11-03 后续裁决：`v1.3 > v1.2 > v1.1 > v1.0`；高版本明确修订的，低版本对应表述失效但原文保留。
 
 > **旧值保留**：初稿 `v1.2 > v1.1 > v1.0` 不删除，保留在 2.1.1 与顶部修订记录表，用 **Superseded by** 标注；本次修订起以 `v1.3 > v1.2 > v1.1 > v1.0` 为准。
 
@@ -124,7 +124,7 @@
 
 【记录者分析】
 - 目标架构已经形成 v1.0（§0–§9）、v1.1（§10–§22）、v1.2（§23–§30）三层叠加。同一运行契约字段在不同版本中可能同时存在“原则性表述”和“可编码默认值”。
-- Phase 0 基线审计已经指出协议面重复（P1–P5）：事件、状态机、任务文件对“唯一事实来源”有不同声明；计划协议、状态词表、版本号、预算模型都存在多套口径（见 `docs/phase0-baseline-audit-2026-11-03.md` §3.6、§4）。
+- Phase 0 基线审计已经指出协议面重复（P1–P5）：事件、状态机、任务文件对“唯一事实来源”有不同声明；计划协议、状态词表、版本号、预算模型都存在多套口径（见 `docs/archive/phase0-baseline-audit-2026-11-03.md` §3.6、§4）。
 - 若不冻结版本优先级，评审时会出现“按最新编辑时间”“按代码默认值”“按旧版原则”三种解释；阈值也会散落在 `routing-config.js`、`tasks.js`、`runtime.js`、`approvals.js` 中且无变更记录。
 - v1.2 的 2/2/3/30min 是当前唯一一组可编码的默认硬阈值，但 Phase 0 尚未完成实测，不能把它们冒充为最终最优值。
 - v1.3 已于 2026-11-03 封版（§31–§42），§31.1 明确 `v1.3 > v1.2 > v1.1 > v1.0`，并规定“高版本明确修订的低版本表述失效但原文保留”“同章内后小节优先”“三条不可覆盖不变量”。初稿只记录到 v1.2 上限，属当时口径；后续用户裁决已确认 v1.3 优先，若不适配会出现“已封版的 v1.3 条款被 v1.2 旧口径压回”的倒挂。
@@ -502,7 +502,7 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | C1 | `server/agents/runtime.js` | 结果收口（L700-730） | `artifacts: []` 硬编码在 L713；Worker 结果没有可引用的产物；没有“产物先持久化再提交 completed”的协议 | D1、D2 | C | 只记录，不修改 |
 | C2 | `server/agents/worker-result.js` | `normalizeWorkerResult`（L57-85） | `artifacts` 只是字符串 ref 数组，无 `artifactId` / `version` / `trustLevel`；无 `usage`；`requiresApproval` 由 `requiresConfirmation` 派生 | D2、D3 | C + A | 只记录，不修改 |
-| C3 | 新增最小 Artifact Store（缺失） | 无对应文件/函数；建议路径 `server/agents/artifact-store.js`【推断】 | 全仓无 artifact store / artifact registry；审计 `docs/phase0-baseline-audit-2026-11-03.md` §3.4 判定 0/10 字段 | D1、D2 | C | 只记录，不修改 |
+| C3 | 新增最小 Artifact Store（缺失） | 无对应文件/函数；建议路径 `server/agents/artifact-store.js`【推断】 | 全仓无 artifact store / artifact registry；审计 `docs/archive/phase0-baseline-audit-2026-11-03.md` §3.4 判定 0/10 字段 | D1、D2 | C | 只记录，不修改 |
 
 ### 5.4 D｜审批 TTL
 
@@ -588,7 +588,7 @@
 
 | 项 | 结果 |
 | --- | --- |
-| 检查 ADR 目录 | 仓库无 `docs/adr/`；发现 `docs/agent-runtime-stage1.md` ~ `stage4.md` 内有阶段局部 ADR，另有 `docs/v1.3-decisions-and-verification-checklist-2026-11-03.md`（2026-11-03 已封版的跨阶段决策清单） |
+| 检查 ADR 目录 | 仓库无 `docs/adr/`；发现 `docs/agent-runtime-stage1.md` ~ `stage4.md` 内有阶段局部 ADR，另有 `docs/archive/v1.3-decisions-and-verification-checklist-2026-11-03.md`（2026-11-03 已封版的跨阶段决策清单） |
 | 新建目录 | `docs/adr/` 已创建 |
 | 新建本 ADR | `docs/adr/0001-runtime-contract-decisions-2026-11-03.md` |
 | 裁决落盘 | 三条裁决均按用户原话记录，Status 均为 `Accepted`，Date 为 2026-11-03 |
@@ -656,9 +656,9 @@
 
 | 文档 | 用途 |
 | --- | --- |
-| `docs/phase0-baseline-audit-2026-11-03.md` | Phase 0 基线审计、组件盘点、契约缺口、P1–P5 协议重复 |
-| `docs/handover-2026-11-03.md` | 仓库基线、硬约束、模块地图、测试纪律 |
-| `docs/v1.3-decisions-and-verification-checklist-2026-11-03.md` | **2026-11-03 已封版**；§31–§42，本 ADR 的修订依据（§31.1 版本优先级、§31.2 留痕、§32 R3、§33 fail-open、§36 A/B 类、§37 来源、§38 orphan、§41 Owner、§42 验收矩阵） |
+| `docs/archive/phase0-baseline-audit-2026-11-03.md` | Phase 0 基线审计、组件盘点、契约缺口、P1–P5 协议重复 |
+| `docs/archive/handover-2026-11-03.md` | 仓库基线、硬约束、模块地图、测试纪律 |
+| `docs/archive/v1.3-decisions-and-verification-checklist-2026-11-03.md` | **2026-11-03 已封版**；§31–§42，本 ADR 的修订依据（§31.1 版本优先级、§31.2 留痕、§32 R3、§33 fail-open、§36 A/B 类、§37 来源、§38 orphan、§41 Owner、§42 验收矩阵） |
 | Notion `40da9575-23c2-8135-9607-e23f6a3c784f` | 架构 v1.0/v1.1/v1.2 条款：§13、§15、§16、§18、§22、§23、§24.2、§25、§29、§30；页面元数据 `unverified`，v1.3 以仓库封版清单为准 |
 | `server/agents/state-machine.js` | 状态集合与合法迁移现状 |
 | `server/agents/tasks.js` | Task 创建、预算、deadline、updateTask、setRetry |

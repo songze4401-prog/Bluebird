@@ -11,11 +11,13 @@
  *   ③ 第二个复杂样本（带依赖的两步）。
  *
  * 采集口径（立项书：只留档不设门槛）：计划块产出率、编译通过率、编排终态、
- * 逐节点 usage/latency、根结果摘要。运行记录落 JSON（--out 只接受 docs/ 目录
- * 内的白名单文件名），失败也留记录（不用桩数据补位）。
+ * 逐节点 usage/latency、根结果摘要。运行记录落 JSON（--out 只接受 docs/ 或
+ * docs/archive/ 内的白名单文件名），失败也留记录（不用桩数据补位）。
  *
  * 用法：
- *   DEEPSEEK_API_KEY=<key> node scripts/run-orchestration-acceptance.js --out docs/orchestration-acceptance-<date>.json
+ *   DEEPSEEK_API_KEY=<key> node scripts/run-orchestration-acceptance.js --out docs/archive/orchestration-acceptance-<date>.json
+ * 历史记录走 docs/archive/（2026-11-21 收尾：C-05 复跑不再回堆 docs 顶层，
+ * 与 #113 的归档口径一致）；docs/<name>.json 仍接受，兼容旧命令行。
  * 钥匙严禁写入任何文件；本脚本只从 process.env.DEEPSEEK_API_KEY 读取。
  */
 const fs = require('fs');
@@ -26,6 +28,36 @@ const crypto = require('crypto');
 function argOf(flag) {
   const index = process.argv.indexOf(flag);
   return index >= 0 ? process.argv[index + 1] : null;
+}
+
+// --out 目标解析（收尾条 4）：只认白名单文件名，目录只认 docs/ 与 docs/archive/。
+// 接受 docs/<name>、docs/archive/<name>、<name>、archive/<name> 四种写法；
+// 其余一律拒绝，不做「未知子目录就放行」的兜底（路径穿越/乱堆顶层都靠这一条挡住）。
+function resolveOutPath(out, docsRoot, archiveRoot = path.join(docsRoot, 'archive')) {
+  const raw = String(out || '').trim().replace(/\\/g, '/');
+  const base = path.basename(raw);
+
+  if (!/^orchestration-acceptance-[A-Za-z0-9._-]+\.json$/.test(base)) {
+    throw new Error(
+      '--out 必须是 docs/ 或 docs/archive/ 下的 orchestration-acceptance-*.json 文件名'
+    );
+  }
+
+  const rel = raw.replace(/^\.\//, '');
+  let dir;
+
+  if (rel === base || rel === `docs/${base}`) dir = docsRoot;
+  else if (rel === `archive/${base}` || rel === `docs/archive/${base}`) dir = archiveRoot;
+  else throw new Error(`--out 目标越界：${raw}`);
+
+  const target = path.join(dir, base);
+  const root = path.resolve(dir);
+
+  if (path.dirname(target) !== root) {
+    throw new Error(`--out 目标越界：${raw}`);
+  }
+
+  return target;
 }
 
 const DATA_DIR = argOf('--data-dir') || fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-c05-'));
@@ -316,17 +348,10 @@ async function main() {
   const out = argOf('--out');
   const text = JSON.stringify(record, null, 2);
   if (out) {
-    // 安全口径：只接受 docs/ 目录内的白名单文件名（basename），拒绝路径穿越。
     const docsRoot = path.resolve(__dirname, '..', 'docs');
-    const base = path.basename(String(out));
-    if (!/^orchestration-acceptance-[A-Za-z0-9._-]+\.json$/.test(base)) {
-      throw new Error('--out 必须是 docs/ 下的 orchestration-acceptance-*.json 文件名');
-    }
-    const target = path.join(docsRoot, base);
-    if (!target.startsWith(docsRoot + path.sep)) {
-      throw new Error('--out 目标越界');
-    }
-    fs.mkdirSync(docsRoot, { recursive: true });
+    const archiveRoot = path.join(docsRoot, 'archive');
+    const target = resolveOutPath(out, docsRoot, archiveRoot);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, text, 'utf8');
     console.log(`[c05] wrote ${target}`);
   } else {
@@ -354,4 +379,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { main };
+module.exports = { main, resolveOutPath };

@@ -426,22 +426,33 @@ describe('Notion §13.1 写入质量：证据驱动的晋升语义', () => {
     );
   });
 
-  test('hedged 跨会话重复仍保持待确认（重复不改判，但贡献要留痕）', () => {
+  test('hedged 跨会话重复并成一条 pending：贡献留痕、不重复成条、不被撬开晋升', () => {
     const row = probe('hedgedRepeatProbe');
     assert.ok(row, 'hedged 跨会话探针行缺失');
-    assert.equal(row.finalStatus, 'pending');
-    assert.ok(
-      row.repeatSessions >= 1,
-      '跨会话重复后一条贡献都没留下：证据累积链断了'
+    assert.equal(row.finalStatus, 'pending', 'hedged 跨会话重复被撬开晋升了');
+    assert.equal(
+      row.repeatSessions,
+      2,
+      '跨会话重复没有并进同一条 pending（repeatSessions=' +
+        `${row.repeatSessions}）：写侧 userId 丢了或 findPendingCandidateForPromotion 的 ` +
+        'hedged 匹配又断了'
+    );
+    assert.equal(
+      row.matchingEntries,
+      1,
+      `同一 hedged 候选留下 ${row.matchingEntries} 条落盘条目：存量会越积越多（收尾条 2 的清理对象）`
     );
     assert.ok(
       row.calls.every(item => item.reason === 'user_hedged_requires_confirmation'),
       '跨会话重复中有一次调用偏离了 hedged 短码'
     );
-    // 已知缺口（2026-11-19 实证）：跨会话的同一 hedged 候选目前不合并，
-    // 各会话自成 pending 条目（repeatSessions=1）；设计与实现矛盾
-    // （findPendingCandidateForPromotion 的 eligibleReason 包含 hedged），
-    // 修复需翻转 memory-evidence-policy 钉死的两条 pending 断言，待 Owner 拍板。
+    // 观测位翻 true 设闸（2026-11-21 收尾条 3）：drive 带可信 userId 后，
+    // 这条判据从「仅报告」变成硬闸门——回归成各自成条或误晋升都会红。
+    assert.equal(
+      p5().hedgedRepeatStillPending,
+      true,
+      'hedged 跨会话重复的并条闸门没亮：要么又各自成条，要么落盘状态不是 pending'
+    );
   });
 
   test('临时状态不覆盖稳定偏好（冲突防护满召回，且走临时状态拒写路径）', () => {

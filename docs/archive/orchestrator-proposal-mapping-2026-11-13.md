@@ -1,7 +1,7 @@
 # Orchestrator 提案现状映射（2026-11-13）
 
 > 输入：Notion《Bluebird Agent Worker Orchestrator & Workers》（2026-11-13 版）。
-> 本文只做一件事：把提案的每条主张对照仓库事实（`main` = `a0082b0`），标出「成立 / 有出入 / 缺口」，供立项书（`docs/orchestrator-charter-2026-11-13.md`）拆轮次使用。
+> 本文只做一件事：把提案的每条主张对照仓库事实（`main` = `a0082b0`），标出「成立 / 有出入 / 缺口」，供立项书（`docs/archive/orchestrator-charter-2026-11-13.md`）拆轮次使用。
 > 取证方式：三路只读调研（聊天入口 / 编排底座 / 测试与验收面）+ 直接运行 `scripts/scan-notion-ledger.js --check`。行号以 `a0082b0` 为准，会漂移，动手前重新 grep。
 
 ## 1. 提案主张 × 仓库事实

@@ -1,7 +1,7 @@
 # 一期（Pre-1）协议收敛实施记录（2026-11-03）
 
 分支：`phase1/protocol-convergence-2026-11-03`（未合并、未开 PR）。
-方案与决策见 `docs/protocol-convergence-plan-2026-11-03.md`；本文件只记结果，不重复方案正文。
+方案与决策见 `docs/archive/protocol-convergence-plan-2026-11-03.md`；本文件只记结果，不重复方案正文。
 
 ## 提交与结论
 

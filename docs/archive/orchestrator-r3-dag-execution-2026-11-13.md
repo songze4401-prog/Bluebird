@@ -1,6 +1,6 @@
 # Orchestrator 轮 3：编排执行引擎（2026-11-13）
 
-> 依据：`docs/orchestrator-charter-2026-11-13.md` 轮 3。代码基准：`main` = PR #77 合并后。
+> 依据：`docs/archive/orchestrator-charter-2026-11-13.md` 轮 3。代码基准：`main` = PR #77 合并后。
 
 ## 1. 实现
 

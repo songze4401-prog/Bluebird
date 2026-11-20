@@ -1,6 +1,6 @@
 # Bluebird 交接文档 v2（2026-11-07 收口：Phase 5 C–G 完成）
 
-> 用途：替代 2026-11-03 版交接文档（基线 `192be27`）；读完这一份即可独立开工、独立验收。旧版 `docs/handover-2026-11-07.md` 只存在于未合并的 `docs/handover-2026-11-07` 分支，不在 main，本文不依赖它。
+> 用途：替代 2026-11-03 版交接文档（基线 `192be27`）；读完这一份即可独立开工、独立验收。旧版 `docs/archive/handover-2026-11-07.md` 只存在于未合并的 `docs/handover-2026-11-07` 分支，不在 main，本文不依赖它。
 > 口径：只写有**命令或文件证据**的事实；「未验证」显式标注。本文取证于 2026-11-07，`main` = `0afcf08`（PR #69 合并提交）。
 
 ## 0. 当前基线（一分钟看懂）
@@ -15,7 +15,7 @@
 | 前端测试 | 22 套 / 188 例（未变） | 同上 `frontend` |
 | Agent Runtime 模块 | `server/agents/` 59 个 `.js`（较上一份交接 +3：`fencing`、`risk-policy`、`improvement-loop`） | `ls server/agents/*.js | wc -l` |
 | 台账 | **1 = 20 / 0.5 = 5 / 0 = 0**（第九次勘误；0.5 = A-07、A-11、A-12、A-13、B-07） | `node scripts/scan-notion-ledger.js --check` |
-| Phase 5 | **A/B/C1/D/E/F/G 全部完成并合并**；未做：P5-C 第 2 轮（A-13 出口） | `docs/phase5-charter-2026-11-06.md` |
+| Phase 5 | **A/B/C1/D/E/F/G 全部完成并合并**；未做：P5-C 第 2 轮（A-13 出口） | `docs/archive/phase5-charter-2026-11-06.md` |
 | CI | 最近一次代码合并（`0afcf08`）的 main CI run `42374840652` = **success**；本文合并后会再产生一次文档 CI | `gh run list --branch main` |
 
 **一句话现状**：M1 早已达成；M2（七包清零）只差 P5-C 第 2 轮；剩余 0.5 全部挂在「真实模型额度 / 压测数据 / Owner 产物」三类外部条件上，没有一个是「写代码能解决」的。
@@ -24,7 +24,7 @@
 
 1. `git log --oneline -1` 确认 main ≥ `0afcf08`；`gh pr list --state open` 应为空。
 2. 按 §1 跑七项检查；数字对不上先查原因（常见：`.env` 打开了 `BLUEBIRD_AGENT_TOOLS`、依赖没装、基线被手改）。
-3. 读三份：本文 §2–§5 → `docs/notion-delivery-ledger-2026-11-04.md`（§17 缺口表与九次勘误）→ `docs/phase5-charter-2026-11-06.md`。
+3. 读三份：本文 §2–§5 → `docs/notion-delivery-ledger-2026-11-04.md`（§17 缺口表与九次勘误）→ `docs/archive/phase5-charter-2026-11-06.md`。
 4. 从 §6 的下一步开始；**不要重做已合并的 P5-A…P5-G**。
 
 **权限边界**（沿用不变）：推送 / 开 PR / 合并 / 删分支都要明确指令；合并必须 `--merge` 不 squash；合并后在 main 重跑门禁再做台账判据；台账数字只能由 `scripts/scan-notion-ledger.js` 产出；交付前过交付闸门（本环境若无该技能，以「已验证/未验证 + 命令级证据」如实替代并说明）。
@@ -50,7 +50,7 @@ node scripts/scan-notion-ledger.js --check   # 1=20 / 0.5=5 / 0=0，行状态与
 | 审批责任队列（P5-F） | `approvals.js` `approval-assignee-v1`（轮值游标/升级重派）+ `approval-workload-v2`（p50/p95 等待、SLA 达成率只对 R2 计、24h 吞吐、`byAssignee`） | v1/v2 | 批量/申诉/取消/提醒语义零回退 |
 | 自我改进闭环（P5-G） | `improvement-loop.js`（`improvement-loop-v1`/`auto-rollback-v1`）+ HTTP `/agent-improvements`（8 条路由，能力登记 `agent-improvements`）+ runtime 启动链周期调度器 | v1 | 六类提案之外不可创建；禁止自改清单**逐段归一+词边界前缀+别名**（`permission`/`permissions.v2`/`server/…/permissions.js` 全命中）；批准仅 local-owner；回滚缺省**重跑评测**对照发布前基线（`reportSource: fresh_evaluation`）；灰度分桶确定性哈希 |
 
-评审修正记录（P5-G，同轮）：无生产入口 / 回归检查缺省自比 / 清单精确匹配三缺陷已修，见 `docs/phase5g-improvement-loop-2026-11-07.md` §5。
+评审修正记录（P5-G，同轮）：无生产入口 / 回归检查缺省自比 / 清单精确匹配三缺陷已修，见 `docs/archive/phase5g-improvement-loop-2026-11-07.md` §5。
 
 ## 3. 关键不变量（前 9 条为既有约束，本文自包含列出；10–14 为 2026-11-07 新增）
 

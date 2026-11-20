@@ -1,6 +1,6 @@
 # Orchestrator 轮 2：计划编译器 plan-compiler-v1（2026-11-13）
 
-> 依据：`docs/orchestrator-charter-2026-11-13.md` 轮 2。代码基准：`main` = `2a22e1a`（PR #76 + 台账第十次勘误后）。
+> 依据：`docs/archive/orchestrator-charter-2026-11-13.md` 轮 2。代码基准：`main` = `2a22e1a`（PR #76 + 台账第十次勘误后）。
 
 ## 1. 实现
 

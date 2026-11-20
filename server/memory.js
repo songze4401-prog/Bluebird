@@ -2595,6 +2595,216 @@ async function mergeMemories({
   });
 }
 
+// ---------------------------------------------------------------- 存量 pending 收敛
+//
+// 2026-11-21 收尾条 2：合并语义只对新写入生效。旧库里同一 hedged/推断候选
+// 可能已经按会话各存一条（当时写作用域还是会话级、且「可能：」前缀破坏过
+// 相似度匹配），这些副本不会被后续写入顺手收掉——本函数按与写入路径同一套
+// 匹配规则把它们并回一条。
+//
+// 分组键：userId + type + provenance + pendingReason（同因同源才可能是同一条），
+// 相似度用 PENDING_CANDIDATE_MATCH_MIN，比较前双侧剥掉「可能：」前缀。
+// 收敛只做三件事：贡献并进 keeper、重复条目退场、留 consolidatedFrom 审计链；
+// 状态一律留在 pending —— hedged 证据再多也不自动晋升，这是既有策略。
+const PENDING_CONSOLIDATE_REASONS = new Set([
+  'user_hedged_requires_confirmation',
+  'low_confidence_candidate',
+  'model_inference_requires_confirmation',
+]);
+
+function planPendingConsolidation(current, options = {}) {
+  const owner = cleanText(options.userId);
+  const candidates = (Array.isArray(current) ? current : []).filter(
+    item =>
+      item &&
+      isPending(item) &&
+      PENDING_CONSOLIDATE_REASONS.has(item.pendingReason) &&
+      (!owner || cleanText(item.userId) === owner)
+  );
+
+  const consumed = new Set();
+  const groups = [];
+
+  for (const seed of candidates) {
+    if (consumed.has(seed.id)) continue;
+
+    const bucket = [seed];
+    const seedContent = stripHedgePendingMark(seed.content);
+
+    for (const other of candidates) {
+      if (other === seed || consumed.has(other.id)) continue;
+      if (other.type !== seed.type) continue;
+      if (other.provenance !== seed.provenance) continue;
+      if (other.pendingReason !== seed.pendingReason) continue;
+      if (cleanText(other.userId) !== cleanText(seed.userId)) continue;
+      if (
+        similarity(stripHedgePendingMark(other.content), seedContent) <
+        PENDING_CANDIDATE_MATCH_MIN
+      ) {
+        continue;
+      }
+
+      bucket.push(other);
+      consumed.add(other.id);
+    }
+
+    if (bucket.length < 2) continue;
+
+    // keeper = 最早落库的那条（时间相同按 id 字典序，保证可复跑同结果）。
+    const keeper = bucket
+      .slice()
+      .sort(
+        (a, b) =>
+          String(a.createdAt || a.pendingAt || '').localeCompare(
+            String(b.createdAt || b.pendingAt || '')
+          ) || String(a.id).localeCompare(String(b.id))
+      )[0];
+
+    groups.push({
+      keeperId: keeper.id,
+      content: keeper.content,
+      pendingReason: keeper.pendingReason,
+      duplicateIds: bucket.filter(item => item.id !== keeper.id).map(item => item.id),
+      sessions: [
+        ...new Set(
+          bucket.flatMap(item =>
+            (Array.isArray(item.contributions) ? item.contributions : [])
+              .map(contribution => cleanText(contribution && contribution.sessionId))
+              .filter(Boolean)
+          )
+        ),
+      ].sort(),
+    });
+  }
+
+  return { groups };
+}
+
+async function consolidatePendingDuplicates(options = {}) {
+  const apply = options.apply === true;
+
+  return enqueueWrite(async () => {
+    const current = Array.isArray(memories) ? memories : [];
+    const { groups } = planPendingConsolidation(current, options);
+    const summary = {
+      applied: apply,
+      groups: groups.map(group => ({
+        keeperId: group.keeperId,
+        duplicateIds: group.duplicateIds,
+        pendingReason: group.pendingReason,
+        sessions: group.sessions,
+        content: group.content,
+      })),
+      mergedEntries: 0,
+      removedEntries: 0,
+      remaining: current.length,
+    };
+
+    if (!groups.length || !apply) return summary;
+
+    const byId = new Map(current.map(item => [item.id, item]));
+    const dropped = new Set();
+    const now = new Date().toISOString();
+
+    for (const group of groups) {
+      const keeper = byId.get(group.keeperId);
+
+      if (!keeper) continue;
+
+      let contributions = Array.isArray(keeper.contributions)
+        ? keeper.contributions.map(item => ({ ...item }))
+        : [];
+
+      for (const duplicateId of group.duplicateIds) {
+        const duplicate = byId.get(duplicateId);
+
+        if (!duplicate) continue;
+
+        contributions = mergeContributions(contributions, duplicate.contributions);
+        dropped.add(duplicateId);
+      }
+
+      const sessions = new Set(
+        contributions.map(item => cleanText(item && item.sessionId)).filter(Boolean)
+      );
+      const evidence =
+        keeper.evidence && typeof keeper.evidence === 'object'
+          ? {
+              ...keeper.evidence,
+              repetition: Math.max(
+                Number(keeper.evidence.repetition) || 0,
+                contributions.length
+              ),
+              independentSessions: Math.max(
+                Number(keeper.evidence.independentSessions) || 0,
+                sessions.size
+              ),
+            }
+          : keeper.evidence;
+
+      byId.set(keeper.id, {
+        ...keeper,
+        contributions,
+        evidence,
+        updatedAt: now,
+        consolidatedFrom: [
+          ...new Set([
+            ...(Array.isArray(keeper.consolidatedFrom) ? keeper.consolidatedFrom : []),
+            ...group.duplicateIds,
+          ]),
+        ],
+      });
+    }
+
+    const next = current
+      .filter(item => !dropped.has(item.id))
+      .map(item => byId.get(item.id) || item);
+
+    try {
+      await saveMemories(next);
+    } catch (error) {
+      logDataEvent({
+        module: 'memory',
+        file: MEMORY_FILE,
+        event: 'memory_pending_consolidate_failed',
+        level: 'error',
+        reason: 'write_failed',
+        action: 'pending_consolidate',
+        error,
+      });
+
+      return { ...summary, reason: 'write_failed' };
+    }
+
+    memories = next;
+    refreshDerivedMemoryIndex('pending_consolidated');
+
+    logDataEvent({
+      module: 'memory',
+      file: MEMORY_FILE,
+      event: 'memory_pending_consolidated',
+      level: 'info',
+      action: 'pending_consolidate',
+      // 只落 id 与计数：记忆正文不进日志。
+      mergedEntries: groups.reduce(
+        (sum, group) => sum + group.duplicateIds.length,
+        0
+      ),
+      groups: groups.length,
+    });
+
+    return {
+      ...summary,
+      mergedEntries: groups.reduce(
+        (sum, group) => sum + group.duplicateIds.length,
+        0
+      ),
+      removedEntries: dropped.size,
+      remaining: next.length,
+    };
+  });
+}
+
 async function supersedeMemory({ id, replacement, actor = 'user' } = {}) {
   const targetId = cleanText(id);
   const source = replacement && typeof replacement === 'object' ? replacement : null;
@@ -3471,6 +3681,8 @@ module.exports = {
   archiveMemory,
   updateMemory,
   mergeMemories,
+  consolidatePendingDuplicates,
+  planPendingConsolidation,
   supersedeMemory,
   withdrawMemory,
   deleteMemory,
