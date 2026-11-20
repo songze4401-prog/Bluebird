@@ -1,6 +1,6 @@
 # Orchestrator 轮 4：主聊天接线（2026-11-13）
 
-> 依据：`docs/orchestrator-charter-2026-11-13.md` 轮 4。代码基准：`main` = PR #78 合并后。
+> 依据：`docs/archive/orchestrator-charter-2026-11-13.md` 轮 4。代码基准：`main` = PR #78 合并后。
 
 ## 1. 实现
 

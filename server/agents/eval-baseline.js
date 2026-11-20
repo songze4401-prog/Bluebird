@@ -1,3 +1,14 @@
+/**
+ * 【台账证据模块 · 勿按死代码删除】（2026-11-21 收尾条 1）
+ *
+ * 生产运行时（server/index.js 起的主链路）不 require 本文件，引用方只有
+ * 固定评测集回归（tests/）与离线评测入口（scripts/eval-offline.js 等）。
+ * 但 docs/notion-delivery-ledger-2026-11-04.md 的台账行 A-07 把本文件列为
+ * §14 五类可比较基线 + 配置记录字段的快照/对比证据：快照钉版与两份快照 diff 的实现。
+ * 删掉本文件等于拆掉该行的可复跑证据（行状态会失去支撑），因此处置口径是
+ * 「保留 + 显式标注 + 由 tests/ledger-evidence-modules.test.js 看住」，
+ * 不是当普通死代码清理。
+ */
 /* global module */
 /**
  * Phase 4 第 1 项：基线快照落盘与两份快照的对比报告。

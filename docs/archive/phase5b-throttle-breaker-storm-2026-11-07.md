@@ -1,7 +1,7 @@
 # Phase 5-B 第 1–3 轮：四维限流、三态熔断、重规划风暴抑制与闸门开销基准
 
 > 依据：Notion Agent Runtime v1.0 **§26**（限流、熔断、重规划风暴抑制）与台账行 **B-07**、**A-11**（风暴判据部分）。
-> 上游：`docs/phase5-charter-2026-11-06.md` P5-B 交付包；基线依赖 `docs/phase5a-eval-tiers-and-comparators.md`（阈值要能对照基线才谈得上调）。
+> 上游：`docs/archive/phase5-charter-2026-11-06.md` P5-B 交付包；基线依赖 `docs/phase5a-eval-tiers-and-comparators.md`（阈值要能对照基线才谈得上调）。
 > 本文数字全部是**离线/桩实测**，阈值本身是 B 类（需压测校准），未测得前不调高。
 
 ## 1. §26 原文要求 → 本轮落点

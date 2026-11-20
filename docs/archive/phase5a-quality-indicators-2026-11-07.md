@@ -1,7 +1,7 @@
 # Phase 5-A 第 2 轮：§7 八项质量指标
 
 > 依据：Notion Agent Runtime v1.0 **§7**（评测必须覆盖的八项质量指标）与台账行 **A-07** 的指标部分。
-> 上游：`docs/phase5-charter-2026-11-06.md`（P5-A 交付包与轮次验收规则）、`docs/phase5a-eval-tiers-and-comparators.md`（第 1 轮：分层与比较对象）。
+> 上游：`docs/archive/phase5-charter-2026-11-06.md`（P5-A 交付包与轮次验收规则）、`docs/phase5a-eval-tiers-and-comparators.md`（第 1 轮：分层与比较对象）。
 > 本轮所有数字都是**离线重放**或**本地 stub 模型的端到端跑**实测，不是真实供应商延迟；区分见 §5。
 
 ## 1. 八项指标 → 代码落点
@@ -100,7 +100,7 @@ BLUEBIRD_DATA_DIR=<dir> node scripts/eval-offline.js --indicators=true
 
 ## 6. 台账 A-07 的指标部分
 
-本轮补齐 §7 的八项定义、口径与可执行入口，A-07 的两处遗留（真实模型证据、指标入门禁）仍留在 §5 的 1/2/4。与第 1 轮合并计为 **A-07：`0 → 0.5`**，行内证据写本文 §1、§3、§4，缺口写本文 §5 的 1/2/4。回填已于 2026-11-07 在 `docs/ledger-a07-b07-backfill-2026-11-07` 这一轮按行级重算脚本 `scripts/scan-notion-ledger.js` 执行（与 B-07 同轮，汇总 `1`=16 / `0.5`=9 / `0`=0）；原时机说明见 `docs/phase5-charter-2026-11-06.md` 的 P5-A 遗留段（PR #59 已合并，不再受同文件冲突限制）。
+本轮补齐 §7 的八项定义、口径与可执行入口，A-07 的两处遗留（真实模型证据、指标入门禁）仍留在 §5 的 1/2/4。与第 1 轮合并计为 **A-07：`0 → 0.5`**，行内证据写本文 §1、§3、§4，缺口写本文 §5 的 1/2/4。回填已于 2026-11-07 在 `docs/ledger-a07-b07-backfill-2026-11-07` 这一轮按行级重算脚本 `scripts/scan-notion-ledger.js` 执行（与 B-07 同轮，汇总 `1`=16 / `0.5`=9 / `0`=0）；原时机说明见 `docs/archive/phase5-charter-2026-11-06.md` 的 P5-A 遗留段（PR #59 已合并，不再受同文件冲突限制）。
 
 ## 7. 复现命令
 

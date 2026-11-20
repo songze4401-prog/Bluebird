@@ -8,7 +8,7 @@
 
 | 提案阶段 | 状态（2026-11-10） | 本地交付 |
 |---|---|---|
-| Phase 0 现状审计（只读） | **已完成** | `docs/phase0-audit-2026-11-09.md`（七条链路逐项核验 + 八个断点） |
+| Phase 0 现状审计（只读） | **已完成** | `docs/archive/phase0-audit-2026-11-09.md`（七条链路逐项核验 + 八个断点） |
 | Phase 1 自动观察闭环 | **能力已落地（开关交付）** | `BLUEBIRD_MEMORY_OBSERVER=every_turn`（2843b51）；前置观测修补（0a9d2c7/d00015b） |
 | Phase 2 渐进式生命周期 | **最小闭环已落地** | 观察台账（hash-only，0006）；缺：observed 正式态、异步深整、晋升语义评审 |
 | Phase 3 召回与上下文调度 | **大半已存在** | Context Runtime v3 + P3 orchestrator；缺：used 态、阈值评测校准 |

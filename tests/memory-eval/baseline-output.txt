@@ -1,101 +1,101 @@
-记忆评测基线 · 种子 22 条 · 题目 26 道 · 临时库 C:\Users\Administrator\AppData\Local\Temp\bluebird-mem-eval-9rJKBm
+记忆评测基线 · 种子 22 条 · 题目 26 道 · 临时库 /tmp/bluebird-mem-eval-Rtiw1B
 
 Q01 偏好    [s-main] "我喜欢喝什么咖啡"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=4 14.058ms  M03,M18,M01,M17
-  inject 召回=0 泄漏=0 n=0 0.860ms  ∅
-  injectScoped 召回=1 泄漏=0 n=4 7.096ms  M03,M18,M01,M17
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=4 9.868ms  M03,M18,M01,M17
+  inject 召回=0 泄漏=0 n=0 0.531ms  ∅
+  injectScoped 召回=1 泄漏=0 n=4 3.644ms  M03,M18,M01,M17
 Q02 偏好    [s-main] "我有什么忌口"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 5.047ms  M03,M18,M02
-  inject 召回=0 泄漏=0 n=0 0.596ms  ∅
-  injectScoped 召回=1 泄漏=0 n=3 6.268ms  M03,M18,M02
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 3.809ms  M03,M18,M02
+  inject 召回=0 泄漏=0 n=0 0.325ms  ∅
+  injectScoped 召回=1 泄漏=0 n=3 2.921ms  M03,M18,M02
 Q03 偏好    [s-main] "界面用什么主题比较好"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 5.454ms  M03,M18,M08
-  inject 召回=0 泄漏=0 n=0 1.732ms  ∅
-  injectScoped 召回=1 泄漏=0 n=3 4.943ms  M03,M18,M08
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 7.940ms  M03,M18,M08
+  inject 召回=0 泄漏=0 n=0 0.577ms  ∅
+  injectScoped 召回=1 泄漏=0 n=3 3.510ms  M03,M18,M08
 Q04 偏好    [s-main] "我的口味偏好是什么"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 5.381ms  M03,M18,M15
-  inject 召回=0 泄漏=0 n=0 0.639ms  ∅
-  injectScoped 召回=1 泄漏=0 n=3 5.288ms  M03,M18,M15
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 2.610ms  M03,M18,M15
+  inject 召回=0 泄漏=0 n=0 0.601ms  ∅
+  injectScoped 召回=1 泄漏=0 n=3 2.411ms  M03,M18,M15
 Q05 偏好    [s-main] "我平时用什么编辑器"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 4.226ms  M03,M18,M21
-  inject 召回=0 泄漏=0 n=0 0.551ms  ∅
-  injectScoped 召回=1 泄漏=0 n=3 5.109ms  M03,M18,M21
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 2.633ms  M03,M18,M21
+  inject 召回=0 泄漏=0 n=0 0.343ms  ∅
+  injectScoped 召回=1 泄漏=0 n=3 2.745ms  M03,M18,M21
 Q06 进展    [s-main] "我在做什么项目"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 4.579ms  M03,M18,M06
-  inject 召回=0 泄漏=0 n=1 0.628ms  M22
-  injectScoped 召回=1 泄漏=0 n=3 4.491ms  M03,M18,M06
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 2.548ms  M03,M18,M06
+  inject 召回=0 泄漏=0 n=1 0.391ms  M22
+  injectScoped 召回=1 泄漏=0 n=3 2.819ms  M03,M18,M06
 Q07 进展    [s-main] "这周有什么要赶的计划"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 5.419ms  M03,M18,M07
-  inject 召回=0 泄漏=0 n=0 0.494ms  ∅
-  injectScoped 召回=1 泄漏=0 n=3 4.462ms  M03,M18,M07
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 2.555ms  M03,M18,M07
+  inject 召回=0 泄漏=0 n=0 0.294ms  ∅
+  injectScoped 召回=1 泄漏=0 n=3 2.717ms  M03,M18,M07
 Q08 进展    [s-main] "我想养成什么运动习惯"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 4.451ms  M03,M18,M14
-  inject 召回=0 泄漏=0 n=0 7.201ms  ∅
-  injectScoped 召回=1 泄漏=0 n=3 5.113ms  M03,M18,M14
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 2.575ms  M03,M18,M14
+  inject 召回=0 泄漏=0 n=0 0.329ms  ∅
+  injectScoped 召回=1 泄漏=0 n=3 2.614ms  M03,M18,M14
 Q09 进展    [s-main] "我用什么电脑系统开发"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 5.293ms  M03,M18,M16
-  inject 召回=0 泄漏=0 n=0 0.581ms  ∅
-  injectScoped 召回=1 泄漏=0 n=3 4.087ms  M03,M18,M16
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 2.719ms  M03,M18,M16
+  inject 召回=0 泄漏=0 n=0 0.385ms  ∅
+  injectScoped 召回=1 泄漏=0 n=3 2.361ms  M03,M18,M16
 Q10 跨会话召回 [s-main] "我叫什么名字"
-  scoped R@5=1 R@10=1 P@10=0.2 泄漏=0 n=2 5.373ms  M03,M18
-  inject 召回=0 泄漏=0 n=0 0.685ms  ∅
-  injectScoped 召回=1 泄漏=0 n=2 4.136ms  M03,M18
+  scoped R@5=1 R@10=1 P@10=0.2 泄漏=0 n=2 2.767ms  M03,M18
+  inject 召回=0 泄漏=0 n=0 0.337ms  ∅
+  injectScoped 召回=1 泄漏=0 n=2 2.659ms  M03,M18
 Q11 跨会话召回 [s-main] "我住在哪个城市"
-  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 5.109ms  M03,M18
-  inject 召回=- 泄漏=0 n=0 0.470ms  ∅
-  injectScoped 召回=- 泄漏=0 n=2 5.722ms  M03,M18
+  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 2.727ms  M03,M18
+  inject 召回=- 泄漏=0 n=0 0.275ms  ∅
+  injectScoped 召回=- 泄漏=0 n=2 2.353ms  M03,M18
 Q12 跨会话召回 [s-main] "我的车牌号是多少"
-  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 4.406ms  M03,M18
-  inject 召回=- 泄漏=0 n=0 0.461ms  ∅
-  injectScoped 召回=- 泄漏=0 n=2 3.881ms  M03,M18
+  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 2.375ms  M03,M18
+  inject 召回=- 泄漏=0 n=0 0.299ms  ∅
+  injectScoped 召回=- 泄漏=0 n=2 2.671ms  M03,M18
 Q13 跨会话召回 [s-main] "我的猫叫什么名字"
-  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 4.615ms  M03,M18
-  inject 召回=- 泄漏=0 n=0 0.471ms  ∅
-  injectScoped 召回=- 泄漏=0 n=2 4.124ms  M03,M18
+  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 2.740ms  M03,M18
+  inject 召回=- 泄漏=0 n=0 0.283ms  ∅
+  injectScoped 召回=- 泄漏=0 n=2 2.690ms  M03,M18
 Q14 跨会话召回 [s-main] "我在备考什么"
-  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 5.026ms  M03,M18
-  inject 召回=- 泄漏=0 n=0 0.469ms  ∅
-  injectScoped 召回=- 泄漏=0 n=2 4.085ms  M03,M18
+  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 2.434ms  M03,M18
+  inject 召回=- 泄漏=0 n=0 0.273ms  ∅
+  injectScoped 召回=- 泄漏=0 n=2 2.530ms  M03,M18
 Q15 泄漏    [s-fresh-new-session] "我叫什么名字"
-  scoped R@5=- R@10=- P@10=0 泄漏=0 n=0 0.493ms  ∅
-  inject 召回=- 泄漏=0 n=0 0.444ms  ∅
-  injectScoped 召回=- 泄漏=0 n=0 0.441ms  ∅
+  scoped R@5=- R@10=- P@10=0 泄漏=0 n=0 0.347ms  ∅
+  inject 召回=- 泄漏=0 n=0 0.258ms  ∅
+  injectScoped 召回=- 泄漏=0 n=0 0.253ms  ∅
 Q16 泄漏    [s-fresh-new-session] "我的小名是什么"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=1 0.483ms  M12
-  inject 召回=1 泄漏=0 n=1 0.462ms  M12
-  injectScoped 召回=1 泄漏=0 n=1 0.457ms  M12
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=1 0.343ms  M12
+  inject 召回=1 泄漏=0 n=1 0.278ms  M12
+  injectScoped 召回=1 泄漏=0 n=1 0.366ms  M12
 Q17 无答案   [s-main] "我上次点的披萨是什么口味"
-  scoped R@5=- R@10=- P@10=0 泄漏=0 n=3 5.739ms  M03,M18,M15
-  inject 召回=- 泄漏=0 n=0 0.943ms  ∅
-  injectScoped 召回=- 泄漏=0 n=3 4.069ms  M03,M18,M15
+  scoped R@5=- R@10=- P@10=0 泄漏=0 n=3 2.436ms  M03,M18,M15
+  inject 召回=- 泄漏=0 n=0 0.349ms  ∅
+  injectScoped 召回=- 泄漏=0 n=3 3.547ms  M03,M18,M15
 Q18 无答案   [s-main] "今天天气怎么样"
-  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 3.781ms  M03,M18
-  inject 召回=- 泄漏=0 n=0 0.444ms  ∅
-  injectScoped 召回=- 泄漏=0 n=2 5.255ms  M03,M18
+  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 2.410ms  M03,M18
+  inject 召回=- 泄漏=0 n=0 0.270ms  ∅
+  injectScoped 召回=- 泄漏=0 n=2 2.630ms  M03,M18
 Q19 无答案   [s-main] "我的护照号码是多少"
-  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 3.956ms  M03,M18
-  inject 召回=- 泄漏=0 n=0 0.451ms  ∅
-  injectScoped 召回=- 泄漏=0 n=2 3.995ms  M03,M18
+  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 2.390ms  M03,M18
+  inject 召回=- 泄漏=0 n=0 0.270ms  ∅
+  injectScoped 召回=- 泄漏=0 n=2 2.294ms  M03,M18
 
 == Phase 1 汇总 ==
 Recall@5  scoped=1 inject=0.0909   Recall@10 scoped=1 inject=0.0909
 Precision@5 scoped=0.1263 inject=0.0105   Precision@10 scoped=0.0632 inject=0.0053
 跨会话泄漏数 scoped=0 inject=0 路径结论不一致=0 legacy暴露=1
 无答案题 3 道，其中误召回 3 道
-检索延迟(ms) scoped={"n":19,"mean":4.889,"p50":5.026,"p95":14.058,"max":14.058}
-           inject={"n":19,"mean":0.978,"p50":0.551,"p95":7.201,"max":7.201}
+检索延迟(ms) scoped={"n":19,"mean":3.065,"p50":2.575,"p95":9.868,"max":9.868}
+           inject={"n":19,"mean":0.351,"p50":0.325,"p95":0.601,"max":0.601}
 
 == Phase 2 事实更正（真实写路径：processMemory + 假 client）==
 Q20 "记住：更正，我的生日改为6月20日，之前说错了" → 候选正文「用户的生日是6月20日」
-  写入=是 动作=superseded 拒写短码=- 新id=mem-f84d1c22-0432-47ea-b1e6-00e386bb1f4f 被更正id=legacy-0fe0b1a416351f37 库容 22→22 新条目在 scoped 结果中的位次=3
+  写入=是 动作=superseded 拒写短码=- 新id=mem-59196362-2d31-4d96-b823-296588bd134d 被更正id=legacy-0fe0b1a416351f37 库容 22→22 新条目在 scoped 结果中的位次=3
   旧条目(M19) 仍在活跃库=false 仍被 scoped 检索命中=false 仍被全局注入=false 仍被会话内注入=false 磁盘留档为 superseded=true 新旧位次=scoped 第- 位 vs 第3 位
   scoped M03,M18,N19 / inject ∅ / injectScoped M03,M18,N19
 Q21 "记住：我把猫的名字从小雪改成糯糯了" → 候选正文「用户的猫名字叫糯糯，两岁」
-  写入=是 动作=inserted 拒写短码=- 新id=mem-ed248707-603c-43ac-8dbd-538d4ef261b9 被更正id=- 库容 22→23 新条目在 scoped 结果中的位次=3
+  写入=是 动作=inserted 拒写短码=- 新id=mem-3218bb37-c65c-4cf2-b1d8-fee2aee45255 被更正id=- 库容 22→23 新条目在 scoped 结果中的位次=3
   旧条目(-) 仍在活跃库=false 仍被 scoped 检索命中=false 仍被全局注入=false 仍被会话内注入=false 磁盘留档为 superseded=false 新旧位次=scoped 第- 位 vs 第3 位
   scoped M03,M18,N09 / inject ∅ / injectScoped M03,M18,N09
 Q22 "记一下：我最近在学弹吉他" → 候选正文「用户在学弹吉他」
-  写入=否 动作=pending 拒写短码=low_confidence_candidate 新id=mem-90f112dc-34f6-4686-ba42-56d19e261977 被更正id=- 库容 22→22 新条目在 scoped 结果中的位次=-
+  写入=否 动作=pending 拒写短码=low_confidence_candidate 新id=mem-d3839930-7e0b-4b16-bb8d-51c62f685bd1 被更正id=- 库容 22→22 新条目在 scoped 结果中的位次=-
   旧条目(-) 仍在活跃库=false 仍被 scoped 检索命中=false 仍被全局注入=false 仍被会话内注入=false 磁盘留档为 superseded=false 新旧位次=scoped 第- 位 vs 第- 位
   scoped M03,M18 / inject ∅ / injectScoped M03,M18
 鉴别探针 anchorSimilarityProbe：期望写入=是 期望短码=- → 实际写入=是 动作=inserted 短码=- 锚点分=- 关键词命中=- 判据符合 库容 22→23
@@ -141,7 +141,7 @@ explicitCorrectionProbe [correction] 期望=active → 落盘=active 动作=supe
 persistentIntentProbe [persistentIntent] 期望=active → 落盘=active 动作=inserted 短码=-
 duplicateVerbatimProbe [duplicate] 期望=active → 落盘=active 动作=merged 短码=- 两段=inserted→merged
 duplicateParaphraseProbe [duplicate] 期望=active → 落盘=active 动作=merged 短码=- 两段=inserted→merged
-hedgedRepeatProbe [hedged] 期望=pending/"user_hedged_requires_confirmation" → 落盘=pending 动作=pending 短码=user_hedged_requires_confirmation 两段=pending→pending 跨会话贡献=1
+hedgedRepeatProbe [hedged] 期望=pending/"user_hedged_requires_confirmation" → 落盘=pending 动作=pending 短码=user_hedged_requires_confirmation 两段=pending→pending 跨会话贡献=2
 singlePreferenceCompatProbe [singlePreferenceCompat] 期望=active → 落盘=active 动作=inserted 短码=-
 写入质量：误晋升=0 冲突防护召回=1 重复记忆率=0 晋升精确率=1（分母 5） pending 落盘失败=[]
 
@@ -398,24 +398,24 @@ singlePreferenceCompatProbe [singlePreferenceCompat] 期望=active → 落盘=ac
     "latencyMs": {
       "scoped": {
         "n": 19,
-        "mean": 4.889,
-        "p50": 5.026,
-        "p95": 14.058,
-        "max": 14.058
+        "mean": 3.065,
+        "p50": 2.575,
+        "p95": 9.868,
+        "max": 9.868
       },
       "inject": {
         "n": 19,
-        "mean": 0.978,
-        "p50": 0.551,
-        "p95": 7.201,
-        "max": 7.201
+        "mean": 0.351,
+        "p50": 0.325,
+        "p95": 0.601,
+        "max": 0.601
       },
       "injectScoped": {
         "n": 19,
-        "mean": 4.37,
-        "p50": 4.462,
-        "p95": 7.096,
-        "max": 7.096
+        "mean": 2.512,
+        "p50": 2.659,
+        "p95": 3.644,
+        "max": 3.644
       },
       "unit": "毫秒，进程内直接调用真实函数，不含 HTTP/模型开销"
     },
@@ -515,8 +515,8 @@ singlePreferenceCompatProbe [singlePreferenceCompat] 期望=active → 落盘=ac
     "conflictDetectionRecall": 1,
     "duplicateMemoryRate": 0,
     "pendingDurabilityFailures": [],
-    "hedgedRepeatStillPending": false,
-    "definition": "写入质量四指标（Notion §13.1）：误晋升数（hedged/推断/临时冲突 → active）、冲突防护召回（临时表达不覆盖稳定偏好）、重复记忆率（重复表达产生额外条目）、晋升精确率（晋升里该晋升的占比）。判分以落盘状态为准，按 sourceQuote 匹配，短码按最后一通调用核对。重复记忆率只计 duplicate 探针；hedged 跨会话重复各自成条的 known gap 不计入（见 hedgedRepeatStillPending 观测位）。"
+    "hedgedRepeatStillPending": true,
+    "definition": "写入质量四指标（Notion §13.1）：误晋升数（hedged/推断/临时冲突 → active）、冲突防护召回（临时表达不覆盖稳定偏好）、重复记忆率（重复表达产生额外条目）、晋升精确率（晋升里该晋升的占比）。判分以落盘状态为准，按 sourceQuote 匹配，短码按最后一通调用核对。重复记忆率只计 duplicate 探针；hedged 跨会话重复单列为 hedgedRepeatStillPending 闸门（并成一条 pending 才为 true）。"
   }
 }
 

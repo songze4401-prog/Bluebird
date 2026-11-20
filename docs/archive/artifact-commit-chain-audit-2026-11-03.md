@@ -7,7 +7,7 @@
 > - **【代码推断】**：结论来自控制流/调用顺序推导，未运行验证。
 > - **【未取证】**：仓库内无材料可证，或需要运行才能确认。
 >
-> 口径说明：任务中所述“§11 完成提交五步”原文不在本仓库（v1.3 文档只含 §31–§42）。本审计的五步口径转引自 [phase0-baseline-audit-2026-11-03.md](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/docs/phase0-baseline-audit-2026-11-03.md#L231-L240)，该处原文为：“产物持久化 → 提交引用 → 校验引用/schema/必需产物 → 才 completed → 失败进 retry/recovery”。**§11 原文本身：未取证。**
+> 口径说明：任务中所述“§11 完成提交五步”原文不在本仓库（v1.3 文档只含 §31–§42）。本审计的五步口径转引自 [phase0-baseline-audit-2026-11-03.md](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/docs/archive/phase0-baseline-audit-2026-11-03.md#L231-L240)，该处原文为：“产物持久化 → 提交引用 → 校验引用/schema/必需产物 → 才 completed → 失败进 retry/recovery”。**§11 原文本身：未取证。**
 
 ## 相关文档（链位置）
 
@@ -112,9 +112,9 @@
 
 | 审计原文 | 代码实际 | 判定 |
 |---|---|---|
-| “`runtime.js:713`”（[audit:69](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/docs/phase0-baseline-audit-2026-11-03.md#L69)、`:167`、`:209`） | 实际路径是 **`server/agents/runtime.js`**；同目录另有 `server/agent-runtime.js`（`runAgentTurn`），两者不同。仅写 `runtime.js` 会产生歧义。 | 审计描述不精确，结论仍成立 |
-| “`artifacts` 数组元素是字符串 ref”（[audit:148](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/docs/phase0-baseline-audit-2026-11-03.md#L148)）、“只接受字符串 ref 数组”（`audit:69`） | 元素是**对象** `{ kind, id }`，只是两个字段值被 `String()` 转成字符串；见 [worker-result.js:21-30](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/worker-result.js#L21-L30)。 | 审计描述有误；“无 artifactId/version”的结论仍成立 |
-| “无对应测试”（[audit:209](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/docs/phase0-baseline-audit-2026-11-03.md#L209)） | 全仓 `tests/` 检索 `artifacts` **零命中**。 | 结论成立 |
+| “`runtime.js:713`”（[audit:69](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/docs/archive/phase0-baseline-audit-2026-11-03.md#L69)、`:167`、`:209`） | 实际路径是 **`server/agents/runtime.js`**；同目录另有 `server/agent-runtime.js`（`runAgentTurn`），两者不同。仅写 `runtime.js` 会产生歧义。 | 审计描述不精确，结论仍成立 |
+| “`artifacts` 数组元素是字符串 ref”（[audit:148](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/docs/archive/phase0-baseline-audit-2026-11-03.md#L148)）、“只接受字符串 ref 数组”（`audit:69`） | 元素是**对象** `{ kind, id }`，只是两个字段值被 `String()` 转成字符串；见 [worker-result.js:21-30](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/worker-result.js#L21-L30)。 | 审计描述有误；“无 artifactId/version”的结论仍成立 |
+| “无对应测试”（[audit:209](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/docs/archive/phase0-baseline-audit-2026-11-03.md#L209)） | 全仓 `tests/` 检索 `artifacts` **零命中**。 | 结论成立 |
 | “§11 完成协议 1–5 **均未实现**”（`audit:209`） | 第 4 步已有实际写入路径（[runtime.js:725-729](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/runtime.js#L725-L729)），第 5 步已有模型类错误重试（[runtime.js:820-847](file:///C:/Users/Administrator/Documents/Qoder/2026-10-27/975cfd2c/Bluebird/server/agents/runtime.js#L820-L847)）。准确说法是“4、5 部分实现，1–3 缺失”。 | 审计表述过宽，需按步拆分 |
 | “无 `pending-commit/orphan`”（`audit:209`） | Agent 域无此概念；但 `orphan` 一词在仓库其他域存在（`sessions.js:134-149` 的 orphan messages、`retrieval/store.js:698-719` 的 orphan chunks）。审计未限定作用域，易被误读为“全仓无 orphan”。 | 需限定域 |
 | 审计未指出 | `updateTask()` **先改内存后落盘**，这是比“结果与状态同一次写”更关键的失败语义（见 §4.1）。 | 审计遗漏 |

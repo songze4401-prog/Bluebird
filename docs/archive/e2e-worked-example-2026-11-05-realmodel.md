@@ -7,7 +7,7 @@
 
 - 运行脚本：`node scripts/run-worked-example.js --real-provider --out docs/archive/e2e-worked-example-run-2026-11-05-realmodel.json`
 - 机器可读记录：`docs/archive/e2e-worked-example-run-2026-11-05-realmodel.json`
-- 并列保留的 stub 记录：`docs/e2e-worked-example-2026-11-05.md` / `docs/archive/e2e-worked-example-run-2026-11-05.json`（未覆盖）
+- 并列保留的 stub 记录：`docs/archive/e2e-worked-example-2026-11-05.md` / `docs/archive/e2e-worked-example-run-2026-11-05.json`（未覆盖）
 - traceId：`trace_9b0c48ab-f21f-46db-b9f6-b72763691210`
 - 运行时间：`2026-11-05T16:05:32.215Z` 起，`2026-11-05T16:06:15.876Z` 止，总耗时 **43,661 ms**
 

@@ -58,6 +58,12 @@ const { jaccard: engineJaccard } = require('../../server/context/text.js');
 // 与 server/tool-memory-search.js:15-22 的 LIMITS 逐项一致：
 // 工具层把 limitMax=10 作为 maxItems 传进 searchMemories。
 const LIMITS = Object.freeze({ maxItems: 10, perItemMax: 300, totalMax: 2000 });
+// 写侧身份：与 /chat 生产链路一致，processMemory 必须带可信 userId
+// （server/index.js 走 resolveUserId(req)，单实例下就是 local-owner）。
+// 不带 userId 时写作用域退回会话级，跨会话的同一 hedged 候选就各自成条 ——
+// 那是兼容旧调用点的语义，不是线上行为。评测写 probing 只在 Phase 5 打开它，
+// Phase 1/2 仍按会话级跑，保留旧隔离基线。
+const USER_ID = require('../../server/user-scope.js').getInstanceUserId();
 const K_LIST = [5, 10];
 const DEFAULT_TOOL_LIMIT = 5; // tool-memory-search.js:20 limitDefault
 
@@ -1339,7 +1345,8 @@ async function runPhase5() {
       const outcome = await memory.processMemory(
         fakeClient({ ...probe.reply, sourceQuote: spec.sourceQuote }),
         spec.userText,
-        spec.session
+        spec.session,
+        { userId: USER_ID }
       );
       calls.push({
         written: outcome ? outcome.written === true : false,
@@ -1398,6 +1405,8 @@ async function runPhase5() {
       finalStatus,
       storeDelta,
       extraEntryCreated,
+      // 命中本探针原话的落盘条目数：>1 就是同一候选各自成条（收尾条 2/3 的判据）
+      matchingEntries: sameContentCount,
       stableIntact,
       supersededOld,
       repeatSessions:
@@ -1465,20 +1474,23 @@ async function runPhase5() {
       pendingDurabilityFailures: pendingRows
         .filter(item => item.finalStatus !== 'pending')
         .map(item => item.key),
-      // known-gap 观测位（期望值待 Owner 拍板后翻 true）：hedged pending 跨会话
-      // 现不合并（可能： 前缀破坏相似度匹配），repeatSessions=1，仅报告不设闸
+      // 设闸项（2026-11-21 收尾条 3 翻转）：drive 带上可信 userId 后，跨会话
+      // 同一 hedged 候选必须并成一条 pending（repeatSessions=2、matchingEntries=1），
+      // 且不被重复证据撬开晋升 —— hedgedRepeatStillPending 就是这条的判据，
+      // 由 tests/memory-eval-baseline.test.js 断言为 true。
       hedgedRepeatStillPending: rows.some(
         item =>
           item.key === 'hedgedRepeatProbe' &&
           item.finalStatus === 'pending' &&
-          item.repeatSessions === 2
+          item.repeatSessions === 2 &&
+          item.matchingEntries === 1
       ),
       definition:
         '写入质量四指标（Notion §13.1）：误晋升数（hedged/推断/临时冲突 → active）、' +
         '冲突防护召回（临时表达不覆盖稳定偏好）、重复记忆率（重复表达产生额外条目）、' +
         '晋升精确率（晋升里该晋升的占比）。判分以落盘状态为准，按 sourceQuote 匹配，' +
         '短码按最后一通调用核对。重复记忆率只计 duplicate 探针；hedged 跨会话重复' +
-        '各自成条的 known gap 不计入（见 hedgedRepeatStillPending 观测位）。',
+        '单列为 hedgedRepeatStillPending 闸门（并成一条 pending 才为 true）。',
     },
   };
 

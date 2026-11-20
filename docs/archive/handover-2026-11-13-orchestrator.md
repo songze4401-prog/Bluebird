@@ -1,6 +1,6 @@
 # Bluebird 交接文档 v3（2026-11-13：Orchestrator 工程 C 系列落地）
 
-> 用途：替代 `docs/handover-2026-11-07-phase5g.md`（那份的 Phase 5 内容仍然有效，本文只增量覆盖 2026-11-13 的 Orchestrator 工程）。读完两份即可独立开工、独立验收。
+> 用途：替代 `docs/archive/handover-2026-11-07-phase5g.md`（那份的 Phase 5 内容仍然有效，本文只增量覆盖 2026-11-13 的 Orchestrator 工程）。读完两份即可独立开工、独立验收。
 > 口径：只写有**命令或文件证据**的事实；「未验证」显式标注。取证于 2026-11-13，基线见 §0。
 
 ## 0. 当前基线（一分钟看懂）
@@ -23,7 +23,7 @@
 
 1. `git log --oneline -1` 确认 main ≥ 收尾 PR；`gh pr list --state open` 应为空。
 2. 跑七项检查（§1）；数字对不上先查原因。
-3. 读三份：本文 → `docs/orchestrator-charter-2026-11-13.md`（立项书与 D1–D8 决策）→ `docs/notion-delivery-ledger-2026-11-04.md`（表 2 第十次勘误 + 表 4 首次建档）。
+3. 读三份：本文 → `docs/archive/orchestrator-charter-2026-11-13.md`（立项书与 D1–D8 决策）→ `docs/notion-delivery-ledger-2026-11-04.md`（表 2 第十次勘误 + 表 4 首次建档）。
 4. 下一步从 §5 开始；**不要重做已合并的轮 1–4**。
 
 **权限边界（沿用）**：推送 / 开 PR / 合并 / 删分支需明确指令（2026-11-13 Owner 已给过一次通宵自治授权，本次收尾即在该授权内）；合并必须 `--merge` 不 squash；合并后在 main 重跑门禁再做台账判据；台账数字只能由 `scripts/scan-notion-ledger.js` 产出（现为双表口径）。
