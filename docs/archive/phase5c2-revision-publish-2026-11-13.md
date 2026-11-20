@@ -2,7 +2,7 @@
 
 > 覆盖原文：Notion §20 第 345/346/349 步后半（planVersion v2 修订闭环、发布节点 waiting_approval、Gateway 幂等执行）。
 > 代码基准：`main` = `e2c6a81`（PR #75 合并后）。本文件记录实现、接线点、验收与边界；A-13 复判随合并后在 main 证据上完成。
-> 上游文档：`docs/orchestrator-charter-2026-11-13.md`（立项书，轮 1 = 本轮）。
+> 上游文档：`docs/archive/orchestrator-charter-2026-11-13.md`（立项书，轮 1 = 本轮）。
 
 ## 1. 实现
 

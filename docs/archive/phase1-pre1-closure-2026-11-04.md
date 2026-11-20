@@ -2,7 +2,7 @@
 
 分支：`phase1/protocol-convergence-2026-11-03`（未合并、未开 PR、未触碰 `main`）。
 范围：只记录 Phase 1 四个前置（① 协议收敛、② CAS 与冲突、③ 产物与完成提交、④ 审批时限与 fail-open）的完成度、证据与缺口；**不含 Phase 1 本体实现**。
-结论先行：四个前置的实现与回归均已落地；`docs/v1.3-decisions-and-verification-checklist-2026-11-03.md` §42 的 **25 项验收仍为 0/25 勾选**，本文件只登记证据缺口，不为凑数打勾。
+结论先行：四个前置的实现与回归均已落地；`docs/archive/v1.3-decisions-and-verification-checklist-2026-11-03.md` §42 的 **25 项验收仍为 0/25 勾选**，本文件只登记证据缺口，不为凑数打勾。
 
 ## 实测快照（2026-11-04）
 
@@ -28,7 +28,7 @@
 | 前置 | 提交 | 核心改动（一句话） | 证据位置 | 明确未完成部分 |
 | --- | --- | --- | --- | --- |
 | **① 协议收敛** | `6b03183`、`4dab3e3`、`8da8a89`、`d94e09d`、`30d5ce7`、`ae26a87`、`339d5f7`、`8f08807`、`946c5af`、`bbca1b2`、`7c28a2b` | 十态词表单点导出、状态写入收口到 `transitionTask`、`retrying`/`recovery` 转正、Session 生命周期由任务状态投影、版本字段单一来源、预留可空计划指针 | `tests/agent-recovery.test.js`：`状态机：recovery 是终态，只能由中间态进入`、`重试：retrying 为正式状态，退避到期后由队列直接取走`、`恢复：可能产生副作用的任务标记 recovery 等待人工处理`；`tests/agent-approval-policy.test.js` 的 `b`、`c`（S6b 资源期限）；`tests/agent-router.test.js`：`契约校验：deadlineMs 越界被拒绝`；实施记录见 [pre1 log](phase1-pre1-protocol-convergence-log-2026-11-03.md) S1–S9 | Workflow Store 未实现：`planId` / `planVersion` 恒 `null`，没有 plan→task 映射与迁移表；Token / Run 总预算不存在；① 本身未做 CAS（已由 ② 补） |
-| **② CAS 与冲突** | `288730a`、`381ca88` | 任务存储引入 `stateVersion` + `expectedVersion` 乐观并发，冲突返回明确契约且不覆盖前者数据 | `tests/agent-recovery.test.js`：`CAS：同一 expectedVersion 的两个写者，后者 conflict 且前者数据保留`、`CAS：冲突后重读并用最新版本重试成功，版本单调递增`、`CAS：不传 expectedVersion 的既有调用保持可写`；说明见 [AGENTS.md](../AGENTS.md)（`381ca88`） | 只覆盖任务存储；Blackboard / 产物存储无 CAS；`ConflictRecord` 未持久化；仍为单写者原子文件，多进程并发不安全 |
+| **② CAS 与冲突** | `288730a`、`381ca88` | 任务存储引入 `stateVersion` + `expectedVersion` 乐观并发，冲突返回明确契约且不覆盖前者数据 | `tests/agent-recovery.test.js`：`CAS：同一 expectedVersion 的两个写者，后者 conflict 且前者数据保留`、`CAS：冲突后重读并用最新版本重试成功，版本单调递增`、`CAS：不传 expectedVersion 的既有调用保持可写`；说明见 [AGENTS.md](../../AGENTS.md)（`381ca88`） | 只覆盖任务存储；Blackboard / 产物存储无 CAS；`ConflictRecord` 未持久化；仍为单写者原子文件，多进程并发不安全 |
 | **③ 产物与完成提交** | `6204f06`、`35b6a09` | 产物先落盘，引用随终态同次写入；`pending-commit` → 扫描标记 `orphan`，超 TTL 物理清理；引用提交幂等（`refCount` 不重复累加） | `tests/agent-artifact-commit.test.js`：`a`（正常完成 + `stateVersion` 递增）、`b`（写失败不进 `completed`）、`c`（pending-commit → orphan → 幂等重关联）、`d`（幂等）、`f`（既有完成路径不变）、`g`（已提交产物不删）；契约变化见 [pre1 log](phase1-pre1-protocol-convergence-log-2026-11-03.md) C1 | 只有引用 `{kind, id, version}`，**没有产物内容与版本链**（A-03/A-13 的证据仍缺）；`cleanupOrphans` 只是模块能力，未挂生产调度；提交意图（Outbox）未实现，跨 Store 恢复仍缺 |
 | **④ 审批时限与 fail-open** | `c8283ca` | 审批记录扩 `riskLevel`/`expiresAt`/`escalationAt`/`policyVersion`，老记录 `execute` fail-closed；R2 到期只标 `overdue` 并留事件、状态仍 `pending`；R3 无自动批准超时；资源期限独立计时；fail-open 七字段策略表 + 版本冻结 + 撤销 + 审计 | `tests/agent-approval-policy.test.js` 的 `a`–`g`；本会话独立临时目录探针 8 项全 PASS（老记录缺字段 → `approval_policy_missing`、任务仍 `waiting_approval`；R2 到期 → `pending` + `overdue`、`execute` 以 `approval_not_approved` 拒绝）；策略与数值表见 [pre1 log](phase1-pre1-protocol-convergence-log-2026-11-03.md) C2 | fail-open 判定**未接任何工具执行器**（命中白名单不会改变实际执行路径）；R2 升级**未接通知渠道**；审批状态枚举仍是 `pending/approved/rejected/executing/completed/failed`，v1.3 §29 的 `expired/escalated/cancelled` 未采用；批量与申诉未实现 |
 

@@ -2,8 +2,8 @@
 
 > 范围：只处理"单一事实源"与状态/版本契约收敛，不实现 CAS（②）、最小 Artifact（③）、审批 TTL（④），不开启动态组队。
 > 规则：所有分歧点先按架构文档条款裁定；文档冲突按 `v1.3 > v1.2 > v1.1 > v1.0` 裁决；文档无覆盖的进入"未覆盖、按最小风险默认推进"，不等用户裁定。
-> 基线：`docs/phase0-baseline-audit-2026-11-03.md`（已读）。
-> 裁决依据：v1.0 §0–§22 / v1.1 §10–§22 / v1.2 §23–§30 来自 Notion 页面 `40da9575-23c2-8135-9607-e23f6a3c784f`；v1.3 §31–§42 来自仓库内已封版文件 `docs/v1.3-decisions-and-verification-checklist-2026-11-03.md`（封版 2026-11-03，本次已实际逐节读取）。按该文件 §31.1："同一章内按小节编号靠后者优先（例如 §32 与 §24.2 冲突时以 §32 为准）"。
+> 基线：`docs/archive/phase0-baseline-audit-2026-11-03.md`（已读）。
+> 裁决依据：v1.0 §0–§22 / v1.1 §10–§22 / v1.2 §23–§30 来自 Notion 页面 `40da9575-23c2-8135-9607-e23f6a3c784f`；v1.3 §31–§42 来自仓库内已封版文件 `docs/archive/v1.3-decisions-and-verification-checklist-2026-11-03.md`（封版 2026-11-03，本次已实际逐节读取）。按该文件 §31.1："同一章内按小节编号靠后者优先（例如 §32 与 §24.2 冲突时以 §32 为准）"。
 > 本文只新建本文件，不改源码、测试、配置、数据，不 commit、不 push。
 
 ## 一句话结论
@@ -54,7 +54,7 @@
 | `waiting_approval` | running、cancelled、failed、timed_out、recovery（v1.3 §32.2） | completed、failed、cancelled、uncertain | 少 `running`、`timed_out`、`recovery`；多 `completed`、`uncertain` | `approvals.js:437-441`（批准后直接 completed） |
 | `retrying` / `recovery` | 新增正式状态 | 不存在 | 缺两态及其边 | `tasks.js:1073`（uncertain）、`1013-1019`（queued+retryAt） |
 
-结论【已验证】：仅改词表名不够；迁移表对齐必然触碰审批入口（queued 不得直接进 waiting_approval）和审批出口（approval → running → 执行 → completed/failed），这是本方案里除状态改名外唯一的结构性行为变化。另【已验证】v1.3 §32.2 的 `timed_out` 仅表示"因资源期限终止"，"与审批期限无关；不改变 Approval Request 的 `pending` 状态，也不产生批准效果"（`docs/v1.3-decisions-and-verification-checklist-2026-11-03.md:68`）。
+结论【已验证】：仅改词表名不够；迁移表对齐必然触碰审批入口（queued 不得直接进 waiting_approval）和审批出口（approval → running → 执行 → completed/failed），这是本方案里除状态改名外唯一的结构性行为变化。另【已验证】v1.3 §32.2 的 `timed_out` 仅表示"因资源期限终止"，"与审批期限无关；不改变 Approval Request 的 `pending` 状态，也不产生批准效果"（`docs/archive/v1.3-decisions-and-verification-checklist-2026-11-03.md:68`）。
 
 ### 1.3 `plan` 缺 `planVersion`、与 task 无关联的具体位置
 
@@ -144,7 +144,7 @@ Session.lifecycle = f(Task.status)，不单独决策
 
 ### 3.1 状态集以哪一套为准（Task）
 
-- **文档依据**：v1.2 §24.1："Task 状态固定为：queued、accepted、running、waiting_approval、retrying、recovery、completed、failed、cancelled、timed_out"；§24.1 还明确 `retrying`=可重试失败已被 Engine 接受、等待下一次 attempt，`recovery`=提交记录/Task 状态/Artifact 持久化不一致或副作用结果不确定；§30 验收项："retrying / recovery 是正式状态，且仅 Engine 可写"。v1.3 §31.1 补充硬不变量："终态不可被普通事件覆盖（§24.2）"（`docs/v1.3-decisions-and-verification-checklist-2026-11-03.md:23`），与既有 `state-machine.js:23-29` 的 `TERMINAL` 语义一致，不构成冲突。
+- **文档依据**：v1.2 §24.1："Task 状态固定为：queued、accepted、running、waiting_approval、retrying、recovery、completed、failed、cancelled、timed_out"；§24.1 还明确 `retrying`=可重试失败已被 Engine 接受、等待下一次 attempt，`recovery`=提交记录/Task 状态/Artifact 持久化不一致或副作用结果不确定；§30 验收项："retrying / recovery 是正式状态，且仅 Engine 可写"。v1.3 §31.1 补充硬不变量："终态不可被普通事件覆盖（§24.2）"（`docs/archive/v1.3-decisions-and-verification-checklist-2026-11-03.md:23`），与既有 `state-machine.js:23-29` 的 `TERMINAL` 语义一致，不构成冲突。
 - **曾考虑的两种做法**：
   - A. 保留现有 9 态（含 `uncertain`），把 `retrying/recovery` 做成派生视图。代价：§24.1 的"固定"状态集未满足，§30 验收项（v1.3 §42.2 B-03）无法通过；派生值无法承载 `recovery` 的"核对/修复流程"持久状态。
   - B. 采用 §24.1 十态，`uncertain → recovery`，`queued+retryAt → retrying`。代价：对外可见状态词变化，需同步前端与 21 处测试引用。
@@ -157,7 +157,7 @@ Session.lifecycle = f(Task.status)，不单独决策
   - v1.2 §24.2 迁移表：`waiting_approval → running、cancelled、failed、timed_out`，条件"Engine 收到有效批准 / 拒绝 / 取消 / 超时策略结果"。
   - v1.2 §29 R3："不设自动批准超时……未批准期间保持 waiting_approval，允许人工取消 / 驳回，**不允许超时放行**"；R2 超时"Task 保持 waiting_approval / escalated，不得自动执行"。
 - **v1.3 裁决依据（已在仓库内实际读取，封版 2026-11-03）**：
-  - §31.1：`v1.3 > v1.2 > v1.1 > v1.0`；"同一章内按小节编号靠后者优先（例如 §32 与 §24.2 冲突时以 §32 为准）"（`docs/v1.3-decisions-and-verification-checklist-2026-11-03.md:10,22`）。
+  - §31.1：`v1.3 > v1.2 > v1.1 > v1.0`；"同一章内按小节编号靠后者优先（例如 §32 与 §24.2 冲突时以 §32 为准）"（`docs/archive/v1.3-decisions-and-verification-checklist-2026-11-03.md:10,22`）。
   - §32.1："**审批期限**：R3 不设自动批准超时，Approval Request 可长期 `pending`；任何人不得以'等待过久'为由自动批准或超时放行"；"**资源期限**：Task `deadline`、Task Token 预算、Run 总预算在 `waiting_approval` 期间照常有效；等待墙钟时间计入 Run 时间预算"；"**任一硬约束耗尽**：立即停止执行。无未核清副作用 → `timed_out`；副作用结果未知或未核清 → 先 `recovery`（沿用 §24.1）"（同上 `:49-51`）。
   - §32.2 直接修订 §24.2 的 `waiting_approval` 行：允许 `running`、`cancelled`、`failed`、`timed_out`、`recovery`；并注明 `timed_out` "表示因资源期限终止，与审批期限无关；不改变 Approval Request 的 `pending` 状态，也不产生批准效果"（同上 `:66-68`）。
   - §31.1 不变量："审批超时不能被解释为批准（§29、§30）"（同上 `:23`）。
@@ -202,7 +202,7 @@ Session.lifecycle = f(Task.status)，不单独决策
 
 ### 3.7 Approval 状态集
 
-- **文档依据**：§29 "Approval Request 自身使用 pending、approved、rejected、expired、escalated、cancelled；Task 的 waiting_approval 由 Engine 管理"；§24.3"审批人只能提交 decision，不能直接改 Task 状态"。v1.3 §31.1 不变量："审批超时不能被解释为批准（§29、§30）"（`docs/v1.3-decisions-and-verification-checklist-2026-11-03.md:23`）；v1.3 §32.3："`overdue` 是 Approval Request 上的标记，不是 Task 状态，不进入 §24.1 状态集合"（同上 `:76`）。
+- **文档依据**：§29 "Approval Request 自身使用 pending、approved、rejected、expired、escalated、cancelled；Task 的 waiting_approval 由 Engine 管理"；§24.3"审批人只能提交 decision，不能直接改 Task 状态"。v1.3 §31.1 不变量："审批超时不能被解释为批准（§29、§30）"（`docs/archive/v1.3-decisions-and-verification-checklist-2026-11-03.md:23`）；v1.3 §32.3："`overdue` 是 Approval Request 上的标记，不是 Task 状态，不进入 §24.1 状态集合"（同上 `:76`）。
 - **裁定**：Approval 的六态是唯一审批状态集；`executing/completed/failed` 是执行结果，不属于审批状态，应写入 Task/Result。`overdue` 只作为 Approval 上的派生标记/升级信号，**不新增状态值**（否则会变成第 7 个审批态并与 §29 冲突）。当前 `approvals.js:4` 的五段式与 §29 冲突，以 §29 为准。
 - **范围**：归属本方案，**代码落地归 Phase 1 ④（审批 TTL）**，因为 `expired/escalated` 必须有 `deadline/escalationAt` 持久化字段（`approvals.js:222-240` 当前无此字段）。本阶段不改。
 
@@ -230,7 +230,7 @@ Session.lifecycle = f(Task.status)，不单独决策
 
 | 步 | 内容 | 改哪些文件 | 如何证明没破坏现有行为 | 测试计数影响 |
 | --- | --- | --- | --- | --- |
-| **S1** | 权威声明归位（纯注释/文档）：改正 `tasks.js:5-7`；把 `state-machine.js:5` 改为"迁移合法性定义"；把 `task-store.js:5-11` 限定为"agent-tasks.json 单文件权威"；补一句"Event 仅通知" | `server/agents/tasks.js`、`state-machine.js`、`task-store.js`；`docs/phase0-baseline-audit-2026-11-03.md` 不改本体，只在后续 PR 说明中引用 | `git diff` 只含注释行；五门禁全绿；现有 2056 个后端用例不变 | **无**（0 用例变化，baseline/AGENTS 不动） |
+| **S1** | 权威声明归位（纯注释/文档）：改正 `tasks.js:5-7`；把 `state-machine.js:5` 改为"迁移合法性定义"；把 `task-store.js:5-11` 限定为"agent-tasks.json 单文件权威"；补一句"Event 仅通知" | `server/agents/tasks.js`、`state-machine.js`、`task-store.js`；`docs/archive/phase0-baseline-audit-2026-11-03.md` 不改本体，只在后续 PR 说明中引用 | `git diff` 只含注释行；五门禁全绿；现有 2056 个后端用例不变 | **无**（0 用例变化，baseline/AGENTS 不动） |
 | **S2** | 词表单一导出：新增 `status-vocabulary.js`，导出 10 态 + `LEGACY_ALIASES = { uncertain: 'recovery' }`；`state-machine.js`、`worker-result.js` 从它导入；**不改任何写入值** | 新增 `server/agents/status-vocabulary.js`；`state-machine.js:11-29`、`worker-result.js:12-18` | 现有 suites 不变；额外用 `node -e` 断言 `STATUSES` 与 §24.1 十态逐字相等（可写成一次性校验，不新增用例） | **无**（不新增 test case；若加 1 条 parity 用例则 backend 2057/nodeSuite 223/runner 1835，需同步 baseline） |
 | **S3** | Task 状态写权限收口：`updateTask` 移除 `status` 分支（`tasks.js:700-703`），新增 `transitionTask(taskId, {to, expectedVersion=null, writer})`；12 处 status 写入改走它；`recoverInterrupted` 两处直接赋值改走它 | `tasks.js:695-703/1013-1034/1046-1095`；`runtime.js`（7 处 status，含 `:73` 启动失败）；`approvals.js`（5 处 status） | `agent-recovery`(26)/`agent-dispatch`(13)/`memory-maintenance`(5)/`memory-bot`(9) 全绿；非法迁移仍返回 409；事件顺序不变 | **无**（调用点重构，不增删用例） |
 | **S4** | Session 投影化：新增 `deriveLifecycleStatus(taskStatus)`（identity 映射 + 兜底 `closed`）；`runtime.js:899-909` 与 `approvals.js:446/469/319` 共用；`closeSession` 不再接受任意值 | `sessions.js:26-34/296-309`；`runtime.js:899-909`；`approvals.js:446-449/469-471/319-322` | `agent-worker`(26) 的 4 处终态断言（`406/503/528/540`）仍通过；`sessions`(61) 全绿；`GET /agents/:botId/sessions` 返回值不变 | **无**（不增删用例） |

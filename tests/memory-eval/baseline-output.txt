@@ -1,110 +1,149 @@
-记忆评测基线 · 种子 22 条 · 题目 26 道 · 临时库 C:\Users\Administrator\AppData\Local\Temp\bluebird-mem-eval-mwlDVW
+记忆评测基线 · 种子 22 条 · 题目 26 道 · 临时库 /tmp/bluebird-mem-eval-Rtiw1B
 
 Q01 偏好    [s-main] "我喜欢喝什么咖啡"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=4 3.682ms  M03,M18,M17,M01
-  inject 召回=1 泄漏=0 n=4 1.092ms  M03,M18,M17,M01
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=4 9.868ms  M03,M18,M01,M17
+  inject 召回=0 泄漏=0 n=0 0.531ms  ∅
+  injectScoped 召回=1 泄漏=0 n=4 3.644ms  M03,M18,M01,M17
 Q02 偏好    [s-main] "我有什么忌口"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 0.737ms  M03,M18,M02
-  inject 召回=1 泄漏=0 n=3 0.155ms  M03,M18,M02
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 3.809ms  M03,M18,M02
+  inject 召回=0 泄漏=0 n=0 0.325ms  ∅
+  injectScoped 召回=1 泄漏=0 n=3 2.921ms  M03,M18,M02
 Q03 偏好    [s-main] "界面用什么主题比较好"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 0.141ms  M03,M18,M08
-  inject 召回=1 泄漏=0 n=3 0.118ms  M03,M18,M08
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 7.940ms  M03,M18,M08
+  inject 召回=0 泄漏=0 n=0 0.577ms  ∅
+  injectScoped 召回=1 泄漏=0 n=3 3.510ms  M03,M18,M08
 Q04 偏好    [s-main] "我的口味偏好是什么"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=4 0.137ms  M03,M18,M15,M08
-  inject 召回=1 泄漏=0 n=4 0.112ms  M03,M18,M15,M08
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 2.610ms  M03,M18,M15
+  inject 召回=0 泄漏=0 n=0 0.601ms  ∅
+  injectScoped 召回=1 泄漏=0 n=3 2.411ms  M03,M18,M15
 Q05 偏好    [s-main] "我平时用什么编辑器"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 0.146ms  M03,M18,M21
-  inject 召回=1 泄漏=0 n=3 0.117ms  M03,M18,M21
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 2.633ms  M03,M18,M21
+  inject 召回=0 泄漏=0 n=0 0.343ms  ∅
+  injectScoped 召回=1 泄漏=0 n=3 2.745ms  M03,M18,M21
 Q06 进展    [s-main] "我在做什么项目"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 0.168ms  M03,M18,M06
-  inject 召回=1 泄漏=0 n=4 0.104ms  M03,M18,M22,M06
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 2.548ms  M03,M18,M06
+  inject 召回=0 泄漏=0 n=1 0.391ms  M22
+  injectScoped 召回=1 泄漏=0 n=3 2.819ms  M03,M18,M06
 Q07 进展    [s-main] "这周有什么要赶的计划"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 0.112ms  M03,M18,M07
-  inject 召回=1 泄漏=0 n=3 0.103ms  M03,M18,M07
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 2.555ms  M03,M18,M07
+  inject 召回=0 泄漏=0 n=0 0.294ms  ∅
+  injectScoped 召回=1 泄漏=0 n=3 2.717ms  M03,M18,M07
 Q08 进展    [s-main] "我想养成什么运动习惯"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 0.135ms  M03,M18,M14
-  inject 召回=1 泄漏=0 n=3 0.117ms  M03,M18,M14
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 2.575ms  M03,M18,M14
+  inject 召回=0 泄漏=0 n=0 0.329ms  ∅
+  injectScoped 召回=1 泄漏=0 n=3 2.614ms  M03,M18,M14
 Q09 进展    [s-main] "我用什么电脑系统开发"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=5 0.145ms  M03,M18,M16,M07,M06
-  inject 召回=1 泄漏=0 n=5 0.164ms  M03,M18,M16,M07,M06
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=3 2.719ms  M03,M18,M16
+  inject 召回=0 泄漏=0 n=0 0.385ms  ∅
+  injectScoped 召回=1 泄漏=0 n=3 2.361ms  M03,M18,M16
 Q10 跨会话召回 [s-main] "我叫什么名字"
-  scoped R@5=1 R@10=1 P@10=0.2 泄漏=0 n=2 0.134ms  M03,M18
-  inject 召回=1 泄漏=1 n=3 0.108ms  M03,M18,M09
+  scoped R@5=1 R@10=1 P@10=0.2 泄漏=0 n=2 2.767ms  M03,M18
+  inject 召回=0 泄漏=0 n=0 0.337ms  ∅
+  injectScoped 召回=1 泄漏=0 n=2 2.659ms  M03,M18
 Q11 跨会话召回 [s-main] "我住在哪个城市"
-  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 0.128ms  M03,M18
-  inject 召回=- 泄漏=1 n=3 0.132ms  M03,M18,M05
+  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 2.727ms  M03,M18
+  inject 召回=- 泄漏=0 n=0 0.275ms  ∅
+  injectScoped 召回=- 泄漏=0 n=2 2.353ms  M03,M18
 Q12 跨会话召回 [s-main] "我的车牌号是多少"
-  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 0.125ms  M03,M18
-  inject 召回=- 泄漏=1 n=3 0.102ms  M03,M18,M04
+  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 2.375ms  M03,M18
+  inject 召回=- 泄漏=0 n=0 0.299ms  ∅
+  injectScoped 召回=- 泄漏=0 n=2 2.671ms  M03,M18
 Q13 跨会话召回 [s-main] "我的猫叫什么名字"
-  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 0.103ms  M03,M18
-  inject 召回=- 泄漏=1 n=3 0.114ms  M03,M18,M09
+  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 2.740ms  M03,M18
+  inject 召回=- 泄漏=0 n=0 0.283ms  ∅
+  injectScoped 召回=- 泄漏=0 n=2 2.690ms  M03,M18
 Q14 跨会话召回 [s-main] "我在备考什么"
-  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 0.098ms  M03,M18
-  inject 召回=- 泄漏=1 n=3 0.095ms  M03,M18,M20
+  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 2.434ms  M03,M18
+  inject 召回=- 泄漏=0 n=0 0.273ms  ∅
+  injectScoped 召回=- 泄漏=0 n=2 2.530ms  M03,M18
 Q15 泄漏    [s-fresh-new-session] "我叫什么名字"
-  scoped R@5=- R@10=- P@10=0 泄漏=0 n=0 0.445ms  ∅
-  inject 召回=- 泄漏=3 n=3 0.086ms  M03,M18,M09
+  scoped R@5=- R@10=- P@10=0 泄漏=0 n=0 0.347ms  ∅
+  inject 召回=- 泄漏=0 n=0 0.258ms  ∅
+  injectScoped 召回=- 泄漏=0 n=0 0.253ms  ∅
 Q16 泄漏    [s-fresh-new-session] "我的小名是什么"
-  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=1 0.086ms  M12
-  inject 召回=1 泄漏=2 n=3 0.081ms  M03,M18,M12
+  scoped R@5=1 R@10=1 P@10=0.1 泄漏=0 n=1 0.343ms  M12
+  inject 召回=1 泄漏=0 n=1 0.278ms  M12
+  injectScoped 召回=1 泄漏=0 n=1 0.366ms  M12
 Q17 无答案   [s-main] "我上次点的披萨是什么口味"
-  scoped R@5=- R@10=- P@10=0 泄漏=0 n=3 0.091ms  M03,M18,M15
-  inject 召回=- 泄漏=0 n=3 0.085ms  M03,M18,M15
+  scoped R@5=- R@10=- P@10=0 泄漏=0 n=3 2.436ms  M03,M18,M15
+  inject 召回=- 泄漏=0 n=0 0.349ms  ∅
+  injectScoped 召回=- 泄漏=0 n=3 3.547ms  M03,M18,M15
 Q18 无答案   [s-main] "今天天气怎么样"
-  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 0.084ms  M03,M18
-  inject 召回=- 泄漏=0 n=2 0.079ms  M03,M18
+  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 2.410ms  M03,M18
+  inject 召回=- 泄漏=0 n=0 0.270ms  ∅
+  injectScoped 召回=- 泄漏=0 n=2 2.630ms  M03,M18
 Q19 无答案   [s-main] "我的护照号码是多少"
-  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 0.081ms  M03,M18
-  inject 召回=- 泄漏=0 n=2 0.079ms  M03,M18
+  scoped R@5=- R@10=- P@10=0 泄漏=0 n=2 2.390ms  M03,M18
+  inject 召回=- 泄漏=0 n=0 0.270ms  ∅
+  injectScoped 召回=- 泄漏=0 n=2 2.294ms  M03,M18
 
 == Phase 1 汇总 ==
-Recall@5  scoped=1 inject=1   Recall@10 scoped=1 inject=1
-Precision@5 scoped=0.1263 inject=0.1263   Precision@10 scoped=0.0632 inject=0.0632
-跨会话泄漏数 scoped=0 inject=20 路径结论不一致=4 legacy暴露=1
+Recall@5  scoped=1 inject=0.0909   Recall@10 scoped=1 inject=0.0909
+Precision@5 scoped=0.1263 inject=0.0105   Precision@10 scoped=0.0632 inject=0.0053
+跨会话泄漏数 scoped=0 inject=0 路径结论不一致=0 legacy暴露=1
 无答案题 3 道，其中误召回 3 道
-检索延迟(ms) scoped={"n":19,"mean":0.357,"p50":0.134,"p95":3.682,"max":3.682}
-           inject={"n":19,"mean":0.16,"p50":0.108,"p95":1.092,"max":1.092}
+检索延迟(ms) scoped={"n":19,"mean":3.065,"p50":2.575,"p95":9.868,"max":9.868}
+           inject={"n":19,"mean":0.351,"p50":0.325,"p95":0.601,"max":0.601}
 
 == Phase 2 事实更正（真实写路径：processMemory + 假 client）==
-Q20 "记住：我的生日其实是6月20日，之前说错了" → 候选正文「用户的生日是6月20日」
-  写入=是 库容 22→23 新条目在 scoped 结果中的位次=4
-  旧条目(M19) 仍在库=true 仍被 scoped 检索命中=true 仍被全局注入=true 新旧位次=scoped 第3 位 vs 第4 位
-  scoped M03,M18,M19,N19 / inject M03,M18,M19,N19
+Q20 "记住：更正，我的生日改为6月20日，之前说错了" → 候选正文「用户的生日是6月20日」
+  写入=是 动作=superseded 拒写短码=- 新id=mem-59196362-2d31-4d96-b823-296588bd134d 被更正id=legacy-0fe0b1a416351f37 库容 22→22 新条目在 scoped 结果中的位次=3
+  旧条目(M19) 仍在活跃库=false 仍被 scoped 检索命中=false 仍被全局注入=false 仍被会话内注入=false 磁盘留档为 superseded=true 新旧位次=scoped 第- 位 vs 第3 位
+  scoped M03,M18,N19 / inject ∅ / injectScoped M03,M18,N19
 Q21 "记住：我把猫的名字从小雪改成糯糯了" → 候选正文「用户的猫名字叫糯糯，两岁」
-  写入=否 库容 22→22 新条目在 scoped 结果中的位次=-
-  旧条目(M09) 仍在库=true 仍被 scoped 检索命中=false 仍被全局注入=true 新旧位次=scoped 第- 位 vs 第- 位
-  scoped M03,M18 / inject M03,M18,M09
+  写入=是 动作=inserted 拒写短码=- 新id=mem-3218bb37-c65c-4cf2-b1d8-fee2aee45255 被更正id=- 库容 22→23 新条目在 scoped 结果中的位次=3
+  旧条目(-) 仍在活跃库=false 仍被 scoped 检索命中=false 仍被全局注入=false 仍被会话内注入=false 磁盘留档为 superseded=false 新旧位次=scoped 第- 位 vs 第3 位
+  scoped M03,M18,N09 / inject ∅ / injectScoped M03,M18,N09
 Q22 "记一下：我最近在学弹吉他" → 候选正文「用户在学弹吉他」
-  写入=否 库容 22→22 新条目在 scoped 结果中的位次=-
-  旧条目(-) 仍在库=false 仍被 scoped 检索命中=false 仍被全局注入=false 新旧位次=scoped 第- 位 vs 第- 位
-  scoped M03,M18 / inject M03,M18
-鉴别探针 anchorSimilarityProbe：content 与 sourceQuote 逐字相同 → 写入=是 库容 22→23 scoped=M03,M18,GATE
-更正残留数 = 2
+  写入=否 动作=pending 拒写短码=low_confidence_candidate 新id=mem-d3839930-7e0b-4b16-bb8d-51c62f685bd1 被更正id=- 库容 22→22 新条目在 scoped 结果中的位次=-
+  旧条目(-) 仍在活跃库=false 仍被 scoped 检索命中=false 仍被全局注入=false 仍被会话内注入=false 磁盘留档为 superseded=false 新旧位次=scoped 第- 位 vs 第- 位
+  scoped M03,M18 / inject ∅ / injectScoped M03,M18
+鉴别探针 anchorSimilarityProbe：期望写入=是 期望短码=- → 实际写入=是 动作=inserted 短码=- 锚点分=- 关键词命中=- 判据符合 库容 22→23
+鉴别探针 confidenceGateProbe：期望写入=否 期望短码=low_confidence_candidate → 实际写入=否 动作=pending 短码=low_confidence_candidate 锚点分=- 关键词命中=- 判据符合 库容 22→22
+鉴别探针 anchorGateProbe：期望写入=否 期望短码=ungrounded_content → 实际写入=否 动作=none 短码=ungrounded_content 锚点分=0 关键词命中=0 判据符合 库容 22→22
+鉴别探针 modelEmptyProbe：期望写入=否 期望短码=model_empty → 实际写入=否 动作=none 短码=model_empty 锚点分=- 关键词命中=- 判据符合 库容 22→22
+鉴别探针 notTriggeredProbe：期望写入=否 期望短码=not_triggered → 实际写入=否 动作=none 短码=not_triggered 锚点分=- 关键词命中=- 判据符合 库容 22→22
+更正残留数 = 0（其中走 supersede 留档 1）
+未写入有短码 5 / 无短码 0
+拒写成因鉴别：anchorSimilarityProbe=- confidenceGateProbe=low_confidence_candidate anchorGateProbe=ungrounded_content modelEmptyProbe=model_empty notTriggeredProbe=not_triggered，判据不符 0 个
 
 == Phase 3 删除/撤回后残留 ==
-S1 会话=s-main 撤回「我的猫叫小雪」@2026-10-20T03:39:00.000Z → 返回整条删除数 0（期望 0） 库容=22 应存活满足=true 应删除满足=true
-S2 会话=s-private 撤回「我的猫叫小雪」@2026-10-20T03:39:00.000Z → 返回整条删除数 1（期望 1） 库容=21 应存活满足=true 应删除满足=true
-Q23 deleteMemory target=M01 → {"api":"deleteMemory","removed":1,"reason":"ok"}
-    "我喜欢喝什么咖啡" scoped=M03,M18,M17 inject=M03,M18,M17
-    残留面={"stillInMemoryArray":false,"stillOnDisk":false,"stillRetrievableByScoped":false,"stillRetrievableByInject":false} 残留数=0 内存/磁盘一致=true 贡献列表剩余=null
-Q24 recallPartial target=M21 → {"api":"recallMemoryBySourceQuote","entriesDeletedReturned":0}
-    "我平时用什么编辑器" scoped=M03,M18 inject=M03,M18,M21
-    残留面={"stillInMemoryArray":true,"stillOnDisk":true,"stillRetrievableByScoped":false,"stillRetrievableByInject":true} 残留数=3 内存/磁盘一致=true 贡献列表剩余=[{"sessionId":"s-work","sourceQuote":"我们组都用VS Code","createdAt":"2026-10-20T06:30:00.000Z"}]
-Q25 recallLast target=M21 → {"api":"recallMemoryBySourceQuote","entriesDeletedReturned":1}
-    "我平时用什么编辑器" scoped=∅ inject=M03,M18
-    残留面={"stillInMemoryArray":false,"stillOnDisk":false,"stillRetrievableByScoped":false,"stillRetrievableByInject":false} 残留数=0 内存/磁盘一致=true 贡献列表剩余=null
-Q26 clearMemories target=ALL → {"api":"clearMemories"}
-    "我喜欢喝什么咖啡" scoped=∅ inject=∅
-    "我叫什么名字" scoped=∅ inject=∅
-    "我的车牌号是多少" scoped=∅ inject=∅
-    残留面={"stillInMemoryArray":false,"stillOnDisk":false,"stillRetrievableByScoped":false,"stillRetrievableByInject":false} 残留数=0 内存/磁盘一致=true 贡献列表剩余=null
-删除残留数 = 0；撤回误删防护探针失败=[]；内存/磁盘不一致=[]；摘掉贡献却返回 0 的题=["Q24"]
+S1 会话=s-main 撤回「我的猫叫小雪」@2026-10-20T03:39:00.000Z → 整条删除 0（期望 0） 摘掉贡献 0 库容=22 应存活满足=true 应删除满足=true 内存/磁盘一致=true
+S2 会话=s-private 撤回「我的猫叫小雪」@2026-10-20T03:39:00.000Z → 整条删除 1（期望 1） 摘掉贡献 1 库容=21 应存活满足=true 应删除满足=true 内存/磁盘一致=true
+Q23 deleteMemory target=M01 → {"api":"deleteMemory","locator":"id","removed":1,"reason":"ok","id":"legacy-fcf84eb965c874f2"}
+    "我喜欢喝什么咖啡" scoped=M03,M18,M17 inject=∅ injectScoped=M03,M18,M17
+    残留面={"stillInMemoryArray":false,"stillOnDisk":false,"stillRetrievableByScoped":false,"stillRetrievableByInject":false,"stillRetrievableByInjectScoped":false} 残留数=0 内存/磁盘一致=true 贡献列表剩余=null
+Q24 recallPartial target=M21 → {"api":"recallMemoryBySourceQuote","entriesDeletedReturned":0,"contributionsDropped":1}
+    "我平时用什么编辑器" scoped=M03,M18 inject=∅ injectScoped=M03,M18
+    残留面={"stillInMemoryArray":true,"stillOnDisk":true,"stillRetrievableByScoped":false,"stillRetrievableByInject":false,"stillRetrievableByInjectScoped":false} 残留数=2 内存/磁盘一致=true 贡献列表剩余=[{"sessionId":"s-work","sourceQuote":"我们组都用VS Code","createdAt":"2026-10-20T06:30:00.000Z"}]
+Q25 recallLast target=M21 → {"api":"recallMemoryBySourceQuote","entriesDeletedReturned":1,"contributionsDropped":1}
+    "我平时用什么编辑器" scoped=∅ inject=∅ injectScoped=∅
+    残留面={"stillInMemoryArray":false,"stillOnDisk":false,"stillRetrievableByScoped":false,"stillRetrievableByInject":false,"stillRetrievableByInjectScoped":false} 残留数=0 内存/磁盘一致=true 贡献列表剩余=null
+Q26 clearMemories target=ALL → {"api":"clearMemories","removedEntries":19,"cleared":true}
+    "我喜欢喝什么咖啡" scoped=∅ inject=∅ injectScoped=∅
+    "我叫什么名字" scoped=∅ inject=∅ injectScoped=∅
+    "我的车牌号是多少" scoped=∅ inject=∅ injectScoped=∅
+    残留面={"stillInMemoryArray":false,"stillOnDisk":false,"stillRetrievableByScoped":false,"stillRetrievableByInject":false,"stillRetrievableByInjectScoped":false} 残留数=0 内存/磁盘一致=true 贡献列表剩余=null
+C1 clearSessionMemories 会话=s-work → {"removedEntries":2,"removedContributions":4,"remaining":20,"reason":"ok"} 库容 22→20
+    本会话贡献未清空=[] 被误删的他会话条目=[] 他会话检索仍可用=true 内存/磁盘一致=true
+删除残留数 = 0；撤回误删防护探针失败=[]；内存/磁盘不一致=[]；摘掉贡献却返回 0 的题=[]
 
 == Phase 4 Context Engine 对照（近似重复候选的裁决）==
-查询「我喝咖啡选什么」 直连检索命中 2 条 = X1,X2
-引擎：ok=true route=direct selected=0 conflicts=2 注入行=[] 标记「时效未知」的行数=0
-引擎路径注入条数少于直连检索即为「开启引擎后召回变少」，原因见 server/context/engine.js:213-224（组内平局 → 整组标 conflict 丢弃）
+查询「我喝咖啡选什么」 直连检索命中 2 条 = X2,X1
+引擎：ok=true route=direct selected=2 conflicts=0 注入行=["用户喝咖啡只喝美式（可能过时，待验证）","用户喝咖啡只喝拿铁（可能过时，待验证）"] 标记「时效未知」的行数=0
+矛盾对（拿铁/美式）按裁决文案刻意双注入（补充事实保留，不整组丢弃），只报告不计冗余；同义重复情景（引擎口径 jaccard ≥0.85）必须被跨条目去重裁掉一条（skipped 出现 duplicate_retrieval_item），注入里不得有冗余对
+
+== Phase 5 写入质量（真实写路径：processMemory + 假 client，判分以落盘为准）==
+hedgedPreferenceProbe [hedged] 期望=pending/"user_hedged_requires_confirmation" → 落盘=pending 动作=pending 短码=user_hedged_requires_confirmation
+inferredPreferenceProbe [inferred] 期望=pending/"model_inference_requires_confirmation" → 落盘=pending 动作=pending 短码=model_inference_requires_confirmation
+temporaryConflictProbe [temporaryConflict] 期望=rejected/["temporary_state","contradictory_evidence_requires_confirmation"] → 落盘=rejected 动作=none 短码=temporary_state 稳定靶子完好=true
+explicitCorrectionProbe [correction] 期望=active → 落盘=active 动作=superseded 短码=- 旧条目 superseded=true
+persistentIntentProbe [persistentIntent] 期望=active → 落盘=active 动作=inserted 短码=-
+duplicateVerbatimProbe [duplicate] 期望=active → 落盘=active 动作=merged 短码=- 两段=inserted→merged
+duplicateParaphraseProbe [duplicate] 期望=active → 落盘=active 动作=merged 短码=- 两段=inserted→merged
+hedgedRepeatProbe [hedged] 期望=pending/"user_hedged_requires_confirmation" → 落盘=pending 动作=pending 短码=user_hedged_requires_confirmation 两段=pending→pending 跨会话贡献=2
+singlePreferenceCompatProbe [singlePreferenceCompat] 期望=active → 落盘=active 动作=inserted 短码=-
+写入质量：误晋升=0 冲突防护召回=1 重复记忆率=0 晋升精确率=1（分母 5） pending 落盘失败=[]
 
 == 基线指标汇总 ==
 {
@@ -115,6 +154,10 @@ Q26 clearMemories target=ALL → {"api":"clearMemories"}
         "10": 1
       },
       "inject": {
+        "5": 0.0909,
+        "10": 0.0909
+      },
+      "injectScoped": {
         "5": 1,
         "10": 1
       }
@@ -125,16 +168,21 @@ Q26 clearMemories target=ALL → {"api":"clearMemories"}
         "10": 0.0632
       },
       "inject": {
+        "5": 0.0105,
+        "10": 0.0053
+      },
+      "injectScoped": {
         "5": 0.1263,
         "10": 0.0632
       }
     },
     "crossSessionLeaks": {
       "scoped": 0,
-      "inject": 20,
-      "definition": "forbid 列（仅属其他会话的记忆）出现在返回结果里的次数总和"
+      "inject": 0,
+      "injectScoped": 0,
+      "definition": "forbid 列（仅属其他会话的记忆）出现在返回结果里的次数总和；injectScoped = 带 sessionId 的线上注入路径"
     },
-    "crossPathDisagreement": 4,
+    "crossPathDisagreement": 0,
     "legacyUnattributedExposure": 1,
     "noAnswerQuestions": {
       "total": 3,
@@ -158,13 +206,27 @@ Q26 clearMemories target=ALL → {"api":"clearMemories"}
           1
         ],
         "recall5Inject": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "recall10Inject": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "recall5InjectScoped": [
           1,
           1,
           1,
           1,
           1
         ],
-        "recall10Inject": [
+        "recall10InjectScoped": [
           1,
           1,
           1,
@@ -173,6 +235,7 @@ Q26 clearMemories target=ALL → {"api":"clearMemories"}
         ],
         "leaksScoped": 0,
         "leaksInject": 0,
+        "leaksInjectScoped": 0,
         "n": 5
       },
       "进展": {
@@ -189,12 +252,24 @@ Q26 clearMemories target=ALL → {"api":"clearMemories"}
           1
         ],
         "recall5Inject": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "recall10Inject": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "recall5InjectScoped": [
           1,
           1,
           1,
           1
         ],
-        "recall10Inject": [
+        "recall10InjectScoped": [
           1,
           1,
           1,
@@ -202,6 +277,7 @@ Q26 clearMemories target=ALL → {"api":"clearMemories"}
         ],
         "leaksScoped": 0,
         "leaksInject": 0,
+        "leaksInjectScoped": 0,
         "n": 4
       },
       "跨会话召回": {
@@ -220,13 +296,27 @@ Q26 clearMemories target=ALL → {"api":"clearMemories"}
           null
         ],
         "recall5Inject": [
-          1,
+          0,
           null,
           null,
           null,
           null
         ],
         "recall10Inject": [
+          0,
+          null,
+          null,
+          null,
+          null
+        ],
+        "recall5InjectScoped": [
+          1,
+          null,
+          null,
+          null,
+          null
+        ],
+        "recall10InjectScoped": [
           1,
           null,
           null,
@@ -234,7 +324,8 @@ Q26 clearMemories target=ALL → {"api":"clearMemories"}
           null
         ],
         "leaksScoped": 0,
-        "leaksInject": 5,
+        "leaksInject": 0,
+        "leaksInjectScoped": 0,
         "n": 5
       },
       "泄漏": {
@@ -254,8 +345,17 @@ Q26 clearMemories target=ALL → {"api":"clearMemories"}
           null,
           1
         ],
+        "recall5InjectScoped": [
+          null,
+          1
+        ],
+        "recall10InjectScoped": [
+          null,
+          1
+        ],
         "leaksScoped": 0,
-        "leaksInject": 5,
+        "leaksInject": 0,
+        "leaksInjectScoped": 0,
         "n": 2
       },
       "无答案": {
@@ -279,49 +379,96 @@ Q26 clearMemories target=ALL → {"api":"clearMemories"}
           null,
           null
         ],
+        "recall5InjectScoped": [
+          null,
+          null,
+          null
+        ],
+        "recall10InjectScoped": [
+          null,
+          null,
+          null
+        ],
         "leaksScoped": 0,
         "leaksInject": 0,
+        "leaksInjectScoped": 0,
         "n": 3
       }
     },
     "latencyMs": {
       "scoped": {
         "n": 19,
-        "mean": 0.357,
-        "p50": 0.134,
-        "p95": 3.682,
-        "max": 3.682
+        "mean": 3.065,
+        "p50": 2.575,
+        "p95": 9.868,
+        "max": 9.868
       },
       "inject": {
         "n": 19,
-        "mean": 0.16,
-        "p50": 0.108,
-        "p95": 1.092,
-        "max": 1.092
+        "mean": 0.351,
+        "p50": 0.325,
+        "p95": 0.601,
+        "max": 0.601
+      },
+      "injectScoped": {
+        "n": 19,
+        "mean": 2.512,
+        "p50": 2.659,
+        "p95": 3.644,
+        "max": 3.644
       },
       "unit": "毫秒，进程内直接调用真实函数，不含 HTTP/模型开销"
+    },
+    "avgInjectedTokens": {
+      "injectScoped": {
+        "n": 19,
+        "mean": 20.526,
+        "p50": 25,
+        "p95": 38,
+        "max": 38
+      },
+      "estimator": "heuristic-cjk-ascii-v1",
+      "definition": "injectScoped 注入路径每题记忆条目正文的 token 估算总量（heuristic-cjk-ascii，与生产注入预算同一实现）；含所有注入行，不管是否被模型引用"
     }
   },
   "phase2": {
-    "correctionResidueCount": 2,
-    "definition": "更正后旧事实仍留在库中/仍可被检索的题数（server/memory.js:509-533 只在相似度≥0.8 时覆盖，没有 validTo/status 字段可标废弃）"
+    "correctionResidueCount": 0,
+    "correctionHandledBySupersede": 1,
+    "definition": "更正残留 = 更正后旧事实仍在活跃记忆集里（getMemories 默认视图）或仍可被检索命中的题数；旧条目转 status=superseded 留在磁盘做审计，不计入残留",
+    "nonWrittenAttempts": 5,
+    "nonWrittenWithReason": 5,
+    "nonWrittenWithoutReason": 0,
+    "nonWrittenWithoutReasonKeys": [],
+    "gateProbeMismatches": [],
+    "gateProbeReasons": [
+      "anchorSimilarityProbe=-",
+      "confidenceGateProbe=low_confidence_candidate",
+      "anchorGateProbe=ungrounded_content",
+      "modelEmptyProbe=model_empty",
+      "notTriggeredProbe=not_triggered"
+    ]
   },
   "phase3": {
     "deletionResidueCount": 0,
-    "deletionResidueDefinition": "应被删除的记忆仍存在于内存数组 / 磁盘 / scoped 检索 / 全局注入 四个面上的次数总和",
+    "deletionResidueDefinition": "应被删除的记忆仍存在于内存数组 / 磁盘 / scoped 检索 / 无归属注入 / 带会话注入 五个面上的次数总和",
     "safetyProbeFailures": [],
     "memoryDiskInconsistencies": [],
-    "recallSilentlyReturnedZero": [
-      "Q24"
-    ]
+    "recallSilentlyReturnedZero": [],
+    "sessionCleanup": {
+      "contributionsStillOwnedByTarget": [],
+      "foreignMissing": [],
+      "diskConsistent": true,
+      "otherSessionStillSearchable": true,
+      "definition": "按会话清理后：该会话的贡献应全部从库里消失（contributionsStillOwnedByTarget 应为空）、其他会话独有的条目一条不少（foreignMissing 应为空）、磁盘与内存一致"
+    }
   },
   "phase4": {
     "query": "我喝咖啡选什么",
     "storeSize": 3,
     "scopedDirect": {
       "ids": [
-        "X1",
-        "X2"
+        "X2",
+        "X1"
       ],
       "count": 2
     },
@@ -333,22 +480,43 @@ Q26 clearMemories target=ALL → {"api":"clearMemories"}
         {
           "source": "memory",
           "status": "ok",
-          "count": 2
-        },
-        {
-          "source": "user",
-          "status": "no_result",
-          "count": 0
+          "count": 3
         }
       ],
-      "selected": 0,
-      "conflicts": 2,
+      "selected": 2,
+      "conflicts": 0,
       "demoted": 0,
       "expired": 0,
-      "injectedLines": [],
+      "injectedLines": [
+        "用户喝咖啡只喝美式（可能过时，待验证）",
+        "用户喝咖啡只喝拿铁（可能过时，待验证）"
+      ],
+      "redundantPairs": 0,
       "unknownFreshnessMarks": 0
     },
-    "verdict": "引擎路径注入条数少于直连检索即为「开启引擎后召回变少」，原因见 server/context/engine.js:213-224（组内平局 → 整组标 conflict 丢弃）"
+    "duplicateScenario": {
+      "query": "我用什么编辑器写代码",
+      "ok": true,
+      "error": null,
+      "scopedDirectCount": 2,
+      "selected": 1,
+      "skippedDuplicates": 1,
+      "injectedLines": [
+        "用户常用的编辑器是 VS Code。（可能过时，待验证）"
+      ],
+      "redundantPairs": 0
+    },
+    "verdict": "矛盾对（拿铁/美式）按裁决文案刻意双注入（补充事实保留，不整组丢弃），只报告不计冗余；同义重复情景（引擎口径 jaccard ≥0.85）必须被跨条目去重裁掉一条（skipped 出现 duplicate_retrieval_item），注入里不得有冗余对"
+  },
+  "phase5": {
+    "promotionPrecision": 1,
+    "promotionDenominator": 5,
+    "preferenceFalsePromotions": 0,
+    "conflictDetectionRecall": 1,
+    "duplicateMemoryRate": 0,
+    "pendingDurabilityFailures": [],
+    "hedgedRepeatStillPending": true,
+    "definition": "写入质量四指标（Notion §13.1）：误晋升数（hedged/推断/临时冲突 → active）、冲突防护召回（临时表达不覆盖稳定偏好）、重复记忆率（重复表达产生额外条目）、晋升精确率（晋升里该晋升的占比）。判分以落盘状态为准，按 sourceQuote 匹配，短码按最后一通调用核对。重复记忆率只计 duplicate 探针；hedged 跨会话重复单列为 hedgedRepeatStillPending 闸门（并成一条 pending 才为 true）。"
   }
 }
 
