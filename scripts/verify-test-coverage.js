@@ -453,10 +453,13 @@ function main() {
   // 一致性门禁：并入本脚本，本地一次 verify 全绿 == CI 对应步骤全绿，
   // 杜绝「本地绿、CI 才红」的计数/登记漂移（2026-11-15 实际踩过一次）。
   // notion-ledger 不在 CI 清单里，这里一并对齐（台账行状态必须与汇总一致）。
+  // scc-baseline（2026-11-20）同样不在 CI 显式清单里：循环依赖成员冻结门禁，
+  // server 新模块入圈必须经 oracle 放行 + --write 再生基线（分层规矩见 AGENTS.md）。
   const consistencyGates = [
     runConsistencyGate('doc-counts(sync-doc-counts --check)', 'sync-doc-counts.js', ['--check']),
     runConsistencyGate('api-capabilities(verify-api-capabilities)', 'verify-api-capabilities.js', []),
     runConsistencyGate('notion-ledger(scan-notion-ledger)', 'scan-notion-ledger.js', []),
+    runConsistencyGate('scc-baseline(verify-dependency-baseline)', 'verify-dependency-baseline.js', []),
   ];
   for (const gate of consistencyGates) {
     if (!gate.ok) errors.push(`${gate.label}: 一致性门禁失败\n${gate.output}`);
