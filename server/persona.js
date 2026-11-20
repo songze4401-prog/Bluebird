@@ -28,6 +28,7 @@ const DEFAULTS = Object.freeze({
   messageMode: 'auto',
   customPrompt: '',
   systemPrompt: '',
+  enabledSkills: [],
 });
 
 const MESSAGE_MODES = Object.freeze(['single', 'auto', 'frequent']);
@@ -85,6 +86,21 @@ function sanitizeSystemPrompt(value) {
   return [...text].slice(0, SYSTEM_PROMPT_MAX_CHARS).join('');
 }
 
+// 技能启用列表：字符串数组去重截断；非数组/非法元素静默回退为空——
+// 读盘宽松归一的原则与既有字段一致（写入口另有严格校验）。
+const SKILLS_ENABLED_MAX = 50;
+
+function normalizeEnabledSkills(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  for (const item of value) {
+    if (typeof item !== 'string' || !item.trim()) continue;
+    seen.add(item.trim());
+    if (seen.size >= SKILLS_ENABLED_MAX) break;
+  }
+  return [...seen];
+}
+
 // 宽松归一：读盘与旧配置迁移用。字段缺失/类型不符一律回退默认值，
 // 保证人手改过或旧版本写下的 persona.json 都能安全读入。
 function normalizeConfig(input) {
@@ -101,6 +117,7 @@ function normalizeConfig(input) {
 
   config.customPrompt = sanitizeCustomPrompt(src.customPrompt);
   config.systemPrompt = sanitizeSystemPrompt(src.systemPrompt);
+  config.enabledSkills = normalizeEnabledSkills(src.enabledSkills);
 
   return config;
 }
@@ -156,6 +173,17 @@ function validateConfig(input) {
     errors.push(
       `systemPrompt 超过 ${SYSTEM_PROMPT_MAX_CHARS} 字上限（当前 ${[...system].length} 字）`
     );
+  }
+
+  if (input.enabledSkills !== undefined && input.enabledSkills !== null) {
+    if (
+      !Array.isArray(input.enabledSkills) ||
+      !input.enabledSkills.every(item => typeof item === 'string')
+    ) {
+      errors.push('enabledSkills 必须是字符串数组');
+    } else if (input.enabledSkills.length > SKILLS_ENABLED_MAX) {
+      errors.push(`enabledSkills 超过 ${SKILLS_ENABLED_MAX} 项上限`);
+    }
   }
 
   if (errors.length) return { ok: false, errors };
