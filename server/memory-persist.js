@@ -242,8 +242,95 @@ function enqueueWrite(task) {
 }
 
 
+function storeFingerprint(list) {
+  return (Array.isArray(list) ? list : [])
+    .map(item =>
+      JSON.stringify([
+        (item && item.id) || null,
+        (item && item.status) || null,
+        (item && item.validFrom) || null,
+        (item && item.validTo) || null,
+        (item && item.supersededBy) || null,
+        (Array.isArray(item && item.contributions) ? item.contributions : []).map(
+          c => [
+            (c && c.sessionId) || null,
+            (c && c.createdAt) || null,
+            (c && c.sourceQuote) || null,
+            (c && c.messageId) || null,
+            (c && c.sourceType) || null,
+          ]
+        ),
+      ])
+    )
+    .join(';');
+}
+
+function verifyStoreConsistency() {
+  const memoryList = Array.isArray(memoryCore().getMemoryList())
+    ? memoryCore().getMemoryList()
+    : [];
+
+  let raw;
+  try {
+    raw = fs.readFileSync(memoryCore().memoryFile, 'utf8');
+  } catch (error) {
+    // 从没写过盘（首次运行 / 空库）时文件不存在，与「内存也是空」一致。
+    if (error && error.code === 'ENOENT' && !memoryList.length) {
+      return { consistent: true, entries: 0, reason: 'ok' };
+    }
+
+    return {
+      consistent: false,
+      entries: memoryList.length,
+      reason: error && error.code === 'ENOENT' ? 'missing' : 'corrupt',
+    };
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (_) {
+    return { consistent: false, entries: memoryList.length, reason: 'corrupt' };
+  }
+
+  if (!Array.isArray(parsed)) {
+    return { consistent: false, entries: memoryList.length, reason: 'corrupt' };
+  }
+
+  // 磁盘形态先过一遍与读盘相同的升级（贡献列表 + 身份/时效字段 + id 去重）：
+  // 旧数据在内存里是升级后的形态，直接拿原始 JSON 比会假报不一致。
+  // 这套升级是幂等的，已升级过的库再过一次结果不变。
+  const hydratedDisk = hydrateEntries(parsed);
+  const diskFingerprint = storeFingerprint(hydratedDisk);
+  const memoryFingerprint = storeFingerprint(memoryList);
+
+  if (hydratedDisk.length !== memoryList.length) {
+    return {
+      consistent: false,
+      entries: memoryList.length,
+      diskEntries: parsed.length,
+      diskValidEntries: hydratedDisk.length,
+      reason: 'count-mismatch',
+    };
+  }
+
+  if (diskFingerprint !== memoryFingerprint) {
+    return {
+      consistent: false,
+      entries: memoryList.length,
+      diskEntries: parsed.length,
+      diskValidEntries: hydratedDisk.length,
+      reason: 'mismatch',
+    };
+  }
+
+  return { consistent: true, entries: memoryList.length, reason: 'ok' };
+}
+
+
 module.exports = {
   registerMemoryCorruptionHandler,
+  verifyStoreConsistency,
   hydrateEntries,
   loadTombstoneState,
   loadMemories,
