@@ -17,7 +17,7 @@
 //
 // 圈依赖注入：data-events / monitoring 都在 46 文件加载圈中（R1 冻结），
 // 本模块顶层 require 它们会把自身拉入圈内（scc-freeze 门禁红线）。
-// 因此这两个能力由 memory.js 加载后经 injectExtractionDeps 回注：
+// 因此这两个能力由 memory.js 加载后经共享容器 injectMemoryCore 回注：
 // reportSkip 在未注入时直接抛错（显式失败，绝不静默丢埋点）；
 // extractMemory 的未注入检查在外层 try 内，会被兜底 catch 转成
 // skip('model_error')——同样显式可见，但不是裸抛错。
@@ -39,20 +39,9 @@ const {
   SOURCE_TYPES,
 } = require('./memory-ranking');
 
-// 注入容器：{ logDataEvent, monitoring, memoryFile }。memory.js 是唯一
-// 注入方（全部消费方——processMemory/测试/eval driver——都经 memory.js 加载）。
-let extractionDeps = null;
-function injectExtractionDeps(deps) {
-  extractionDeps = deps;
-}
-function extractionDepsOrThrow() {
-  if (!extractionDeps) {
-    throw new Error(
-      'memory-extraction: 圈依赖未注入（injectExtractionDeps）——本模块须在 memory.js 加载后使用'
-    );
-  }
-  return extractionDeps;
-}
+// 注入经共享容器 server/memory-core.js（state-holder 统一设计）：
+// 键 { logDataEvent, monitoring, memoryFile }，memory.js 顶层注入。
+const { memoryCore } = require('./memory-core');
 
 // hedged 候选落盘时正文带的不确定性前缀（见 processMemory 的 sourceHedged 分支）。
 // 合并配对必须先把前缀剥掉再算相似度：不剥的话「可能：X」对「X」相似度只有
@@ -213,9 +202,9 @@ function skip(reason, detail) {
 function reportSkip(reason, detail) {
   console.log('Memory skipped:', reason);
 
-  extractionDepsOrThrow().logDataEvent({
+  memoryCore().logDataEvent({
     module: 'memory',
-    file: extractionDepsOrThrow().memoryFile,
+    file: memoryCore().memoryFile,
     event: 'memory_write_rejected',
     level: 'info',
     reason,
@@ -432,7 +421,7 @@ async function extractMemory(client, message, force = false, sessionId = null, o
     let extractAttempts = 0;
     for (;;) {
       extractAttempts += 1;
-      const monitoringApi = extractionDepsOrThrow().monitoring;
+      const monitoringApi = memoryCore().monitoring;
       const auxiliary = monitoringApi.beginAuxiliaryModel({
         providerId: 'deepseek',
         modelId: 'deepseek-chat',
@@ -660,7 +649,6 @@ uncertainty 在原话有犹豫表达时必须为 source_hedged，否则为 none�
 
 
 module.exports = {
-  injectExtractionDeps,
   HEDGE_PENDING_MARK,
   MEMORY_ENABLED,
   MEMORY_TRIGGER,

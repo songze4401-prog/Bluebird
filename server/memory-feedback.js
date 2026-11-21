@@ -8,7 +8,7 @@
 // 设计边界（勿破坏）：
 // - 这是写路径模块：写基础设施（写队列 enqueueWrite、持久化 saveMemories/
 //   commitWithTombstones、派生索引 refreshDerivedMemoryIndex、状态数组
-//   memories 的读写）全部留守 memory.js，经 injectMemoryWriteDeps 注入。
+//   memories 的读写）全部留守 memory.js，经共享容器 injectMemoryCore 注入。
 //   setMemoryList(next) 是状态重赋值的唯一通道（memories 是 let 数组，
 //   不能像 pendingMemoryIntents 那样共享 Set 引用）。
 // - 零回边：不 require memory.js（否则入圈，触发 scc-freeze 门禁）。
@@ -41,19 +41,9 @@ const {
 const { issuedId } = require('./memory-extraction');
 const { ownerAllows } = require('./memory-retrieval');
 
-// 写路径注入容器：10 键。memory.js 是唯一注入方（全部消费方都经其加载）。
-let memoryWriteDeps = null;
-function injectMemoryWriteDeps(deps) {
-  memoryWriteDeps = deps;
-}
-function memoryWriteDepsOrThrow() {
-  if (!memoryWriteDeps) {
-    throw new Error(
-      'memory-feedback: 写路径依赖未注入（injectMemoryWriteDeps）——本模块须在 memory.js 加载后使用'
-    );
-  }
-  return memoryWriteDeps;
-}
+// 写路径注入经共享容器 server/memory-core.js（state-holder 统一设计）：
+// 10 键，memory.js 顶层注入。
+const { memoryCore } = require('./memory-core');
 
 // 反馈历史留档上限（appendFeedbackHistory 裁剪用）。
 const FEEDBACK_HISTORY_LIMIT = 20;
@@ -143,7 +133,7 @@ async function confirmMemoryFeedback({ id, userId = null, feedbackId = null } = 
   if (!targetId) return { updated: 0, reason: 'invalid' };
   if (fbId === undefined) return { updated: 0, reason: 'invalid_feedback_id' };
 
-  const deps = memoryWriteDepsOrThrow();
+  const deps = memoryCore();
   return deps.enqueueWrite(async () => {
     const currentList = deps.getMemoryList();
     const current = Array.isArray(currentList) ? currentList : [];
@@ -333,7 +323,7 @@ async function denyMemoryFeedback({
   if (!targetId) return { denied: 0, reason: 'invalid' };
   if (fbId === undefined) return { denied: 0, reason: 'invalid_feedback_id' };
 
-  const deps = memoryWriteDepsOrThrow();
+  const deps = memoryCore();
   return deps.enqueueWrite(async () => {
     const currentList = deps.getMemoryList();
     const current = Array.isArray(currentList) ? currentList : [];
@@ -421,7 +411,7 @@ async function correctMemoryFeedback({
   keywords,
   confidence,
 } = {}) {
-  const deps = memoryWriteDepsOrThrow();
+  const deps = memoryCore();
   const targetId = cleanText(id);
   const owner = cleanText(userId);
   const fbId = normalizeFeedbackId(feedbackId);
@@ -643,7 +633,6 @@ async function correctMemoryFeedback({
 // reason：ok / corrupt（文件读不出合法数组）/ missing / count-mismatch / mismatch
 
 module.exports = {
-  injectMemoryWriteDeps,
   FEEDBACK_HISTORY_LIMIT,
   feedbackDecision,
   appendFeedbackHistory,

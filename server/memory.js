@@ -110,44 +110,19 @@ const {
   correctMemoryFeedback,
 } = require('./memory-feedback');
 
-// 写路径注入：反馈模块的写基础设施与状态读写跟随本文件语境。
-const { injectMemoryWriteDeps } = require('./memory-feedback');
-injectMemoryWriteDeps({
-  getMemoryList: () => memories,
-  setMemoryList: (next) => { memories = next; },
-  enqueueWrite,
-  saveMemories,
-  commitWithTombstones,
-  refreshDerivedMemoryIndex,
-  logLifecycleEvent,
-  logLifecycleRejection,
-  trimToCapacity,
-  maintenanceKeywords,
-});
-
-// 状态注入：检索模块的状态 getter 与 memoryEnabled 快照跟随本文件语境。
-// getMemories 是公开 getter（用户视角过滤+副本，getMemoriesForUser 原语义）；
-// getMemoryList 是原始数组 getter（visiblePool/checkMemoryOwnership/
-// selectSearchCandidates 迁移前直读模块状态 memories，含历史条目——
-// 公开 getter 会过滤历史并重写副本，语义不同，不可混用）。
-const { injectRetrievalDeps } = require('./memory-retrieval');
-injectRetrievalDeps({
-  getMemories,
-  getMemoryList: () => memories,
-  getPendingMemories,
-  memoryEnabled: MEMORY_ENABLED,
-});
-
-// 圈依赖回注：data-events/monitoring 都在 46 文件加载圈中，抽取模块顶层
-// require 它们会入圈（scc-freeze 门禁红线），改为由本文件注入。必须在
-// 本模块顶层同步完成——全部消费方（processMemory/测试/eval driver）都
-// 经本文件加载。MEMORY_FILE 一并注入：抽取模块的埋点 file 字段必须跟随
-// 本文件的加载语境（freshModule 只重载本文件，抽取模块不得自固化路径）。
-const { injectExtractionDeps } = require('./memory-extraction');
-
-const { getInstanceUserId } = require('./user-scope');
-const memoryObservationLedger = require('./memory-observation-ledger');
-
+// 记忆核心状态注入：迁移模块共用唯一容器（server/memory-core.js，
+// state-holder 统一设计）。键分三域：
+// - 状态读写：getMemoryList/setMemoryList（memories 是 let 数组的唯一
+//   读写通道）、getMemories（公开 getter，过滤+副本——getMemoriesForUser
+//   原语义，与 getMemoryList 语义不同不可混用）、getPendingMemories、
+//   memoryEnabled（快照，freshModule 重载时随本文件更新）
+// - 写基础设施：enqueueWrite/saveMemories/commitWithTombstones/
+//   refreshDerivedMemoryIndex/trimToCapacity/maintenanceKeywords
+// - 圈依赖与观测：logDataEvent/monitoring/memoryFile（抽取埋点 file
+//   跟随本文件加载语境）/logLifecycleEvent/logLifecycleRejection
+// 必须在本模块顶层同步完成——全部消费方（processMemory/测试/eval
+// driver）都经本文件加载。
+const { injectMemoryCore } = require('./memory-core');
 // 数据目录可通过 BLUEBIRD_DATA_DIR 覆盖：测试用临时目录，避免碰到真实数据。
 // 未设置时与 sessions.js / emotion.js 保持一致，落在 server/data/。
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
@@ -158,9 +133,29 @@ const MEMORY_TOMBSTONE_FILE = path.join(DATA_DIR, 'memory-tombstones.json');
 const MEMORY_FILE = path.join(DATA_DIR, 'memory.json');
 const MEMORY_LIMIT = 100;
 
-// 圈依赖注入：抽取模块的埋点能力与 file 字段跟随本文件语境（MEMORY_FILE
-// 在上方定义后注入——freshModule 只重载本文件，抽取模块不得自固化路径）。
-injectExtractionDeps({ logDataEvent, monitoring, memoryFile: MEMORY_FILE });
+injectMemoryCore({
+  logDataEvent,
+  monitoring,
+  memoryFile: MEMORY_FILE,
+  getMemories,
+  getMemoryList: () => memories,
+  setMemoryList: (next) => { memories = next; },
+  getPendingMemories,
+  memoryEnabled: MEMORY_ENABLED,
+  enqueueWrite,
+  saveMemories,
+  commitWithTombstones,
+  refreshDerivedMemoryIndex,
+  logLifecycleEvent,
+  logLifecycleRejection,
+  trimToCapacity,
+  maintenanceKeywords,
+});
+
+const { getInstanceUserId } = require('./user-scope');
+const memoryObservationLedger = require('./memory-observation-ledger');
+
+
 // 待确认候选只有高度相似的后续表达才合并，避免将相近但不同的事实并成一条。
 const PENDING_CANDIDATE_MATCH_MIN = 0.9;
 function stripHedgePendingMark(value) {
