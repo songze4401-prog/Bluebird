@@ -8,7 +8,7 @@
 //
 // 设计边界（勿破坏）：
 // - 零回边：不 require memory.js（否则入圈，触发 scc-freeze 门禁）。
-//   状态经 injectRetrievalDeps 注入：getMemories/getPendingMemories 是
+//   状态经共享容器 injectMemoryCore 注入：getMemories/getPendingMemories 是
 //   memory.js 的留守公开 getter，memoryEnabled 是 memory.js 的模块级
 //   快照——注入使行为与迁移前完全一致（freshModule 重载 memory.js 时
 //   注入值随之更新，避免 R2b 在 memory-extraction 上踩过的快照固化坑）。
@@ -47,20 +47,10 @@ const {
 } = require('./text-utils');
 const { semanticCapability } = require('./memory-semantic');
 
-// 状态注入容器：{ getMemories, getPendingMemories, memoryEnabled }。
-// memory.js 是唯一注入方（全部消费方都经 memory.js 加载）。
-let retrievalDeps = null;
-function injectRetrievalDeps(deps) {
-  retrievalDeps = deps;
-}
-function retrievalDepsOrThrow() {
-  if (!retrievalDeps) {
-    throw new Error(
-      'memory-retrieval: 依赖未注入（injectRetrievalDeps）——本模块须在 memory.js 加载后使用'
-    );
-  }
-  return retrievalDeps;
-}
+// 状态注入经共享容器 server/memory-core.js（state-holder 统一设计）：
+// 键 { getMemories, getMemoryList, getPendingMemories, memoryEnabled }，
+// memory.js 顶层注入。
+const { memoryCore } = require('./memory-core');
 
 // 记忆读作用域。两种模式，语义完全不同：
 //
@@ -158,7 +148,7 @@ function ownerAllows(item, userId) {
 function getMemoriesForUser(userId, options = {}) {
   const owner = cleanText(userId);
   if (!owner) return [];
-  return retrievalDepsOrThrow()
+  return memoryCore()
     .getMemories(options)
     .filter(item => ownerAllows(item, owner));
 }
@@ -166,7 +156,7 @@ function getMemoriesForUser(userId, options = {}) {
 function getPendingMemoriesForUser(userId) {
   const owner = cleanText(userId);
   if (!owner) return [];
-  return retrievalDepsOrThrow()
+  return memoryCore()
     .getPendingMemories()
     .filter(item => ownerAllows(item, owner));
 }
@@ -179,7 +169,7 @@ function checkMemoryOwnership(id, userId) {
 
   if (!targetId) return { ok: false, reason: 'invalid' };
 
-  const pool = retrievalDepsOrThrow().getMemoryList();
+  const pool = memoryCore().getMemoryList();
   const item = (Array.isArray(pool) ? pool : []).find(
     entryItem => entryItem && entryItem.id === targetId
   );
@@ -194,7 +184,7 @@ function checkMemoryOwnership(id, userId) {
 // 未到生效时间的旧条目不再对外生效），再按作用域过滤。
 function visiblePool(rawScope, list = null) {
   const scope = normalizeScopeInput(rawScope);
-  if (!list) list = retrievalDepsOrThrow().getMemoryList();
+  if (!list) list = memoryCore().getMemoryList();
 
   const valid = list.filter(
     item =>
@@ -227,7 +217,7 @@ const INJECT_CAP = 10;
 // 作用域回归断言使用：它与 searchMemories 共用 scopeOf / visiblePool /
 // rankMemories，因此评测里的作用域结论与线上读路径一致。
 function buildMemoryContext(message, scope = null) {
-  if (!retrievalDepsOrThrow().memoryEnabled) return '';
+  if (!memoryCore().memoryEnabled) return '';
 
   try {
     const current = String(message || '').trim();
@@ -336,7 +326,7 @@ function selectSearchCandidates({
   asOfMs,
   filters,
 }) {
-  const poolSrc = retrievalDepsOrThrow().getMemoryList();
+  const poolSrc = memoryCore().getMemoryList();
   const all = Array.isArray(poolSrc) ? poolSrc : [];
   const exclusions = {
     invalid: 0,
@@ -561,7 +551,7 @@ function searchMemories({
     diagnostics: { ...emptyDiagnostics, ...(extra.diagnostics || {}) },
   });
 
-  if (!retrievalDepsOrThrow().memoryEnabled) return emptyResult('memory_disabled');
+  if (!memoryCore().memoryEnabled) return emptyResult('memory_disabled');
 
   const current = String(query || '').trim();
   if (!current) return emptyResult('empty_query');
@@ -775,7 +765,6 @@ function searchMemories({
 
 
 module.exports = {
-  injectRetrievalDeps,
   normalizeScopeInput,
   sessionScopeOf,
   userScopeOf,
