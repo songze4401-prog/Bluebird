@@ -6,7 +6,7 @@
 import React from 'react';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
 
-type NavKind = 'home' | 'chat' | 'settings';
+type NavKind = 'home' | 'chat' | 'settings' | 'files';
 
 // 底部导航三键（原型 .tb svg：stroke 1.8 round）
 export function NavIcon({ kind, color = '#ffffff' }: { kind: NavKind; color?: string }) {
@@ -29,6 +29,12 @@ export function NavIcon({ kind, color = '#ffffff' }: { kind: NavKind; color?: st
       )}
       {kind === 'chat' && (
         <Path d="M21 12a8 8 0 0 1-8 8H4l2-3a8 8 0 1 1 15-5z" />
+      )}
+      {kind === 'files' && (
+        <>
+          <Path d="M7 3.5h7l4 4V20a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 6 20V5a1.5 1.5 0 0 1 1-1.5z" />
+          <Path d="M14 3.5V8h4M9 12h6M9 16h6" />
+        </>
       )}
       {kind === 'settings' && (
         <>
