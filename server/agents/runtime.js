@@ -6,7 +6,12 @@
  * 两个入口的差别只有消息构造、结果交付对象与是否记录任务。
  */
 const crypto = require('crypto');
-const { runAgentTurn } = require('../agent-runtime');
+// agent-runtime 经惰性加载解环（解环 P1，2026-11-21）：runtime 与
+// agent-runtime 的顶层互相依赖（agent-runtime→tool-dispatch-bot→orchestrator
+// →router→runtime→agent-runtime 加载期环）由此打断；两个符号只在运行期用。
+function getAgentRuntime() {
+  return require('../agent-runtime');
+}
 const { classifyError } = require('../model-adapter');
 const { getManifest } = require('./manifest');
 const { isMemoryQueryDelegation } = require('../delegation-intent');
@@ -22,7 +27,6 @@ const { projectWorkerContext, validateHandoff } = require('./context-projection'
 const artifactStore = require('./artifact-store');
 const { normalizeWorkerResult } = require('./worker-result');
 const { createToolAuthorizer } = require('./tool-gateway');
-const { listToolMetadata } = require('../agent-runtime');
 const { AgentError, budgetExceededError, classifyFailureMode, errorContractFingerprint } = require('./errors');
 const approvalDeadline = require('./approval-deadline');
 const conflictRecord = require('./conflict-record');
@@ -649,7 +653,7 @@ async function execute({
 
   let outcome;
   try {
-    outcome = await runAgentTurn({
+    outcome = await getAgentRuntime().runAgentTurn({
       providerId: config.modelProfile.providerId,
       modelId: config.modelProfile.modelId,
       agentId: botId,
@@ -1262,7 +1266,7 @@ async function runTask(taskId) {
       systemPrompt: config.prompt.systemPrompt,
     });
     const toolMeta = {};
-    for (const item of listToolMetadata()) {
+    for (const item of getAgentRuntime().listToolMetadata()) {
       if (item && item.name) toolMeta[item.name] = item;
     }
 

@@ -63,6 +63,41 @@ function resolveRequire(fromFile, spec) {
 
 const REQUIRE_RE = /\brequire\(\s*(['"])(\.[^'"]+?)\1\s*\)/g;
 
+// 词法级括号深度表：逐字符扫描（跳过字符串/模板/注释），输出每个偏移处的
+// 括号嵌套深度。require 处深度为 0 = 模块加载期执行；深度 > 0 = 函数内惰性。
+// 语句头回溯判定无法区分「顶层多行语句」与「函数体内语句」（P1 实证），
+// 深度法是正确形态。
+function bracketDepths(text) {
+  const depths = new Int32Array(text.length + 1);
+  let depth = 0, i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      depths[i] = depth;
+      continue;
+    }
+    if (ch === '/' && text[i + 1] === '*') {
+      i += 2;
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i++;
+      i += 2;
+      depths[Math.min(i, text.length)] = depth;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const q = ch; i++;
+      while (i < text.length && text[i] !== q) { if (text[i] === '\\') i++; i++; }
+      i++; depths[Math.min(i, text.length)] = depth;
+      continue;
+    }
+    if (ch === '{' || ch === '(' || ch === '[') depth++;
+    else if (ch === '}' || ch === ')' || ch === ']') depth = Math.max(0, depth - 1);
+    i++;
+    depths[i] = depth;
+  }
+  return depths;
+}
+
 function buildGraph() {
   const files = listServerModules();
   const byPath = new Map(files.map(f => [path.normalize(f), f]));
@@ -71,7 +106,7 @@ function buildGraph() {
 
   for (const file of files) {
     const text = fs.readFileSync(file, 'utf8');
-    const L = text.split(/\r?\n/);
+    const depths = bracketDepths(text);
     const edges = [];
     REQUIRE_RE.lastIndex = 0;
     let match;
@@ -80,14 +115,10 @@ function buildGraph() {
       if (resolved) {
         const target = path.normalize(resolved);
         if (target !== path.normalize(file)) {
-          // 记录顶层性：跨行解构 const { ... } = require(...) 的 require 词虽
-          // 在缩进行，但语句头（const/let/var 行）才是加载期判定点——回溯
-          // 语句头，语句头零缩进 = 加载期执行；语句头缩进 = 函数内惰性。
-          const lineNo = text.slice(0, match.index).split('\n').length - 1;
-          let s = lineNo;
-          while (s > 0 && /^[ \t\}.,\]]/.test(L[s])) s -= 1;
-          const top = /^[^\s]/.test(L[s]);
-          edges.push({ to: target, top, line: lineNo + 1 });
+          // 词法级顶层判定：require 处括号深度 0 = 加载期执行；> 0 = 函数内惰性
+          const line = text.slice(0, match.index).split('\n').length;
+          const top = depths[match.index] === 0;
+          edges.push({ to: target, top, line });
         }
       } else {
         // 指向 server 外的相对引用（如 ../package.json）——记录不计边
@@ -198,7 +229,7 @@ function main() {
     if (!staticMembers.has(from)) continue;
     for (const e of edges) {
       if (!e.top && staticMembers.has(e.to)) {
-        lazyEdges.push(rel(from) + ':' + e.line + ' -> ' + rel(e.to));
+        lazyEdges.push(rel(from) + ' -> ' + rel(e.to));
       }
     }
   }
