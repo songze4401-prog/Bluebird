@@ -247,3 +247,55 @@ test('k. 注册面：钥匙已配置时 web 工具进入注册表且只读', () 
   assert.equal(search.risk, 'read');
   assert.equal(fetch.risk, 'read');
 });
+
+test('l. web_fetch GitHub blob/raw URL 归一化（真机抓取只到 README 的解法）', () => {
+  const { normalizeGitHubBlobUrl } = toolWeb;
+  // blob/raw -> raw.githubusercontent.com（纯文本直链，抽取器原样可用）
+  assert.equal(
+    normalizeGitHubBlobUrl('https://github.com/songze4401-prog/Bluebird/blob/main/README.md'),
+    'https://raw.githubusercontent.com/songze4401-prog/Bluebird/main/README.md'
+  );
+  assert.equal(
+    normalizeGitHubBlobUrl('https://github.com/o/r/raw/main/server/tool-web.js'),
+    'https://raw.githubusercontent.com/o/r/main/server/tool-web.js'
+  );
+  // 非 blob/raw 的 github URL 原样返回（tree 目录页、仓库首页不转换——
+  // raw 无目录语义，目录要走 contents API，另行立项）
+  assert.equal(
+    normalizeGitHubBlobUrl('https://github.com/o/r/tree/main/server'),
+    'https://github.com/o/r/tree/main/server'
+  );
+  assert.equal(normalizeGitHubBlobUrl('https://github.com/o/r'), 'https://github.com/o/r');
+  // 非 github 域名原样返回
+  assert.equal(normalizeGitHubBlobUrl('https://example.com/blob/main/x'), 'https://example.com/blob/main/x');
+  // 归一化结果仍过全量 URL 闸（raw.githubusercontent.com 公网域正常通过）
+  const fetchUrl = normalizeGitHubBlobUrl('https://github.com/o/r/blob/main/README.md');
+  const gated = toolWeb.assertFetchableUrl(fetchUrl);
+  assert.equal(gated.hostname, 'raw.githubusercontent.com');
+  // 大小写不敏感（GitHub.com 首页链接常见大写形态）
+  assert.equal(
+    normalizeGitHubBlobUrl('https://GitHub.com/o/r/blob/main/x.js'),
+    'https://raw.githubusercontent.com/o/r/main/x.js'
+  );
+  // 查询参数剥离（?tab=readme-ov-file 等页面参数不进 raw 直链）
+  assert.equal(
+    normalizeGitHubBlobUrl('https://github.com/o/r/blob/main/README.md?tab=readme-ov-file'),
+    'https://raw.githubusercontent.com/o/r/main/README.md'
+  );
+  // ref 带点（语义化版本 tag）
+  assert.equal(
+    normalizeGitHubBlobUrl('https://github.com/o/r/blob/v1.0.0/dist/index.js'),
+    'https://raw.githubusercontent.com/o/r/v1.0.0/dist/index.js'
+  );
+  // 幂等：raw.githubusercontent.com 输入原样返回
+  assert.equal(
+    normalizeGitHubBlobUrl('https://raw.githubusercontent.com/o/r/main/x.js'),
+    'https://raw.githubusercontent.com/o/r/main/x.js'
+  );
+  // 对抗性 owner（`..` 路径穿越）：正则捕获组不含 `..`（dotall 不适用——
+  // `[A-Za-z0-9_.-]+` 允许点但 `..` 会被吞进 owner），归一化输出 host 是
+  // 字面量 raw.githubusercontent.com，authority 不可能被 path 重开——
+  // 结构性保证，这里实证 host 恒为 raw 域。
+  const hostile = normalizeGitHubBlobUrl('https://github.com/../evil/blob/main/x.js');
+  assert.equal(new URL(hostile).hostname, 'raw.githubusercontent.com');
+});

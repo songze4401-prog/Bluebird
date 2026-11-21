@@ -77,6 +77,26 @@ function isConfigured() {
   return Boolean(String(apiConfigs.getProviderKey('deepseek') || '').trim());
 }
 
+/**
+ * GitHub blob/raw URL 归一化（web_fetch 专用）：
+ *   github.com/:owner/:repo/blob/:ref/:path   -> raw.githubusercontent.com/:owner/:repo/:ref/:path
+ *   github.com/:owner/:repo/raw/:ref/:path    -> 同上（旧形态）
+ * 动机：GitHub 仓库页是 SSR(README)+客户端渲染(文件树/代码)拼盘，正文抽取
+ * 只能拿到 README；blob 单文件转 raw 直链后是纯文本，抽取器原样可用。
+ * 仅归一化 host/path（http 一律提升为 https——raw 强制 TLS，实现优于字面
+ * 「不换协议」的说法）；归一化结果仍走 assertFetchableUrl 全量闸。
+ * tree（目录页）不转换——raw 无目录语义，目录要走 contents API（另行立项）。
+ */
+function normalizeGitHubBlobUrl(rawUrl) {
+  const url = String(rawUrl || '').trim();
+  const m = url.match(
+    /^https?:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/(?:blob|raw)\/([^/#?\s]+)\/([^#?\s]+)(?:[?#].*)?$/i
+  );
+
+  if (!m) return url;
+  return 'https://raw.githubusercontent.com/' + m[1] + '/' + m[2] + '/' + m[3] + '/' + m[4];
+}
+
 /** 抓取目标的客户端 URL 闸：不吃测试旁路（见文件头安全边界）。 */
 function assertFetchableUrl(rawUrl) {
   let url;
@@ -285,11 +305,13 @@ const webFetchDefinition = Object.freeze({
   },
 
   async handler(args) {
+    // GitHub blob/raw 归一化（见函数注释），再走全量 URL 闸。
+    const fetchUrl = normalizeGitHubBlobUrl(args.url);
     // 客户端 URL 闸：远端抓取前先拒绝内网样式目标（不吃测试旁路）。
-    assertFetchableUrl(args.url);
+    assertFetchableUrl(fetchUrl);
     let payload;
     try {
-      payload = await toolsPost('/v1/tools/fetch', { url: args.url }, LIMITS.fetchTimeoutMs);
+      payload = await toolsPost('/v1/tools/fetch', { url: fetchUrl }, LIMITS.fetchTimeoutMs);
     } catch (error) {
       return {
         ok: false,
@@ -300,6 +322,8 @@ const webFetchDefinition = Object.freeze({
     const content = truncateText(clean(payload && payload.content), LIMITS.contentMax);
     return {
       ok: true,
+      // 回报原始 URL（模型引用的是人友好链接）；实际抓取走归一化后的
+      // fetchUrl——两者是刻意分开的，不要「修复」成同一个。
       url: clean(args.url),
       title: clean(payload && payload.title),
       content,
@@ -318,5 +342,6 @@ module.exports = {
   webFetchDefinition,
   isConfigured,
   assertFetchableUrl,
+  normalizeGitHubBlobUrl,
   LIMITS,
 };
