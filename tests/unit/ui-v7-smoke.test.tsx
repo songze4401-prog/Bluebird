@@ -6,12 +6,26 @@
  */
 import React from 'react';
 import { fireEvent, render, waitFor } from '@testing-library/react-native';
+import { Animated } from 'react-native';
 
 import { BluebirdApp } from '../../app/BluebirdApp';
+import * as workspaceFilesApi from '../../lib/api/workspace-files';
 
 jest.mock('react-native-safe-area-context', () =>
   require('react-native-safe-area-context/jest/mock').default
 );
+
+jest.mock('../../lib/api/workspace-files', () => ({
+  listWorkspaceFiles: jest.fn(async () => ({
+    path: '.', search: null, count: 1, truncated: false,
+    entries: [{ name: 'note.md', path: 'note.md', type: 'file', size: 4, mtime: '2026-11-22T00:00:00.000Z', editable: true, mimeType: 'text/markdown' }],
+  })),
+  readWorkspaceText: jest.fn(async (filePath: string) => ({ path: filePath, content: '示例内容', version: 'a'.repeat(64), size: 12, mtime: '2026-11-22T00:00:00.000Z', editable: true })),
+  saveWorkspaceText: jest.fn(async (filePath: string) => ({ ok: true, path: filePath, version: 'b'.repeat(64), size: 0, mtime: '2026-11-22T00:00:00.000Z', backup: null })),
+  deleteWorkspaceFile: jest.fn(async (filePath: string) => ({ ok: true, path: filePath })),
+  uploadWorkspaceFile: jest.fn(),
+  downloadWorkspaceFile: jest.fn(async () => new Uint8Array()),
+}));
 
 jest.mock('@react-native-async-storage/async-storage', () => ({
   __esModule: true,
@@ -99,6 +113,13 @@ jest.mock('../../hooks/useBotResultStream', () => ({
   useBotResultStream: jest.fn(),
 }));
 
+const completedAnimation = {
+  start: (callback?: (result: { finished: boolean }) => void) => callback?.({ finished: true }),
+  stop: () => undefined,
+  reset: () => undefined,
+} as ReturnType<typeof Animated.timing>;
+jest.spyOn(Animated, 'timing').mockImplementation(() => completedAnimation);
+
 describe('蓝鸟 v7 新壳', () => {
   it('聊天首屏 + 底部导航 + 主页区块 + 设置弹层 + 进度推进（mock 数据）', async () => {
     const utils = await render(<BluebirdApp />);
@@ -113,6 +134,7 @@ describe('蓝鸟 v7 新壳', () => {
     expect(utils.getByText('主页')).toBeTruthy();
     expect(utils.getByText('聊天')).toBeTruthy();
     expect(utils.getByText('设置')).toBeTruthy();
+    expect(utils.getByTestId('nav-tab-files')).toBeTruthy();
 
     // 切主页：入口卡 / 双卡 / 对话记录都在；任务两段在无任务时整段隐藏（不展示假数据）
     fireEvent.press(utils.getByText('主页'));
@@ -136,5 +158,31 @@ describe('蓝鸟 v7 新壳', () => {
     // 验证「进行中的任务」分区不复活、历史假百分比不可见
     expect(utils.queryByText('进行中的任务')).toBeNull();
     expect(utils.queryByText('62%')).toBeNull();
+  });
+
+  it('文件页位于最右侧，切换后保留聊天并要求二次确认删除', async () => {
+    const utils = await render(<BluebirdApp />);
+    await waitFor(() => expect(utils.getByPlaceholderText('与 Bluebird 对话…')).toBeTruthy());
+
+    fireEvent.press(utils.getByTestId('nav-tab-files'));
+    await waitFor(() => expect(utils.getByPlaceholderText('搜索工作区文件')).toBeTruthy());
+    expect(utils.getByText('note.md')).toBeTruthy();
+
+    fireEvent.press(utils.getByTestId('nav-tab-chat'));
+    await waitFor(() => expect(utils.getByPlaceholderText('与 Bluebird 对话…')).toBeTruthy());
+    fireEvent.press(utils.getByTestId('nav-tab-files'));
+    await waitFor(() => expect(utils.getByText('note.md')).toBeTruthy());
+
+    fireEvent.press(utils.getByText('note.md'));
+    await waitFor(() => expect(utils.getByText('示例内容')).toBeTruthy());
+    fireEvent.press(utils.getByTestId('workspace-delete'));
+    await waitFor(() => expect(utils.getByText('确定删除「note.md」吗？此操作不能撤销。')).toBeTruthy());
+    expect(workspaceFilesApi.deleteWorkspaceFile).not.toHaveBeenCalled();
+    fireEvent.press(utils.getByText('取消'));
+    expect(workspaceFilesApi.deleteWorkspaceFile).not.toHaveBeenCalled();
+
+    fireEvent.press(utils.getByTestId('workspace-delete'));
+    fireEvent.press(utils.getByText('确认删除'));
+    await waitFor(() => expect(workspaceFilesApi.deleteWorkspaceFile).toHaveBeenCalledWith('note.md'));
   });
 });

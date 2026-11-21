@@ -134,6 +134,8 @@ app.use((req, res, next) => {
 app.use('/uploads/image', express.json({ limit: '8mb' }));
 // 表情包仓库上传同理：图片以 dataURL 提交，与 uploads 共用 8mb 路由级限额
 app.use('/sticker-repo', express.json({ limit: '8mb' }));
+// 工作区文件上传只接受 base64 JSON；限额在全局鉴权之后、通用 1MB parser 之前生效。
+app.use('/workspace/files/upload', express.json({ limit: '14mb' }));
 app.use(express.json({ limit: '1mb' }));
 
 // 埋点中间件注册在 body 解析之后（需要 sessionId 生成脱敏 session_ref）。
@@ -361,6 +363,7 @@ const { createSessionsRouter } = require('./routes/sessions');
 const { createUploadsRouter } = require('./routes/uploads');
 const { createModelProvidersRouter } = require('./routes/model-providers');
 const { createMemoryRouter } = require('./routes/memory');
+const { createWorkspaceFilesRouter } = require('./routes/workspace-files');
 
 // 多模态图片模块：上传校验 / 存储 / 读取 / 表情包索引
 const {
@@ -543,6 +546,8 @@ app.use(createMemoryRouter({
   auditAction,
   clearGuardError,
 }));
+// 文件管理 UI 与 Agent 工具共用同一 Bluebird 工作区根目录及路径沙箱。
+app.use('/workspace', createWorkspaceFilesRouter({ requireAuth }));
 
 app.get('/', (req, res) => {
   res.json({
