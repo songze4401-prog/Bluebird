@@ -3,12 +3,8 @@ const fs = require('fs');
 const path = require('path');
 const { logDataEvent } = require('./data-events');
 const monitoring = require('./monitoring');
-const { writeFileAtomic, writeFileExclusiveSync } = require('./atomic-write');
 const {
   hashText,
-  loadTombstones,
-  saveTombstones,
-  appendTombstones,
   tombstoneBlocksCandidate,
 } = require('./memory-tombstones');
 const { registerCorruptionHandler, handleCorruption } = require('./corruption');
@@ -73,8 +69,6 @@ const {
   reportSkip,
   keywordGrounding,
   normalizeContribution,
-  normalizeEntry,
-  ensureUniqueIds,
   mergeContributions,
   cloneEntry,
   shareKeyword,
@@ -132,6 +126,18 @@ const {
   deleteMemory,
 } = require('./memory-crud');
 
+// 记忆持久化簇：R6 自本文件迁出（server/memory-persist.js），经解构
+// 回注保持调用点零改动（顶层 loadMemories() 调用、verifyStoreConsistency
+// 的 hydrateEntries、容器注入的六函数引用）。
+const {
+  registerMemoryCorruptionHandler,
+  hydrateEntries,
+  loadMemories,
+  saveMemories,
+  commitWithTombstones,
+  enqueueWrite,
+} = require('./memory-persist');
+
 // 记忆核心状态注入：迁移模块共用唯一容器（server/memory-core.js，
 // state-holder 统一设计）。键分三域：
 // - 状态读写：getMemoryList/setMemoryList（memories 是 let 数组的唯一
@@ -172,7 +178,17 @@ injectMemoryCore({
   logLifecycleRejection,
   trimToCapacity,
   maintenanceKeywords,
+  memoryTombstoneFile: MEMORY_TOMBSTONE_FILE,
+  getTombstones: () => memoryTombstones,
+  setTombstones: (next) => { memoryTombstones = next; },
+  getWriteQueue: () => writeQueue,
+  setWriteQueue: (next) => { writeQueue = next; },
+  handleCorruption,
+  registerCorruptionHandler,
 });
+
+// corruption 注册：须在容器注入后执行（回调经容器触达圈依赖）。
+registerMemoryCorruptionHandler();
 
 const { getInstanceUserId } = require('./user-scope');
 const memoryObservationLedger = require('./memory-observation-ledger');
@@ -592,216 +608,6 @@ function trimToCapacity(list) {
   return list;
 }
 
-// 损坏处理契约：detect 负责判定（读取失败 / JSON 解析失败 / 不是数组），
-// recover 保持原有隔离策略（重命名为 <file>.corrupt-<ts>，失败则原地保留）。
-registerCorruptionHandler('memory', {
-  detect(data) {
-    if (data.error) {
-      return {
-        corrupt: true,
-        // 允许调用方为"非解析型异常"（如初始化写盘失败）显式指定原因短码。
-        reason: data.reason || 'read_error',
-        error: data.error,
-      };
-    }
-
-    let parsed;
-
-    try {
-      parsed = JSON.parse(data.text);
-    } catch (error) {
-      return { corrupt: true, reason: 'json_parse_error', error };
-    }
-
-    if (!Array.isArray(parsed)) {
-      return { corrupt: true, reason: 'invalid_shape' };
-    }
-
-    return { corrupt: false, parsed };
-  },
-
-  recover(context) {
-    // 处理策略不变（隔离重命名 + 回退空库）；结构化日志由 handleCorruption 统一记录，
-    // 刻意不再打印 error.message：JSON.parse 的报错可能夹带文件内容（记忆正文）。
-    let isolatedPath = null;
-
-    try {
-      const corruptPath = `${context.file}.corrupt-${Date.now()}`;
-
-      fs.renameSync(context.file, corruptPath);
-
-      isolatedPath = corruptPath;
-
-      console.error(`Corrupt memory backed up: ${isolatedPath}`);
-    } catch (backupError) {
-      console.error('Memory backup error:', backupError.message);
-    }
-
-    return {
-      action: isolatedPath ? 'isolated_file' : 'isolation_failed',
-      isolatedPath,
-    };
-  },
-});
-
-// 磁盘数组 → 内存条目：过滤无效项、补齐贡献列表与身份/时效字段、id 去重。
-// 读盘与写后自检都走这一条，两边才是同一种形态，比较结果才有意义。
-function hydrateEntries(parsed) {
-  return ensureUniqueIds(
-    (Array.isArray(parsed) ? parsed : [])
-      .filter(
-        item =>
-          item &&
-          typeof item === 'object' &&
-          typeof item.content === 'string' &&
-          item.content.trim()
-      )
-      .map(normalizeEntry)
-  );
-}
-
-function loadTombstoneState() {
-  const loaded = loadTombstones(MEMORY_TOMBSTONE_FILE);
-
-  memoryTombstones = loaded.tombstones;
-
-  if (loaded.corrupt) {
-    logDataEvent({
-      module: 'memory',
-      file: MEMORY_TOMBSTONE_FILE,
-      event: 'data_file_corruption',
-      level: 'error',
-      reason: loaded.reason || 'invalid_shape',
-      action: 'tombstones_unavailable',
-      error: loaded.error,
-    });
-  }
-}
-
-function loadMemories() {
-  loadTombstoneState();
-
-  if (!fs.existsSync(MEMORY_FILE)) {
-    let created = false;
-
-    try {
-      // 排他创建：并发启动时只有一个进程能创建空库。
-      // 另一个进程得到 false（EEXIST）后必须继续读取现存文件，不能把内存设成空库。
-      created = writeFileExclusiveSync(MEMORY_FILE, '[]\n');
-    } catch (error) {
-      // 初始化写盘失败：与旧实现一致地走损坏兜底（隔离 + 回退空库），不向上抛。
-      handleCorruption(
-        'memory',
-        { text: null, error, reason: 'io_error' },
-        { file: MEMORY_FILE }
-      );
-      memories = [];
-      return;
-    }
-
-    if (created) {
-      memories = [];
-      return;
-    }
-  }
-
-  let text = null;
-  let error = null;
-
-  try {
-    text = fs.readFileSync(MEMORY_FILE, 'utf8');
-  } catch (readError) {
-    error = readError;
-  }
-
-  const outcome = handleCorruption(
-    'memory',
-    { text, error },
-    { file: MEMORY_FILE }
-  );
-
-  if (outcome.corrupt) {
-    memories = [];
-    return;
-  }
-
-  memories = hydrateEntries(outcome.parsed);
-
-  console.log(`Memory loaded: ${memories.length}`);
-}
-
-// 先在副本上算出新库 → await 落盘成功 → 才把内存换成新库。
-// 落盘失败时异常原样抛给调用方（内存与磁盘都还是旧的，两边一致），
-// 绝不出现"接口回 200、磁盘没改"的假成功。
-async function saveMemories(nextMemories) {
-  const dir = path.dirname(MEMORY_FILE);
-
-  fs.mkdirSync(dir, { recursive: true });
-
-  // 原子写（临时文件 'wx' + fsync + rename + 尽力 fsync 父目录），
-  // 崩溃时不会出现空文件 / 截断文件。
-  await writeFileAtomic(MEMORY_FILE, JSON.stringify(nextMemories, null, 2));
-}
-
-// 删除类操作先写墓碑再落记忆库：宁可删除失败，也不让已删除内容
-// 在异步抽取的下一次写入里复活。记忆库写入失败时回滚墓碑。
-async function commitWithTombstones(nextMemories, tombstoneEntries, reason) {
-  const hasTombstones =
-    Array.isArray(tombstoneEntries) && tombstoneEntries.some(Boolean);
-  const previousTombstones = memoryTombstones;
-
-  if (hasTombstones) {
-    const nextTombstones = appendTombstones(
-      previousTombstones,
-      tombstoneEntries,
-      { reason, now: new Date().toISOString() }
-    );
-
-    await saveTombstones(MEMORY_TOMBSTONE_FILE, nextTombstones);
-    memoryTombstones = nextTombstones;
-  }
-
-  try {
-    await saveMemories(nextMemories);
-  } catch (error) {
-    if (hasTombstones) {
-      memoryTombstones = previousTombstones;
-
-      try {
-        await saveTombstones(MEMORY_TOMBSTONE_FILE, previousTombstones);
-      } catch (rollbackError) {
-        logDataEvent({
-          module: 'memory',
-          file: MEMORY_TOMBSTONE_FILE,
-          event: 'memory_tombstone_rollback_failed',
-          level: 'error',
-          reason: 'rollback_failed',
-          action: 'tombstone_rollback',
-          error: rollbackError,
-        });
-      }
-    }
-
-    throw error;
-  }
-}
-
-function enqueueWrite(task) {
-  const run = writeQueue.then(task, task);
-
-  writeQueue = run.catch(error => {
-    // 结构化记录写入队列里的落盘失败（原本只有一行裸 message，无模块/路径/时间戳）。
-    logDataEvent({
-      module: 'memory',
-      file: MEMORY_FILE,
-      event: 'write_queue_error',
-      error,
-      action: 'write_failed',
-    });
-  });
-
-  return run;
-}
 async function applyCandidate(raw, options = {}) {
   const candidate = normalizeCandidate(raw, options);
   const base = {
