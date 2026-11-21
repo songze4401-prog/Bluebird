@@ -27,7 +27,13 @@
  */
 const fs = require('fs');
 const path = require('path');
-const tasks = require('./tasks');
+// tasks.js 经惰性加载解环（解环 P1，2026-11-21）：oe 在模块加载期不需要
+// tasks，运行期才访问；oe↔tasks 的顶层互相依赖由此打断（加载期圈台账递减）。
+let tasksModule = null;
+function getTasks() {
+  if (!tasksModule) tasksModule = require('./tasks');
+  return tasksModule;
+}
 const workflowStore = require('./workflow-store');
 const artifactStore = require('./artifact-store');
 const riskPolicy = require('./risk-policy');
@@ -48,7 +54,7 @@ const REVIEW_WAIT_MS = Math.max(
 );
 
 function storePath() {
-  return path.join(path.dirname(tasks.TASKS_FILE), ORCHESTRATIONS_FILE);
+  return path.join(path.dirname(getTasks().TASKS_FILE), ORCHESTRATIONS_FILE);
 }
 
 function emptyStore() {
@@ -86,7 +92,7 @@ function reloadForTests() {
 
 function recordEvent(botId, eventType, payload, context = {}) {
   try {
-    tasks.appendEvent({ botId: botId || 'memory', eventType, payload, ...context });
+    getTasks().appendEvent({ botId: botId || 'memory', eventType, payload, ...context });
   } catch (_) {
     /* 事件失败不改变编排结论 */
   }
@@ -136,7 +142,7 @@ function orchestrateDAG({ planId, definitions = null, parentSessionId = null, pa
   const existing = state.orchestrations[planId];
   if (existing && existing.status === 'running') {
     // 幂等重入：同计划重复 orchestrateDAG 返回既有编排与任务，不重复建任务。
-    const nodes = Object.values(existing.nodes || {}).map(node => tasks.getRawTask(node.taskId)).filter(Boolean);
+    const nodes = Object.values(existing.nodes || {}).map(node => getTasks().getRawTask(node.taskId)).filter(Boolean);
     const allPresent = nodes.length === Object.keys(existing.nodes || {}).length;
     if (allPresent) {
       return { orchestration: publicOrchestration(existing), idempotent: true };
@@ -171,7 +177,7 @@ function orchestrateDAG({ planId, definitions = null, parentSessionId = null, pa
       .filter(Boolean);
     const upstreamGoals = upstreamTaskIds
       .map(taskId => {
-        const upstream = tasks.getRawTask(taskId);
+        const upstream = getTasks().getRawTask(taskId);
         return upstream ? `${upstream.taskType}:${upstream.goal.slice(0, 120)}` : taskId;
       });
     const contextParts = [
@@ -266,7 +272,7 @@ const inFlight = new Set();
 
 /** ② runtime 终态收口钩子（异步 fire-and-forget，调用方 fail-safe）。 */
 async function onPlanTaskSettled({ taskId, status } = {}) {
-  const task = typeof taskId === 'string' ? tasks.getRawTask(taskId) : null;
+  const task = typeof taskId === 'string' ? getTasks().getRawTask(taskId) : null;
   if (!task || !task.planId || !String(task.planId).startsWith('plan_pc_')) return;
   const state = load();
   const record = state.orchestrations[task.planId];
@@ -291,13 +297,13 @@ async function onPlanTaskSettled({ taskId, status } = {}) {
             withTaskIds: [downNode.taskId],
             byTaskId: taskId,
           });
-          const downstreamTask = tasks.getRawTask(downNode.taskId);
-          if (downstreamTask && !tasks.isTerminalStatus(downstreamTask.status)) {
+          const downstreamTask = getTasks().getRawTask(downNode.taskId);
+          if (downstreamTask && !getTasks().isTerminalStatus(downstreamTask.status)) {
             const refLine = `上游产物引用：${ref.kind}:${ref.id}:${ref.version}（来自 ${task.taskType}）`;
             const merged = downstreamTask.context
               ? `${downstreamTask.context}\n${refLine}`
               : refLine;
-            tasks.updateTask(downNode.taskId, { context: merged.slice(0, CONTEXT_APPEND_MAX) });
+            getTasks().updateTask(downNode.taskId, { context: merged.slice(0, CONTEXT_APPEND_MAX) });
           }
           recordEvent(
             task.agentId,
@@ -356,8 +362,8 @@ async function maybeReducePlan(planId) {
       return { reduced: false, reason: 'not_running' };
     }
     const nodes = Object.values(record.nodes || {});
-    const rawNodes = nodes.map(node => tasks.getRawTask(node.taskId));
-    if (rawNodes.some(item => !item || !tasks.isTerminalStatus(item.status))) {
+    const rawNodes = nodes.map(node => getTasks().getRawTask(node.taskId));
+    if (rawNodes.some(item => !item || !getTasks().isTerminalStatus(item.status))) {
       return { reduced: false, reason: 'nodes_pending' };
     }
 
@@ -474,8 +480,8 @@ async function runReviewGate({ planId, record, lastSettledTask, artifactRefs, su
   record.reviewRef = reviewTaskId;
   const deadline = Date.now() + REVIEW_WAIT_MS;
   while (Date.now() < deadline) {
-    const reviewTask = reviewTaskId ? tasks.getRawTask(reviewTaskId) : null;
-    if (reviewTask && tasks.isTerminalStatus(reviewTask.status)) {
+    const reviewTask = reviewTaskId ? getTasks().getRawTask(reviewTaskId) : null;
+    if (reviewTask && getTasks().isTerminalStatus(reviewTask.status)) {
       const verdict = verificationLoop.parseVerdict(reviewTask);
       if (verdict.decision === 'pass' && verdict.valid) {
         return { pass: true, annotate: false, reviewNote: null, reviewTaskId, verdict };
