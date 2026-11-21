@@ -640,6 +640,27 @@ export function ChatScreen(props: {
     };
   }, []);
 
+  // 悬浮输入坞的实际高度：输入条（上下 6 + 内容行高）+ 可选待发送预览行，
+  // 消息流底部预留必须按它算，否则键盘弹起后最后一条会被输入坞压住（真机复现）。
+  const inputClampedH = Math.min(Math.max(inputH, 22), 120);
+  const barH = 12 + Math.max(34, inputClampedH, 36);
+  const pendingH =
+    attachments.pendingAttachments.length > 0 || attachments.uploadingImage ? 56 : 0;
+  const dockH = barH + pendingH;
+  // 无键盘时让出悬浮导航（44+12+8）＋输入坞＋间距；键盘弹起时让出键盘实测高度＋输入坞＋间距
+  const threadPadBottom =
+    keyboardH > 0 ? keyboardH + 8 + dockH + 16 : insets.bottom + 64 + dockH + 16;
+
+  // 键盘弹起会改变底部预留高度：若用户本就停在底部，等布局稳定后再贴一次底，
+  // 避免输入条上移后最后一条气泡被盖住。
+  useEffect(() => {
+    if (keyboardH <= 0 || !followRef.current) return undefined;
+    const timer = setTimeout(() => {
+      scrollRef.current?.scrollToEnd({ animated: false });
+    }, 60);
+    return () => clearTimeout(timer);
+  }, [keyboardH]);
+
   // 面板形变三值：宽 34↔248、高 34↔190、圆角 17↔20（原型 openPlus/closePlus）
   const ppWidth = progress.interpolate({ inputRange: [0, 1], outputRange: [34, 248] });
   // 内容实际高度：padding 20 + 关闭行 30 + 4 行（32 图标 + 22 内边距）= 282，
@@ -762,9 +783,9 @@ export function ChatScreen(props: {
         style={styles.thread}
         contentContainerStyle={[
           styles.threadContent,
-          // 顶部给悬浮身份组让位；底部预留 = 导航（44+12）+ 输入条（≈48）+ 上下间距，
-          // 输入条与导航都是悬浮层，消息滚到底时停在它们上方，不被遮挡。
-          { paddingTop: insets.top + 76, paddingBottom: insets.bottom + 128 },
+          // 顶部给悬浮身份组让位；底部预留按输入坞实测高度 + 键盘高度动态算，
+          // 输入坞与导航都是悬浮层，消息滚到底时停在它们上方，不被遮挡。
+          { paddingTop: insets.top + 76, paddingBottom: threadPadBottom },
         ]}
         showsVerticalScrollIndicator={false}
         onScroll={e => {
@@ -955,7 +976,7 @@ export function ChatScreen(props: {
         {/* 返回底部：用户上滑阅读、新内容到达时出现（旧壳「返回底部」箭头的轻量版） */}
         {showJump && !panelOpen && (
           <Pressable
-            style={[styles.jumpBtn, { bottom: insets.bottom + 120 }]}
+            style={[styles.jumpBtn, { bottom: keyboardH > 0 ? keyboardH + 8 + dockH + 12 : insets.bottom + 120 }]}
             onPress={() => {
               followRef.current = true;
               setShowJump(false);
@@ -1017,7 +1038,7 @@ export function ChatScreen(props: {
             <Text style={styles.plusTxt}>＋</Text>
           </Pressable>
           <TextInput
-            style={[styles.input, { height: Math.min(Math.max(inputH, 22), 120) }]}
+            style={[styles.input, { height: inputClampedH }]}
             value={input}
             onChangeText={setInput}
             placeholder="与 Bluebird 对话…"
