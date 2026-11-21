@@ -41,6 +41,14 @@ const env = {
   // 测试进程里的模型调用一律是桩（模块级 mock 或本地 HTTP 桩）。
   // 显式声明，避免监控把桩 usage 记成供应商真实统计。
   BLUEBIRD_PROVIDER_KIND: 'stub',
+  // 2026-11-21：本地 .env 打开的功能开关不能改变测试口径（记忆观察、技能、
+  // 工作区直写/根目录等）；统一钉回默认态，工作区落在临时目录。
+  BLUEBIRD_MEMORY_OBSERVER: '',
+  BLUEBIRD_SKILLS: '',
+  BLUEBIRD_WORKSPACE_TOOLS: '',
+  BLUEBIRD_WORKSPACE_AUTO_CONFIRM: '0',
+  BLUEBIRD_WORKSPACE_DIR: path.join(dataDir, 'workspace'),
+  BLUEBIRD_RETRIEVAL_ROOTS: '',
 };
 
 const failed = [];

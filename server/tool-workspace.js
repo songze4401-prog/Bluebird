@@ -50,10 +50,19 @@ const TEXT_EXTENSIONS = Object.freeze([
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
   : path.join(__dirname, 'data');
-const WORKSPACE_ROOT = path.join(DATA_DIR, 'workspace');
+// 工作区根目录可独立指定（BLUEBIRD_WORKSPACE_DIR，便于放到用户可见目录如桌面）；
+// 未设置时沿用旧口径 BLUEBIRD_DATA_DIR/workspace/。
+const WORKSPACE_ROOT = process.env.BLUEBIRD_WORKSPACE_DIR
+  ? path.resolve(process.env.BLUEBIRD_WORKSPACE_DIR)
+  : path.join(DATA_DIR, 'workspace');
 
 function isEnabled() {
   return process.env.BLUEBIRD_WORKSPACE_TOOLS === '1';
+}
+
+// 写入自动确认（默认关闭）：开启后主聊的 workspace_write 跳过聊天内确认行直接落盘。
+function isAutoConfirmEnabled() {
+  return process.env.BLUEBIRD_WORKSPACE_AUTO_CONFIRM === '1';
 }
 
 function ensureWorkspaceRoot() {
@@ -489,8 +498,14 @@ const workspaceWriteDefinition = Object.freeze({
 
   async handler(args, context = {}) {
     // 任务书接法 a（2026-11-19）：主聊直连路径（运行层注入 workspacePendingFlow）
-    // 不直接落盘——创建待确认写入，用户在聊天里确认后才由确认路由执行真写入。
+    // 默认不直接落盘——创建待确认写入，用户在聊天里确认后才由确认路由执行真写入。
+    // BLUEBIRD_WORKSPACE_AUTO_CONFIRM=1 时跳过确认往返，直接走同一套沙箱执行体
+    // （任务执行器/无来源上下文的 deny-only 判定在上游，不受此开关影响）。
     if (context && context.workspacePendingFlow === true) {
+      if (isAutoConfirmEnabled()) {
+        // 未经过用户确认往返，监控标记保持 confirmed=false（口径见 executeWrite 注释）
+        return executeWrite(args, { confirmed: false });
+      }
       return createPendingWriteResult(args, context);
     }
     return executeWrite(args, { confirmed: false });

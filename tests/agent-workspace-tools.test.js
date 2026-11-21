@@ -28,7 +28,11 @@ const assert = require('node:assert');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'bluebird-workspace-tools-'));
 process.env.BLUEBIRD_DATA_DIR = TMP;
+// 工作区根目录独立指定后必须同步钉到临时目录，否则本机 .env 会把测试写到桌面。
+process.env.BLUEBIRD_WORKSPACE_DIR = path.join(TMP, 'workspace');
 process.env.BLUEBIRD_WORKSPACE_TOOLS = '1';
+// 默认关掉自动确认：用例 q 测确认往返，本机 .env 的开关不能影响测试口径。
+process.env.BLUEBIRD_WORKSPACE_AUTO_CONFIRM = '0';
 // run-tests.js / verify-test-coverage.js 会给所有测试进程注入 BLUEBIRD_MONITORING=0；
 // 本文件是监控专项断言（用例 r），按仓库约定在文件内显式打开（同 monitoring.test.js）。
 process.env.BLUEBIRD_MONITORING = '1';
@@ -419,6 +423,34 @@ test('q. 运行层确认往返：主聊建 pending 不落盘；worker/无来源�
   // 只读工具不受影响：list 在同一运行层可正常执行。
   const listed = await agentRuntime.executeToolCall('workspace_list', {}, { cache: new Map() });
   assert.equal(listed.ok, true);
+});
+
+test('q2. 自动确认模式：主聊 workspace_write 直写落盘，不建 pending', async () => {
+  const storePath = path.join(TMP, 'workspace-pending.json');
+  const readCount = () =>
+    fs.existsSync(storePath)
+      ? JSON.parse(fs.readFileSync(storePath, 'utf8')).pending.length
+      : 0;
+  const before = readCount();
+
+  process.env.BLUEBIRD_WORKSPACE_AUTO_CONFIRM = '1';
+  try {
+    const direct = await agentRuntime.executeToolCall(
+      'workspace_write',
+      { path: 'auto-confirm.md', content: 'auto-confirm-body' },
+      { cache: new Map(), sessionId: 'session-1', userText: '往工作区随便写点' }
+    );
+    assert.equal(direct.ok, true);
+    assert.equal(direct.pending, undefined, '自动确认不应返回 pending');
+    assert.equal(
+      fs.readFileSync(workspacePath('auto-confirm.md'), 'utf8'),
+      'auto-confirm-body',
+      '自动确认应立即落盘'
+    );
+    assert.equal(readCount(), before, '自动确认不产生 pending 记录');
+  } finally {
+    process.env.BLUEBIRD_WORKSPACE_AUTO_CONFIRM = '0';
+  }
 });
 
 test('r. 监控埋点：workspace.op.completed 记 tool/path/mode/bytes，正文绝不入事件流', async () => {

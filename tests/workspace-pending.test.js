@@ -30,11 +30,16 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ---- 环境隔离（必须在 require 任何服务端模块之前） ----
 process.env.BLUEBIRD_DATA_DIR = DATA_DIR;
+// 工作区根目录必须显式钉在临时目录：本机 .env 的 BLUEBIRD_WORKSPACE_DIR 不能泄漏。
+process.env.BLUEBIRD_WORKSPACE_DIR = path.join(DATA_DIR, 'workspace');
 process.env.BLUEBIRD_API_TOKEN = 'test-ws-pending-token';
 process.env.DEEPSEEK_API_KEY = ''; // 空串而非 delete：防 dotenv 回灌真实 key
 process.env.PORT = '0';
 process.env.BLUEBIRD_AGENT_TOOLS = '1';
 process.env.BLUEBIRD_WORKSPACE_TOOLS = '1';
+// 本文件测的是「确认往返」本身：必须显式关掉自动确认，避免本机 .env 的
+// BLUEBIRD_WORKSPACE_AUTO_CONFIRM=1 泄漏进测试进程把 pending 流短路掉。
+process.env.BLUEBIRD_WORKSPACE_AUTO_CONFIRM = '0';
 process.env.BLUEBIRD_MONITORING = '1';
 process.env.BLUEBIRD_ALLOW_PRIVATE_BASE_URL = '1'; // 测试专用旁路：mock 服务商在 127.0.0.1
 
