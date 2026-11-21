@@ -84,12 +84,11 @@ const {
 } = require('./memory-extraction');
 
 // 记忆检索路径簇：R2c 自本文件迁出（server/memory-retrieval.js），经解构
-// 回注保持调用点零改动（写路径 scopeOf/ownerAllows、管理接口与
+// 回注保持调用点零改动（写路径 scopeOf、管理接口与
 // module.exports 的 searchMemories/buildMemoryContext 等留守代码继续裸名
 // 调用同一套读路径）。
 const {
   scopeOf,
-  ownerAllows,
   getMemoriesForUser,
   getPendingMemoriesForUser,
   checkMemoryOwnership,
@@ -123,6 +122,15 @@ const {
   supersedeMemory,
   withdrawMemory,
 } = require('./memory-lifecycle-ops');
+
+// 记忆读侧 CRUD 与删除簇：R5 自本文件迁出（server/memory-crud.js），
+// 经解构回注保持调用点零改动（module.exports 四操作）。
+const {
+  clearMemories,
+  clearSessionMemories,
+  recallMemoryBySourceQuote,
+  deleteMemory,
+} = require('./memory-crud');
 
 // 记忆核心状态注入：迁移模块共用唯一容器（server/memory-core.js，
 // state-holder 统一设计）。键分三域：
@@ -722,6 +730,9 @@ function loadMemories() {
   console.log(`Memory loaded: ${memories.length}`);
 }
 
+// 先在副本上算出新库 → await 落盘成功 → 才把内存换成新库。
+// 落盘失败时异常原样抛给调用方（内存与磁盘都还是旧的，两边一致），
+// 绝不出现"接口回 200、磁盘没改"的假成功。
 async function saveMemories(nextMemories) {
   const dir = path.dirname(MEMORY_FILE);
 
@@ -1628,268 +1639,6 @@ function refreshDerivedMemoryIndex(reason) {
 }
 
 // 三个写入口（processMemory / recall / delete / clear）统一遵守同一顺序：
-// 先在副本上算出新库 → await 落盘成功 → 才把内存换成新库。
-// 落盘失败时异常原样抛给调用方（内存与磁盘都还是旧的，两边一致），
-// 绝不出现"接口回 200、磁盘没改"的假成功。
-
-// 清空整库。removedEntries 是真正被删掉的条目数（含已被更正的历史条目），
-// 回 0 会让调用方以为「库本来就是空的」。
-//
-// userId 非空时只清掉该用户名下的条目：管理接口在多用户下不能"清空别人的记忆"。
-async function clearMemories(userId = null) {
-  const owner = cleanText(userId);
-
-  return enqueueWrite(async () => {
-    const current = Array.isArray(memories) ? memories : [];
-    const remaining = owner
-      ? current.filter(item => !ownerAllows(item, owner))
-      : [];
-    const removed = current.filter(item => !remaining.includes(item));
-    const removedEntries = removed.length;
-
-    await commitWithTombstones(
-      remaining,
-      removed,
-      owner ? 'clear_user' : 'clear'
-    );
-
-    memories = remaining;
-
-    refreshDerivedMemoryIndex(owner ? 'clear_user' : 'clear');
-
-    console.log(`Memory cleared: ${removedEntries}`);
-
-    return { removedEntries, cleared: true };
-  });
-}
-
-// 按会话清理：只摘掉登记在该会话名下的贡献，贡献被摘空的条目整条删除。
-// 别的会话说过的同一事实（还有其它贡献）必须留着 —— 与撤回同一条规则，
-// 否则"删掉我这个会话的记忆"会把别人的会话记录一并抹掉。
-async function clearSessionMemories(sessionId, userId = null) {
-  const target = cleanText(sessionId);
-  const owner = cleanText(userId);
-
-  if (!target) {
-    return {
-      removedEntries: 0,
-      removedContributions: 0,
-      remaining: Array.isArray(memories) ? memories.length : 0,
-      reason: 'invalid',
-    };
-  }
-
-  return enqueueWrite(async () => {
-    const current = Array.isArray(memories) ? memories : [];
-
-    const remaining = [];
-    const removedForTombstone = [];
-    let removedEntries = 0;
-    let removedContributions = 0;
-
-    for (const item of current) {
-      // 不属于该用户的条目一律原样保留（多用户下不能借 sessionId 越界删除）。
-      if (!ownerAllows(item, owner)) {
-        remaining.push(item);
-        continue;
-      }
-
-      const contributions = Array.isArray(item.contributions)
-        ? item.contributions
-        : [];
-
-      const kept = contributions.filter(
-        contribution => !contribution || contribution.sessionId !== target
-      );
-
-      if (kept.length === contributions.length) {
-        remaining.push(item);
-
-        continue;
-      }
-
-      const removed = contributions.filter(
-        contribution => contribution && contribution.sessionId === target
-      );
-
-      if (removed.length) {
-        removedForTombstone.push({ ...item, contributions: removed });
-      }
-
-      removedContributions += contributions.length - kept.length;
-
-      if (kept.length) {
-        remaining.push({ ...item, contributions: kept, updatedAt: new Date().toISOString() });
-      } else {
-        removedEntries += 1;
-      }
-    }
-
-    if (!removedEntries && !removedContributions) {
-      return {
-        removedEntries: 0,
-        removedContributions: 0,
-        remaining: current.length,
-        reason: 'no-match',
-      };
-    }
-
-    await commitWithTombstones(
-      remaining,
-      removedForTombstone,
-      'clear_session'
-    );
-
-    memories = remaining;
-
-    refreshDerivedMemoryIndex('clear_session');
-
-    console.log(
-      `Memory session cleared: ${target} entries=${removedEntries} contributions=${removedContributions}`
-    );
-
-    return {
-      removedEntries,
-      removedContributions,
-      remaining: remaining.length,
-      reason: 'ok',
-    };
-  });
-}
-
-// 撤回用户消息时，同步撤回由该消息产生的长期记忆。
-// 通过贡献自身的 sourceQuote 与原文做包含/相似度匹配，并用时间窗防止误删无关记忆。
-// 归属规则（E2 + 贡献列表）：
-//   1) 优先只摘掉 sourceQuote 匹配且同为"本会话"的那条贡献；
-//   2) 本会话没有任何匹配时，回退摘掉"无归属"的旧贡献（引入 sessionId 之前
-//      写入的记忆，没有会话信息，按旧行为处理）；
-//   3) 其他会话的贡献一律不动 —— 这正是旧实现里"A 会话撤回误删 B 会话
-//      同内容记忆"的漏洞；
-//   4) 贡献被摘空的记忆整条删除；还有别的会话贡献撑着时，记忆保留。
-// 返回两个计数：摘掉的贡献数 + 删除的条目数。只返回条目数时，
-// 「摘掉一条贡献、条目还在」和「什么都没匹配上」在调用方眼里都是 0。
-async function recallMemoryBySourceQuote(
-  sourceText,
-  sourceCreatedAt,
-  sessionId = null,
-  sourceMessageId = null
-) {
-  const empty = { removedEntries: 0, removedContributions: 0 };
-
-  if (!MEMORY_ENABLED) return empty;
-
-  const source = normalize(sourceText);
-  if (!source) return empty;
-
-  const sourceTime = sourceCreatedAt
-    ? new Date(sourceCreatedAt).getTime()
-    : null;
-  const targetMessageId = cleanText(sourceMessageId);
-
-  const targetSessionId = cleanText(sessionId);
-
-  // 单条贡献是否与本条被撤回消息匹配（文本 + 时间窗）。
-  // 有 messageId 时优先按来源消息精确定位；旧贡献没有 messageId，才退回文本+时间窗。
-  const isMatch = contribution => {
-    if (targetMessageId && contribution && contribution.messageId) {
-      return contribution.messageId === targetMessageId;
-    }
-
-    const quote = normalize(contribution && contribution.sourceQuote);
-
-    if (!quote) return false;
-
-    const textMatch =
-      quote === source ||
-      (quote.length >= 4 && source.includes(quote)) ||
-      similarity(quote, source) >= 0.7;
-
-    if (!textMatch) return false;
-
-    const contributionTime =
-      contribution && contribution.createdAt
-        ? new Date(contribution.createdAt).getTime()
-        : null;
-
-    return (
-      sourceTime === null ||
-      contributionTime === null ||
-      (contributionTime >= sourceTime - 5000 &&
-        contributionTime <= sourceTime + 2 * 60 * 60 * 1000)
-    );
-  };
-
-  return enqueueWrite(async () => {
-    const current = Array.isArray(memories) ? memories : [];
-
-    // 本会话名下是否存在任何匹配贡献
-    const hasPrimaryMatch = current.some(
-      item =>
-        Array.isArray(item.contributions) &&
-        item.contributions.some(
-          contribution =>
-            contribution.sessionId === targetSessionId &&
-            isMatch(contribution)
-        )
-    );
-
-    // 本会话没有任何匹配时，才回退到无归属旧贡献；其他会话的贡献永不动。
-    const useFallback = !hasPrimaryMatch;
-
-    const isTargeted = contribution =>
-      useFallback
-        ? contribution.sessionId === null
-        : contribution.sessionId === targetSessionId;
-
-    const remaining = [];
-    const removedForTombstone = [];
-    let removedContributions = 0;
-
-    for (const item of current) {
-      const contributions = Array.isArray(item.contributions)
-        ? item.contributions
-        : [];
-
-      const removed = contributions.filter(
-        contribution => isTargeted(contribution) && isMatch(contribution)
-      );
-      const kept = contributions.filter(
-        contribution => !(isTargeted(contribution) && isMatch(contribution))
-      );
-
-      if (removed.length) {
-        removedForTombstone.push({ ...item, contributions: removed });
-      }
-
-      removedContributions += contributions.length - kept.length;
-
-      if (!contributions.length || kept.length) {
-        remaining.push(
-          kept.length === contributions.length
-            ? item
-            : { ...item, contributions: kept }
-        );
-      }
-      // 贡献被摘空的记忆整条删除
-    }
-
-    const removedEntries = current.length - remaining.length;
-
-    if (!removedContributions && !removedEntries) return empty;
-
-    await commitWithTombstones(remaining, removedForTombstone, 'recall');
-
-    memories = remaining;
-
-    refreshDerivedMemoryIndex('recall');
-
-    console.log(
-      `Memory recalled: entries=${removedEntries} contributions=${removedContributions}`
-    );
-
-    return { removedEntries, removedContributions };
-  });
-}
 
 // 记忆库读取：默认只给"仍在生效"的条目（被更正的旧条目要显式点名才给，
 // 审计与回滚才看得到）。返回的是逐条深拷贝：外部改 contributions 数组
@@ -1921,74 +1670,6 @@ function getMemories(options = {}) {
       };
     });
 }
-
-// 记忆库单条删除。定位方式两种都支持，新的优先：
-//   1) id —— 稳定身份，前端与接口都应改用这个；
-//   2) createdAt + content —— 旧数据与旧客户端仍在用的定位键，保留不废。
-// 必须走 enqueueWrite，与 processMemory 的自动写入串行化，
-// 否则会出现"用户刚删除 → 后台提取写入"把这次删除覆盖掉。
-async function deleteMemory({ id, createdAt, content, userId = null } = {}) {
-  const targetId = cleanText(id);
-  const targetCreatedAt = typeof createdAt === 'string' ? createdAt : '';
-  const targetContent = typeof content === 'string' ? content : '';
-  const owner = cleanText(userId);
-
-  if (!targetId && !(targetCreatedAt && targetContent)) {
-    return { removed: 0, reason: 'invalid' };
-  }
-
-  return enqueueWrite(async () => {
-    const current = Array.isArray(memories) ? memories : [];
-
-    const index = current.findIndex(item => {
-      if (!item) return false;
-
-      if (targetId) return item.id === targetId;
-
-      return (
-        item.createdAt === targetCreatedAt && item.content === targetContent
-      );
-    });
-
-    if (index < 0) {
-      return { removed: 0, reason: 'not-found' };
-    }
-
-    // 归属不符：不删、不暴露目标是否存在（reason 与 not-found 同属拒绝语义，
-    // 但分开返回便于调用方区分"不存在"与"无权"）。
-    if (!ownerAllows(current[index], owner)) {
-      return { removed: 0, reason: 'forbidden' };
-    }
-
-    const next = current.slice();
-    const removedItem = next[index];
-
-    next.splice(index, 1);
-
-    await commitWithTombstones(next, [removedItem], 'delete');
-
-    memories = next;
-
-    refreshDerivedMemoryIndex('delete');
-    logLifecycleEvent({
-      action: 'delete',
-      from: removedItem ? removedItem.status || STATUS_ACTIVE : null,
-      to: 'deleted',
-      id: removedItem ? removedItem.id : null,
-      reason: 'user_deleted',
-    });
-
-    console.log('Memory deleted');
-
-    return {
-      removed: 1,
-      reason: 'ok',
-      id: removedItem ? removedItem.id : null,
-    };
-  });
-}
-
-// ---- 生命周期操作：pending 确认/拒绝、归档 ----
 
 function getPendingMemories() {
   return (Array.isArray(memories) ? memories : [])
