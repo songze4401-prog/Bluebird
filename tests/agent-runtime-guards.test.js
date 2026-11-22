@@ -286,6 +286,27 @@ test('正文工具调用封装：末轮不下发 tools 仍执行解析出的调�
   assert.ok(!outcome.rawReply.includes('DSML'), '交付正文不得残留封装标记');
 });
 
+test('正文工具调用封装：末轮只有调用没有正文时，用工具结果摘要收尾而不是空回复', async () => {
+  probeSeqs.length = 0;
+
+  modelResponder = body => {
+    const hasToolResult = (body.messages || []).some(m => m.role === 'tool');
+    if (!hasToolResult) return toolCallCompletion('guard_probe', { seq: 21 });
+
+    // 末轮正文只有封装、没有一句人话：解析后必须执行，且不能交出空回复。
+    return textCompletion(dsmlEnvelope([{ name: 'guard_probe', args: { seq: 22 } }]));
+  };
+
+  const outcome = await agentRuntime.runAgentTurn({
+    messages: [{ role: 'user', content: '写一句想对我说的话' }],
+    sessionId: 's-textual-final-empty',
+    policy: policyWith({ maxRounds: 2 }),
+  });
+
+  assert.deepEqual(probeSeqs, [21, 22], '末轮封装里的调用必须真的执行');
+  assert.equal(outcome.rawReply, 'probe', '空正文时用最后一条工具结果摘要收尾');
+});
+
 test('正文工具调用封装：普通轮次解析后照常进入下一轮并回传工具结果', async () => {
   probeSeqs.length = 0;
   let secondRequest = null;

@@ -134,17 +134,23 @@ function normalizeCandidate(raw, options = {}) {
         .slice(0, 5)
     : [];
 
+  // 2026-11-23：Agent 概括写入可以没有原话。贡献的本质是「用户说过的原话」，
+  // 没有原话就不造空贡献——hydrateEntries 会把空原话的贡献丢掉，存空贡献会
+  // 让磁盘与内存指纹不一致（落盘校验报 mismatch）。此时贡献列表为空，
+  // 前端 sourceQuote 回落成空串，不影响正文与来源类型。
   const contributions = rawContributions.length
     ? rawContributions
-    : [
-        {
-          sessionId: sessionId || null,
-          sourceQuote,
-          createdAt: now,
-          sourceType,
-          ...(messageId ? { messageId } : {}),
-        },
-      ];
+    : sourceQuote
+      ? [
+          {
+            sessionId: sessionId || null,
+            sourceQuote,
+            createdAt: now,
+            sourceType,
+            ...(messageId ? { messageId } : {}),
+          },
+        ]
+      : [];
 
   return {
     id: cleanText(source.id) || issuedId(),
@@ -211,8 +217,11 @@ function candidateValidationError(candidate, options = {}) {
   }
   const quote =
     candidate.contributions[0] && candidate.contributions[0].sourceQuote;
-  if (!quote || quote.length < 2) return 'quote_too_short';
-  if (isSensitive(candidate.content) || isSensitive(quote)) {
+  // 2026-11-23：Agent 显式写入允许省略原话（由模型概括）；抽取通道仍必须带原话。
+  if ((!quote || quote.length < 2) && !options.allowMissingQuote) {
+    return 'quote_too_short';
+  }
+  if (isSensitive(candidate.content) || (quote && isSensitive(quote))) {
     return 'sensitive_content';
   }
   if (!VALID_PROVENANCE.has(candidate.provenance)) {
@@ -235,18 +244,23 @@ function candidateValidationError(candidate, options = {}) {
     const userText = normalize(options.userText || '');
     const normalizedQuote = normalize(quote);
 
-    if (!userText || !normalizedQuote || !userText.includes(normalizedQuote)) {
-      return 'ungrounded_source';
-    }
+    // 2026-11-23：不再强制用户原话——sourceQuote 可以省略，正文由模型概括。
+    // 但只要提供了原话，就必须真实出现在当前用户消息里，防止编造引文；
+    // 此时正文仍需与该原话相关（原有相似度校验保留）。
+    if (!userText) return 'ungrounded_source';
 
-    const anchorScore = similarity(candidate.content, quote);
-    const grounding = keywordGrounding(candidate.keywords, userText);
+    if (normalizedQuote) {
+      if (!userText.includes(normalizedQuote)) return 'ungrounded_source';
 
-    if (
-      anchorScore < ANCHOR_MIN &&
-      !(anchorScore >= ANCHOR_FALLBACK_MIN && grounding.covered)
-    ) {
-      return 'ungrounded_content';
+      const anchorScore = similarity(candidate.content, quote);
+      const grounding = keywordGrounding(candidate.keywords, userText);
+
+      if (
+        anchorScore < ANCHOR_MIN &&
+        !(anchorScore >= ANCHOR_FALLBACK_MIN && grounding.covered)
+      ) {
+        return 'ungrounded_content';
+      }
     }
   }
 

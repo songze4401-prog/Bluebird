@@ -79,13 +79,14 @@ function builtinProvider() {
         id: BUILTIN_VISION_MODEL,
         name: 'DeepSeek Flash（视觉）',
         enabled: true,
-        // 视觉模型不参与工具循环：Agent 走纯文本路由。
+        // V4.1 Flash 同时支持视觉与工具调用（2026-11-23 实测 provider：
+        // 带 tools 的 chat/completions 返回 finish_reason=tool_calls + 真实调用）。
+        // 因此它可以作为单模型同时承担图文与 Agent 工具循环。
         // contextWindow 来自 provider GET /models 的真实元数据
-        // （2026-10-29 实测：deepseek-flash context_window=1048576,
+        // （2026-10-29 实测 deepseek-flash context_window=1048576,
         //  max_output_tokens=393216, input_modalities=[text,image]）。
-        // 仅声明提供方明确返回的值；deepseek-chat 未返回，故不声明。
         contextWindow: 1048576,
-        capabilities: { vision: true, tools: false },
+        capabilities: { vision: true, tools: true },
       },
     ],
   };

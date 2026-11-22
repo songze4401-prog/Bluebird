@@ -755,23 +755,22 @@ async function main() {
   check('末轮强制无 tools（结构上终结循环）', stubCalls[2].tools === undefined);
   check('记录了 2 次工具执行', capped.json.toolSteps.length === 2);
 
-  // ================= H. 能力降级与带图强制 =================
-  ORIG_LOG('\nH. 能力降级与带图请求安全策略');
+  // ================= H. 单模型能力（V4.1 Flash 视觉 + 工具） =================
+  ORIG_LOG('\nH. 单模型能力与带图工具');
 
-  // H1 模型未声明 tools（flash）→ 降级普通聊天，保留 model 回执
+  // H1 V4.1 Flash 同时声明 tools：单模型即可承载图文 + 工具循环
   resetScript();
   scripted.push({ content: '[happy] 我是视觉模型。' });
   const flash = await req('/chat', {
     method: 'POST',
     body: { message: '你好', providerId: 'deepseek', modelId: 'deepseek-flash' },
   });
-  check('未声明 tools 的模型降级为普通聊天', flash.status === 200 && flash.json.reply.includes('视觉模型'));
-  check('降级请求不带 tools', stubCalls[0].tools === undefined);
-  check('降级后 model 回执仍为实际下发模型', flash.json.model === 'deepseek-flash', flash.json.model);
-  check('降级后 upstreamModel 记录供应商回显', flash.json.upstreamModel === 'deepseek-chat', flash.json.upstreamModel);
-  check('降级无 toolSteps', flash.json.toolSteps === undefined);
+  check('flash 模型走 Agent 路径（请求带 tools）', flash.status === 200 && Array.isArray(stubCalls[0].tools));
+  check('flash 请求回执 model 正确', flash.json.model === 'deepseek-flash', flash.json.model);
+  check('flash 无工具调用时正常返回文本', flash.json.reply.includes('视觉模型'));
+  check('flash 无工具调用时无 toolSteps', flash.json.toolSteps === undefined);
 
-  // H2 带图请求（默认模型声明了 tools）→ 后端强制无工具。
+  // H2 带图请求（视觉模型同时声明 tools）→ 允许工具，不再互斥
   // 用独立会话：带图消息会进入会话历史，避免污染默认会话后续请求的视觉判定。
   const freshRes = await req('/sessions', { method: 'POST', body: {} });
   const freshSessionId = freshRes.json && freshRes.json.session && freshRes.json.session.id;
@@ -782,9 +781,9 @@ async function main() {
     body: { message: '这是什么', sessionId: freshSessionId, attachmentIds: [imageId] },
   });
   check('带图请求正常（视觉路由保持）', withImage.status === 200);
-  check('带图请求后端强制无工具（请求不带 tools）', stubCalls[0].tools === undefined);
+  check('带图请求允许工具（请求带 tools）', Array.isArray(stubCalls[0].tools));
   check('带图请求仍走视觉模型 deepseek-flash', stubCalls[0].model === 'deepseek-flash');
-  check('带图请求无 toolSteps', withImage.json.toolSteps === undefined);
+  check('带图请求无工具调用时无 toolSteps', withImage.json.toolSteps === undefined);
   check(
     '带图请求图片仍以 blocks 上行（多模态链路无回归）',
     (() => {
@@ -793,14 +792,13 @@ async function main() {
     })()
   );
   check(
-    'H2 新图触发 Agent 互斥并返回用户提示',
-    withImage.json.agentNotice === '本次带图，已切换到视觉模型，工具暂不可用',
+    '带图不再返回工具互斥提示',
+    withImage.json.agentNotice === undefined,
     JSON.stringify(withImage.json.agentNotice)
   );
 
-  // H3 带图门控的独立验证：内置 flash 靠 tools:false 挡住（能力门控），
-  // 这里用一个"视觉+工具双声明"的自定义模型——只有 !useVision 门控能挡住。
-  // 若门控被移除，带图请求就会携带 tools（违反任务书强制要求）。
+  // H3 视觉+工具双声明模型：带图同样允许工具（2026-11-23 起互斥解除），
+  // 与内置 V4.1 Flash 行为一致。
   const h3SessionRes = await req('/sessions', { method: 'POST', body: {} });
   const h3SessionId = h3SessionRes.json && h3SessionRes.json.session.id;
   mockChatRequests.length = 0;
@@ -815,15 +813,15 @@ async function main() {
     },
   });
   check(
-    'H3 带图 + 视觉工具双声明模型：后端强制无 tools',
+    'H3 带图 + 视觉工具双声明模型：允许 tools',
     imageOnDual.status === 200 &&
       mockChatRequests[0] &&
-      mockChatRequests[0].body.tools === undefined,
+      Array.isArray(mockChatRequests[0].body.tools),
     JSON.stringify(mockChatRequests[0] && mockChatRequests[0].body).slice(0, 120)
   );
   check(
-    'H3 双声明模型的新图也返回工具互斥提示',
-    imageOnDual.json.agentNotice === '本次带图，已切换到视觉模型，工具暂不可用'
+    'H3 双声明模型带图不再返回互斥提示',
+    imageOnDual.json && imageOnDual.json.agentNotice === undefined
   );
 
   const h3TextSessionRes = await req('/sessions', { method: 'POST', body: {} });
@@ -953,11 +951,10 @@ async function main() {
   });
   const streamNoticeDone = streamNotice.events.find(e => e.type === 'done');
   check(
-    'H6 流式新图在 done 中返回工具互斥提示',
+    'H6 流式新图不再返回工具互斥提示',
     streamNotice.status === 200 &&
       !!streamNoticeDone &&
-      streamNoticeDone.agentNotice ===
-        '本次带图，已切换到视觉模型，工具暂不可用'
+      streamNoticeDone.agentNotice === undefined
   );
 
   // ================= I. 并行 tool_calls =================

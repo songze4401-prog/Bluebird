@@ -463,6 +463,34 @@ async function main() {
     deltas2.map(d => d.content).join('').includes('[mood:happy]')
   );
 
+  // ---- 工具协议残留（非 Agent 路径）：done 权威文本必须剥离 ----
+  stubChunks = [
+    '[mood:calm] 记一下。\n<tool_call>memory_remember\n{"content":"x"}</tool_call>',
+  ];
+  const resTag = await postStream({ message: '记一下' });
+  const sseTag = await readSSE(resTag);
+  const doneTag = sseTag.events.find(e => e.type === 'done');
+
+  check(
+    '工具协议残留：done 文本不含 <tool_call> 与函数名',
+    !!doneTag &&
+      !String(doneTag.reply).includes('<tool_call') &&
+      !String(doneTag.reply).includes('memory_remember'),
+    doneTag ? `reply=${doneTag.reply}` : 'no done'
+  );
+
+  // 整条只有协议块：必须给可读兜底，不能留空气泡
+  stubChunks = ['[mood:calm] <tool_call>memory_remember\n{"content":"y"}</tool_call>'];
+  const resOnly = await postStream({ message: '再记一次' });
+  const sseOnly = await readSSE(resOnly);
+  const doneOnly = sseOnly.events.find(e => e.type === 'done');
+
+  check(
+    '工具协议残留：纯协议回复补可读兜底',
+    !!doneOnly && doneOnly.reply === '（原本是一条工具调用，但这次没有执行成功）',
+    doneOnly ? `reply=${doneOnly.reply}` : 'no done'
+  );
+
   // ---- 分条保留（默认 persona 为 auto）----
   stubChunks = ['[mood:calm] 第一段。\n\n第', '二段。\n\n第三段。'];
   const res3 = await postStream({ message: '分条测试' });

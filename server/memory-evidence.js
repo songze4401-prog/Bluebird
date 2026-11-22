@@ -387,7 +387,16 @@ function applyEvidencePolicy({
     evidence.quoteGrounded &&
     evidence.directness >= 0.79 &&
     evidence.sourceReliability >= 0.7;
-  const directEvidence = directUserEvidence || directAgentQuoteEvidence;
+  // 2026-11-23：显式要求「记住」的 Agent 写入不再强制逐字原话。
+  // 用户在聊天里明确要求记录时，允许模型用自己的话概括并直接落地；
+  // 改写/合并已有记忆仍走 requireMutationConfirmation 的确认门禁。
+  const directAgentExplicitEvidence =
+    candidate.provenance === PROVENANCE.AGENT_OBSERVED &&
+    candidate.sourceType === 'agent' &&
+    candidate.intent === 'explicit' &&
+    confidence >= 0.7;
+  const directEvidence =
+    directUserEvidence || directAgentQuoteEvidence || directAgentExplicitEvidence;
   // 长期偏好允许用户用一条明确记忆意图更新旧偏好；这不是通用冲突豁免，
   // 必须是直接用户原话、原话接地、近期且高置信，并有足够具体信息。
   const currentPreferenceUpdate =

@@ -26,13 +26,11 @@ const REPLY_MAX_CHARS = (() => {
   return Number.isInteger(raw) && raw > 0 ? raw : 4000;
 })();
 
-const AGENT_NEW_IMAGE_NOTICE = '本次带图，已切换到视觉模型，工具暂不可用';
-
-// Agent 门控的唯一判定入口：reason 只用于诊断和用户提示，不改变互斥规则。
-// 优先级：总开关关闭 > 策略 answer_only > 本次新图 > 模型不支持 tools >
-// 策略没有可用工具 > 放行。策略不能绕过前三道既有门控。
-// 轮 4（Orchestrator）：编排开关开启时给模型追加计划块协议。能力清单由
-// Manifest 动态生成（capabilities ∩ acceptedTaskTypes 的并集），不硬编码。
+// Agent 门控的唯一判定入口：reason 只用于诊断，不改变规则。
+// 优先级：总开关关闭 > 策略 answer_only > 模型不支持 tools >
+// 策略没有可用工具 > 放行。
+// 2026-11-23：V4.1 Flash 实测同时支持视觉与工具调用，带图不再与工具互斥；
+// hasNewImage 参数保留兼容旧调用方，但不再参与判定。
 function orchestrationPromptAppendix(policy) {
   if (!policy || !policy.orchestration || policy.orchestration.enabled !== true) {
     return null;
@@ -81,13 +79,6 @@ function evaluateAgentGate({
   }
   if (policyMode === 'answer_only') {
     return { allowed: false, reason: 'policyAnswerOnly', notice: null };
-  }
-  if (hasNewImage) {
-    return {
-      allowed: false,
-      reason: 'newImage',
-      notice: AGENT_NEW_IMAGE_NOTICE,
-    };
   }
   if (!toolsSupported) {
     return { allowed: false, reason: 'noToolsCapability', notice: null };

@@ -3,8 +3,9 @@
  *
  * Agent 只能提交候选；真正的创建/合并/更新/取代/拒绝/待确认由 memory.js
  * 的统一决策管线执行。服务端强制：
- * - sourceQuote 必须是当前用户原话中的连续片段；
- * - 正文必须接地于该原话；
+ * - sourceQuote 可选：填写时必须是当前用户原话中的连续片段（防编造），
+ *   不填时正文由模型概括，不再要求逐字引用；
+ * - 填写原话时，正文必须与该原话接地；
  * - 会话归属来自运行时上下文，不能由模型指定；
  * - 工具结果不含记忆正文。
  */
@@ -35,7 +36,9 @@ const definition = Object.freeze({
   name: 'memory_remember',
   description:
     '提交一条关于用户的候选长期记忆。只能用于用户明确说出、值得跨会话保留的事实/偏好；' +
-    'sourceQuote 必须逐字来自当前用户消息。临时情绪、一次性状态、模型推测不要提交。' +
+    '用你自己的话概括即可，不要求逐字引用用户原话。sourceQuote 可选：' +
+    '若填写则必须是当前用户消息里的连续原话片段（用于审计，不能编造）；' +
+    '不填也能写入。临时情绪、一次性状态、模型推测不要提交。' +
     '如果用户是在纠正旧事实，可传 targetId 指定要更新的记忆。',
   parameters: Object.freeze({
     type: 'object',
@@ -52,7 +55,7 @@ const definition = Object.freeze({
       }),
       sourceQuote: Object.freeze({
         type: 'string',
-        description: '当前用户消息中的连续原话片段',
+        description: '可选：当前用户消息中的连续原话片段（用于审计；不填也可写入）',
         maxLength: LIMITS.quoteMax,
       }),
       keywords: Object.freeze({
@@ -91,7 +94,7 @@ const definition = Object.freeze({
         description: '可选：事实适用的条件；条件不同不得合并',
       }),
     }),
-    required: Object.freeze(['content', 'type', 'sourceQuote']),
+    required: Object.freeze(['content', 'type']),
   }),
   timeoutMs: 5000,
   // 受控写入工具：运行层要求 context 同时带 sessionId 与当前用户原话，
@@ -115,7 +118,6 @@ const definition = Object.freeze({
 
     const sourceQuote =
       typeof args.sourceQuote === 'string' ? args.sourceQuote.trim() : '';
-    if (!sourceQuote) return { ok: false, error: '缺少必填参数 sourceQuote' };
     if (textLength(sourceQuote) > LIMITS.quoteMax) {
       return { ok: false, error: `sourceQuote 超过 ${LIMITS.quoteMax} 字上限` };
     }
@@ -226,6 +228,9 @@ const definition = Object.freeze({
         actor: 'agent',
         userText: context.userText,
         requireUserGrounding: true,
+        // 2026-11-23：不强制逐字引用用户原话——sourceQuote 可省略；
+        // 提供时仍会校验其真实出现在当前消息中（防编造）。
+        allowMissingQuote: true,
         // 新增可自动落地；改写/合并/替代已有记忆必须先确认。
         requireMutationConfirmation: true,
         signal: context.signal,

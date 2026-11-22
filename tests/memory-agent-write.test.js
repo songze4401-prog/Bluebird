@@ -198,7 +198,36 @@ function check(name, cond, extra = '') {
     JSON.stringify(diskMemory())
   );
 
-  console.log('\n2) 原话不接地 → 拒绝写入');
+  console.log('\n2) 不提供原话 → 用模型概括也能写入（不再强制逐字引用）');
+  resetScripted([
+    {
+      toolCalls: [
+        tc('c-paraphrase', 'memory_remember', {
+          content: '用户最近在学习烹饪',
+          type: 'goal',
+          keywords: ['做饭', '学习'],
+          confidence: 0.9,
+        }),
+      ],
+    },
+    { content: '[calm] 记下了' },
+  ]);
+
+  const paraphrased = await req('/chat', {
+    method: 'POST',
+    body: { message: '我最近在学做饭' },
+  });
+
+  check(
+    '无 sourceQuote 也能写入，正文为概括而非原话',
+    paraphrased.status === 200 &&
+      paraphrased.json.toolSteps &&
+      paraphrased.json.toolSteps[0].ok === true &&
+      diskMemory().some(item => item.content === '用户最近在学习烹饪'),
+    JSON.stringify(paraphrased.json.toolSteps)
+  );
+
+  console.log('\n3) 编造原话 → 拒绝写入');
   resetScripted([
     {
       toolCalls: [
@@ -227,8 +256,10 @@ function check(name, cond, extra = '') {
     JSON.stringify(rejected.json.toolSteps)
   );
 
-  console.log('\n3) 同一候选重复提交进入待确认，不直接改写 active');
-  const activeBefore = diskMemory().filter(item => item.status === 'active').length;
+  console.log('\n4) 同一候选重复提交进入待确认，不直接改写 active');
+  const activeBefore = diskMemory().filter(
+    item => item.status === 'active' && item.content === '用户喜欢喝美式咖啡'
+  ).length;
 
   resetScripted([
     {
@@ -269,7 +300,7 @@ function check(name, cond, extra = '') {
     JSON.stringify({ mergeConfirmed: mergeConfirmed.json, memory: diskMemory() })
   );
 
-  console.log('\n4) 低置信 Agent 候选进入 pending，可由 HTTP 确认');
+  console.log('\n5) 低置信 Agent 候选进入 pending，可由 HTTP 确认');
   const agent = require(path.join(SERVER, 'agent-runtime.js'));
 
   const unauthorizedWrite = await agent.executeToolCall(
@@ -360,7 +391,7 @@ function check(name, cond, extra = '') {
     JSON.stringify(confirmed.json)
   );
 
-  console.log('\n5) HTTP 归档接口');
+  console.log('\n6) HTTP 归档接口');
   const activeId = diskMemory().find(
     item => item.status === 'active' && item.content === '用户喜欢喝美式咖啡'
   ).id;
