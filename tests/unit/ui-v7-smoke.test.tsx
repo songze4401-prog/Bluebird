@@ -166,7 +166,7 @@ describe('蓝鸟 v7 新壳', () => {
 
     fireEvent.press(utils.getByTestId('nav-tab-files'));
     await waitFor(() => expect(utils.getByPlaceholderText('搜索工作区文件')).toBeTruthy());
-    expect(utils.getByText('note.md')).toBeTruthy();
+    await waitFor(() => expect(utils.getByText('note.md')).toBeTruthy());
 
     fireEvent.press(utils.getByTestId('nav-tab-chat'));
     await waitFor(() => expect(utils.getByPlaceholderText('与 Bluebird 对话…')).toBeTruthy());
