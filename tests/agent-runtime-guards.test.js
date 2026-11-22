@@ -104,7 +104,9 @@ function hangingCompletion(options) {
 }
 
 const agentRuntime = require(path.join(SERVER, 'agent-runtime.js'));
-const { parseTextualToolCalls } = require(path.join(SERVER, 'textual-tool-calls.js'));
+const { parseTextualToolCalls, stripToolProtocolText } = require(
+  path.join(SERVER, 'textual-tool-calls.js')
+);
 const { auditTaskClaims } = require(path.join(SERVER, 'task-claim-guard.js'));
 
 // 每次探针调用记录 seq：正文封装解析出的调用必须真的执行到 handler。
@@ -223,6 +225,34 @@ test('正文工具调用封装：严格解析、兼容半角分隔符，残缺�
     ),
     null
   );
+
+  // 2026-11-22 真机形态：<tool_call> 标签 + 首行函数名 + JSON 正文。
+  const tagged = parseTextualToolCalls(
+    '<tool_call>guard_probe\n{"seq": 9}</tool_call>'
+  );
+  assert.ok(tagged, '<tool_call> 形态应被解析');
+  assert.equal(tagged.calls.length, 1);
+  assert.equal(tagged.calls[0].function.name, 'guard_probe');
+  assert.deepEqual(JSON.parse(tagged.calls[0].function.arguments), { seq: 9 });
+  assert.equal(tagged.text, '');
+
+  const taggedWrapped = parseTextualToolCalls(
+    '先记一下。\n<tool_calls><tool_call>guard_probe\n{"seq": 10}</tool_call></tool_calls>'
+  );
+  assert.ok(taggedWrapped, '<tool_calls> 外层包裹应被解析');
+  assert.equal(taggedWrapped.calls.length, 1);
+  assert.equal(taggedWrapped.text, '先记一下。');
+
+  assert.equal(
+    parseTextualToolCalls('<tool_call>guard_probe\nnot-json</tool_call>'),
+    null,
+    'JSON 正文不合法时不得猜测'
+  );
+  assert.equal(
+    stripToolProtocolText('前面 <tool_call>bad</tool_call> 后面'),
+    '前面 后面',
+    '无法解析的协议块也不得原样交付'
+  );
 });
 
 test('正文工具调用封装：末轮不下发 tools 仍执行解析出的调用，回复不含标记', async () => {
@@ -280,6 +310,36 @@ test('正文工具调用封装：普通轮次解析后照常进入下一轮并�
   assert.equal(outcome.rounds, 2);
   assert.deepEqual(probeSeqs, [7]);
   assert.equal(outcome.rawReply, '已写入。');
+  assert.ok(
+    secondRequest && secondRequest.messages.some(m => m.role === 'tool'),
+    '下一轮请求应包含 tool 结果消息'
+  );
+});
+
+test('正文工具调用封装：<tool_call> 标签形态必须真执行，交付正文不残留协议文本', async () => {
+  probeSeqs.length = 0;
+  let secondRequest = null;
+
+  modelResponder = body => {
+    const hasToolResult = (body.messages || []).some(m => m.role === 'tool');
+    if (!hasToolResult) {
+      return textCompletion(
+        '记一下。\n<tool_call>guard_probe\n{"seq": 11}</tool_call>'
+      );
+    }
+    secondRequest = body;
+    return textCompletion('记好了。');
+  };
+
+  const outcome = await agentRuntime.runAgentTurn({
+    messages: [{ role: 'user', content: '记一下' }],
+    sessionId: 's-textual-tag',
+    policy: policyWith({ maxRounds: 3 }),
+  });
+
+  assert.deepEqual(probeSeqs, [11], '标签形态的调用必须真的执行');
+  assert.equal(outcome.rawReply, '记好了。');
+  assert.ok(!outcome.rawReply.includes('tool_call'), '交付正文不得残留协议标记');
   assert.ok(
     secondRequest && secondRequest.messages.some(m => m.role === 'tool'),
     '下一轮请求应包含 tool 结果消息'

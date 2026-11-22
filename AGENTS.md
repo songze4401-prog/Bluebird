@@ -215,7 +215,7 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-135 files, 2597 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
+135 files, 2598 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
 node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js tests/monitoring.test.js   # node:test suites (231)
@@ -263,7 +263,7 @@ node tests/agent-recovery.test.js          # 31 — state machine transitions, t
 node tests/agent-risk-policy.test.js       # 8
 node tests/agent-router.test.js            # 50 — router decision chain, task contract v1, fast/slow budgets, idempotency/priority queue, route events privacy, delegate_to_bot compatibility
 node tests/agent-run-limits.test.js        # 4 — §25 persisted hard limits: delegation depth 2, two replans per run (task-level counts also recorded), three run retries; counts survive restart and retries never reset them
-node tests/agent-runtime-guards.test.js    # 9 — agent runtime guards: cross-session MERGE dedupe scope, task deadlineMs, policy maxRounds, abort-listener cleanup
+node tests/agent-runtime-guards.test.js    # 10 — agent runtime guards: cross-session MERGE dedupe scope, task deadlineMs, policy maxRounds, abort-listener cleanup
 node tests/agent-side-effect-ledger.test.js # 8 — runtime idempotency wiring (P2): begin-before-execute, succeeded reuse without re-execution, started residue routes the task to recovery, timeout becomes unknown and blocks retry, failed retries in place with one row per opKey, dedupeKeyOverride escape hatch for intentional repeats, read-only tools write no ledger rows
 node tests/agent-storage-limits.test.js    # 2 — agent event outbox hard cap, overflow accounting (drop_oldest) and outbox recovery
 node tests/agent-taint-policy.test.js      # 5

@@ -41,7 +41,7 @@ const { truncateText } = require('./text-utils');
 const { buildPolicyInstruction } = require('./agent-policy');
 const { detectExplicitDelegation, isMemoryQueryDelegation } = require('./delegation-intent');
 const { classifyIntent, INTENTS } = require('./context/orchestrator');
-const { parseTextualToolCalls } = require('./textual-tool-calls');
+const { parseTextualToolCalls, stripToolProtocolText } = require('./textual-tool-calls');
 
 const FORCED_DELEGATION_INSTRUCTION = `
 【服务端已执行子 agent 委派】
@@ -1377,8 +1377,10 @@ async function runAgentTurn({
     // 保持一致的可选链降级——收不到内容时按"无有效内容"可控结束，
     // 不向路由层抛 TypeError。
     if (!toolCalls.length) {
-      rawReply =
-        typeof assistantContent === 'string' ? assistantContent : '';
+      // 交付正文兜底：模型若把调用写成无法解析的协议块，也绝不原样透传。
+      rawReply = stripToolProtocolText(
+        typeof assistantContent === 'string' ? assistantContent : ''
+      );
       if (toolBudgetReached) stopReason = 'tool_call_budget';
       break;
     }
@@ -1404,8 +1406,9 @@ async function runAgentTurn({
         }
       }
 
-      rawReply =
-        typeof assistantContent === 'string' ? assistantContent : '';
+      rawReply = stripToolProtocolText(
+        typeof assistantContent === 'string' ? assistantContent : ''
+      );
       if (toolBudgetReached) stopReason = 'tool_call_budget';
       break;
     }
