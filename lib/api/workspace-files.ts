@@ -1,6 +1,8 @@
+import { File, Paths } from 'expo-file-system';
 import { API_PATHS } from './endpoints';
 import { apiErrorFromPayload } from './errors';
-import { apiFetch, TIMEOUTS } from './client';
+import { apiFetch, API_BASE, TIMEOUTS } from './client';
+import { API_TOKEN } from '../constants';
 import type {
   WorkspaceFilesResponse,
   WorkspaceSaveResponse,
@@ -77,4 +79,24 @@ export async function downloadWorkspaceFile(path: string): Promise<Uint8Array> {
     throw apiErrorFromPayload(payload, response.status, '下载文件失败');
   }
   return new Uint8Array(await response.arrayBuffer());
+}
+
+/**
+ * 原生端流式下载：由原生网络栈直接写入缓存文件，正文不进入 JS 内存。
+ * 工作区是用户可见目录，可能有大文件；不能像 Web 端那样 arrayBuffer 全量缓冲。
+ */
+export async function downloadWorkspaceFileToCache(
+  path: string,
+  fileName: string
+): Promise<File> {
+  const destination = new File(Paths.cache, fileName);
+  return File.downloadFileAsync(
+    `${API_BASE}${API_PATHS.workspaceFileDownload(path)}`,
+    destination,
+    {
+      headers: { Authorization: `Bearer ${API_TOKEN}` },
+      // 允许覆盖同名缓存文件，重复打开不会因 DestinationAlreadyExists 失败
+      idempotent: true,
+    }
+  );
 }

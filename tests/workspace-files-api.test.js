@@ -25,7 +25,7 @@ test.after(() => {
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (_) {}
 });
 
-test('浏览/搜索：按修改时间倒序、递归匹配，隐藏 .history 与符号链接', () => {
+test('浏览/搜索：按修改时间倒序、递归匹配，隐藏 .history 与符号链接', async () => {
   fs.mkdirSync(full('notes'), { recursive: true });
   fs.mkdirSync(full('.history'), { recursive: true });
   fs.writeFileSync(full('older.md'), 'old');
@@ -40,17 +40,17 @@ test('浏览/搜索：按修改时间倒序、递归匹配，隐藏 .history 与
   fs.writeFileSync(outside, 'outside');
   try { fs.symlinkSync(outside, full('linked.md')); } catch (_) {}
 
-  const listed = service.list({ path: '.' });
+  const listed = await service.list({ path: '.' });
   assert.deepEqual(listed.entries.slice(0, 2).map(item => item.path), ['notes', 'older.md']);
   assert.equal(listed.entries.some(item => item.path.startsWith('.history/')), false);
   assert.equal(listed.entries.some(item => item.name === 'linked.md'), false);
-  const found = service.list({ path: '.', search: 'newest' });
+  const found = await service.list({ path: '.', search: 'newest' });
   assert.equal(found.entries.length, 1);
   assert.equal(found.entries[0].path, 'notes/newest.md');
 });
 
 test('所有文件 API 路径均受工作区 realpath 沙箱约束', async () => {
-  assert.throws(() => service.list({ path: '../outside' }), error => error.code === 'workspace_path_outside');
+  await assert.rejects(service.list({ path: '../outside' }), error => error.code === 'workspace_path_outside');
   assert.throws(() => service.readText({ path: '../outside.md' }), error => error.code === 'workspace_path_outside');
   assert.throws(() => service.deleteFile({ path: '../outside.md', confirm: true }), error => error.code === 'workspace_path_outside');
   await assert.rejects(service.upload({ directory: '../', name: 'escape.bin', base64: Buffer.from('x').toString('base64') }), error => error.code === 'workspace_path_outside');
@@ -61,7 +61,7 @@ test('所有文件 API 路径均受工作区 realpath 沙箱约束', async () =>
   try { fs.symlinkSync(outsideDir, full('escape'), process.platform === 'win32' ? 'junction' : 'dir'); }
   catch (error) { if (process.platform !== 'win32') throw error; }
   if (fs.existsSync(full('escape'))) {
-    assert.throws(() => service.list({ path: 'escape' }), error => error.code === 'workspace_path_outside');
+    await assert.rejects(service.list({ path: 'escape' }), error => error.code === 'workspace_path_outside');
   }
 });
 

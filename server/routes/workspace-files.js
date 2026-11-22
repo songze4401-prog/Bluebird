@@ -121,13 +121,15 @@ function createWorkspaceFileService() {
     return stat;
   };
 
-  const list = ({ path: requestedPath = '.', search = '' } = {}) => {
+  // 异步遍历：工作区可能上万项，同步 readdir/lstat 会阻塞 Express 主线程，
+  // 拖慢同一进程上的聊天流式响应。上限与结果集口径保持不变。
+  const list = async ({ path: requestedPath = '.', search = '' } = {}) => {
     const query = typeof search === 'string' ? search.trim().toLocaleLowerCase() : '';
     const requested = typeof requestedPath === 'string' && requestedPath.trim() ? requestedPath : '.';
     const { absolutePath, relativePath, rootReal } = resolve(requested);
     let rootStat;
     try {
-      rootStat = fs.lstatSync(absolutePath);
+      rootStat = await fs.promises.lstat(absolutePath);
     } catch (_) {
       fail(404, 'workspace_not_found', '目录不存在');
     }
@@ -137,11 +139,11 @@ function createWorkspaceFileService() {
 
     const entries = [];
     let visited = 0;
-    const walk = (dir, depth = 0) => {
+    const walk = async (dir, depth = 0) => {
       if (depth > 32 || visited >= MAX_WALK_ENTRIES) return;
       let names;
       try {
-        names = fs.readdirSync(dir);
+        names = await fs.promises.readdir(dir);
       } catch (_) {
         return;
       }
@@ -151,7 +153,7 @@ function createWorkspaceFileService() {
         const full = path.join(dir, name);
         let stat;
         try {
-          stat = fs.lstatSync(full);
+          stat = await fs.promises.lstat(full);
         } catch (_) {
           continue;
         }
@@ -163,10 +165,10 @@ function createWorkspaceFileService() {
         if (!query || entry.name.toLocaleLowerCase().includes(query) || entry.path.toLocaleLowerCase().includes(query)) {
           entries.push(entry);
         }
-        if (query && type === 'dir') walk(full, depth + 1);
+        if (query && type === 'dir') await walk(full, depth + 1);
       }
     };
-    walk(absolutePath);
+    await walk(absolutePath);
     entries.sort((a, b) => Date.parse(b.mtime) - Date.parse(a.mtime) || a.path.localeCompare(b.path));
     const sliced = entries.slice(0, MAX_SEARCH_RESULTS);
     return {
@@ -420,9 +422,9 @@ function createWorkspaceFilesRouter({ requireAuth, service = createWorkspaceFile
   if (typeof requireAuth !== 'function') throw new TypeError('[workspace-files] createWorkspaceFilesRouter 需要 requireAuth');
   const router = express.Router();
 
-  router.get('/files', requireAuth, (req, res) => {
+  router.get('/files', requireAuth, async (req, res) => {
     try {
-      return res.json(service.list({ path: req.query.path, search: req.query.search }));
+      return res.json(await service.list({ path: req.query.path, search: req.query.search }));
     } catch (error) { return sendError(res, error); }
   });
 

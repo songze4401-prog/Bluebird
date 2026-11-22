@@ -10,13 +10,14 @@ import {
   View,
 } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
-import { File, Paths } from 'expo-file-system';
+import { File } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ApiError } from '../lib/api/errors';
 import {
   deleteWorkspaceFile,
   downloadWorkspaceFile,
+  downloadWorkspaceFileToCache,
   listWorkspaceFiles,
   readWorkspaceText,
   saveWorkspaceText,
@@ -72,6 +73,8 @@ export function WorkspaceFilesScreen({ visible }: { visible: boolean }) {
   const [deleting, setDeleting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [conflict, setConflict] = useState(false);
+  // 版本巡检本身失败（网络抖动/服务重启）只降级提示，不能当成冲突锁死保存
+  const [checkFailed, setCheckFailed] = useState(false);
   const [pendingUpload, setPendingUpload] = useState<PickedUpload | null>(null);
   const [modal, setModal] = useState<ModalKind>(null);
   const [notice, setNotice] = useState('');
@@ -108,24 +111,25 @@ export function WorkspaceFilesScreen({ visible }: { visible: boolean }) {
     return () => clearTimeout(timer);
   }, [visible, refreshList]);
 
-  // 编辑期间定期检查服务端版本；真正保存时仍由服务端再次强校验。
+  // 编辑期间定期检查服务端版本。只有「成功读到且版本不同」才算冲突；
+  // 网络抖动/后端重启导致的读取失败只置 checkFailed 提示，不锁保存——
+  // 保存请求仍带 SHA-256，由服务端做强校验，不会被静默覆盖。
+  const verifyRemoteVersion = useCallback(async () => {
+    if (!activeFile) return;
+    try {
+      const latest = await readWorkspaceText(activeFile.path);
+      setCheckFailed(false);
+      setConflict(latest.version !== activeFile.version);
+    } catch {
+      setCheckFailed(true);
+    }
+  }, [activeFile]);
+
   useEffect(() => {
     if (!visible || !editing || !activeFile) return undefined;
-    let cancelled = false;
-    const check = async () => {
-      try {
-        const latest = await readWorkspaceText(activeFile.path);
-        if (!cancelled && latest.version !== activeFile.version) setConflict(true);
-      } catch {
-        if (!cancelled) setConflict(true);
-      }
-    };
-    const timer = setInterval(() => { void check(); }, 6000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [visible, editing, activeFile]);
+    const timer = setInterval(() => { void verifyRemoteVersion(); }, 6000);
+    return () => clearInterval(timer);
+  }, [visible, editing, activeFile, verifyRemoteVersion]);
 
   const openTextFile = async (entry: WorkspaceFileEntry) => {
     setLoading(true);
@@ -136,6 +140,7 @@ export function WorkspaceFilesScreen({ visible }: { visible: boolean }) {
       setDraft(file.content);
       setEditing(false);
       setConflict(false);
+      setCheckFailed(false);
       setNotice('');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '打开文件失败');
@@ -148,8 +153,8 @@ export function WorkspaceFilesScreen({ visible }: { visible: boolean }) {
     setLoading(true);
     setNotice('正在下载文件…');
     try {
-      const bytes = await downloadWorkspaceFile(entry.path);
       if (Platform.OS === 'web') {
+        const bytes = await downloadWorkspaceFile(entry.path);
         const doc = typeof document === 'undefined' ? null : document;
         if (!doc) throw new Error('浏览器下载不可用');
         const buffer = new ArrayBuffer(bytes.byteLength);
@@ -165,10 +170,8 @@ export function WorkspaceFilesScreen({ visible }: { visible: boolean }) {
         setNotice(`已下载 ${entry.name}`);
         return;
       }
-      const local = new File(Paths.cache, entry.name);
-      if (local.exists) local.delete();
-      local.create({ intermediates: true });
-      await local.write(bytes);
+      // 原生端由原生网络栈流式写入缓存文件，大文件不会整体进入 JS 内存
+      const local = await downloadWorkspaceFileToCache(entry.path, entry.name);
       if (await local.canPreview()) {
         await local.preview({ title: entry.name });
       } else if (await Sharing.isAvailableAsync()) {
@@ -252,6 +255,7 @@ export function WorkspaceFilesScreen({ visible }: { visible: boolean }) {
       setActiveFile({ ...activeFile, content: draft, version: saved.version, size: saved.size, mtime: saved.mtime });
       setEditing(false);
       setConflict(false);
+      setCheckFailed(false);
       setNotice('已保存');
       await refreshList(true);
     } catch (error) {
@@ -275,6 +279,7 @@ export function WorkspaceFilesScreen({ visible }: { visible: boolean }) {
       setActiveFile(latest);
       setDraft(latest.content);
       setConflict(false);
+      setCheckFailed(false);
       setNotice('已载入服务器上的最新版本');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '重新载入失败');
@@ -314,6 +319,7 @@ export function WorkspaceFilesScreen({ visible }: { visible: boolean }) {
     setActiveFile(null);
     setEditing(false);
     setConflict(false);
+    setCheckFailed(false);
     setNotice('');
   };
 
@@ -391,8 +397,8 @@ export function WorkspaceFilesScreen({ visible }: { visible: boolean }) {
       ) : (
         <>
           <View style={styles.detailActions}>
-            {activeFile.editable && !editing && <Pressable onPress={() => { setDraft(activeFile.content); setEditing(true); setNotice(''); }} style={styles.actionButton}><Text style={styles.actionText}>编辑</Text></Pressable>}
-            {editing && <Pressable onPress={() => { setEditing(false); setDraft(activeFile.content); setConflict(false); }} style={styles.actionButton}><Text style={styles.actionText}>取消编辑</Text></Pressable>}
+            {activeFile.editable && !editing && <Pressable onPress={() => { setDraft(activeFile.content); setEditing(true); setConflict(false); setCheckFailed(false); setNotice(''); }} style={styles.actionButton}><Text style={styles.actionText}>编辑</Text></Pressable>}
+            {editing && <Pressable onPress={() => { setEditing(false); setDraft(activeFile.content); setConflict(false); setCheckFailed(false); }} style={styles.actionButton}><Text style={styles.actionText}>取消编辑</Text></Pressable>}
             <Pressable testID="workspace-delete" accessibilityRole="button" accessibilityLabel="删除文件" onPress={() => setModal('delete')} style={[styles.actionButton, styles.dangerAction]}><Text style={styles.dangerText}>删除</Text></Pressable>
           </View>
           {conflict && (
@@ -400,6 +406,13 @@ export function WorkspaceFilesScreen({ visible }: { visible: boolean }) {
               <Text style={styles.conflictTitle}>文件已被其他操作修改</Text>
               <Text style={styles.conflictText}>为保护你的草稿，保存已暂停，服务器版本没有被覆盖。</Text>
               <Pressable onPress={() => setModal('reload-conflict')} style={styles.inlineButton}><Text style={styles.inlineAction}>载入最新版本（放弃草稿）</Text></Pressable>
+            </View>
+          )}
+          {checkFailed && !conflict && (
+            <View style={styles.checkFailedBox}>
+              <Text style={styles.conflictTitle}>暂时无法检查服务器版本</Text>
+              <Text style={styles.conflictText}>网络或服务暂时不可用；草稿仍可保存，保存时会强制校验版本，不会被静默覆盖。</Text>
+              <Pressable onPress={() => void verifyRemoteVersion()} style={styles.inlineButton}><Text style={styles.inlineAction}>重试检查</Text></Pressable>
             </View>
           )}
           {notice ? <Text style={styles.notice}>{notice}</Text> : null}
@@ -496,6 +509,7 @@ function createStyles(t: ReturnType<typeof useUi>['tokens'], fontDelta: number) 
     dangerAction: { backgroundColor: `${t.down}18` },
     dangerText: { color: t.down, fontSize: 13 + fontDelta, fontWeight: '700' },
     conflictBox: { borderRadius: 13, padding: 12, backgroundColor: `${t.warn}20`, marginBottom: 10 },
+    checkFailedBox: { borderRadius: 13, padding: 12, backgroundColor: `${t.info}18`, marginBottom: 10 },
     conflictTitle: { color: t.ink, fontSize: 14 + fontDelta, fontWeight: '700' },
     conflictText: { color: t.sec, fontSize: 12 + fontDelta, marginTop: 4 },
     editor: { flex: 1, minHeight: 180, borderRadius: 14, padding: 14, color: t.ink, backgroundColor: t.soft, fontSize: 15 + fontDelta, lineHeight: 23 + fontDelta },
