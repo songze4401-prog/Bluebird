@@ -5,7 +5,7 @@
   "nodeTestSuiteTotal": 231,
   "frontend": {
     "suites": 18,
-    "tests": 141
+    "tests": 142
   },
   "nodeTestSuiteFiles": [
     "memory",
@@ -143,6 +143,7 @@
     "skills",
     "sticker-repo",
     "time-gap",
+    "workspace-files-api",
     "workspace-pending"
   ],
   "files": {
@@ -778,7 +779,7 @@
     },
     "agent-workspace-tools": {
       "format": "node",
-      "count": 22,
+      "count": 23,
       "runner": true
     },
     "workspace-pending": {
@@ -815,6 +816,12 @@
       "format": "node",
       "count": 5,
       "runner": true
+    },
+    "workspace-files-api": {
+      "format": "node",
+      "count": 8,
+      "runner": true
     }
-  }
+  },
+  "runnerTotal": 2366
 }

@@ -1,0 +1,858 @@
+{
+  "version": 1,
+<<<<<<< HEAD
+  "updateRule": "新增/删除 tests/*.test.js 或改变用例数时，必须在同一变更中更新 files、backendTotal、nodeTestSuiteTotal、runnerTotal、frontend；不得只改总数或删除条目。nodeTestSuiteFiles 只包含由 node --test 七套命令执行的文件；runnerFiles 包含 CI 自定义 runner 逐文件执行的 109 个条目（format 为 node 的 69 个走 node --test 单文件、custom 的 40 个直接执行脚本，两者都按单文件退出码判定）。CI 清单必须覆盖所有 files 条目，verify-test-coverage.js 会检查。文档里的所有计数由 scripts/sync-doc-counts.js 从本文件生成，不要手工改数字。",
+  "backendTotal": 2592,
+  "nodeTestSuiteTotal": 231,
+  "runnerTotal": 2361,
+=======
+  "updateRule": "新增/删除 tests/*.test.js 或改变用例数时，必须在同一变更中更新 files、backendTotal、nodeTestSuiteTotal、runnerTotal、frontend；不得只改总数或删除条目。nodeTestSuiteFiles 只包含由 node --test 七套命令执行的文件；runnerFiles 包含 CI 自定义 runner 逐文件执行的 108 个条目（format 为 node 的 68 个走 node --test 单文件、custom 的 40 个直接执行脚本，两者都按单文件退出码判定）。CI 清单必须覆盖所有 files 条目，verify-test-coverage.js 会检查。文档里的所有计数由 scripts/sync-doc-counts.js 从本文件生成，不要手工改数字。",
+  "backendTotal": 2588,
+  "nodeTestSuiteTotal": 231,
+  "runnerTotal": 2357,
+>>>>>>> d87493f (chore(baseline): 登记 mail-tools 测试文件（5 用例，backend 2588/runner 2357）+ runnerFiles 数组形态修正 + 文档锚点同步)
+  "frontend": {
+    "suites": 18,
+    "tests": 142
+  },
+  "nodeTestSuiteFiles": [
+    "memory",
+    "emotion",
+    "sticker-markers",
+    "streaming-segments",
+    "backup",
+    "context-engine",
+    "monitoring"
+  ],
+  "runnerFiles": [
+    "agent-approval-batch-appeal",
+    "agent-approval-owner-rota",
+    "agent-approval-policy",
+    "agent-approval-recovery",
+    "agent-approval-request",
+    "agent-artifact-commit",
+    "agent-artifact-content",
+    "agent-autonomy-policy",
+    "agent-budget-atomic",
+    "agent-chat-orchestration",
+    "agent-circuit-enforcement",
+    "agent-conflict-record",
+    "agent-cost-tracking",
+    "agent-crash-injection",
+    "agent-cycle-detection",
+    "agent-dead-letter",
+    "agent-dispatch",
+    "agent-error-contract",
+    "agent-eval-baseline",
+    "agent-eval-comparators",
+    "agent-eval-indicators",
+    "agent-eval-tiers",
+    "agent-event-delivery",
+    "agent-failopen-enforcement",
+    "agent-failure-modes",
+    "agent-failure-modes-p5d",
+    "agent-fencing",
+    "agent-gate-overhead-bench",
+    "agent-improvement-loop",
+    "agent-op-ledger",
+    "agent-orchestration-engine",
+    "agent-orchestrator",
+    "agent-orphan-scheduler",
+    "agent-phase0-degradation",
+    "agent-plan-compiler",
+    "agent-plan-revision",
+    "agent-planner",
+    "agent-policy",
+    "agent-provenance",
+    "agent-publish-gate",
+    "agent-recovery",
+    "agent-risk-policy",
+    "agent-router",
+    "agent-run-limits",
+    "agent-runtime-guards",
+    "agent-side-effect-ledger",
+    "agent-storage-limits",
+    "agent-taint-policy",
+    "agent-task-transition-guard",
+    "agent-throttle-breaker-storm",
+    "agent-tools",
+    "agent-trust-level",
+    "agent-trust-level-runtime",
+    "agent-verification-loop",
+    "agent-watchdog",
+    "agent-web-tools",
+    "agent-worked-example-e2e",
+    "agent-worker",
+    "agent-workflow-binding",
+    "agent-workflow-crash",
+    "agent-workflow-store",
+    "agent-workspace-tools",
+    "api",
+    "atomic-write",
+    "chat-abort",
+    "chat-persist",
+    "chat-stream",
+    "context-engine-e2e",
+    "context-orchestrator-p3",
+    "context-trace-verify",
+    "corruption-contract",
+    "data-events",
+    "delete-semantics",
+    "doc-layout",
+    "emotion-decay-global",
+    "frozen-snapshot-banners",
+    "ledger-evidence-modules",
+    "mail-tools",
+    "memory-agent-write",
+    "memory-api-recall",
+    "memory-bot",
+    "memory-budget-golden",
+    "memory-context-injection",
+    "memory-degradation-golden",
+    "memory-eval-baseline",
+    "memory-evidence-policy",
+    "memory-golden-path",
+    "memory-id-migration",
+    "memory-id-order",
+    "memory-lifecycle-decisions",
+    "memory-lifecycle-golden",
+    "memory-lifecycle-p2",
+    "memory-maintenance",
+    "memory-observability",
+    "memory-observation-ledger",
+    "memory-ownership",
+    "memory-pending-consolidate",
+    "memory-restart",
+    "memory-retrieval",
+    "memory-semantic",
+    "memory-session-isolation",
+    "memory-session-scope",
+    "memory-startup-lock",
+    "memory-state-units",
+    "memory-user-scope",
+    "model-providers",
+    "model-routing",
+    "monitoring-api",
+    "multimodal",
+    "notion-ledger-scan",
+    "p3-acceptance",
+    "persona",
+    "presence",
+    "profile-audit-p6",
+    "profile-p5",
+    "reply-segmentation",
+    "retrieval",
+    "retrieval-api",
+    "retrieval-embeddings",
+    "session-ownership",
+<<<<<<< HEAD
+    "reply-segmentation",
+    "profile-p5",
+    "profile-audit-p6",
+    "notion-ledger-scan",
+    "agent-failure-modes-p5d",
+    "agent-risk-policy",
+    "agent-approval-owner-rota",
+    "agent-improvement-loop",
+    "agent-plan-revision",
+    "agent-publish-gate",
+    "agent-plan-compiler",
+    "agent-orchestration-engine",
+    "agent-chat-orchestration",
+    "agent-web-tools",
+    "agent-workspace-tools",
+    "workspace-files-api",
+    "workspace-pending",
+    "ledger-evidence-modules",
+    "frozen-snapshot-banners",
+    "doc-layout",
+    "memory-pending-consolidate",
+    "skills"
+=======
+    "session-scope-e2e",
+    "sessions",
+    "sessions-recovery",
+    "skills",
+    "sticker-repo",
+    "time-gap",
+    "workspace-pending"
+>>>>>>> d87493f (chore(baseline): 登记 mail-tools 测试文件（5 用例，backend 2588/runner 2357）+ runnerFiles 数组形态修正 + 文档锚点同步)
+  ],
+  "files": {
+    "api": {
+      "format": "custom",
+      "count": 36,
+      "runner": true
+    },
+    "atomic-write": {
+      "format": "custom",
+      "count": 16,
+      "runner": true
+    },
+    "chat-persist": {
+      "format": "custom",
+      "count": 23,
+      "runner": true
+    },
+    "chat-abort": {
+      "format": "custom",
+      "count": 9,
+      "runner": true
+    },
+    "corruption-contract": {
+      "format": "custom",
+      "count": 26,
+      "runner": true
+    },
+    "data-events": {
+      "format": "custom",
+      "count": 34,
+      "runner": true
+    },
+    "emotion-decay-global": {
+      "format": "custom",
+      "count": 10,
+      "runner": true
+    },
+    "memory-session-scope": {
+      "format": "custom",
+      "count": 19,
+      "runner": true
+    },
+    "session-scope-e2e": {
+      "format": "custom",
+      "count": 19,
+      "runner": true
+    },
+    "sessions-recovery": {
+      "format": "custom",
+      "count": 37,
+      "runner": true
+    },
+    "sessions": {
+      "format": "custom",
+      "count": 61,
+      "runner": true
+    },
+    "presence": {
+      "format": "custom",
+      "count": 52,
+      "runner": true
+    },
+    "time-gap": {
+      "format": "custom",
+      "count": 29,
+      "runner": true
+    },
+    "persona": {
+      "format": "custom",
+      "count": 77,
+      "runner": true
+    },
+    "chat-stream": {
+      "format": "custom",
+      "count": 37,
+      "runner": true
+    },
+    "multimodal": {
+      "format": "custom",
+      "count": 58,
+      "runner": true
+    },
+    "sticker-repo": {
+      "format": "custom",
+      "count": 58,
+      "runner": true
+    },
+    "model-providers": {
+      "format": "custom",
+      "count": 115,
+      "runner": true
+    },
+    "model-routing": {
+      "format": "custom",
+      "count": 21,
+      "runner": true
+    },
+    "agent-tools": {
+      "format": "custom",
+      "count": 135,
+      "runner": true
+    },
+    "agent-policy": {
+      "format": "custom",
+      "count": 51,
+      "runner": true
+    },
+    "context-engine-e2e": {
+      "format": "custom",
+      "count": 38,
+      "runner": true
+    },
+    "delete-semantics": {
+      "format": "custom",
+      "count": 55,
+      "runner": true
+    },
+    "memory-agent-write": {
+      "format": "custom",
+      "count": 13,
+      "runner": true
+    },
+    "memory-api-recall": {
+      "format": "custom",
+      "count": 41,
+      "runner": true
+    },
+    "memory-context-injection": {
+      "format": "node",
+      "count": 11,
+      "runner": true
+    },
+    "memory-evidence-policy": {
+      "format": "node",
+      "count": 19,
+      "runner": true
+    },
+    "memory-eval-baseline": {
+      "format": "node",
+      "count": 32,
+      "runner": true
+    },
+    "memory-id-migration": {
+      "format": "node",
+      "count": 20,
+      "runner": true
+    },
+    "memory-id-order": {
+      "format": "custom",
+      "count": 10,
+      "runner": true
+    },
+    "memory-lifecycle-decisions": {
+      "format": "node",
+      "count": 19,
+      "runner": true
+    },
+    "memory-restart": {
+      "format": "node",
+      "count": 8,
+      "runner": true
+    },
+    "memory-retrieval": {
+      "format": "custom",
+      "count": 47,
+      "runner": true
+    },
+    "memory-semantic": {
+      "format": "custom",
+      "count": 54,
+      "runner": true
+    },
+    "memory-session-isolation": {
+      "format": "node",
+      "count": 15,
+      "runner": true
+    },
+    "memory-startup-lock": {
+      "format": "custom",
+      "count": 34,
+      "runner": true
+    },
+    "retrieval": {
+      "format": "node",
+      "count": 30,
+      "runner": true
+    },
+    "retrieval-api": {
+      "format": "node",
+      "count": 14,
+      "runner": true
+    },
+    "retrieval-embeddings": {
+      "format": "node",
+      "count": 10,
+      "runner": true
+    },
+    "memory-bot": {
+      "format": "node",
+      "count": 10,
+      "runner": true
+    },
+    "memory-maintenance": {
+      "format": "node",
+      "count": 5,
+      "runner": true
+    },
+    "memory-golden-path": {
+      "format": "custom",
+      "count": 12,
+      "runner": true
+    },
+    "memory-lifecycle-golden": {
+      "format": "custom",
+      "count": 24,
+      "runner": true
+    },
+    "memory-lifecycle-p2": {
+      "format": "node",
+      "count": 13,
+      "runner": true
+    },
+    "memory-state-units": {
+      "format": "custom",
+      "count": 26,
+      "runner": true
+    },
+    "memory-degradation-golden": {
+      "format": "custom",
+      "count": 6,
+      "runner": true
+    },
+    "memory-budget-golden": {
+      "format": "custom",
+      "count": 7,
+      "runner": true
+    },
+    "agent-dispatch": {
+      "format": "node",
+      "count": 13,
+      "runner": true
+    },
+    "agent-router": {
+      "format": "node",
+      "count": 50,
+      "runner": true
+    },
+    "agent-worker": {
+      "format": "node",
+      "count": 54,
+      "runner": true
+    },
+    "agent-recovery": {
+      "format": "node",
+      "count": 31,
+      "runner": true
+    },
+    "agent-artifact-commit": {
+      "format": "node",
+      "count": 9,
+      "runner": true
+    },
+    "agent-artifact-content": {
+      "format": "node",
+      "count": 7,
+      "runner": true
+    },
+    "agent-provenance": {
+      "format": "node",
+      "count": 5,
+      "runner": true
+    },
+    "agent-taint-policy": {
+      "format": "node",
+      "count": 5,
+      "runner": true
+    },
+    "agent-trust-level": {
+      "format": "node",
+      "count": 7,
+      "runner": true
+    },
+    "agent-trust-level-runtime": {
+      "format": "node",
+      "count": 5,
+      "runner": true
+    },
+    "agent-task-transition-guard": {
+      "format": "node",
+      "count": 2,
+      "runner": true
+    },
+    "agent-run-limits": {
+      "format": "node",
+      "count": 4,
+      "runner": true
+    },
+    "agent-conflict-record": {
+      "format": "node",
+      "count": 4,
+      "runner": true
+    },
+    "agent-error-contract": {
+      "format": "node",
+      "count": 6,
+      "runner": true
+    },
+    "agent-cycle-detection": {
+      "format": "node",
+      "count": 6,
+      "runner": true
+    },
+    "agent-approval-request": {
+      "format": "node",
+      "count": 9,
+      "runner": true
+    },
+    "agent-budget-atomic": {
+      "format": "node",
+      "count": 7,
+      "runner": true
+    },
+    "agent-orchestrator": {
+      "format": "node",
+      "count": 12,
+      "runner": true
+    },
+    "agent-planner": {
+      "format": "node",
+      "count": 4,
+      "runner": true
+    },
+    "agent-orphan-scheduler": {
+      "format": "node",
+      "count": 6,
+      "runner": true
+    },
+    "agent-failopen-enforcement": {
+      "format": "node",
+      "count": 6,
+      "runner": true
+    },
+    "agent-approval-policy": {
+      "format": "node",
+      "count": 7,
+      "runner": true
+    },
+    "agent-approval-recovery": {
+      "format": "node",
+      "count": 5,
+      "runner": true
+    },
+    "agent-approval-batch-appeal": {
+      "format": "node",
+      "count": 8,
+      "runner": true
+    },
+    "agent-phase0-degradation": {
+      "format": "node",
+      "count": 9,
+      "runner": true
+    },
+    "agent-failure-modes": {
+      "format": "node",
+      "count": 10,
+      "runner": true
+    },
+    "agent-fencing": {
+      "format": "node",
+      "count": 8,
+      "runner": true
+    },
+    "agent-worked-example-e2e": {
+      "format": "node",
+      "count": 1,
+      "runner": true
+    },
+    "agent-op-ledger": {
+      "format": "node",
+      "count": 19,
+      "runner": true
+    },
+    "agent-side-effect-ledger": {
+      "format": "node",
+      "count": 8,
+      "runner": true
+    },
+    "agent-verification-loop": {
+      "format": "node",
+      "count": 12,
+      "runner": true
+    },
+    "agent-event-delivery": {
+      "format": "node",
+      "count": 4,
+      "runner": true
+    },
+    "agent-dead-letter": {
+      "format": "node",
+      "count": 4,
+      "runner": true
+    },
+    "agent-cost-tracking": {
+      "format": "node",
+      "count": 3,
+      "runner": true
+    },
+    "agent-eval-baseline": {
+      "format": "node",
+      "count": 7,
+      "runner": true
+    },
+    "agent-autonomy-policy": {
+      "format": "node",
+      "count": 5,
+      "runner": true
+    },
+    "agent-eval-tiers": {
+      "format": "node",
+      "count": 6,
+      "runner": true
+    },
+    "agent-eval-comparators": {
+      "format": "node",
+      "count": 6,
+      "runner": true
+    },
+    "agent-throttle-breaker-storm": {
+      "format": "node",
+      "count": 8,
+      "runner": true
+    },
+    "agent-circuit-enforcement": {
+      "format": "node",
+      "count": 6,
+      "runner": true
+    },
+    "agent-eval-indicators": {
+      "format": "node",
+      "count": 10,
+      "runner": true
+    },
+    "agent-gate-overhead-bench": {
+      "format": "node",
+      "count": 7,
+      "runner": true
+    },
+    "agent-workflow-store": {
+      "format": "node",
+      "count": 15,
+      "runner": true
+    },
+    "agent-workflow-binding": {
+      "format": "node",
+      "count": 8,
+      "runner": true
+    },
+    "agent-workflow-crash": {
+      "format": "node",
+      "count": 2,
+      "runner": true
+    },
+    "agent-crash-injection": {
+      "format": "node",
+      "count": 4,
+      "runner": true
+    },
+    "agent-watchdog": {
+      "format": "node",
+      "count": 26,
+      "runner": true
+    },
+    "memory": {
+      "format": "node",
+      "count": 49,
+      "runner": false
+    },
+    "emotion": {
+      "format": "node",
+      "count": 34,
+      "runner": false
+    },
+    "sticker-markers": {
+      "format": "node",
+      "count": 12,
+      "runner": false
+    },
+    "streaming-segments": {
+      "format": "node",
+      "count": 11,
+      "runner": false
+    },
+    "backup": {
+      "format": "node",
+      "count": 50,
+      "runner": false
+    },
+    "context-engine": {
+      "format": "node",
+      "count": 48,
+      "runner": false
+    },
+    "monitoring": {
+      "format": "node",
+      "count": 27,
+      "runner": false
+    },
+    "monitoring-api": {
+      "format": "custom",
+      "count": 38,
+      "runner": true
+    },
+    "agent-runtime-guards": {
+      "format": "node",
+      "count": 9,
+      "runner": true
+    },
+    "agent-storage-limits": {
+      "format": "node",
+      "count": 2,
+      "runner": true
+    },
+    "memory-observability": {
+      "format": "node",
+      "count": 13,
+      "runner": true
+    },
+    "memory-observation-ledger": {
+      "format": "node",
+      "count": 12,
+      "runner": true
+    },
+    "context-trace-verify": {
+      "format": "custom",
+      "count": 9,
+      "runner": true
+    },
+    "context-orchestrator-p3": {
+      "format": "node",
+      "count": 11,
+      "runner": true
+    },
+    "profile-p5": {
+      "format": "custom",
+      "count": 44,
+      "runner": true
+    },
+    "memory-user-scope": {
+      "format": "node",
+      "count": 14,
+      "runner": true
+    },
+    "p3-acceptance": {
+      "format": "node",
+      "count": 10,
+      "runner": true
+    },
+    "memory-ownership": {
+      "format": "custom",
+      "count": 29,
+      "runner": true
+    },
+    "session-ownership": {
+      "format": "custom",
+      "count": 28,
+      "runner": true
+    },
+    "reply-segmentation": {
+      "format": "node",
+      "count": 10,
+      "runner": true
+    },
+    "profile-audit-p6": {
+      "format": "custom",
+      "count": 9,
+      "runner": true
+    },
+    "notion-ledger-scan": {
+      "format": "node",
+      "count": 9,
+      "runner": true
+    },
+    "agent-failure-modes-p5d": {
+      "format": "node",
+      "count": 10,
+      "runner": true
+    },
+    "agent-risk-policy": {
+      "format": "node",
+      "count": 8,
+      "runner": true
+    },
+    "agent-approval-owner-rota": {
+      "format": "node",
+      "count": 5,
+      "runner": true
+    },
+    "agent-improvement-loop": {
+      "format": "node",
+      "count": 11,
+      "runner": true
+    },
+    "agent-plan-revision": {
+      "format": "node",
+      "count": 5,
+      "runner": true
+    },
+    "agent-publish-gate": {
+      "format": "node",
+      "count": 4,
+      "runner": true
+    },
+    "agent-plan-compiler": {
+      "format": "node",
+      "count": 10,
+      "runner": true
+    },
+    "agent-orchestration-engine": {
+      "format": "node",
+      "count": 10,
+      "runner": true
+    },
+    "agent-chat-orchestration": {
+      "format": "node",
+      "count": 7,
+      "runner": true
+    },
+    "agent-web-tools": {
+      "format": "node",
+      "count": 12,
+      "runner": true
+    },
+    "agent-workspace-tools": {
+      "format": "node",
+      "count": 23,
+      "runner": true
+    },
+    "workspace-files-api": {
+      "format": "node",
+      "count": 8,
+      "runner": true
+    },
+    "workspace-pending": {
+      "format": "node",
+      "count": 15,
+      "runner": true
+    },
+    "ledger-evidence-modules": {
+      "format": "node",
+      "count": 4,
+      "runner": true
+    },
+    "frozen-snapshot-banners": {
+      "format": "node",
+      "count": 2,
+      "runner": true
+    },
+    "doc-layout": {
+      "format": "node",
+      "count": 3,
+      "runner": true
+    },
+    "memory-pending-consolidate": {
+      "format": "node",
+      "count": 5,
+      "runner": true
+    },
+    "skills": {
+      "format": "node",
+      "count": 16,
+      "runner": true
+    },
+    "mail-tools": {
+      "format": "node",
+      "count": 5,
+      "runner": true
+    }
+  }
+}

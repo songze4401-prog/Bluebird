@@ -47,8 +47,8 @@ flowchart LR
     - **持久化** — sessions/memory/tasks/events/outbox/index（原子写；保留策略已实现：会话 200 / 消息 1000 / 分页 200）
     - **监控** — trace、metrics、alerts、health（已验证 / 只读）
   - **工程保障** — 测试、CI、覆盖率、文档（通过；计数对齐 scripts/test-coverage-baseline.json 单一基线）
-    - **后端测试** — 134 文件 / 2588 项；真实 HTTP + stub（通过）
-    - **前端测试** — 18 套 / 141 项；apiFetch mock（通过 / 无 App E2E）
+    - **后端测试** — 135 文件 / 2597 项；真实 HTTP + stub（通过）
+    - **前端测试** — 18 套 / 142 项；apiFetch mock（通过 / 无 App E2E）
     - **CI** — GitHub Actions；push 仅 main、PR 指向 main，覆盖率脚本单次执行（通过）
     - **文档** — AGENTS/docs/README 计数同源（scripts/sync-doc-counts.js 单一基线，CI --check 兜底）
 
