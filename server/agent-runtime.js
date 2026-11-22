@@ -262,6 +262,16 @@ if (skillsTool.isEnabled()) {
   registerTool(skillsTool.loadSkillDefinition);
 }
 
+// 任务书 2026-11-22：Agent Mail 工具。agently-cli 已安装才注册（isConfigured
+// 探测 CLI 可执行；登录态在执行期 fail-closed→mail_not_authorized）；仍受
+// BLUEBIRD_AGENT_TOOLS 总开关与 Agent 策略约束。mail_send/mail_reply 走
+// reversible_write 直通——Owner 拍板：免点击确认、聊天卡片可见、口头修正
+// （单用户信任模型；语义取舍见 tool-mail.js 头注）。
+const mailTools = require('./tool-mail');
+if (mailTools.isConfigured()) {
+  for (const def of mailTools.mailDefinitions) registerTool(def);
+}
+
 // ---- 工具执行 ----
 
 class ToolTimeoutError extends Error {}
