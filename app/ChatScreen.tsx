@@ -163,9 +163,12 @@ const createStyles = (t: V7Tokens, fd: number) =>
     thread: { flex: 1, backgroundColor: 'transparent' },
     threadContent: { paddingHorizontal: 18, paddingBottom: 12, gap: 20 },
 
-    // 消息列（原型 .m：maxWidth 86%、列 gap 8；user 右对齐、blue 左对齐）
-    mUser: { maxWidth: '86%', alignSelf: 'flex-end', alignItems: 'flex-end', gap: 8 },
-    mBlue: { maxWidth: '86%', alignSelf: 'flex-start', alignItems: 'flex-start', gap: 8 },
+    // 消息列（原型 .m：maxWidth 86%、列 gap 8；user 右对齐、blue 左对齐）。
+    // 用确定的 width:'86%' 而不是 maxWidth：气泡本身仍按内容收缩（alignItems 决定
+    // 靠左/靠右），但行宽在测量/布局两趟里有确定值，避免安卓 shrink-to-fit 下
+    // 换行行高少算、文字溢出气泡（真机「串行」现象）。
+    mUser: { width: '86%', alignSelf: 'flex-end', alignItems: 'flex-end', gap: 8 },
+    mBlue: { width: '86%', alignSelf: 'flex-start', alignItems: 'flex-start', gap: 8 },
     who: { fontSize: 10, color: t.ink },
 
     // 用户黑泡（原型 .bub：card 底，圆角 14/4/14/14，p12/15，阴影 card）
