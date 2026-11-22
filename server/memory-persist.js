@@ -242,6 +242,10 @@ function enqueueWrite(task) {
 }
 
 
+// 这是定位/生命周期一致性检查，不是内容完整性哈希。字段集刻意只含条目 id、状态、
+// 有效期/替代关系，以及贡献的会话归属、时间、原话、消息 id 和来源类型；不含 content
+// 与 keywords，因此只篡改正文仍会得到 consistent:true。纳入正文会改变
+// verifyStoreConsistency 的语义，需先经明确的产品决策。
 function storeFingerprint(list) {
   return (Array.isArray(list) ? list : [])
     .map(item =>

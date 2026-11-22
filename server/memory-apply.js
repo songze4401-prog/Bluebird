@@ -1118,11 +1118,5 @@ module.exports = {
   logLifecycleEvent,
   logLifecycleRejection,
   trimToCapacity,
-  MEMORY_LIMIT,
-  SUPERSEDED_HISTORY,
-  PENDING_LIMIT,
-  CONTESTED_LIMIT,
-  ARCHIVED_HISTORY,
-  IDENTITY_QUOTA,
   applyCandidate,
 };

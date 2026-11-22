@@ -187,7 +187,7 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - `npx jest tests/unit/agent-results-stream.test.ts`：1 项，覆盖结果 SSE 的 401 永久失败、5xx/200 干净关闭可重试、主动 abort 为 `closed` 的连接分类。
 - `npx jest tests/unit/use-bot-result-stream.test.tsx`：2 项，覆盖 Hook 对永久错误只提示不重连、可重试错误按 1s 退避重连、snapshot 打开后重置延迟。
 - v7 壳测试（`tests/unit/ui-v7-*` 六套）覆盖聊天渲染/附件/主页入口卡/模型抽屉/壳冒烟；旧壳的 `memory-bot-screen` 与 `app-smoke` 两套已随 2026-11-19 旧壳删除一并移除。
-- 全量：`npm test` 134 个后端文件 / 2592 项；Jest 18 套 / 142 项；覆盖率校验 backend 2592/2592、runner 2361/2361、frontend 142/142；tsc/lint 通过（以最终交付命令输出为准）。
+- 全量：`npm test` 135 个后端文件 / 2597 项；Jest 18 套 / 142 项；覆盖率校验 backend 2597/2597、runner 2366/2366、frontend 142/142；tsc/lint 通过（以最终交付命令输出为准）。
 - Expo Web export 成功；浏览器 DOM 核对：Agent 团队入口、真实 Memory Bot 状态、工作台三页签、配置页真实服务商/脱敏 Key、维护申请表单与审批列表可渲染；浏览器实际提交一条 update 维护申请后，服务端返回 pending 并在审批列表显示。
 
 ### 8.1 Stub 与真实模型测试区分
@@ -224,4 +224,4 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 | P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；工具预算截断后无工具总结；任务裁剪只删已投递终态；Provider token delta；停止/切会话 abort；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 9 项；SSE/tool event 测试；Jest 5 项工作台测试 + 1 项 App 冒烟 |
 | P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；维护申请表单；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验、真实模型 HTTP SSE E2E |
 
-“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 2592/2592、nodeSuite 231/231、runner 2361/2361、frontend 142/142、CI 134/134。
+“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 2597/2597、nodeSuite 231/231、runner 2366/2366、frontend 142/142、CI 135/135。
