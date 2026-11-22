@@ -22,6 +22,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const monitoring = require('./monitoring');
 const workspacePending = require('./workspace-pending');
 
@@ -35,6 +36,7 @@ const LIMITS = Object.freeze({
 
 const TEXT_EXTENSIONS = Object.freeze([
   '.md',
+  '.markdown',
   '.txt',
   '.json',
   '.csv',
@@ -211,21 +213,52 @@ function backupStamp() {
   );
 }
 
+function ensureHistoryDirectory() {
+  ensureWorkspaceRoot();
+  const rootReal = fs.realpathSync(WORKSPACE_ROOT);
+  const historyDir = path.join(rootReal, '.history');
+  try {
+    fs.mkdirSync(historyDir);
+  } catch (error) {
+    if (!error || error.code !== 'EEXIST') throw error;
+  }
+
+  let stat;
+  try {
+    stat = fs.lstatSync(historyDir);
+  } catch (_) {
+    throw toolError('workspace_history_unavailable', '备份目录不可用');
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw toolError('workspace_history_unavailable', '.history 必须是工作区内的普通目录');
+  }
+  const realHistory = fs.realpathSync(historyDir);
+  const relative = path.relative(rootReal, realHistory);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw toolError('workspace_history_unavailable', '.history 真实路径必须位于工作区内');
+  }
+  return realHistory;
+}
+
 function backupExistingFile(absolutePath) {
-  const historyDir = path.join(WORKSPACE_ROOT, '.history');
-  fs.mkdirSync(historyDir, { recursive: true });
+  const historyDir = ensureHistoryDirectory();
   const base = path.basename(absolutePath);
   let name = `${base}.${backupStamp()}`;
   while (fs.existsSync(path.join(historyDir, name))) {
-    name = `${name}-${Math.floor(Math.random() * 90 + 10)}`;
+    name = `${base}.${backupStamp()}-${Math.floor(Math.random() * 90 + 10)}`;
   }
-  fs.copyFileSync(absolutePath, path.join(historyDir, name));
+  fs.copyFileSync(absolutePath, path.join(historyDir, name), fs.constants.COPYFILE_EXCL);
   pruneHistory(base);
   return name;
 }
 
 function pruneHistory(base) {
-  const historyDir = path.join(WORKSPACE_ROOT, '.history');
+  let historyDir;
+  try {
+    historyDir = ensureHistoryDirectory();
+  } catch (_) {
+    return;
+  }
   const prefix = `${base}.`;
   let names = [];
   try {
@@ -559,6 +592,22 @@ async function executeWrite(args, { confirmed = false } = {}) {
         // append 到不存在的文件等同 create。
       }
 
+      // 文件页在打开时读取 SHA-256；在同步写入临界区再次比较，避免 Blue
+      // 在 API 初次读取后、真正落盘前写入的新内容被覆盖。
+      if (args.expectedVersion !== undefined) {
+        if (typeof args.expectedVersion !== 'string' || !/^[a-f0-9]{64}$/.test(args.expectedVersion)) {
+          const result = toolError('workspace_version_required', '保存文本必须提供有效的文件版本');
+          recordOp({ tool: 'workspace_write', relPath: relativePath, mode: args.mode, status: 'failed', code: result.code, confirmed });
+          return result;
+        }
+        const currentVersion = stat ? crypto.createHash('sha256').update(fs.readFileSync(absolutePath)).digest('hex') : null;
+        if (currentVersion !== args.expectedVersion) {
+          const result = toolError('workspace_version_conflict', '文件已在编辑期间发生变化；本次内容没有保存');
+          recordOp({ tool: 'workspace_write', relPath: relativePath, mode: args.mode, status: 'failed', code: result.code, confirmed });
+          return { ...result, currentVersion };
+        }
+      }
+
       // 配额投影按「写入后最坏情况」计：overwrite 还会往 .history 复制一份旧
       // 文件（净增量 = incoming，旧内容转存备份仍在总量内），三种模式一致。
       const usageBefore = workspaceUsage();
@@ -693,8 +742,10 @@ module.exports = {
   WORKSPACE_ROOT,
   isEnabled,
   ensureWorkspaceRoot,
+  resolveWithinRoot,
   workspaceUsage,
   assertQuota,
+  backupExistingFile,
   workspaceListDefinition,
   workspaceReadDefinition,
   workspaceWriteDefinition,

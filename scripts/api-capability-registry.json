@@ -43,6 +43,11 @@
       "mountExpr": "app.use(createMemoryRouter"
     },
     {
+      "file": "server/routes/workspace-files.js",
+      "mount": "/workspace",
+      "mountExpr": "app.use('/workspace', createWorkspaceFilesRouter"
+    },
+    {
       "file": "server/routes/skills.js",
       "mount": "/skills",
       "mountExpr": "app.use('/skills', createSkillsRouter({ requireAuth }))"
@@ -57,7 +62,7 @@
       "capabilities": [
         {
           "name": "GET / 返回版本与状态",
-          "probe": "'/'",
+          "probe": "API_PATHS.serverMeta",
           "ui": false,
           "consumers": [],
           "note": "只读探针，供部署方与监控使用；应用本身不调用。"
@@ -507,6 +512,50 @@
             "hooks/useChatSession.ts"
           ],
           "note": "取消并删除 pending 记录；监控记 cancelled。"
+        },
+        {
+          "name": "GET /workspace/files 浏览与搜索实际工作区",
+          "probe": "API_PATHS.workspaceFiles",
+          "ui": true,
+          "consumers": [
+            "lib/api/workspace-files.ts"
+          ],
+          "note": "目录项按最近修改时间倒序；搜索限制在同一工作区根目录内。"
+        },
+        {
+          "name": "GET/PUT /workspace/files/text 预览、版本校验与保存文本",
+          "probe": "API_PATHS.workspaceFileText",
+          "ui": true,
+          "consumers": [
+            "lib/api/workspace-files.ts"
+          ],
+          "note": "仅允许纯文本编辑，保存要求 SHA-256 版本匹配，冲突时不覆盖。"
+        },
+        {
+          "name": "POST /workspace/files/upload 上传文件并显式处理同名冲突",
+          "probe": "API_PATHS.workspaceFileUpload",
+          "ui": true,
+          "consumers": [
+            "lib/api/workspace-files.ts"
+          ],
+          "note": "手机文档选择器上传到 Bluebird 工作区；支持覆盖或保留两份。"
+        },
+        {
+          "name": "GET /workspace/files/download 下载工作区文件",
+          "probe": "API_PATHS.workspaceFileDownload",
+          "ui": true,
+          "consumers": [
+            "lib/api/workspace-files.ts"
+          ]
+        },
+        {
+          "name": "DELETE /workspace/files 删除并要求显式确认",
+          "probe": "API_PATHS.workspaceFiles",
+          "ui": true,
+          "consumers": [
+            "lib/api/workspace-files.ts"
+          ],
+          "note": "删除前要求请求体 confirm: true，路径只允许工作区内普通文件。"
         }
       ]
     },

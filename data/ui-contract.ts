@@ -7,7 +7,7 @@
 // 其余字段全部由真实 hooks/后端驱动。
 
 // ---- 视图 ----
-export type ViewId = 'home' | 'chat';
+export type ViewId = 'home' | 'chat' | 'files';
 
 // ---- 主题偏好（系统外观三态）----
 export type ThemePref = 'system' | 'light' | 'dark';

@@ -142,6 +142,16 @@ export const API_PATHS = {
     `/workspace/pending/${encodeURIComponent(id)}/confirm`,
   workspacePendingReject: (id: string) =>
     `/workspace/pending/${encodeURIComponent(id)}/reject`,
+  // Bluebird 文件页：所有资源路径都作为查询参数编码，不拼接到服务器文件路径。
+  workspaceFiles: (path = '.', search?: string) =>
+    `/workspace/files?path=${encodeURIComponent(path)}` +
+    (search ? `&search=${encodeURIComponent(search)}` : ''),
+  workspaceFileText: (path: string) =>
+    `/workspace/files/text?path=${encodeURIComponent(path)}`,
+  workspaceFileTextSave: '/workspace/files/text',
+  workspaceFileUpload: '/workspace/files/upload',
+  workspaceFileDownload: (path: string) =>
+    `/workspace/files/download?path=${encodeURIComponent(path)}`,
   // 任务书 2026-11-21：技能系统（设置页技能面板）
   skillsList: '/skills',
   skillsUpdate: '/skills',

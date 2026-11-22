@@ -24,6 +24,7 @@ import { UiStateProvider, useUi } from './ui-state';
 import { HomeScreen } from './HomeScreen';
 import { ChatScreen } from './ChatScreen';
 import { SettingsScreen } from './SettingsScreen';
+import { WorkspaceFilesScreen } from './WorkspaceFilesScreen';
 
 // 真实聊天链路：复用旧壳的全套 hooks（v7 壳只换皮不换逻辑）
 import { DEFAULT_SESSION_ID } from '../lib/constants';
@@ -40,7 +41,7 @@ import { NavIcon } from '../components/V7Icons';
 
 // ---- 底部导航单键：选中键展开到 66 显示文字，未选中收成 40 只留图标 ----
 function NavTab(props: {
-  icon: 'home' | 'chat' | 'settings';
+  icon: 'home' | 'chat' | 'settings' | 'files';
   label: string;
   width: Animated.AnimatedInterpolation<number> | number;
   labelWidth: Animated.AnimatedInterpolation<number> | number;
@@ -54,6 +55,7 @@ function NavTab(props: {
           可点区域只剩图标那一小块，真机上点「主页」经常点不中。 */}
       <Pressable
         onPress={props.onPress}
+        testID={`nav-tab-${props.icon}`}
         accessibilityRole="button"
         accessibilityLabel={props.label}
         style={{
@@ -96,6 +98,11 @@ function InnerShell() {
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [nonFilesView, setNonFilesView] = useState<'home' | 'chat'>(ui.view === 'home' ? 'home' : 'chat');
+  const setScreenView = (view: 'home' | 'chat' | 'files') => {
+    if (view !== 'files') setNonFilesView(view);
+    ui.setView(view);
+  };
 
   // 键盘可见时收起底部导航：导航是悬浮层，不收起会被 KAV 顶到输入条上方挤占空间。
   const [keyboardVisible, setKeyboardVisible] = useState(false);
@@ -145,7 +152,7 @@ function InnerShell() {
     currentSessionId,
     setCurrentSessionId,
     // 主页选中会话 / 新建聊天成功后，轨道切到聊天页（旧壳等价于 setTab('chat')）
-    onEnterChat: () => ui.setView('chat'),
+    onEnterChat: () => setScreenView('chat'),
   });
 
   // ---- 收藏 / 本机隐藏（与旧壳同键名同语义：bluebird.favoriteMessages）----
@@ -278,36 +285,40 @@ function InnerShell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bootstrapped, ui.view]);
 
-  // 轨道：主页 0 ↔ 聊天 -width（原型 .track translateX，380ms 同款缓动）
+  // 文件页覆盖在轨道之上；主页/聊天轨道停在进入文件前的位置，不卸载其状态。
   const [trackX] = useState(() => new Animated.Value(ui.view === 'chat' ? -width : 0));
+  const trackView = ui.view === 'files' ? nonFilesView : ui.view;
   useEffect(() => {
     Animated.timing(trackX, {
-      toValue: ui.view === 'home' ? 0 : -width,
+      toValue: trackView === 'home' ? 0 : -width,
       duration: 380,
       easing: Easing.bezier(0.32, 0.72, 0.28, 1),
       useNativeDriver: true,
     }).start();
-  }, [ui.view, width, trackX]);
+  }, [trackView, width, trackX]);
 
-  // pill 高亮滑移（原型 .tbpill translateX 0/40，同一根弹簧曲线；宽度是布局属性，只能 JS 驱动）
-  const [pillX] = useState(() => new Animated.Value(ui.view === 'chat' ? 40 : 0));
+  // 高亮在主页、聊天、文件三键间滑移；设置仍是独立弹层入口。
+  const [navProgress] = useState(() => new Animated.Value(ui.view === 'home' ? 0 : ui.view === 'files' ? 2 : 1));
   useEffect(() => {
-    Animated.timing(pillX, {
-      toValue: ui.view === 'home' ? 0 : 40,
+    Animated.timing(navProgress, {
+      toValue: ui.view === 'home' ? 0 : ui.view === 'files' ? 2 : 1,
       duration: 380,
       easing: Easing.bezier(0.3, 1.1, 0.45, 1),
       useNativeDriver: false,
     }).start();
-  }, [ui.view, pillX]);
+  }, [ui.view, navProgress]);
 
-  // 主页/聊天两键的宽度与标签随 pill 联动；设置键不占 pill（原型 tbSet 无 .on）
-  const homeWidth = pillX.interpolate({ inputRange: [0, 40], outputRange: [66, 40] });
-  const chatWidth = pillX.interpolate({ inputRange: [0, 40], outputRange: [40, 66] });
-  const homeLabel = pillX.interpolate({ inputRange: [0, 20], outputRange: [1, 0], extrapolate: 'clamp' });
-  const chatLabel = pillX.interpolate({ inputRange: [20, 40], outputRange: [0, 1], extrapolate: 'clamp' });
-  // 文字槽宽：0（只留图标）↔ 33（28px 文字 + 5px 间距），与原型 .lbl max-width 一致
-  const homeLabelW = pillX.interpolate({ inputRange: [0, 20], outputRange: [33, 0], extrapolate: 'clamp' });
-  const chatLabelW = pillX.interpolate({ inputRange: [20, 40], outputRange: [0, 33], extrapolate: 'clamp' });
+  const navRange = [0, 1, 2];
+  const homeWidth = navProgress.interpolate({ inputRange: navRange, outputRange: [66, 40, 40] });
+  const chatWidth = navProgress.interpolate({ inputRange: navRange, outputRange: [40, 66, 40] });
+  const fileWidth = navProgress.interpolate({ inputRange: navRange, outputRange: [40, 40, 66] });
+  const homeLabel = navProgress.interpolate({ inputRange: navRange, outputRange: [1, 0, 0] });
+  const chatLabel = navProgress.interpolate({ inputRange: navRange, outputRange: [0, 1, 0] });
+  const fileLabel = navProgress.interpolate({ inputRange: navRange, outputRange: [0, 0, 1] });
+  const homeLabelW = navProgress.interpolate({ inputRange: navRange, outputRange: [33, 0, 0] });
+  const chatLabelW = navProgress.interpolate({ inputRange: navRange, outputRange: [0, 33, 0] });
+  const fileLabelW = navProgress.interpolate({ inputRange: navRange, outputRange: [0, 0, 33] });
+  const pillX = navProgress.interpolate({ inputRange: navRange, outputRange: [0, 40, 120] });
 
   return (
     <KeyboardAvoidingView style={{ flex: 1 }}>
@@ -377,6 +388,8 @@ function InnerShell() {
         </Animated.View>
       </View>
 
+      <WorkspaceFilesScreen visible={ui.view === 'files'} />
+
       {/* 底部悬浮导航：绝对定位覆盖在内容之上（原型 .tb）；主页/聊天各自在内容底部
           预留导航高度，消息与输入条不会被它压住。空白处点击穿透，pill 本体可按。
           键盘弹出时收起，避免被顶到输入条上方。 */}
@@ -408,16 +421,17 @@ function InnerShell() {
                 position: 'absolute',
                 left: 6,
                 top: 4,
-                width: 66,
-                height: 36,
-                borderRadius: 12,
-                backgroundColor: 'rgba(255,255,255,0.18)',
-                transform: [{ translateX: pillX }],
-              }}
-            />
-            <NavTab icon="home" label="主页" width={homeWidth} labelWidth={homeLabelW} labelOpacity={homeLabel} active={ui.view === 'home'} onPress={() => ui.setView('home')} />
-            <NavTab icon="chat" label="聊天" width={chatWidth} labelWidth={chatLabelW} labelOpacity={chatLabel} active={ui.view === 'chat'} onPress={() => ui.setView('chat')} />
+              width: 66,
+              height: 36,
+              borderRadius: 12,
+              backgroundColor: 'rgba(255,255,255,0.18)',
+              transform: [{ translateX: pillX }],
+            }}
+          />
+            <NavTab icon="home" label="主页" width={homeWidth} labelWidth={homeLabelW} labelOpacity={homeLabel} active={ui.view === 'home'} onPress={() => setScreenView('home')} />
+            <NavTab icon="chat" label="聊天" width={chatWidth} labelWidth={chatLabelW} labelOpacity={chatLabel} active={ui.view === 'chat'} onPress={() => setScreenView('chat')} />
             <NavTab icon="settings" label="设置" width={40} labelWidth={0} labelOpacity={0} active={false} onPress={() => setSettingsOpen(true)} />
+            <NavTab icon="files" label="文件" width={fileWidth} labelWidth={fileLabelW} labelOpacity={fileLabel} active={ui.view === 'files'} onPress={() => setScreenView('files')} />
           </View>
         </View>
       )}
@@ -438,5 +452,3 @@ export function BluebirdApp() {
     </UiStateProvider>
   );
 }
-
-

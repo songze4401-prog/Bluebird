@@ -1040,3 +1040,50 @@ export type AgentTask = {
 
 export type AgentTasksResponse = { tasks: AgentTask[] };
 export type AgentTaskResponse = { task: AgentTask };
+
+
+// ---- Bluebird 实际工作区文件 ----
+export type WorkspaceFileEntry = {
+  name: string;
+  path: string;
+  type: 'file' | 'dir';
+  size: number;
+  mtime: string;
+  editable: boolean;
+  mimeType: string | null;
+};
+
+export type WorkspaceFilesResponse = {
+  path: string;
+  search: string | null;
+  count: number;
+  truncated: boolean;
+  entries: WorkspaceFileEntry[];
+};
+
+export type WorkspaceTextResponse = {
+  path: string;
+  content: string;
+  version: string;
+  size: number;
+  mtime: string;
+  editable: boolean;
+};
+
+export type WorkspaceSaveResponse = {
+  ok: true;
+  path: string;
+  version: string;
+  size: number;
+  mtime: string;
+  backup: string | null;
+};
+
+export type WorkspaceUploadResponse = {
+  ok: true;
+  path: string;
+  name: string;
+  size: number;
+  mtime: string;
+  version: string;
+};
