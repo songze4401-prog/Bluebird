@@ -12,12 +12,15 @@
  */
 const test = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 // 子路径 imports 别名（package.json #server/* → ./server/*.js）：静态字面量加载
 const toolMail = require('#server/tool-mail');
 const { normalize } = toolMail;
 
-test('a. 只读硬拦：白名单 + 黑名单双重防护', () => {
+test('a. 只读硬拦：白名单 + 黑名单双重防护', async () => {
   // 白名单外一律拒绝
   assert.throws(() => normalize.assertReadonly(['message', '+send', '--to', 'a@b.com']), /只读工具禁止/);
   assert.throws(() => normalize.assertReadonly(['message', '+reply', '--id', 'm1']), /只读工具禁止/);
@@ -29,6 +32,40 @@ test('a. 只读硬拦：白名单 + 黑名单双重防护', () => {
   // 黑名单词即使混在参数里也拦（mail-watch 同款）
   assert.throws(() => normalize.assertReadonly(['message', '+list', '--dry-run', '+delete']), /只读工具禁止/);
   assert.throws(() => normalize.assertReadonly(['message', '+list', '--body-file', '+upload']), /只读工具禁止/);
+  for (const token of ['--confirmation-token', '--confirmation-token=secret', '--body-file', '--body-file=body.txt', '+attachment', '--attachment', '--attachment-file']) {
+    assert.throws(() => normalize.assertReadonly(['message', '+list', token]), /只读工具禁止/);
+  }
+
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mail-tools-'));
+  const cliFile = path.join(tempDir, 'fake-cli.js');
+  const argsFile = path.join(tempDir, 'args.json');
+  const previousCli = process.env.AGENTLY_CLI;
+  const previousArgsFile = process.env.MAIL_ARGS_FILE;
+  fs.writeFileSync(cliFile, [
+    "require('fs').writeFileSync(process.env.MAIL_ARGS_FILE, JSON.stringify(process.argv.slice(2)));",
+    "process.stdout.write(JSON.stringify({ok:true,data:{data:[],pagination:{next_cursor:'next-page',has_more:true}}}));",
+  ].join('\n'));
+  process.env.AGENTLY_CLI = cliFile;
+  process.env.MAIL_ARGS_FILE = argsFile;
+  try {
+    const search = toolMail.mailDefinitions.find(definition => definition.name === 'mail_search');
+    assert.equal(search.parameters.properties.cursor.type, 'string');
+    const result = await search.handler({ query: 'project', cursor: 'page-2' });
+    assert.equal(result.nextCursor, 'next-page');
+    assert.equal(result.hasMore, true);
+    const cliArgs = JSON.parse(fs.readFileSync(argsFile, 'utf8'));
+    assert.deepEqual(cliArgs.slice(-2), ['--cursor', 'page-2']);
+
+    fs.unlinkSync(argsFile);
+    await assert.rejects(search.handler({ query: 'project', cursor: '--body-file' }), /只读工具禁止/);
+    assert.equal(fs.existsSync(argsFile), false, '拒绝危险游标前不应启动 CLI');
+  } finally {
+    if (previousCli === undefined) delete process.env.AGENTLY_CLI;
+    else process.env.AGENTLY_CLI = previousCli;
+    if (previousArgsFile === undefined) delete process.env.MAIL_ARGS_FILE;
+    else process.env.MAIL_ARGS_FILE = previousArgsFile;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test('b. parseCliJson：混合输出容错', () => {

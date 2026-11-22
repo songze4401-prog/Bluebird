@@ -21,7 +21,8 @@
  *
  * CLI 发现：环境变量 AGENTLY_CLI → where/which → npm 全局候选。
  * 全部子进程调用走异步 spawn（服务端事件循环不阻塞——mail-watch 的
- * spawnSync 形态是单次脚本场景，这里不能照抄）。
+ * spawnSync 形态是单次脚本场景，这里不能照抄）。Windows 超时另用 taskkill /T
+ * 杀包装进程树，因为 child_process 的 timeout 可能只终止 node/npm 包装层。
  */
 'use strict';
 
@@ -40,7 +41,8 @@ const READONLY_OPS = ['message +list', 'message +search', 'message +read'];
 /** 只读工具绝不出现的写类子命令（含 auth 写操作）。 */
 const FORBIDDEN_TOKENS = [
   '+send', '+reply', '+forward', '+trash', '+delete', '+upload', '+download',
-  '--send', '--draft',
+  '--send', '--draft', '--confirmation-token', '--body-file',
+  'attachment', 'attachments', '+attachment', '--attachment', '--attachments',
 ];
 
 function fail(code, message) {
@@ -97,25 +99,79 @@ function runCli(args) {
   const spawnBin = useNode ? process.execPath : bin;
   const spawnArgs = useNode ? [bin, ...args] : args;
   return new Promise((resolve) => {
-    const child = spawn(spawnBin, spawnArgs, { timeout: CLI_TIMEOUT_MS, windowsHide: true });
+    const isWindows = process.platform === 'win32';
+    const child = spawn(spawnBin, spawnArgs, {
+      ...(isWindows ? {} : { timeout: CLI_TIMEOUT_MS }),
+      windowsHide: true,
+    });
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    let settled = false;
+    let timeoutId = null;
+    const finish = result => {
+      if (settled) return;
+      settled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      resolve(result);
+    };
     child.stdout.on('data', chunk => { stdout += chunk; });
     child.stderr.on('data', chunk => { stderr += chunk; });
+    if (isWindows) {
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        if (!child.pid) {
+          child.kill();
+          return;
+        }
+        // spawn({ timeout }) only kills the npm/node wrapper on Windows; kill its
+        // native executable descendants as well. Fall back to the wrapper if taskkill
+        // is unavailable or cannot terminate the process tree.
+        let killer;
+        try {
+          killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], {
+            windowsHide: true,
+            stdio: 'ignore',
+          });
+          killer.once('error', () => child.kill());
+          killer.once('close', code => { if (code !== 0) child.kill(); });
+        } catch (_) {
+          child.kill();
+        }
+      }, CLI_TIMEOUT_MS);
+    }
     child.on('error', error => {
-      resolve({ status: -1, stdout, stderr: String(error.message || error), ok: false });
+      finish({
+        status: -1,
+        stdout,
+        stderr: timedOut ? 'agently-cli timed out' : String(error.message || error),
+        ok: false,
+      });
     });
     child.on('close', code => {
-      resolve({ status: code, stdout, stderr, ok: code === 0 });
+      finish({
+        status: timedOut ? -1 : code,
+        stdout,
+        stderr: timedOut ? 'agently-cli timed out' : stderr,
+        ok: !timedOut && code === 0,
+      });
     });
   });
 }
 
 /** 只读硬拦：白名单 + 黑名单（mail-watch 同款双重防护）。 */
 function assertReadonly(args) {
-  for (const bad of FORBIDDEN_TOKENS) {
-    if (args.includes(bad)) {
-      throw fail('mail_readonly_violation', `只读工具禁止调用 ${bad}`);
+  for (let i = 0; i < args.length; i += 1) {
+    const token = String(args[i]);
+    const option = token.split('=', 1)[0];
+    const attachmentOption = /^(?:--?attachments?|\+attachments?)(?:-|$)/i.test(option);
+    const bad = FORBIDDEN_TOKENS.find(forbidden =>
+      (forbidden.startsWith('-') || forbidden.startsWith('+'))
+        ? option === forbidden
+        : i < 2 && token === forbidden
+    );
+    if (bad || attachmentOption) {
+      throw fail('mail_readonly_violation', `只读工具禁止调用 ${bad || option}`);
     }
   }
   const head = args[0] === 'message' ? args.slice(0, 2).join(' ') : args[0];
@@ -229,11 +285,11 @@ const mailListDefinition = Object.freeze({
     }),
   }),
   async handler(args) {
-    assertReadonly(['message', '+list']);
     const limit = Math.min(Math.max(parseInt(args.limit, 10) || 10, 1), CLI_MAX_LIST);
     const preview = Math.min(Math.max(parseInt(args.preview, 10) || 200, 0), PREVIEW_MAX);
     const cliArgs = ['message', '+list', '--dir', 'inbox', '--limit', String(limit)];
     if (args.page) cliArgs.push('--cursor', String(args.page));
+    assertReadonly(cliArgs);
     const json = await runParsed(cliArgs);
     const data = json.data || {};
     const list = Array.isArray(data.data) ? data.data : [];
@@ -260,14 +316,17 @@ const mailSearchDefinition = Object.freeze({
       query: Object.freeze({ type: 'string', description: '关键词（主题/正文/发件人）' }),
       limit: Object.freeze({ type: 'integer', description: '取多少封，默认 10，上限 50' }),
       preview: Object.freeze({ type: 'integer', description: '正文摘要字数，默认 200' }),
+      cursor: Object.freeze({ type: 'string', description: '翻页游标（上次返回的 nextCursor）' }),
     }),
     required: Object.freeze(['query']),
   }),
   async handler(args) {
-    assertReadonly(['message', '+search']);
     const limit = Math.min(Math.max(parseInt(args.limit, 10) || 10, 1), CLI_MAX_LIST);
     const preview = Math.min(Math.max(parseInt(args.preview, 10) || 200, 0), PREVIEW_MAX);
-    const json = await runParsed(['message', '+search', '--q', String(args.query), '--limit', String(limit)]);
+    const cliArgs = ['message', '+search', '--q', String(args.query), '--limit', String(limit)];
+    if (args.cursor) cliArgs.push('--cursor', String(args.cursor));
+    assertReadonly(cliArgs);
+    const json = await runParsed(cliArgs);
     const data = json.data || {};
     const list = Array.isArray(data.data) ? data.data : [];
     return {
@@ -294,10 +353,11 @@ const mailReadDefinition = Object.freeze({
     required: Object.freeze(['id']),
   }),
   async handler(args) {
-    assertReadonly(['message', '+read']);
     const id = String(args.id || '').trim();
     if (!id) throw fail('mail_invalid_args', 'id 不能为空');
-    const json = await runParsed(['message', '+read', '--id', id]);
+    const cliArgs = ['message', '+read', '--id', id];
+    assertReadonly(cliArgs);
+    const json = await runParsed(cliArgs);
     const data = json.data || {};
     return {
       ok: true,
