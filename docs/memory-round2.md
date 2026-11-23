@@ -32,7 +32,7 @@
 
 - 临时状态：心情/情绪词，或 `identity/preference/relationship` 带今天/明天/临时/短期等标记 → `temporary_state` 拒绝；显式 `validTo` 的事件不按此拒绝。
 - 事件时间/适用条件：候选与旧条目都有 `eventAt` 且不同，或都有 `condition` 且不同 → 不合并、不取代，创建独立事实。
-- 来源：自动提取 `sourceType=user`；Agent 候选 `sourceType=agent` 且 `sourceQuote` 必须逐字出现在当前用户消息；`model/tool` 来源不得直接写入。
+- 来源：自动提取 `sourceType=user`；Agent 候选 `sourceType=agent`，`sourceQuote` 可选——填写时必须逐字出现在当前用户消息（防编造），不填时正文由模型概括；`model/tool` 来源不得直接写入。
 - 会话：冲突只能在当前会话可见的条目中裁决；跨会话私有目标拒绝 `unauthorized_target`。
 
 ## 3. 生命周期
@@ -54,7 +54,7 @@
 
 ### Agent 工具 `memory_remember`
 
-输入：`content`、`type`、`sourceQuote`、`keywords`、`confidence`、可选 `targetId`/`validFrom`/`validTo`/`eventAt`/`condition`。
+输入：`content`、`type`、`keywords`、`confidence`（后两者可选）、可选 `sourceQuote`（填写时须为用户原话连续片段）、可选 `targetId`/`validFrom`/`validTo`/`eventAt`/`condition`。
 返回：`ok`、`decision`、`entryId`/`targetId`/`supersededId`、`status`、`durable`、`pending`（待确认时）、稳定 `reason`（拒绝时）。不返回记忆正文。
 
 ### HTTP 新增（不改既有契约）

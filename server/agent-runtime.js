@@ -1429,7 +1429,14 @@ async function runAgentTurn({
       tagModelMessage(
         {
           role: 'assistant',
-          content: assistantContent == null ? null : assistantContent,
+          // 正文封装解析出的调用：只把剥离后的正文写回请求，避免模型在下一轮
+          // 继续模仿自己上一轮的协议包装。
+          content:
+            textual != null
+              ? textual.text || null
+              : assistantContent == null
+                ? null
+                : assistantContent,
           tool_calls: executableCalls,
         },
         `assistant-tool-call:${round}`
@@ -1486,6 +1493,13 @@ async function runAgentTurn({
   // 监控口径与真实行为对不上。
   const reachedMaxRounds = rounds >= maxRounds;
   const clientGone = typeof isClientGone === 'function' && isClientGone();
+
+  // 工具已真实执行、模型却没留下正文（典型：末轮只吐了正文封装的工具调用，
+  // 或直接返回空正文）。此时绝不能把整轮判成「模型没有返回有效内容」——
+  // 用最后一条工具结果摘要收尾，让用户看到操作确实完成了。
+  if (!rawReply && toolSteps.length) {
+    rawReply = toolSteps[toolSteps.length - 1].summary || '工具操作已执行完成。';
+  }
 
   monitoring.recordAgentRun({
     status: clientGone ? 'cancelled' : rawReply ? 'success' : 'failed',

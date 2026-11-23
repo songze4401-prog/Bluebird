@@ -638,10 +638,10 @@ test('主控记忆 → 委派 Bot：memory_remember 归属父主控会话，跨�
     providerId,
     modelId: 'dispatch-test-model',
     sessionId: main.id,
-    userText: 'DELEGATE MEMORY_WRITE 我喜欢浅烘咖啡',
+    userText: 'DELEGATE MEMORY_WRITE: 请记住，我喜欢浅烘咖啡',
     messages: [
       { role: 'system', content: '你可以调用 delegate_to_bot。' },
-      { role: 'user', content: 'DELEGATE MEMORY_WRITE 我喜欢浅烘咖啡' },
+      { role: 'user', content: 'DELEGATE MEMORY_WRITE: 请记住，我喜欢浅烘咖啡' },
     ],
     policy: {
       schemaVersion: 1,

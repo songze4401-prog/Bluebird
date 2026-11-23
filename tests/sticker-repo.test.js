@@ -700,10 +700,15 @@ async function main() {
   const candidateBlock = plainSystem.slice(
     plainSystem.indexOf('【可发送的表情包】')
   );
+  // 候选行形如「[<uuid>] 情绪:…」；system prompt 末尾可能追加「本轮工具不可用」
+  // 等其他段落，按候选行统计才不会被无关换行数干扰。
+  const candidateLines = candidateBlock
+    .split('\n')
+    .filter(line => /^\[[0-9a-f-]{36}\]/i.test(line.trim()));
   check(
     '候选列表受 20 条上限约束（仓库 21 条）',
-    candidateBlock.split('\n').length - 1 === 20,
-    `lines=${candidateBlock.split('\n').length - 1}`
+    candidateLines.length === 20,
+    `lines=${candidateLines.length}`
   );
 
   // B-1：提示词必须给出「什么时候算合适 / 什么时候不发」的判断依据，

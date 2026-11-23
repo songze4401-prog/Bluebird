@@ -202,6 +202,28 @@ async function waitReady() {
       !aMsgs.some(m => m.content === '默认会话新消息')
     );
     check('读取不存在的会话返回 null', sessions.getMessages('no-such-session') === null);
+
+    // 历史里残留的工具协议文本：读取时统一剥离，绝不回显给客户端/模型
+    const proto = sessions.createSession({ title: '协议清理' });
+    sessions.appendMessages(proto.id, [
+      {
+        role: 'assistant',
+        content: '记一下。\n<tool_call>memory_remember\n{"content":"x"}</tool_call>',
+      },
+      {
+        role: 'assistant',
+        content: '<tool_call>memory_remember\n{"content":"y"}</tool_call>',
+      },
+    ]);
+    const protoMsgs = sessions.getMessages(proto.id);
+    check(
+      '历史读取剥离工具协议块（纯协议消息给兜底文案）',
+      protoMsgs.length === 2 &&
+        protoMsgs[0].content === '记一下。' &&
+        protoMsgs[1].content === '（这条消息原本是一次未能执行的工具调用）',
+      JSON.stringify(protoMsgs.map(m => m.content))
+    );
+    sessions.deleteSession(proto.id);
   }
 
   origLog('\nHTTP 接口（会话列表 / 新建 / 按会话读取）');

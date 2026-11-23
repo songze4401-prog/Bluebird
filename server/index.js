@@ -457,6 +457,7 @@ const { config: contextConfig } = require('./context/config');
 
 // 情绪标签剥离：全量（/chat）与增量（/chat/stream）共用同一套规则。
 const { stripMoodTags, createMoodTagStripper } = require('./stream-strip');
+const { stripToolProtocolText } = require('./textual-tool-calls');
 
 // 单实例守卫：必须在 listen 之前、且必须在路由注册之后调用，
 // 这样被测试 require 时不会先抢锁再崩，而是走到 listen 拦截那里正常起来。
@@ -1265,7 +1266,16 @@ function completeChatTurn({
 }) {
   const { sessionId, userText, userMessageId, attachments, personaConfig } = ctx;
 
-  const { reply: cleanedReply, mood } = stripMoodTags(rawReply);
+  const { reply: moodStripped, mood } = stripMoodTags(rawReply);
+  // 工具协议文本兜底（2026-11-22）：工具未启用（如视觉模型轮次）或模型把
+  // 调用写成正文时，<tool_call>…</tool_call> 绝不能进入气泡或落盘历史。
+  const protocolMarkup = /<tool_calls?\b|[|｜]{1,3}DSML[|｜]{1,3}/i.test(moodStripped);
+  const strippedReply = stripToolProtocolText(moodStripped);
+  // 整条回复只有协议块时给一句可读的兜底，不能留空气泡。
+  const cleanedReply =
+    protocolMarkup && !strippedReply
+      ? '（原本是一条工具调用，但这次没有执行成功）'
+      : strippedReply;
 
   // 图片/表情包声明解析（[sticker:ID] / [image:ID]）在情绪标签清洗之后：
   // 标记可能在正文任意位置，三级校验通过转为消息附件，不通过整段删除。
@@ -1517,6 +1527,28 @@ function scheduleMemoryExtraction(
   });
 }
 
+// 非 Agent 路径（本轮工具不可用）的模型约束：明确要求不要输出工具协议，
+// 否则视觉模型等不支持工具调用的轮次会把 <tool_call> 当正文发出来。
+const NO_TOOLS_NOTICE =
+  '【本轮工具不可用】本轮没有可调用的工具。不要在正文里输出 <tool_call>、DSML 或任何工具调用标记；需要工具才能完成的事，直接说明本轮做不了，或请用户切到支持工具的纯文字轮次再试。';
+
+function withNoToolsNotice(messages) {
+  if (!Array.isArray(messages) || !messages.length) return messages;
+  const index = messages.findIndex(
+    item => item && item.role === 'system' && typeof item.content === 'string'
+  );
+  if (index >= 0) {
+    if (messages[index].content.includes('【本轮工具不可用】')) return messages;
+    const copy = messages.slice();
+    copy[index] = {
+      ...copy[index],
+      content: `${copy[index].content}\n\n${NO_TOOLS_NOTICE}`,
+    };
+    return copy;
+  }
+  return [{ role: 'system', content: NO_TOOLS_NOTICE }, ...messages];
+}
+
 // 每次真正调用提供方之前记录 sent 证据：使用与 createChatCompletion 完全
 // 相同的 messages 数组；只记录标识/角色/数量，不记录正文。
 function recordSentForContext(ctx, { round = 1, messages = ctx.requestMessages, toolsCount = 0 } = {}) {
@@ -1658,7 +1690,8 @@ app.post('/chat', requireAuth, async (req, res) => {
     // Agent 工具调用（V1）三重门控，全部在后端强制执行：
     // ① 紧急开关 BLUEBIRD_AGENT_TOOLS=1（默认关，每请求重读）；
     // ② 模型显式声明支持 Tool Calling（supportsTools，未知一律 false）；
-    // ③ 非带图请求——带图（useVision）后端强制无工具，不依赖前端。
+    // ③ 策略允许的工具清单非空。
+    // 2026-11-23：V4.1 Flash 实测同时支持视觉与工具，带图不再关闭工具。
     // 任一不满足都走下方原路径，行为与改造前逐字节一致。
     noteSwitchObservation();
     const agentSwitchOn = agentToolsEnabled();
@@ -1813,7 +1846,10 @@ app.post('/chat', requireAuth, async (req, res) => {
         throw new Error('模型没有返回有效内容');
       }
     } else {
-      recordSentForContext(ctx);
+      // 工具本轮不可用：明确告诉模型不要输出工具协议文本。
+      // trace 必须记录真正发出去的那份 messages，否则内容指纹对不上。
+      const outgoingMessages = withNoToolsNotice(ctx.requestMessages);
+      recordSentForContext(ctx, { messages: outgoingMessages });
       completion = await createChatCompletion({
         providerId: ctx.providerId,
         modelId: ctx.modelId,
@@ -1821,7 +1857,7 @@ app.post('/chat', requireAuth, async (req, res) => {
         temperature: 0.8,
         maxTokens: 8192,
         timeout: 90000,
-        messages: ctx.requestMessages,
+        messages: outgoingMessages,
         // 客户端断开时中止上游调用，不让模型把额度耗在没人要的回复上
         signal: disconnect.signal,
       });
@@ -2103,7 +2139,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   let streamError = null;
 
   // Agent 工具调用（V1）：与 /chat 完全相同的三重门控（开关 / 模型能力 /
-  // 非带图），全部后端强制。工具轮以非流式执行，经 tool_start / tool_end
+  // 策略工具清单），全部后端强制。工具轮以非流式执行，经 tool_start / tool_end
   // 事件向客户端反馈进度；最终文本仍走 stripper → delta → done，
   // 不新增也不改变既有事件格式（旧客户端忽略新 type 即可）。
   noteSwitchObservation();
@@ -2261,7 +2297,10 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         streamOrchestrationMeta = orchestrationMeta;
       }
     } else {
-      recordSentForContext(ctx);
+      // 工具本轮不可用：明确告诉模型不要输出工具协议文本。
+      // trace 必须记录真正发出去的那份 messages，否则内容指纹对不上。
+      const outgoingMessages = withNoToolsNotice(ctx.requestMessages);
+      recordSentForContext(ctx, { messages: outgoingMessages });
       const stream = await createChatCompletion({
         providerId: ctx.providerId,
         modelId: ctx.modelId,
@@ -2270,7 +2309,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         maxTokens: 8192,
         timeout: 90000,
         stream: true,
-        messages: ctx.requestMessages,
+        messages: outgoingMessages,
       });
 
       // 流式 usage 由供应商在末帧给出（不保证存在）：拿到就记，拿不到记 missing。
