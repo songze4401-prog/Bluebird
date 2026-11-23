@@ -656,6 +656,7 @@ module.exports = {
   isSensitive,
   contributionSourceTypes,
   confidenceWeight,
+  TYPE_WEIGHTS,
   SOURCE_TYPES,
   SEARCHABLE_CATEGORIES,
   SENSITIVE_PATTERN,

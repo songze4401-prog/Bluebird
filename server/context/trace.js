@@ -92,6 +92,7 @@ function createTrace({ task, sessionId, ts, requestId } = {}) {
       decisions: [],
       summary: { count: 0, sources: [], conflicts: [], warning: null },
     },
+    coreMemory: { selected: 0, truncated: 0, deduped: 0 },
     retrieval: {
       source: 'memory',
       status: null,
@@ -227,6 +228,14 @@ function createTrace({ task, sessionId, ts, requestId } = {}) {
       }
 
       trace.stages.candidate = selection.tokens.totalMessages || 0;
+    },
+
+    recordCoreMemory({ selected = 0, truncated = 0, deduped = 0 } = {}) {
+      trace.coreMemory = {
+        selected: Number.isFinite(selected) ? selected : 0,
+        truncated: Number.isFinite(truncated) ? truncated : 0,
+        deduped: Number.isFinite(deduped) ? deduped : 0,
+      };
     },
 
     recordRetrieval(outcome, adjudication, diagnostics) {

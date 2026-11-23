@@ -23,7 +23,9 @@ process.env.BLUEBIRD_DATA_DIR = DATA_DIR;
 process.env.BLUEBIRD_API_TOKEN = 'test-token';
 process.env.DEEPSEEK_API_KEY = 'sk-stub-deepseek-0001';
 process.env.PORT = '0';
+process.env.BLUEBIRD_USER_ID = 'e2e-core-owner';
 delete process.env.BLUEBIRD_CONTEXT_ENGINE;
+delete process.env.BLUEBIRD_CORE_MEMORY;
 
 const SERVER = path.join(__dirname, '..', 'server');
 
@@ -405,6 +407,43 @@ async function main() {
       traceH.sent.rounds.length === 1 &&
       traceH.sent.rounds[0].messageIds.includes('current-user')
   );
+
+  // ============ I. 常驻记忆：独立于检索命中 ==========
+  ORIG_LOG('\n[E2E-I] 常驻记忆开关、独立注入与 trace 隐私');
+  resetGroups();
+  const { memoryCore } = require(path.join(SERVER, 'memory-core.js'));
+  memoryCore().setMemoryList([{
+    id: 'core-pref-e2e',
+    userId: 'e2e-core-owner',
+    content: '用户偏好：回答请使用简体中文，并避免繁体字。',
+    type: 'preference',
+    category: 'long_term_preference',
+    status: 'active',
+    confidence: 0.95,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    validFrom: '2020-01-01T00:00:00.000Z',
+    validTo: null,
+    contributions: [{ sessionId: longSessionId, sourceQuote: '请使用简体中文', createdAt: new Date().toISOString() }],
+  }]);
+  process.env.BLUEBIRD_CORE_MEMORY = '0';
+  const disabledCoreSession = await newSession('ctx-core-disabled');
+  scripted.push({ content: '[calm] 默认行为' });
+  await post('/chat', { message: '没有检索相关记忆的问题', sessionId: disabledCoreSession });
+  const disabledCoreCall = stubCalls[stubCalls.length - 1];
+  check('I1: 默认关闭不注入常驻记忆', !!disabledCoreCall && !String(disabledCoreCall.messages[0].content).includes('用户偏好：回答请使用简体中文'));
+
+  process.env.BLUEBIRD_CORE_MEMORY = '1';
+  const enabledCoreSession = await newSession('ctx-core-enabled');
+  scripted.push({ content: '[calm] 使用常驻偏好' });
+  await post('/chat', { message: '今天的天气怎么样？', sessionId: enabledCoreSession });
+  const enabledCoreCall = stubCalls[stubCalls.length - 1];
+  const coreSystem = enabledCoreCall ? String(enabledCoreCall.messages[0].content || '') : '';
+  const coreTrace = traces().pop();
+  check('I2: 不依赖检索命中仍注入跨会话长期偏好', coreSystem.includes('用户偏好：回答请使用简体中文') && coreSystem.includes('避免繁体字'));
+  check('I3: trace 只记录常驻选择计数，不含记忆正文', !!coreTrace && coreTrace.coreMemory.selected === 1 && !JSON.stringify(coreTrace).includes('避免繁体字'));
+  delete process.env.BLUEBIRD_CORE_MEMORY;
+  memoryCore().setMemoryList([]);
 
   // ============ G. trace 隐私 ============
   ORIG_LOG('\n[E2E-G] trace 隐私');

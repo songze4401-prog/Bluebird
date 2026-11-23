@@ -47,6 +47,11 @@ const {
   resetBreaker,
 } = require('../server/context/retriever');
 const { createTrace } = require('../server/context/trace');
+const { selectCoreMemories, MAX_CORE_MEMORIES, MAX_CORE_MEMORY_CODEPOINTS } = require('../server/context/core-memory');
+const memory = require('../server/memory');
+const { memoryCore } = require('../server/memory-core');
+const { CATEGORY } = require('../server/memory-evidence');
+const { hashText } = require('../server/memory-tombstones');
 const { estimateTokens } = require('../server/text-utils');
 
 const iso = offset => new Date(Date.UTC(2026, 0, 1, 0, offset)).toISOString();
@@ -82,6 +87,7 @@ async function runRuntime({
   items = [],
   query = '当前问题',
   injected = {},
+  userId = null,
   model = {},
   toolsReserveTokens = 0,
   systemBlocks = coreBlocks(),
@@ -94,6 +100,7 @@ async function runRuntime({
   return runContextRuntime({
     task: query,
     sessionId: 's1',
+    userId,
     projectedMessages: projected,
     renderMessage: item => render(item),
     systemBlocks,
@@ -778,6 +785,134 @@ test('F7: 输入保护裁剪发生在运行时，并记录 dropped 与注入 ID 
   assert.ok(out.historyMessages.length < 30);
   assert.ok(!out.contextIds.includes('memory:mem1'));
 });
+
+test('F9: Core Memory fail-closed、用户隔离及同用户长期记忆跨会话可见', () => {
+  memoryCore().setMemoryList([
+    coreEntry('owner-a', '用户偏好：回答时使用简体中文。', 'preference', 'user-a', 'session-a'),
+    coreEntry('owner-b', '另一个用户的私有偏好。', 'preference', 'user-b', 'session-b'),
+    coreEntry('private-session', '临时状态只属于 A 会话。', 'fact', 'user-a', 'session-a', CATEGORY.TEMPORARY_STATE),
+  ]);
+  const absent = selectCoreMemories({ sessionId: 'session-a' });
+  assert.deepStrictEqual(absent.items, []);
+  const crossSession = selectCoreMemories({ userId: 'user-a', sessionId: 'session-b' });
+  assert.deepStrictEqual(crossSession.items.map(item => item.id), ['owner-a']);
+  const sameSession = selectCoreMemories({ userId: 'user-a', sessionId: 'session-a' });
+  assert.deepStrictEqual(sameSession.items.map(item => item.id), ['owner-a', 'private-session']);
+});
+
+test('F10: 仅 active、未 supersede、未过期且无当前用户 tombstone 的记忆入选', () => {
+  const now = new Date().toISOString();
+  const base = { userId: 'user-a', updatedAt: now, createdAt: now, validFrom: '2020-01-01T00:00:00.000Z', contributions: [{ sessionId: 's1', sourceQuote: 'quote' }] };
+  const entries = [
+    { ...base, id: 'active', content: '活动记忆。', type: 'identity', status: 'active' },
+    { ...base, id: 'pending', content: '待确认。', type: 'identity', status: 'pending' },
+    { ...base, id: 'contested', content: '争议中。', type: 'identity', status: 'contested' },
+    { ...base, id: 'archived', content: '已归档。', type: 'identity', status: 'archived' },
+    { ...base, id: 'superseded', content: '旧版本。', type: 'identity', status: 'active', supersededBy: 'new' },
+    { ...base, id: 'expired', content: '已过期。', type: 'identity', status: 'active', validTo: '2020-01-01T00:00:00.000Z' },
+    { ...base, id: 'deleted', content: '已删除。', type: 'identity', status: 'active' },
+  ];
+  memoryCore().setMemoryList(entries);
+  memoryCore().setTombstones([{ userId: 'user-a', entryId: 'deleted', contentHash: hashText('已删除。') }]);
+  assert.deepStrictEqual(selectCoreMemories({ userId: 'user-a', sessionId: 's1' }).items.map(item => item.id), ['active']);
+  memoryCore().setTombstones([]);
+});
+
+test('F11: 同类型时按 confidence，再按 updatedAt 排序', () => {
+  const now = Date.now();
+  memoryCore().setMemoryList([
+    coreEntry('fact', '事实', 'fact', 'user-a', 's1', CATEGORY.STABLE_FACT, 0.5, new Date(now + 10000).toISOString()),
+    coreEntry('fact-new', '较新事实', 'fact', 'user-a', 's1', CATEGORY.STABLE_FACT, 0.5, new Date(now + 20000).toISOString()),
+    coreEntry('goal', '目标', 'goal', 'user-a', 's1', CATEGORY.STABLE_FACT, 0.5, new Date(now + 10000).toISOString()),
+    coreEntry('pref-low', '较低置信偏好', 'preference', 'user-a', 's1', CATEGORY.LONG_TERM_PREFERENCE, 0.6, new Date(now).toISOString()),
+    coreEntry('pref-high-old', '较高置信偏好', 'preference', 'user-a', 's1', CATEGORY.LONG_TERM_PREFERENCE, 0.9, new Date(now - 10000).toISOString()),
+  ]);
+  assert.deepStrictEqual(
+    selectCoreMemories({ userId: 'user-a', sessionId: 's1' }).items.map(item => item.id),
+    ['pref-high-old', 'pref-low', 'goal', 'fact-new', 'fact']
+  );
+});
+
+test('F12: 上限为 20 条和 1500 code points，超限只裁剪尾部', () => {
+  memoryCore().setMemoryList(Array.from({ length: 25 }, (_, index) =>
+    coreEntry(`many-${index}`, `身份${String(index).padStart(2, '0')}`, 'identity', 'user-a', 's1')
+  ));
+  const capped = selectCoreMemories({ userId: 'user-a', sessionId: 's1' });
+  assert.strictEqual(capped.items.length, MAX_CORE_MEMORIES);
+  assert.strictEqual(capped.truncated, 5);
+
+  memoryCore().setMemoryList([
+    coreEntry('long-a', '甲'.repeat(800), 'identity', 'user-a', 's1'),
+    coreEntry('long-b', '乙'.repeat(800), 'identity', 'user-a', 's1'),
+    coreEntry('tail', '尾部', 'identity', 'user-a', 's1'),
+  ]);
+  const budgeted = selectCoreMemories({ userId: 'user-a', sessionId: 's1' });
+  const totalLength = Array.from(budgeted.items.map(item => item.content).join('')).length;
+  assert.ok(totalLength <= MAX_CORE_MEMORY_CODEPOINTS);
+  assert.deepStrictEqual(budgeted.items.map(item => item.id), ['long-a', 'long-b']);
+  assert.strictEqual(Array.from(budgeted.items[1].content).length, 700);
+  assert.strictEqual(budgeted.truncated, 2);
+});
+
+test('F13: 空库返回空集，不影响普通 runtime', async () => {
+  memoryCore().setMemoryList([]);
+  memoryCore().setTombstones([]);
+  assert.deepStrictEqual(selectCoreMemories({ userId: 'user-a', sessionId: 's1' }), { items: [], truncated: 0 });
+  const out = await runRuntime({ items: [], query: '你好', userId: 'user-a' });
+  assert.strictEqual(out.ok, true);
+  assert.strictEqual(out.coreMemory.selected, 0);
+  assert.strictEqual(out.systemPrompt.includes('常驻记忆'), false);
+});
+
+test('F14: 默认关闭保持旧上下文；启用后不依赖检索命中，且去重和 trace 计数正确', async () => {
+  const oldFlag = process.env.BLUEBIRD_CORE_MEMORY;
+  memoryCore().setMemoryList([
+    coreEntry('preference', '用户偏好：回答时用简体中文，避免繁体字。', 'preference', 'user-a', 's1', CATEGORY.LONG_TERM_PREFERENCE),
+  ]);
+  try {
+    delete process.env.BLUEBIRD_CORE_MEMORY;
+    const disabled = await runRuntime({ items: [], query: '请告诉我今天的天气', userId: 'user-a' });
+    assert.strictEqual(disabled.coreMemory.selected, 0);
+    assert.strictEqual(disabled.systemPrompt.includes('常驻记忆'), false);
+
+    process.env.BLUEBIRD_CORE_MEMORY = '1';
+    const enabled = await runRuntime({
+      items: [], query: '天气如何？', userId: 'user-a',
+      injected: { memory: [
+        { id: 'preference', content: '同一条偏好不应重复。', type: 'preference' },
+        { id: 'retrieved', content: '仅由现有检索找到的补充事实。', type: 'fact' },
+      ] },
+    });
+    assert.strictEqual(enabled.coreMemory.selected, 1);
+    assert.strictEqual(enabled.coreMemory.deduped, 1);
+    assert.strictEqual(enabled.trace.coreMemory.selected, 1);
+    assert.strictEqual(enabled.trace.coreMemory.deduped, 1);
+    assert.ok(enabled.trace.coreMemory.truncated >= 0);
+    assert.strictEqual((enabled.systemPrompt.match(/用户偏好：回答时用简体中文/g) || []).length, 1);
+    assert.ok(enabled.systemPrompt.includes('不能覆盖用户当前明确表达'));
+    assert.ok(enabled.systemPrompt.indexOf('常驻记忆') < enabled.systemPrompt.indexOf('仅由现有检索找到的补充事实'));
+    assert.ok(enabled.contextIds.includes('memory:retrieved'));
+    assert.strictEqual(enabled.contextIds.filter(id => id === 'memory:preference').length, 1);
+
+    const rephrased = await runRuntime({ items: [], query: '今天天气怎么样？', userId: 'user-a' });
+    assert.strictEqual(rephrased.coreMemory.selected, 1);
+    assert.ok(rephrased.systemPrompt.includes('避免繁体字'));
+  } finally {
+    if (oldFlag === undefined) delete process.env.BLUEBIRD_CORE_MEMORY;
+    else process.env.BLUEBIRD_CORE_MEMORY = oldFlag;
+    memoryCore().setMemoryList([]);
+    memoryCore().setTombstones([]);
+  }
+});
+
+function coreEntry(id, content, type, userId, sessionId, category = CATEGORY.STABLE_FACT, confidence = 0.9, updatedAt = '2026-01-01T00:00:00.000Z') {
+  const now = '2026-01-01T00:00:00.000Z';
+  return {
+    id, content, type, userId, category, confidence, updatedAt,
+    createdAt: now, validFrom: now, validTo: null, status: 'active',
+    contributions: [{ sessionId, sourceQuote: content.slice(0, 20), createdAt: now }],
+  };
+}
 
 // ============ G. Trace 阶段 ============
 
