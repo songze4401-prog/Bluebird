@@ -13,6 +13,7 @@ import { fireEvent, render, waitFor } from '@testing-library/react-native';
 
 import { ChatScreen } from '../../app/ChatScreen';
 import { UiStateProvider } from '../../app/ui-state';
+import { getToolDetailRows } from '../../components/ToolDetailSheet';
 import type { ChatSessionApi } from '../../hooks/useChatSession';
 import type { Message } from '../../lib/types';
 
@@ -152,6 +153,25 @@ describe('v7 聊天屏渲染契约', () => {
     expect(utils.getAllByLabelText('表情包').length).toBeGreaterThan(0);
     expect(utils.queryByText(/sticker:xyz-789/)).toBeNull();
     expect(utils.queryByText(/\[sticker:/)).toBeNull();
+  });
+
+  it('工具详情耗时仅来自真实 durationMs，缺失时不生成耗时行', () => {
+    const withDuration = getToolDetailRows({
+      name: 'memory_search',
+      ok: true,
+      summary: '命中 1 条',
+      running: false,
+      durationMs: 17,
+    });
+    expect(withDuration.find(row => row.label === '耗时')?.value).toBe('17 ms');
+
+    const withoutDuration = getToolDetailRows({
+      name: 'memory_search',
+      ok: true,
+      summary: '命中 1 条',
+      running: false,
+    });
+    expect(withoutDuration.some(row => row.label === '耗时')).toBe(false);
   });
 
   it('工具 pill：ok=✓、running=●、fail=✕，文本带 name · summary', async () => {

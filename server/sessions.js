@@ -763,14 +763,14 @@ function sanitizeToolSteps(list) {
     const durationMs =
       typeof raw.durationMs === 'number' && Number.isFinite(raw.durationMs)
         ? Math.max(0, Math.round(raw.durationMs))
-        : 0;
+        : null;
 
     const pendingConfirmation = sanitizePendingConfirmation(raw.pendingConfirmation);
     items.push({
       name,
       ok,
       summary,
-      durationMs,
+      ...(durationMs !== null ? { durationMs } : {}),
       ...(pendingConfirmation ? { pendingConfirmation } : {}),
     });
   }

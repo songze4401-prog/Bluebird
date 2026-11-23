@@ -84,6 +84,7 @@ const EVENTS = Object.freeze({
   AGENT_GATE: 'agent.gate',
   AGENT_ROUND_COMPLETED: 'agent.round.completed',
   AGENT_RUN_COMPLETED: 'agent.run.completed',
+  CLAIM_MISMATCH: 'claim.mismatch',
   RESPONSE_STREAM_STARTED: 'response.stream.started',
   RESPONSE_STREAM_COMPLETED: 'response.stream.completed',
   PERSISTENCE_WRITE_STARTED: 'persistence.write.started',
@@ -102,7 +103,7 @@ const ERROR_CODE_RE = /^[a-z][a-z0-9_]{0,63}$/;
 const SENSITIVE_PATTERN =
   /(密码|口令|私钥|助记词|验证码|信用卡|银行卡|身份证|手机号|cvv|api[\s_-]?key|authorization|secret|bearer|token\s*[:=]|sk-[a-zA-Z0-9_-]{8,}|(?<![0-9a-f-])(?:\d[\s-]?){11,}(?![0-9a-f-]))/i;
 
-const SAFE_METRIC_SUFFIX = /(_length|_count|_bytes|_tokens|_ms|_hash|_ref|_id|_ids|_source|_version|_reason|_class|_kind|_type|_name|_name_length|_status|_roles|_round|_rounds|_index|_size|_limit|_rate|_ratio|_percent|_p50|_p95|_p99)$/;
+const SAFE_METRIC_SUFFIX = /(_length|_count|_bytes|_tokens|_ms|_hash|_ref|_id|_ids|_source|_version|_reason|_class|_kind|_type|_group|_name|_name_length|_status|_roles|_round|_rounds|_index|_size|_limit|_rate|_ratio|_percent|_p50|_p95|_p99)$/;
 
 const FORBIDDEN_ATTRIBUTE_RE =
   /(^|_)(prompt|content|message|messages|text|body|args|arguments|params|parameter|result|response|answer|reply|quote|transcript|attachment|image|file|password|secret|token|credential|authorization|api_?key)(_|$)/i;
