@@ -58,6 +58,11 @@ process.env.DEEPSEEK_API_KEY = 'sk-stub-deepseek-0001';
 process.env.PORT = '0';
 // Agent 开关：默认关。各组自行翻转，结束前恢复。
 process.env.BLUEBIRD_AGENT_TOOLS = '';
+// Claim Guard 默认开启；本文件按脚本精确断言模型调用次数，先显式关闭，
+// 仅 C3 组打开验证开启路径。
+process.env.BLUEBIRD_CLAIM_GUARD = '0';
+// Claim Guard 断言监控事件，覆盖门禁默认关闭全局监控时也要显式启用。
+process.env.BLUEBIRD_MONITORING = '1';
 
 const SERVER = path.join(__dirname, '..', 'server');
 
@@ -383,6 +388,8 @@ const memoryTool = require(path.join(SERVER, 'tool-memory-search.js'));
 const textUtils = require(path.join(SERVER, 'text-utils.js'));
 const configs = require(path.join(SERVER, 'api-configs.js'));
 const sessions = require(path.join(SERVER, 'sessions.js'));
+const claimGuard = require(path.join(SERVER, 'claim-guard.js'));
+const monitoring = require(path.join(SERVER, 'monitoring', 'index.js'));
 
 // 本地 mock 服务商（H3 组）：真实 SDK 路径，记录请求体
 const mockChatRequests = [];
@@ -689,6 +696,115 @@ async function main() {
     JSON.stringify(stream.events.find(e => e.type === 'delta'))
   );
   check('done 带 toolSteps', Array.isArray(stream.events.find(e => e.type === 'done').toolSteps));
+
+  // ================= C3. Claim Guard =================
+  ORIG_LOG('\\nC3. Claim Guard 声明-工具回执核对');
+  process.env.BLUEBIRD_AGENT_TOOLS = '1';
+  const successStep = (name, ok) => ({ name, ok, summary: '真实工具回执', durationMs: 3 });
+  const mismatchCases = [
+    ['文件成功声明与失败回执冲突', '文件已保存。', successStep('workspace_write', false)],
+    ['邮件完成声明与失败回执冲突', '邮件已经发出。', successStep('mail_send', false)],
+    ['记忆完成声明与失败回执冲突', '已经记住这条记忆。', successStep('memory_remember', false)],
+    ['委派成功声明与失败回执冲突', '任务已派发。', successStep('delegate_to_bot', false)],
+    ['文件失败声明与成功回执冲突', '文件保存失败。', successStep('workspace_write', true)],
+    ['邮件失败声明与成功回执冲突', '邮件发送失败。', successStep('mail_send', true)],
+    ['记忆失败声明与成功回执冲突', '记忆写入失败。', successStep('memory_remember', true)],
+    ['委派失败声明与成功回执冲突', '任务派发失败。', successStep('delegate_to_bot', true)],
+  ];
+  for (const [name, text, step] of mismatchCases) {
+    check(name, claimGuard.detectClaimMismatch(text, [step]) !== null);
+  }
+  check('“还没保存”与成功回执矛盾要报', claimGuard.detectClaimMismatch('还没保存文件。', [successStep('workspace_write', true)]) !== null);
+  check('“没发出去”与成功回执矛盾要报', claimGuard.detectClaimMismatch('邮件没发出去。', [successStep('mail_send', true)]) !== null);
+  check('“不会保存”否定意向不误报', claimGuard.detectClaimMismatch('我不会保存这段内容。', [successStep('workspace_write', true)]) === null);
+  check('“不打算发送”否定意向不误报', claimGuard.detectClaimMismatch('我不打算发送邮件。', [successStep('mail_send', true)]) === null);
+  check('无工具回执不做声明核对', claimGuard.detectClaimMismatch('已保存文件。', []) === null);
+  check(
+    '跨组不误报：只有文件成功时“已保存”不算记忆声明',
+    claimGuard.detectClaimMismatch('文件已保存。', [
+      successStep('workspace_write', true),
+      successStep('memory_remember', false),
+    ]) === null
+  );
+  check(
+    '跨组不误报：表单提交不算委派声明',
+    claimGuard.detectClaimMismatch('表单已提交。', [
+      successStep('workspace_write', true),
+      successStep('delegate_to_bot', false),
+    ]) === null
+  );
+  check(
+    '待确认表述不算完成声明',
+    claimGuard.detectClaimMismatch('已创建待确认写入。', [
+      {
+        name: 'workspace_write',
+        ok: true,
+        summary: '已创建待确认写入，等用户在聊天里确认后才会落盘',
+        durationMs: 2,
+        pendingConfirmation: { id: 'confirm_1', path: 'note.md' },
+      },
+    ]) === null
+  );
+  check(
+    '记忆成功声明仍能识别（记住 / 记忆已保存）',
+    claimGuard.detectClaimMismatch('已经记住这条记忆。', [successStep('memory_remember', false)]) !== null &&
+      claimGuard.detectClaimMismatch('记忆已保存。', [successStep('memory_remember', false)]) !== null
+  );
+  delete process.env.BLUEBIRD_CLAIM_GUARD;
+  check('环境开关默认开启（未设置也启用）', claimGuard.claimGuardEnabled());
+  process.env.BLUEBIRD_CLAIM_GUARD = '0';
+  check('显式 0 时关闭', !claimGuard.claimGuardEnabled());
+
+  process.env.BLUEBIRD_CLAIM_GUARD = '1';
+  resetScript();
+  scripted.push({ toolCalls: [tc('claim_call', 'memory_search', { query: '猫' })] });
+  scripted.push({ content: '[calm] 记忆查询失败。' });
+  scripted.push({ content: '[calm] 记忆检索已成功。' });
+  const claimCallStart = stubCalls.length;
+  const claimResponse = await req('/chat', {
+    method: 'POST',
+    body: { message: '查询关于猫的记忆' },
+  });
+  const claimModelCalls = stubCalls.slice(claimCallStart);
+  check('矛盾声明触发一次无工具重生成', claimResponse.status === 200 && claimModelCalls.length === 3 && !claimModelCalls[2].tools);
+  check('重生成采用真实回执并修正回复', claimResponse.json.reply.includes('记忆检索已成功') && !claimResponse.json.reply.includes('核对说明'));
+  const correctionPrompt = claimModelCalls[2]?.messages.find(message => String(message.content || '').includes('【服务端回复核对】'));
+  check('重生成提示含真实工具回执且不含用户文本', !!correctionPrompt && String(correctionPrompt.content).includes('工具 memory_search：ok=true') && !String(correctionPrompt.content).includes('猫'));
+  check('Claim Guard 重生成不重跑工具（仅一轮工具调用）', claimResponse.json.toolSteps?.length === 1 && claimResponse.json.toolSteps[0].name === 'memory_search');
+  const claimEvents = monitoring.getEvents({ eventName: monitoring.EVENTS.CLAIM_MISMATCH, limit: 20 }).items;
+  check('claim.mismatch 监控事件包含类型/工具组/重试结果', claimEvents.some(event => event.attributes.a_type === 'failure_claim' && event.attributes.b_type === 'tool_success' && event.attributes.tool_group === 'memory' && event.attributes.retry_succeeded === true));
+
+  resetScript();
+  scripted.push({ toolCalls: [tc('claim_fail_call', 'memory_search', { query: '猫' })] });
+  scripted.push({ content: '[calm] 记忆查询失败。' });
+  scripted.push({ content: '[calm] 记忆查询失败。' });
+  const unresolved = await req('/chat', {
+    method: 'POST',
+    body: { message: '再次查询猫的记忆' },
+  });
+  check('二次生成仍矛盾时追加固定核对文案', unresolved.status === 200 && unresolved.json.reply.endsWith('核对说明：本轮工具执行回执与回复中的完成状态不一致，请以工具回执为准。'));
+
+  process.env.BLUEBIRD_CLAIM_GUARD = '1';
+  resetScript();
+  scripted.push({ toolCalls: [tc('claim_stream_call', 'memory_search', { query: '咖啡' })] });
+  scripted.push({ content: '[calm] 记忆查询失败。' });
+  scripted.push({ content: '[calm] 记忆检索已成功。' });
+  const claimStreamStart = stubCalls.length;
+  const claimStream = await readSse('/chat/stream', { message: '查咖啡记忆' });
+  const claimStreamCalls = stubCalls.slice(claimStreamStart);
+  const claimStreamDone = claimStream.events.find(event => event.type === 'done');
+  const claimStreamDelta = claimStream.events.filter(event => event.type === 'delta').map(event => event.content).join('');
+  check('流式 Claim Guard 在 delta 前重生成并将修正文本作为权威 done', claimStream.status === 200 && claimStreamCalls.length === 3 && claimStreamCalls[2].tools === undefined && claimStreamDone.reply.includes('记忆检索已成功'));
+  check('流式 Claim Guard 不先泄露矛盾文本且只执行一次工具', !claimStreamDelta.includes('查询失败') && claimStreamDone.toolSteps?.length === 1);
+  process.env.BLUEBIRD_CLAIM_GUARD = '0';
+  const disabled = await claimGuard.reconcileClaim({
+    reply: '文件已保存。',
+    toolSteps: [successStep('workspace_write', false)],
+    retry: async () => { throw new Error('flag off must not retry'); },
+  });
+  check('开关关闭时不重生成且不改写回复', disabled.reply === '文件已保存。' && !disabled.retried);
+  // 后续分组继续按“显式关闭”跑，避免默认开启改变它们的桩调用次数。
+  process.env.BLUEBIRD_CLAIM_GUARD = '0';
 
   // ================= D. 未知工具 =================
   ORIG_LOG('\nD. 未知工具安全处理');

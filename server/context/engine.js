@@ -21,6 +21,7 @@ const { buildContext } = require('./builder');
 const { fitRequest } = require('./input-guard');
 const { createTrace } = require('./trace');
 const { planContext, applyPlanToConfig } = require('./orchestrator');
+const { selectCoreMemories } = require('./core-memory');
 
 // 记忆状态标准化：把内部检索状态映射为对外契约状态。
 // - ok → ok（检索成功且有结果）
@@ -170,6 +171,19 @@ async function runContextRuntime({
   }
   trace.recordHistory(selection, summary);
 
+  // 2026-11-23：常驻记忆默认开启；只有显式 BLUEBIRD_CORE_MEMORY=0 才关闭。
+  const coreMemoryEnabled =
+    String(process.env.BLUEBIRD_CORE_MEMORY || '1').trim() !== '0';
+  let coreMemorySelection = { items: [], truncated: 0 };
+  if (coreMemoryEnabled) {
+    try {
+      coreMemorySelection = selectCoreMemories({ userId, sessionId });
+    } catch (_) {
+      // 增强项失败不能把聊天变成 500：本轮按无常驻记忆继续。
+      coreMemorySelection = { items: [], truncated: 0 };
+    }
+  }
+
   let retrieval;
   try {
     retrieval = await retrieveMemory({
@@ -242,10 +256,16 @@ async function runContextRuntime({
     summary,
     memoryItems: retrieval.items || [],
     knowledgeItems: knowledge.items || [],
+    coreMemoryItems: coreMemorySelection.items,
     config: effectiveConfig,
   });
 
   trace.recordRetrieval(retrieval, build.memory, retrieval.diagnostics || null);
+  trace.recordCoreMemory({
+    selected: coreMemorySelection.items.length,
+    truncated: coreMemorySelection.truncated,
+    deduped: build.coreMemory.deduped,
+  });
   trace.recordKnowledge(knowledge, build.knowledge);
 
   const fit = fitRequest({
@@ -267,12 +287,14 @@ async function runContextRuntime({
       selection.recent.length +
       selection.recalled.length +
       (summary.sources ? summary.sources.length : 0) +
+      coreMemorySelection.items.length +
       (retrieval.count || 0) +
       (knowledge.count || 0),
     accepted:
       selection.recent.length +
       selection.recalled.length +
       (summary.sources ? summary.sources.length : 0) +
+      coreMemorySelection.items.length +
       build.memory.accepted.length +
       build.knowledge.accepted.length +
       (currentMessage ? 1 : 0),
@@ -300,6 +322,11 @@ async function runContextRuntime({
       contextIds: [],
       summary,
       memory: build.memory,
+      coreMemory: {
+        selected: coreMemorySelection.items.length,
+        truncated: coreMemorySelection.truncated,
+        deduped: build.coreMemory.deduped,
+      },
       // 记忆编排契约字段：检索状态（ok / no_result / source_unavailable / retrieval_error）。
       // 主控据此区分"确实没有相关记忆"与"检索失败/降级"，避免把故障伪装成空结果。
       memoryStatus: retrieval.status || 'retrieval_error',
@@ -346,6 +373,11 @@ async function runContextRuntime({
       warning: summaryWarning,
     },
     memory: build.memory,
+    coreMemory: {
+      selected: coreMemorySelection.items.length,
+      truncated: coreMemorySelection.truncated,
+      deduped: build.coreMemory.deduped,
+    },
     // 记忆编排契约字段：检索状态（ok / no_result / source_unavailable / retrieval_error）。
     memoryStatus: retrieval.status || 'retrieval_error',
     memoryState: normalizeMemoryState(retrieval.status, retrieval),

@@ -105,7 +105,8 @@ function measureRequest({
     // 上下文块（记忆/知识/摘要/历史摘录）的 Token 归属。
     blocks,
     blockTokensByKind,
-    memoryTokens: blockTokensByKind.memory || 0,
+    memoryTokens:
+      (blockTokensByKind.memory || 0) + (blockTokensByKind.core_memory || 0),
     knowledgeTokens: blockTokensByKind.knowledge || 0,
     rawInputTokens,
     estimatedInputTokens,

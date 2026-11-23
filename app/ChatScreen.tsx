@@ -49,6 +49,7 @@ import type {
   Message,
   ModelDefaults,
   ModelProvider,
+  ToolStepView,
 } from '../lib/types';
 
 // 全屏绝对定位（与 app/ui-state.tsx 同款写法：本仓库 RN 版型里没有 absoluteFillObject）
@@ -494,7 +495,7 @@ export function ChatScreen(props: {
       setWsBusyId(null);
     }
   };
-  const [tool, setTool] = useState<string | null>(null);
+  const [tool, setTool] = useState<ToolStepView | null>(null);
   const [stickersOpen, setStickersOpen] = useState(false);
   // 表情包仓库列表（GET /sticker-repo，打开选择器时拉取）
   const [stickers, setStickers] = useState<Attachment[] | null>(null);
@@ -897,7 +898,7 @@ export function ChatScreen(props: {
                       key={ti}
                       style={styles.tool}
                       onPress={() => {
-                        setTool(step.name + ' · ' + step.summary);
+                        setTool(step);
                         setToolOpen(true);
                       }}
                       accessibilityRole="button"
