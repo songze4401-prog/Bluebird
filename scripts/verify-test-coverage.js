@@ -228,6 +228,8 @@ function backendEnv(dataDir) {
     // 开发者本地 .env 可能打开 Agent 开关；覆盖验证必须从确定默认态开始。
     BLUEBIRD_AGENT_TOOLS: '',
     BLUEBIRD_CLAIM_GUARD: '0',
+    // 常驻记忆默认开启；覆盖验证按关闭口径跑，专项测试在文件内自行打开。
+    BLUEBIRD_CORE_MEMORY: '0',
     BLUEBIRD_MONITORING: '0',
     // 2026-11-21：本地 .env 新增的功能开关同样可能改变测试行为（记忆观察变为
     // 每轮提取、工作区直写、技能注入等），这里统一钉回默认态；工作区根目录指向

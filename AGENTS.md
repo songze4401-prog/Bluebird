@@ -215,7 +215,7 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-135 files, 2635 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
+135 files, 2636 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
 node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js tests/monitoring.test.js   # node:test suites (237)
@@ -286,7 +286,7 @@ node tests/atomic-write.test.js            # 16 — temp+fsync+rename atomic wri
 node tests/chat-abort.test.js              # 9 — client disconnect on the non-stream /chat: the abort signal reaches the model call, the upstream call is cancelled, nothing is persisted (no ghost message), and the server stays healthy instead of writing to a closed socket
 node tests/chat-persist.test.js            # 23
 node tests/chat-stream.test.js             # 37 — SSE streaming: stream-strip rules, /chat/stream framing/deltas/done fields, persistence timing, deleted continuation mode rejected by normal empty-body validation, mid-stream error, pure-image memory extraction, /chat coexistence
-node tests/context-engine-e2e.test.js      # 41 — Context Runtime real HTTP integration: no kill switch (always-on v3), long-history recall/summary in the actual request, no duplicate recent messages, stream path, Agent tool result forwarding and multi-round sent trace, explicit 413 input guard, session isolation, trace privacy
+node tests/context-engine-e2e.test.js      # 42 — Context Runtime real HTTP integration: no kill switch (always-on v3), long-history recall/summary in the actual request, no duplicate recent messages, stream path, Agent tool result forwarding and multi-round sent trace, explicit 413 input guard, session isolation, trace privacy
 node tests/context-orchestrator-p3.test.js # 11
 node tests/context-trace-verify.test.js    # 9 — end-to-end context trace: sent content hash recomputed from what the stub provider actually received, and stub usage labeled usage_source=stub (never counted as real provider usage)
 node tests/corruption-contract.test.js     # 26 — detect/recover contract + all three modules routed through handleCorruption

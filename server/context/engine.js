@@ -171,10 +171,18 @@ async function runContextRuntime({
   }
   trace.recordHistory(selection, summary);
 
-  const coreMemoryEnabled = process.env.BLUEBIRD_CORE_MEMORY === '1';
-  const coreMemorySelection = coreMemoryEnabled
-    ? selectCoreMemories({ userId, sessionId })
-    : { items: [], truncated: 0 };
+  // 2026-11-23：常驻记忆默认开启；只有显式 BLUEBIRD_CORE_MEMORY=0 才关闭。
+  const coreMemoryEnabled =
+    String(process.env.BLUEBIRD_CORE_MEMORY || '1').trim() !== '0';
+  let coreMemorySelection = { items: [], truncated: 0 };
+  if (coreMemoryEnabled) {
+    try {
+      coreMemorySelection = selectCoreMemories({ userId, sessionId });
+    } catch (_) {
+      // 增强项失败不能把聊天变成 500：本轮按无常驻记忆继续。
+      coreMemorySelection = { items: [], truncated: 0 };
+    }
+  }
 
   let retrieval;
   try {

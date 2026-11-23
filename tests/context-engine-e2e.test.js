@@ -25,7 +25,8 @@ process.env.DEEPSEEK_API_KEY = 'sk-stub-deepseek-0001';
 process.env.PORT = '0';
 process.env.BLUEBIRD_USER_ID = 'e2e-core-owner';
 delete process.env.BLUEBIRD_CONTEXT_ENGINE;
-delete process.env.BLUEBIRD_CORE_MEMORY;
+// 常驻记忆默认开启；本文件除 E2E-I 外按关闭口径跑，I 组单独验证默认开启。
+process.env.BLUEBIRD_CORE_MEMORY = '0';
 
 const SERVER = path.join(__dirname, '..', 'server');
 
@@ -426,12 +427,19 @@ async function main() {
     validTo: null,
     contributions: [{ sessionId: longSessionId, sourceQuote: '请使用简体中文', createdAt: new Date().toISOString() }],
   }]);
+  delete process.env.BLUEBIRD_CORE_MEMORY;
+  const defaultCoreSession = await newSession('ctx-core-default');
+  scripted.push({ content: '[calm] 默认开启' });
+  await post('/chat', { message: '没有检索相关记忆的问题', sessionId: defaultCoreSession });
+  const defaultCoreCall = stubCalls[stubCalls.length - 1];
+  check('I1: 默认开启注入常驻记忆', !!defaultCoreCall && String(defaultCoreCall.messages[0].content).includes('用户偏好：回答请使用简体中文'));
+
   process.env.BLUEBIRD_CORE_MEMORY = '0';
   const disabledCoreSession = await newSession('ctx-core-disabled');
-  scripted.push({ content: '[calm] 默认行为' });
+  scripted.push({ content: '[calm] 显式关闭' });
   await post('/chat', { message: '没有检索相关记忆的问题', sessionId: disabledCoreSession });
   const disabledCoreCall = stubCalls[stubCalls.length - 1];
-  check('I1: 默认关闭不注入常驻记忆', !!disabledCoreCall && !String(disabledCoreCall.messages[0].content).includes('用户偏好：回答请使用简体中文'));
+  check('I2: 显式 0 时不注入常驻记忆', !!disabledCoreCall && !String(disabledCoreCall.messages[0].content).includes('用户偏好：回答请使用简体中文'));
 
   process.env.BLUEBIRD_CORE_MEMORY = '1';
   const enabledCoreSession = await newSession('ctx-core-enabled');
@@ -440,9 +448,9 @@ async function main() {
   const enabledCoreCall = stubCalls[stubCalls.length - 1];
   const coreSystem = enabledCoreCall ? String(enabledCoreCall.messages[0].content || '') : '';
   const coreTrace = traces().pop();
-  check('I2: 不依赖检索命中仍注入跨会话长期偏好', coreSystem.includes('用户偏好：回答请使用简体中文') && coreSystem.includes('避免繁体字'));
-  check('I3: trace 只记录常驻选择计数，不含记忆正文', !!coreTrace && coreTrace.coreMemory.selected === 1 && !JSON.stringify(coreTrace).includes('避免繁体字'));
-  delete process.env.BLUEBIRD_CORE_MEMORY;
+  check('I3: 不依赖检索命中仍注入跨会话长期偏好', coreSystem.includes('用户偏好：回答请使用简体中文') && coreSystem.includes('避免繁体字'));
+  check('I4: trace 只记录常驻选择计数，不含记忆正文', !!coreTrace && coreTrace.coreMemory.selected === 1 && !JSON.stringify(coreTrace).includes('避免繁体字'));
+  process.env.BLUEBIRD_CORE_MEMORY = '0';
   memoryCore().setMemoryList([]);
 
   // ============ G. trace 隐私 ============

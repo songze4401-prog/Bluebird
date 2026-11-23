@@ -60,7 +60,12 @@ function compareCoreMemories(a, b) {
  */
 function selectCoreMemories({ userId, sessionId } = {}) {
   const owner = typeof userId === 'string' ? userId.trim() : '';
-  if (!owner || memory.MEMORY_ENABLED === false) {
+  // 常驻记忆是增强项：缺可信用户、记忆关闭或读接口不可用时降级为空，不影响聊天。
+  if (
+    !owner ||
+    memory.MEMORY_ENABLED === false ||
+    typeof memory.getMemoriesForUser !== 'function'
+  ) {
     return { items: [], truncated: 0 };
   }
 
@@ -96,8 +101,12 @@ function selectCoreMemories({ userId, sessionId } = {}) {
     const points = Array.from(content);
     const remaining = MAX_CORE_MEMORY_CODEPOINTS - codePoints;
     if (points.length > remaining) {
-      // 只裁剪排序末尾条目的正文，绝不改写存储对象或跳过它补入低优先级条目。
-      items.push({ ...item, content: points.slice(0, remaining).join('') });
+      // 预算刚好用尽（remaining=0）时不塞空条目，只计入截断；
+      // 还有空间时放一条带省略号的截断副本，总长度不超过 remaining。
+      if (remaining > 0) {
+        const kept = remaining > 1 ? points.slice(0, remaining - 1) : [];
+        items.push({ ...item, content: `${kept.join('')}…` });
+      }
       truncated += eligible.length - index;
       break;
     }
