@@ -36,6 +36,9 @@ const env = {
   DEEPSEEK_API_KEY: '',
   // 开发者本地 .env 可能打开 Agent 开关；测试必须从确定的默认态开始。
   BLUEBIRD_AGENT_TOOLS: '',
+  // Claim Guard 默认开启，但普通测试按脚本精确断言模型调用次数；
+  // 统一显式关闭，声明核对专项在文件内自行打开。
+  BLUEBIRD_CLAIM_GUARD: '0',
   // 监控默认开启；普通测试关闭，监控专项测试在文件内显式打开并使用临时目录。
   BLUEBIRD_MONITORING: '0',
   // 测试进程里的模型调用一律是桩（模块级 mock 或本地 HTTP 桩）。

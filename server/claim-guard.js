@@ -25,10 +25,16 @@ const SUCCESS_PATTERNS = Object.freeze({
     reply: /(?:已|已经)(?:成功)?回复(?:了)?|(?:邮件|消息).{0,8}回复(?:成功|了)/i,
   },
   memory: {
-    remember: /(?:已|已经)(?:成功)?(?:记住|记录|保存|写入)(?:了)?(?:这条)?(?:记忆|偏好|信息)?|记忆.{0,8}(?:已保存|写入成功|更新成功)/i,
+    // 2026-11-23：保存/写入必须紧邻「记忆/偏好/信息」才算记忆声明；
+    // 否则「文件已保存」会被误判成记忆成功声明（跨工具误报）。
+    remember: /(?:已|已经).{0,4}(?:记住|记下)(?:了)?|(?:记忆|偏好|信息|画像).{0,10}(?:已保存|已写入|保存成功|写入成功|更新成功)|(?:已|已经)(?:成功)?(?:保存|写入|记录)(?:了)?.{0,4}(?:记忆|偏好|信息)/i,
     search: /(?:记忆|信息|记录).{0,6}(?:检索|查询|搜索)(?:已)?成功|(?:检索|查询|搜索)(?:记忆|信息|记录).{0,4}(?:已)?成功/i,
   },
-  delegation: { delegate: /(?:已|已经)(?:成功)?(?:派发|委派|提交)(?:了)?|(?:任务|请求).{0,10}(?:已提交|已派发|已进入队列)/i },
+  delegation: {
+    // 2026-11-23：派发/提交必须指向任务、请求或 Bot，避免「表单已提交」
+    // 在委派失败时被当成成功声明。
+    delegate: /(?:已|已经)(?:成功)?(?:派发|委派|提交)(?:了)?.{0,6}(?:任务|子任务|请求|委派|Bot|机器人)|(?:任务|子任务|请求|委派|Bot|机器人).{0,10}(?:已(?:成功)?(?:派发|提交|进入队列)|(?:派发|提交)成功)|(?:已|已经)(?:成功)?进入队列/i,
+  },
 });
 
 const FAILURE_PATTERNS = Object.freeze({
@@ -48,6 +54,9 @@ const FAILURE_PATTERNS = Object.freeze({
   delegation: { delegate: /(?:(?:派发|委派|提交|任务|请求).{0,10}(?:失败|没成功|未成功|没能|无法|还没|没有|没)|(?:还没|没有|没|未能|无法|不能|没能|未).{0,8}(?:派发|委派|提交))/i },
 });
 
+// 「待确认」是尚未落盘的状态陈述，不是完成声明；与 pendingConfirmation 回执对齐。
+const PENDING_CLAIM_RE = /(?:待确认|待你确认|等待(?:用户|你)?确认|等(?:用户|你)确认|尚未确认)/i;
+
 function getToolInfo(step) {
   return step && typeof step.name === 'string' ? TOOL_GROUPS[step.name] || null : null;
 }
@@ -58,6 +67,8 @@ function toolSucceeded(step) {
   return !/(?:待确认|等待用户确认|等用户确认)/i.test(summary);
 }
 
+// 只过滤「意向 / 拒绝」：不会保存、不打算发送等，不代表本轮执行结果。
+// 「还没保存」「没发出去」「未能写入」是对本轮结果的陈述，仍要与 ok 回执对照。
 function isNegatedOutcome(text, operation) {
   const action = {
     write: '(?:保存|写入|创建|修改|更新|生成)',
@@ -69,7 +80,7 @@ function isNegatedOutcome(text, operation) {
     search: '(?:检索|查询|搜索)',
     delegate: '(?:派发|委派|提交)',
   }[operation];
-  return new RegExp(`(?:还没|尚未|没有|没(?:有)?|没发出去|未能|不会|不打算|不准备|不需要).{0,8}${action}`, 'i').test(text);
+  return new RegExp(`(?:不会|不打算|不准备|不需要|无需|不必|不想).{0,8}${action}`, 'i').test(text);
 }
 
 function detectClaimMismatch(reply, toolSteps) {
@@ -88,10 +99,10 @@ function detectClaimMismatch(reply, toolSteps) {
     const failurePattern = FAILURE_PATTERNS[info.group] && FAILURE_PATTERNS[info.group][info.operation];
     if (!successPattern || !failurePattern) continue;
 
-    // “不会保存/不打算发送”是意向或拒绝，不代表本轮执行结果；“还没保存”
-    // 与“没发出去”是对本轮尚未成功的陈述，仍要同 ok:true 对照。
+    // 意向/拒绝（不会保存）与待确认陈述不算完成声明；其余一律与回执对照。
     const claims = clauses
       .filter(clause => !isNegatedOutcome(clause, info.operation))
+      .filter(clause => !PENDING_CLAIM_RE.test(clause))
       .map(clause => ({
         success: successPattern.test(clause),
         failure: failurePattern.test(clause),
@@ -110,8 +121,9 @@ function detectClaimMismatch(reply, toolSteps) {
   return null;
 }
 
+// 2026-11-23：默认开启；只有显式 BLUEBIRD_CLAIM_GUARD=0 才关闭（排障/成本敏感时）。
 function claimGuardEnabled() {
-  return process.env.BLUEBIRD_CLAIM_GUARD === '1';
+  return String(process.env.BLUEBIRD_CLAIM_GUARD || '1').trim() !== '0';
 }
 
 function buildCorrectionInstruction(mismatch, toolSteps, previousReply = '') {

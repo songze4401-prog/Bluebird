@@ -58,7 +58,9 @@ process.env.DEEPSEEK_API_KEY = 'sk-stub-deepseek-0001';
 process.env.PORT = '0';
 // Agent 开关：默认关。各组自行翻转，结束前恢复。
 process.env.BLUEBIRD_AGENT_TOOLS = '';
-process.env.BLUEBIRD_CLAIM_GUARD = '';
+// Claim Guard 默认开启；本文件按脚本精确断言模型调用次数，先显式关闭，
+// 仅 C3 组打开验证开启路径。
+process.env.BLUEBIRD_CLAIM_GUARD = '0';
 // Claim Guard 断言监控事件，覆盖门禁默认关闭全局监控时也要显式启用。
 process.env.BLUEBIRD_MONITORING = '1';
 
@@ -712,12 +714,46 @@ async function main() {
   for (const [name, text, step] of mismatchCases) {
     check(name, claimGuard.detectClaimMismatch(text, [step]) !== null);
   }
-  check('“还没保存”否定表达不误报', claimGuard.detectClaimMismatch('还没保存文件。', [successStep('workspace_write', true)]) === null);
-  check('“没发出去”否定表达不误报', claimGuard.detectClaimMismatch('邮件没发出去。', [successStep('mail_send', true)]) === null);
+  check('“还没保存”与成功回执矛盾要报', claimGuard.detectClaimMismatch('还没保存文件。', [successStep('workspace_write', true)]) !== null);
+  check('“没发出去”与成功回执矛盾要报', claimGuard.detectClaimMismatch('邮件没发出去。', [successStep('mail_send', true)]) !== null);
   check('“不会保存”否定意向不误报', claimGuard.detectClaimMismatch('我不会保存这段内容。', [successStep('workspace_write', true)]) === null);
   check('“不打算发送”否定意向不误报', claimGuard.detectClaimMismatch('我不打算发送邮件。', [successStep('mail_send', true)]) === null);
   check('无工具回执不做声明核对', claimGuard.detectClaimMismatch('已保存文件。', []) === null);
-  check('环境开关默认关闭', !claimGuard.claimGuardEnabled());
+  check(
+    '跨组不误报：只有文件成功时“已保存”不算记忆声明',
+    claimGuard.detectClaimMismatch('文件已保存。', [
+      successStep('workspace_write', true),
+      successStep('memory_remember', false),
+    ]) === null
+  );
+  check(
+    '跨组不误报：表单提交不算委派声明',
+    claimGuard.detectClaimMismatch('表单已提交。', [
+      successStep('workspace_write', true),
+      successStep('delegate_to_bot', false),
+    ]) === null
+  );
+  check(
+    '待确认表述不算完成声明',
+    claimGuard.detectClaimMismatch('已创建待确认写入。', [
+      {
+        name: 'workspace_write',
+        ok: true,
+        summary: '已创建待确认写入，等用户在聊天里确认后才会落盘',
+        durationMs: 2,
+        pendingConfirmation: { id: 'confirm_1', path: 'note.md' },
+      },
+    ]) === null
+  );
+  check(
+    '记忆成功声明仍能识别（记住 / 记忆已保存）',
+    claimGuard.detectClaimMismatch('已经记住这条记忆。', [successStep('memory_remember', false)]) !== null &&
+      claimGuard.detectClaimMismatch('记忆已保存。', [successStep('memory_remember', false)]) !== null
+  );
+  delete process.env.BLUEBIRD_CLAIM_GUARD;
+  check('环境开关默认开启（未设置也启用）', claimGuard.claimGuardEnabled());
+  process.env.BLUEBIRD_CLAIM_GUARD = '0';
+  check('显式 0 时关闭', !claimGuard.claimGuardEnabled());
 
   process.env.BLUEBIRD_CLAIM_GUARD = '1';
   resetScript();
@@ -767,7 +803,8 @@ async function main() {
     retry: async () => { throw new Error('flag off must not retry'); },
   });
   check('开关关闭时不重生成且不改写回复', disabled.reply === '文件已保存。' && !disabled.retried);
-  delete process.env.BLUEBIRD_CLAIM_GUARD;
+  // 后续分组继续按“显式关闭”跑，避免默认开启改变它们的桩调用次数。
+  process.env.BLUEBIRD_CLAIM_GUARD = '0';
 
   // ================= D. 未知工具 =================
   ORIG_LOG('\nD. 未知工具安全处理');
