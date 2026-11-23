@@ -331,6 +331,7 @@ const {
 
 // 内置后端提示词：用户未自定义时使用；控制面板读取/重置也以它为准。
 const { BLUEBIRD_SYSTEM_PROMPT } = require('./blue-system-prompt');
+const claimGuard = require('./claim-guard');
 
 // 回复分段：默认一条消息；只有超过单条硬上限才按语义边界分片（纯函数）。
 const { splitReplyIntoSegments, DEFAULT_MAX_CHARS } = require('./split-reply');
@@ -1545,6 +1546,37 @@ function recordSentForContext(ctx, { round = 1, messages = ctx.requestMessages, 
 
 // Provider 返回后立即对账：把真实 usage 写进 trace，并与本地估算输入 Token 比对。
 // 桩返回一律标 stub，不参与校准；没有 usage 就记 missing，不猜数字。
+async function reconcileAgentClaim({ ctx, rawReply, toolSteps, abortSignal, round }) {
+  return claimGuard.reconcileClaim({
+    reply: rawReply,
+    toolSteps,
+    sessionId: ctx.sessionId,
+    retry: async correctionInstruction => {
+      const messages = [
+        ...ctx.requestMessages,
+        { role: 'assistant', content: rawReply },
+        { role: 'system', content: correctionInstruction },
+      ];
+      const retryRound = round + 1;
+      recordSentForContext(ctx, { round: retryRound, messages, toolsCount: 0 });
+      const completion = await createChatCompletion({
+        providerId: ctx.providerId,
+        modelId: ctx.modelId,
+        wantVision: ctx.useVision,
+        temperature: 0.2,
+        maxTokens: 8192,
+        timeout: 90000,
+        messages,
+        monitoringRound: retryRound,
+        signal: abortSignal,
+      });
+      recordUsageForContext(ctx, completion, retryRound);
+      const reply = completion.choices?.[0]?.message?.content;
+      return typeof reply === 'string' ? reply : '';
+    },
+  });
+}
+
 function recordUsageForContext(ctx, completion, round = 1) {
   if (!ctx) return null;
 
@@ -1744,6 +1776,19 @@ app.post('/chat', requireAuth, async (req, res) => {
             `[orchestration-chat] not dispatched session=${ctx.sessionId} reason=${wired.reason}`
           );
         }
+      }
+
+      // Claim Guard 在工具循环结束后最多重生成一次；重试不带 tools，绝不重跑工具。
+      if (Array.isArray(toolSteps) && toolSteps.length) {
+        const reconciled = await reconcileAgentClaim({
+          ctx,
+          rawReply,
+          toolSteps,
+          abortSignal: disconnect.signal,
+          round: outcome.rounds || 1,
+        });
+        rawReply = reconciled.reply;
+        if (reconciled.retried) lastAgentRounds += 1;
       }
 
       // Context Engine trace 收尾：把真实工具调用结果写入 trace（结构化、可测试验证）
@@ -2194,6 +2239,20 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
               `[orchestration-chat] not dispatched (stream) session=${ctx.sessionId} reason=${wired.reason}`
             );
           }
+        }
+
+        // 编排块处理会改写最终回复，因此核对必须位于编排之后、delta 之前。
+        // Claim Guard 最多无工具重生成一次，绝不重跑本轮工具。
+        if (Array.isArray(toolSteps) && toolSteps.length) {
+          const reconciled = await reconcileAgentClaim({
+            ctx,
+            rawReply,
+            toolSteps,
+            abortSignal: disconnect.signal,
+            round: outcome.rounds || 1,
+          });
+          rawReply = reconciled.reply;
+          if (reconciled.retried) lastAgentRounds += 1;
         }
 
         // 最终文本经同一套情绪标签剥离后以 delta 发出

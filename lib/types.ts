@@ -38,7 +38,7 @@ export type ToolStep = {
   name: string;
   ok: boolean;
   summary: string;
-  durationMs: number;
+  durationMs?: number;
   // 工作区写入确认凭据（仅 workspace_write 的 pending 流；服务端
   // sessions.js sanitizeToolSteps 白名单字段，只含元数据不含文件正文）
   pendingConfirmation?: {
