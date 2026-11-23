@@ -219,7 +219,7 @@ function check(name, cond, extra = '') {
     ]);
     const w = await req('/chat', {
       method: 'POST',
-      body: { sessionId: S1, message: FACTS[i].quote },
+      body: { sessionId: S1, message: `请记住，${FACTS[i].quote}` },
     });
     if (w.status !== 200 || !(w.json.toolSteps || [])[0] || w.json.toolSteps[0].ok !== true) {
       check(`第 ${i + 1} 条记忆写入失败`, false, JSON.stringify(w.json));

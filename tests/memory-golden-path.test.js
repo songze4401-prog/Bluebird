@@ -205,7 +205,7 @@ function check(name, cond, extra = '') {
 
   const created = await req('/chat', {
     method: 'POST',
-    body: { sessionId: S1, message: '我喜欢喝美式咖啡' },
+    body: { sessionId: S1, message: '请记住，我喜欢喝美式咖啡' },
   });
 
   check(

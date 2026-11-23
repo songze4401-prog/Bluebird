@@ -11,6 +11,7 @@
  */
 const { applyCandidate } = require('./memory');
 const { textLength } = require('./text-utils');
+const { detectExplicitMemoryIntent } = require('./memory-evidence');
 const monitoring = require('./monitoring');
 
 const LIMITS = Object.freeze({
@@ -36,7 +37,8 @@ const definition = Object.freeze({
   name: 'memory_remember',
   description:
     '提交一条关于用户的候选长期记忆。只能用于用户明确说出、值得跨会话保留的事实/偏好；' +
-    '用你自己的话概括即可，不要求逐字引用用户原话。sourceQuote 可选：' +
+    '只有当前用户明确要求记住/保存时才可直接生效；其他情况仅待用户确认。' +
+    '明确要求时可用你自己的话概括，但概括必须有当前消息支持。sourceQuote 可选：' +
     '若填写则必须是当前用户消息里的连续原话片段（用于审计，不能编造）；' +
     '不填也能写入。临时情绪、一次性状态、模型推测不要提交。' +
     '如果用户是在纠正旧事实，可传 targetId 指定要更新的记忆。',
@@ -204,6 +206,7 @@ const definition = Object.freeze({
 
     // 记忆归属使用独立 scope；委派任务写入父主控会话，而不是 Bot 的 bs_ 会话。
     const memorySessionId = context.memoryScopeSessionId || context.sessionId;
+    const explicitMemoryIntent = detectExplicitMemoryIntent(context.userText);
     const result = await applyCandidate(
       {
         content: args.content,
@@ -224,7 +227,13 @@ const definition = Object.freeze({
         userId: context.userId || null,
         messageId: context.userMessageId || null,
         sourceType: 'agent',
-        intent: args.targetId ? 'correction' : 'explicit',
+        // 只有服务端从当前用户原话识别到肯定保存请求时，才授予 explicit；
+        // targetId/工具调用本身不构成用户同意。
+        intent: args.targetId
+          ? 'correction'
+          : explicitMemoryIntent
+            ? 'explicit'
+            : 'auto',
         actor: 'agent',
         userText: context.userText,
         requireUserGrounding: true,

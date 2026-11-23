@@ -215,7 +215,7 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-135 files, 2602 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
+135 files, 2610 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
 node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js tests/monitoring.test.js   # node:test suites (231)
@@ -297,14 +297,14 @@ node tests/emotion-decay-global.test.js    # 10 — global baseline decay incl. 
 node tests/frozen-snapshot-banners.test.js # 2
 node tests/ledger-evidence-modules.test.js # 4
 node tests/mail-tools.test.js              # 5
-node tests/memory-agent-write.test.js      # 14
+node tests/memory-agent-write.test.js      # 20
 node tests/memory-api-recall.test.js       # 41
 node tests/memory-bot.test.js              # 10 — Memory Bot registry/config, AES-256-GCM vault, Bot sessions, tool loop and budget finalization, delivered-terminal task pruning, queue/SSE
 node tests/memory-budget-golden.test.js    # 7 — budget trimming: 10 memories → memoryMaxItems=8 → final request injects ≤8, token budget enforced
 node tests/memory-context-injection.test.js # 11
 node tests/memory-degradation-golden.test.js # 6 — real server with MEMORY_ENABLED=false: chat still works, memoryState=empty, no memory block injected, stable across turns
 node tests/memory-eval-baseline.test.js    # 32
-node tests/memory-evidence-policy.test.js  # 19
+node tests/memory-evidence-policy.test.js  # 21
 node tests/memory-golden-path.test.js      # 12 — golden path: real /chat + stubbed provider, write→recall→inject into final request, session isolation, response memoryState empty→ok, requestId format
 node tests/memory-id-migration.test.js     # 20
 node tests/memory-id-order.test.js         # 10

@@ -46,6 +46,14 @@ const DECISION_RE = /(决定|采用|选择|方案|架构|迁移|上线|改用|�
 const HEDGE_RE = /(可能|也许|似乎|大概|好像|倾向于|应该是|估计|或许|不确定)/;
 const PERSISTENT_INTENT_RE =
   /(记住|记下|记着|别忘|不要忘|以后|今后|从今以后|长期|始终|一直|永远|每次|往后)/;
+// 仅接受当前用户直接发出的肯定保存指令。它刻意比 persistent-intent
+// 更窄：普通长期事实、否定、条件句和转述都不能仅凭一个“记住”字样授权 Agent 落盘。
+const DIRECT_MEMORY_REQUEST_RE =
+  /(?:^|[。.!?;，,:：\n])\s*(?:(?:请|麻烦|帮我|请帮我|你|please|kindly|can you|could you|would you|help me|I want you to|I need you to|我希望你(?:能)?|我想让你|我要你|(?:从今以后|以后|今后|往后)\s*(?:帮我)?)\s*)*(?:把.{0,30}(?:记住|记下|记着|记一下|记下来|记录|保存|存到记忆里)|记住(?!了|过)|记下(?!了|过)|记着(?!了|过)|记一下|记一笔|记录(?:一下|下来)?|保存(?:到记忆里?)?|存(?:到记忆里?|起来)|写入记忆|加入记忆|remember(?!ed|ing)(?:\s+(?:that|this))?|save(?!d|s|ing)(?:\s+(?:this|that|it)(?:\s+to memory)?)?|store(?!d|s|ing)(?:\s+(?:this|that|it)(?:\s+in memory)?)?|keep in mind|note(?:\s+down)?|make a note)/i;
+const CONDITIONAL_MEMORY_INTENT_RE =
+  /(如果|假如|假设|要是|倘若|万一|假使|假定|\bif\b|\bsuppose(?:d)?\b|\bhypothetical(?:ly)?\b)/i;
+const REPORTED_MEMORY_INTENT_RE =
+  /(?:(?:他说|她说|朋友(?:曾)?说|有人说|别人说|同事说|家人说|they said|he said|she said|someone said)|(?:我在)?[^。.!?;\n]{0,24}(?:文章|帖子|书|邮件|网页|新闻|视频|聊天记录|评论|原文|引用)(?:里|中|上)?[^。.!?;\n]{0,12}(?:看到|看见|读到|听到|写着|写道|提到|表示|说|要求|建议)|\baccording to\b[^.!?\n]{0,80}|\b(?:a|an|the|this)\s+(?:article|post|book|email|webpage|news(?: report)?|video|message|quote|citation)\s+(?:says|said|writes|wrote|asks|asked|recommends|recommended|states|stated)\b|\bI (?:read|saw|heard|found)\b[^.!?\n]{0,80}\b(?:article|post|book|email|webpage|news|video|message|quote|citation)\b[^.!?\n]{0,20}(?:says|said|writes|wrote|asks|asked|recommends|recommended)?)$/i;
 const EXPLICIT_CORRECTION_RE =
   /(更正|纠正|改成|改为|改(?:喝|用|叫|住|选)|换成|现在(?:我|用户)?(?:喜欢|用|叫|住|选择)|不再|已经不|不是.{0,20}(而是|改为|换成))/;
 const ACTIVE_CONFIDENCE = Object.freeze({
@@ -86,6 +94,31 @@ function hasTemporaryMarker(text) {
 
 function detectPersistentIntent(text) {
   return PERSISTENT_INTENT_RE.test(String(text || ''));
+}
+
+function detectExplicitMemoryIntent(text) {
+  const value = String(text || '').trim();
+  if (!value || CONDITIONAL_MEMORY_INTENT_RE.test(value)) return false;
+
+  // 否定命令不是保存授权；“别忘了”不在此列，因为它是肯定的记忆请求。
+  if (
+    /(?:不要|别|不必|无需|不用|不能|不需要|拒绝|停止)\s*(?:再\s*)?(?:请\s*)?(?:记住|记下|记着|记一下|记录|保存|存到记忆|写入记忆|加入记忆)|\b(?:do not|don't|never|not)\s+(?:please\s+)?(?:remember|save|store|note|keep in mind)\b/i.test(
+      value
+    )
+  ) {
+    return false;
+  }
+
+  const match = DIRECT_MEMORY_REQUEST_RE.exec(value);
+  if (!match) return false;
+
+  const prefix = value
+    .slice(0, match.index)
+    .replace(/[\s，,。.!?;:：]+$/u, '');
+  const currentClausePrefix = prefix.split(/[。.!?;\n]/).pop().trim();
+  if (REPORTED_MEMORY_INTENT_RE.test(currentClausePrefix)) return false;
+
+  return true;
 }
 
 function detectExplicitCorrection(text) {
@@ -298,6 +331,8 @@ function buildEvidence({
     sensitivity: candidate.sensitive === true ? 1 : 0,
     modelConfidence: Number(candidate.confidence),
     persistentIntent: candidate.persistentIntent === true,
+    explicitMemoryIntent: candidate.explicitMemoryIntent === true,
+    contentGrounded: candidate.contentGrounded === true,
     quotePresent: Boolean(quote),
     quoteGrounded,
     hedged: candidate.uncertainty === 'source_hedged' || hasHedge(quote),
@@ -384,6 +419,7 @@ function applyEvidencePolicy({
   const directAgentQuoteEvidence =
     candidate.provenance === PROVENANCE.AGENT_OBSERVED &&
     candidate.sourceType === 'agent' &&
+    candidate.explicitMemoryIntent === true &&
     evidence.quoteGrounded &&
     evidence.directness >= 0.79 &&
     evidence.sourceReliability >= 0.7;
@@ -394,6 +430,8 @@ function applyEvidencePolicy({
     candidate.provenance === PROVENANCE.AGENT_OBSERVED &&
     candidate.sourceType === 'agent' &&
     candidate.intent === 'explicit' &&
+    candidate.explicitMemoryIntent === true &&
+    evidence.contentGrounded === true &&
     confidence >= 0.7;
   const directEvidence =
     directUserEvidence || directAgentQuoteEvidence || directAgentExplicitEvidence;
@@ -492,12 +530,14 @@ module.exports = {
   DECISION_RE,
   HEDGE_RE,
   PERSISTENT_INTENT_RE,
+  DIRECT_MEMORY_REQUEST_RE,
   ACTIVE_CONFIDENCE,
   PENDING_CONFIDENCE,
   getPolicyMode,
   hasHedge,
   hasTemporaryMarker,
   detectPersistentIntent,
+  detectExplicitMemoryIntent,
   detectExplicitCorrection,
   resolveProvenance,
   classifyCategory,

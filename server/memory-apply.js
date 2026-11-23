@@ -50,6 +50,7 @@ const {
   buildEvidence,
   classifyCategory,
   detectExplicitCorrection,
+  detectExplicitMemoryIntent,
   detectPersistentIntent,
   getPolicyMode,
   hasHedge,
@@ -80,6 +81,22 @@ const CONTESTED_LIMIT = 20;
 const ARCHIVED_HISTORY = 20;
 // identity 类记忆的显式配额：超过就淘汰最旧的，不再假装「identity 永不淘汰」。
 const IDENTITY_QUOTA = 20;
+
+function candidateContentGrounded(content, sourceQuote, userText, keywords) {
+  const normalizedUser = normalize(userText || '');
+  const normalizedQuote = normalize(sourceQuote || '');
+  if (!normalizedUser) return false;
+  if (normalizedQuote && !normalizedUser.includes(normalizedQuote)) return false;
+
+  const supportText = sourceQuote || userText;
+  const anchorScore = similarity(content, supportText);
+  const grounding = keywordGrounding(keywords, userText);
+  return (
+    anchorScore >= ANCHOR_MIN ||
+    (anchorScore >= ANCHOR_FALLBACK_MIN && grounding.covered)
+  );
+}
+
 function normalizeCandidate(raw, options = {}) {
   const now = new Date().toISOString();
   const source = raw && typeof raw === 'object' ? raw : {};
@@ -133,6 +150,14 @@ function normalizeCandidate(raw, options = {}) {
         .filter(Boolean)
         .slice(0, 5)
     : [];
+  // Agent 的保存许可和内容接地均从可信运行时 userText 派生，绝不采信
+  // 模型候选中的 intent / explicitMemoryIntent / contentGrounded 字段。
+  const explicitMemoryIntent =
+    sourceType === 'agent' && detectExplicitMemoryIntent(userText);
+  const contentGrounded =
+    sourceType === 'agent' &&
+    candidateContentGrounded(content, sourceQuote, userText, keywords);
+  const verifiedAgentIntent = explicitMemoryIntent && contentGrounded;
 
   // 2026-11-23：Agent 概括写入可以没有原话。贡献的本质是「用户说过的原话」，
   // 没有原话就不造空贡献——hydrateEntries 会把空原话的贡献丢掉，存空贡献会
@@ -182,14 +207,31 @@ function normalizeCandidate(raw, options = {}) {
     evidence: null,
     policyVersion: POLICY_VERSION,
     decisionVersion: DECISION_VERSION,
-    intent: cleanText(options.intent) || cleanText(source.intent) || 'auto',
+    intent:
+      sourceType === 'agent'
+        ? options.intent === 'correction'
+          ? 'correction'
+          : verifiedAgentIntent
+            ? 'explicit'
+            : 'auto'
+        : cleanText(options.intent) || cleanText(source.intent) || 'auto',
+    explicitMemoryIntent,
+    contentGrounded,
     targetId: cleanText(options.targetId) || cleanText(source.targetId),
     eventAt: cleanText(source.eventAt),
     condition: cleanText(source.condition),
     requiresConfirmation:
       options.requiresConfirmation === true ||
-      source.requiresConfirmation === true,
-    confirmationReason: cleanText(source.confirmationReason),
+      source.requiresConfirmation === true ||
+      (sourceType === 'agent' && !verifiedAgentIntent),
+    confirmationReason:
+      cleanText(options.confirmationReason) ||
+      cleanText(source.confirmationReason) ||
+      (sourceType === 'agent' && !explicitMemoryIntent
+        ? 'user_save_intent_required'
+        : sourceType === 'agent' && !contentGrounded
+          ? 'content_not_grounded_requires_confirmation'
+          : null),
   };
 }
 

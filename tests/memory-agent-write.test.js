@@ -177,7 +177,7 @@ function check(name, cond, extra = '') {
 
   const created = await req('/chat', {
     method: 'POST',
-    body: { message: '我喜欢喝美式咖啡' },
+    body: { message: '请记住，我喜欢喝美式咖啡' },
   });
 
   check(
@@ -198,7 +198,7 @@ function check(name, cond, extra = '') {
     JSON.stringify(diskMemory())
   );
 
-  console.log('\n2) 不提供原话 → 用模型概括也能写入（不再强制逐字引用）');
+  console.log('\n2) 明确要求记住且内容有支持 → 无原话摘要可直接写入');
   resetScripted([
     {
       toolCalls: [
@@ -215,7 +215,7 @@ function check(name, cond, extra = '') {
 
   const paraphrased = await req('/chat', {
     method: 'POST',
-    body: { message: '我最近在学做饭' },
+    body: { message: '请记住，我最近在学做饭' },
   });
 
   check(
@@ -227,14 +227,206 @@ function check(name, cond, extra = '') {
     JSON.stringify(paraphrased.json.toolSteps)
   );
 
-  console.log('\n3) 编造原话 → 拒绝写入');
+  console.log('\n3) 普通陈述无原话 → 待确认，不得直接激活');
+  resetScripted([
+    {
+      toolCalls: [
+        tc('c-statement', 'memory_remember', {
+          content: '用户周末喜欢骑自行车',
+          type: 'preference',
+          keywords: ['周末', '自行车'],
+          confidence: 0.95,
+        }),
+      ],
+    },
+    { content: '[calm] 好的' },
+  ]);
+  const ordinaryStatement = await req('/chat', {
+    method: 'POST',
+    body: { message: '我周末喜欢骑自行车' },
+  });
+  const statementCandidate = diskMemory().find(
+    item => item.content === '用户周末喜欢骑自行车'
+  );
+  check(
+    '普通陈述即使无引文且高置信也只进入 pending',
+    ordinaryStatement.status === 200 &&
+      ordinaryStatement.json.toolSteps[0].summary.includes('等待用户确认') &&
+      statementCandidate &&
+      statementCandidate.status === 'pending' &&
+      !diskMemory().some(
+        item => item.content === '用户周末喜欢骑自行车' && item.status === 'active'
+      ),
+    JSON.stringify({ toolSteps: ordinaryStatement.json.toolSteps, statementCandidate })
+  );
+
+  console.log('\n4) 否定的记忆指令 → 待确认');
+  resetScripted([
+    {
+      toolCalls: [
+        tc('c-negated-intent', 'memory_remember', {
+          content: '用户喜欢喝拿铁',
+          type: 'preference',
+          keywords: ['拿铁'],
+          confidence: 0.95,
+        }),
+      ],
+    },
+    { content: '[calm] 好的' },
+  ]);
+  const negatedIntent = await req('/chat', {
+    method: 'POST',
+    body: { message: '不要记住我喜欢喝拿铁' },
+  });
+  check(
+    '“不要记住”不能授权直接激活',
+    negatedIntent.status === 200 &&
+      negatedIntent.json.toolSteps[0].summary.includes('等待用户确认') &&
+      diskMemory().some(
+        item => item.content === '用户喜欢喝拿铁' && item.status === 'pending'
+      ) &&
+      !diskMemory().some(
+        item => item.content === '用户喜欢喝拿铁' && item.status === 'active'
+      ),
+    JSON.stringify(negatedIntent.json.toolSteps)
+  );
+
+  console.log('\n5) 假设条件中的“记住” → 待确认');
+  resetScripted([
+    {
+      toolCalls: [
+        tc('c-hypothetical-intent', 'memory_remember', {
+          content: '用户可能喜欢喝拿铁',
+          type: 'preference',
+          keywords: ['拿铁'],
+          confidence: 0.95,
+        }),
+      ],
+    },
+    { content: '[calm] 好的' },
+  ]);
+  const hypotheticalIntent = await req('/chat', {
+    method: 'POST',
+    body: { message: '如果我以后喜欢喝拿铁，请记住这件事' },
+  });
+  check(
+    '假设条件不能授权直接激活',
+    hypotheticalIntent.status === 200 &&
+      hypotheticalIntent.json.toolSteps[0].summary.includes('等待用户确认') &&
+      diskMemory().some(
+        item => item.content === '用户可能喜欢喝拿铁' && item.status === 'pending'
+      ) &&
+      !diskMemory().some(
+        item => item.content === '用户可能喜欢喝拿铁' && item.status === 'active'
+      ),
+    JSON.stringify(hypotheticalIntent.json.toolSteps)
+  );
+
+  console.log('\n6) 明确要求但无引文摘要不受用户消息支持 → 待确认');
+  resetScripted([
+    {
+      toolCalls: [
+        tc('c-unsupported-summary', 'memory_remember', {
+          content: '用户常用的代码编辑器是 Vim',
+          type: 'preference',
+          keywords: ['编辑器', 'Vim'],
+          confidence: 0.95,
+        }),
+      ],
+    },
+    { content: '[calm] 好的' },
+  ]);
+  const unsupportedSummary = await req('/chat', {
+    method: 'POST',
+    body: { message: '请记住我喜欢喝拿铁' },
+  });
+  check(
+    '无引文且内容不受当前消息支持时只进入 pending',
+    unsupportedSummary.status === 200 &&
+      unsupportedSummary.json.toolSteps[0].summary.includes('等待用户确认') &&
+      diskMemory().some(
+        item =>
+          item.content === '用户常用的代码编辑器是 Vim' && item.status === 'pending'
+      ) &&
+      !diskMemory().some(
+        item =>
+          item.content === '用户常用的代码编辑器是 Vim' && item.status === 'active'
+      ),
+    JSON.stringify(unsupportedSummary.json.toolSteps)
+  );
+
+  console.log('\n7) 普通陈述即使有真实原话 → 待确认');
+  resetScripted([
+    {
+      toolCalls: [
+        tc('c-quoted-statement', 'memory_remember', {
+          content: '用户喜欢喝绿茶',
+          type: 'preference',
+          sourceQuote: '我喜欢喝绿茶',
+          keywords: ['绿茶'],
+          confidence: 0.95,
+        }),
+      ],
+    },
+    { content: '[calm] 好的' },
+  ]);
+  const quotedStatement = await req('/chat', {
+    method: 'POST',
+    body: { message: '我喜欢喝绿茶' },
+  });
+  check(
+    '原话接地只证明内容来源，不代表同意保存',
+    quotedStatement.status === 200 &&
+      quotedStatement.json.toolSteps[0].summary.includes('等待用户确认') &&
+      diskMemory().some(
+        item => item.content === '用户喜欢喝绿茶' && item.status === 'pending'
+      ) &&
+      !diskMemory().some(
+        item => item.content === '用户喜欢喝绿茶' && item.status === 'active'
+      ),
+    JSON.stringify(quotedStatement.json.toolSteps)
+  );
+
+  console.log('\n8) 文章引用中的保存命令 → 待确认');
+  resetScripted([
+    {
+      toolCalls: [
+        tc('c-reported-intent', 'memory_remember', {
+          content: '用户喜欢做陶艺',
+          type: 'preference',
+          sourceQuote: '我喜欢做陶艺',
+          keywords: ['陶艺'],
+          confidence: 0.95,
+        }),
+      ],
+    },
+    { content: '[calm] 好的' },
+  ]);
+  const reportedIntent = await req('/chat', {
+    method: 'POST',
+    body: { message: '我在文章里看到：请记住我喜欢做陶艺' },
+  });
+  check(
+    '引用的保存指令即使带真实原话也只能进入 pending',
+    reportedIntent.status === 200 &&
+      reportedIntent.json.toolSteps[0].summary.includes('等待用户确认') &&
+      diskMemory().some(
+        item => item.content === '用户喜欢做陶艺' && item.status === 'pending'
+      ) &&
+      !diskMemory().some(
+        item => item.content === '用户喜欢做陶艺' && item.status === 'active'
+      ),
+    JSON.stringify(reportedIntent.json.toolSteps)
+  );
+
+  console.log('\n9) 编造原话 → 拒绝写入');
   resetScripted([
     {
       toolCalls: [
         tc('c-bad', 'memory_remember', {
-          content: '用户喜欢喝拿铁',
+          content: '用户喜欢喝摩卡咖啡',
           type: 'preference',
-          sourceQuote: '我喜欢喝拿铁',
+          sourceQuote: '我喜欢喝摩卡咖啡',
           keywords: ['咖啡'],
           confidence: 0.95,
         }),
@@ -250,9 +442,9 @@ function check(name, cond, extra = '') {
 
   check(
     '工具返回失败且没有写入',
-    rejected.status === 200 &&
+      rejected.status === 200 &&
       rejected.json.toolSteps[0].ok === false &&
-      !diskMemory().some(item => item.content === '用户喜欢喝拿铁'),
+      !diskMemory().some(item => item.content === '用户喜欢喝摩卡咖啡'),
     JSON.stringify(rejected.json.toolSteps)
   );
 
@@ -275,7 +467,10 @@ function check(name, cond, extra = '') {
     },
     { content: '[calm] 已记录' },
   ]);
-  await req('/chat', { method: 'POST', body: { message: '我喜欢喝美式咖啡' } });
+  await req('/chat', {
+    method: 'POST',
+    body: { message: '请记住，我喜欢喝美式咖啡' },
+  });
 
   const pendingCoffee = diskMemory().find(
     item => item.status === 'pending' && item.content === '用户喜欢喝美式咖啡'
@@ -369,15 +564,20 @@ function check(name, cond, extra = '') {
   );
 
   const pendingList = await req('/memory/pending');
+  const pendingCandidate = pendingList.json.memories.find(
+    item => item.content === '用户常用编辑器是 Vim' && item.status === 'pending'
+  );
+  const defaultMemoryList = await req('/memory');
   check(
     'pending 列表可查且默认记忆库不可见',
     pendingList.status === 200 &&
-      pendingList.json.memories.length === 1 &&
+      pendingCandidate &&
+      !defaultMemoryList.json.memories.some(item => item.id === pendingCandidate.id) &&
       !diskMemory().some(item => item.status === 'active' && item.content === '用户常用编辑器是 Vim'),
-    JSON.stringify(pendingList.json)
+    JSON.stringify({ pending: pendingList.json, default: defaultMemoryList.json })
   );
 
-  const pendingId = pendingList.json.memories[0].id;
+  const pendingId = pendingCandidate.id;
   const confirmed = await req('/memory/confirm', {
     method: 'POST',
     body: { id: pendingId },

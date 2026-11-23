@@ -229,7 +229,7 @@ function check(name, cond, extra = '') {
   ]);
   const w1 = await req('/chat', {
     method: 'POST',
-    body: { sessionId: S1, message: '我喜欢喝美式咖啡' },
+    body: { sessionId: S1, message: '请记住，我喜欢喝美式咖啡' },
   });
   check(
     'A1 写入旧事实成功',
@@ -243,7 +243,7 @@ function check(name, cond, extra = '') {
   ]);
   const w2 = await req('/chat', {
     method: 'POST',
-    body: { sessionId: S1, message: '我不再喜欢美式咖啡了' },
+    body: { sessionId: S1, message: '请记住，我不再喜欢美式咖啡了' },
   });
   check(
     'A2 矛盾事实写入后进入待确认（不直接改写 active）',
@@ -332,7 +332,7 @@ function check(name, cond, extra = '') {
   ]);
   const wd = await req('/chat', {
     method: 'POST',
-    body: { sessionId: S2, message: '我喜欢喝美式咖啡' },
+    body: { sessionId: S2, message: '请记住，我喜欢喝美式咖啡' },
   });
   check(
     'C1 写入待删除记忆成功',
