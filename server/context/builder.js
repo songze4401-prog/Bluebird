@@ -20,6 +20,7 @@ const {
   dedupeRetrievalItems,
   findHistoryConflict,
 } = require('./coverage');
+const { renderCoreMemoryBlock } = require('./core-memory');
 
 function applyTtlPolicy(item, config) {
   const status = item.freshness && item.freshness.status;
@@ -200,6 +201,7 @@ function buildContext({
   summary = null,
   memoryItems = [],
   knowledgeItems = [],
+  coreMemoryItems = [],
   config = defaultConfig,
 } = {}) {
   const memory = adjudicateMemory({
@@ -219,6 +221,17 @@ function buildContext({
   });
 
   const blocks = [];
+  const coreMemoryBlock = renderCoreMemoryBlock(coreMemoryItems);
+  if (coreMemoryBlock) {
+    blocks.push({
+      id: 'core-memory',
+      kind: 'core_memory',
+      priority: 35,
+      text: coreMemoryBlock,
+      itemIds: coreMemoryItems.map(item => `memory:${item.id}`),
+    });
+  }
+
   const summaryBlock = renderSummaryBlock(summary);
   if (summaryBlock) {
     blocks.push({
@@ -241,14 +254,16 @@ function buildContext({
     });
   }
 
-  const memoryBlock = renderMemoryBlock(memory.accepted);
+  const coreMemoryIds = new Set(coreMemoryItems.map(item => item.id));
+  const dedupedMemory = memory.accepted.filter(item => !coreMemoryIds.has(item.id));
+  const memoryBlock = renderMemoryBlock(dedupedMemory);
   if (memoryBlock) {
     blocks.push({
       id: 'memory',
       kind: 'memory',
       priority: 30,
       text: memoryBlock,
-      itemIds: memory.accepted.map(item => `memory:${item.id}`),
+      itemIds: dedupedMemory.map(item => `memory:${item.id}`),
     });
   }
 
@@ -267,9 +282,13 @@ function buildContext({
     ok: true,
     blocks,
     memory: {
-      accepted: memory.accepted,
+      accepted: dedupedMemory,
       skipped: memory.skipped,
       conflicts: memory.conflicts,
+    },
+    coreMemory: {
+      items: coreMemoryItems,
+      deduped: memory.accepted.length - dedupedMemory.length,
     },
     knowledge: {
       accepted: knowledge.accepted,
