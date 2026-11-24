@@ -48,6 +48,7 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "test": "node scripts/run-tests.js",
+    "test:real:e2e": "node scripts/real-model-e2e.js",
     "test:unit": "jest",
     "eval:memory": "node tests/memory-eval/run-eval.js",
     "eval:semantic": "node tests/memory-semantic-eval.js --assert",
