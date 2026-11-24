@@ -143,7 +143,7 @@ test('d. 失败恢复率：以 run 历史里的失败 attempt 为分母', () => 
 });
 
 test('e. 重复副作用率：executions 缺失的旧账本条目计 unknown，不稀释分母', () => {
-  const args = { agentId: 'executor', taskId: 'task-dup', stepId: 'step-1', toolName: 'memory_remember', args: { text: '同一段' } };
+  const args = { agentId: 'executor', taskId: 'task-dup', stepId: 'step-1', toolName: 'knowledge_search', args: { text: '同一段' } };
   const first = opLedger.begin({ ...args, now: N });
   assert.equal(first.entry.executions, 0, '新记录 executions 从 0 起算');
   opLedger.finish(first.opKey, { status: 'succeeded', result: { ok: true, id: 'm1' }, now: N + 10 });
@@ -409,7 +409,7 @@ test('i. 真实存储形状：证据钉在产物、冲突走 verification.confli
     agentId,
     taskType: 'memory.recall',
     goal,
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     deadlineMs: 30000,
     ...extra,
   });

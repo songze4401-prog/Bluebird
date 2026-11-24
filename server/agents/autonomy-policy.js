@@ -17,6 +17,8 @@ const HIGH_RISK_TASK_TYPES = new Set(['action.execute', 'memory.write']);
 // 只有「策略/审校不通过」这类失败才值得换策略重规划；瞬态错误走既有 retry，
 // 硬失败（证据缺失/超时）重规划只会制造假成功，因此不重规划。
 const RECOVERABLE_ERRORS = new Set(['review_rejected', 'evidence_insufficient', 'capability_mismatch']);
+// 执行型 Agent：失败重规划时转 to reviewer 复核（memory 是 Action Bot 的历史 id）。
+const EXECUTION_AGENT_IDS = new Set(['executor', 'memory']);
 
 const REQUIRED_CAPABILITIES = {
   'memory.recall': ['memory.recall'],
@@ -175,7 +177,12 @@ function decideReplan({ task = {}, errorCode = null, maxAttempts = 1, tokenBudge
     attempts,
     maxAttempts: limit,
     errorCode,
-    nextAgentId: replan ? (String(task.agentId || '') === 'executor' ? 'reviewer' : 'researcher') : null,
+    // 执行型 Agent（executor / memory-Action Bot）失败后转审校；其余转检索重取证。
+    nextAgentId: replan
+      ? EXECUTION_AGENT_IDS.has(String(task.agentId || ''))
+        ? 'reviewer'
+        : 'researcher'
+      : null,
   };
 }
 

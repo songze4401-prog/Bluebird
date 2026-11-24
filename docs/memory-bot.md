@@ -1,5 +1,14 @@
 # 云岫 Bluebird — Memory Bot 首期：基线审计与实现
 
+> **2026-11-24 架构变更（现行实现以此为准）**
+> 长期记忆改由主控模型独占：`memory_search` / `memory_remember` 只注册在主控工具表，
+> 子 Agent 不持有 `memory_search`；`memory_remember` 虽保留在子 Agent 白名单作为
+> Gateway 副作用判定载体，但其 handler 对 `agentId` 非空的上下文一律硬闸拒绝
+> （`memory_main_agent_only`）。`delegate_to_bot` 已通用化（`botId` 必填，可派给
+> researcher / executor / memory / reviewer），记忆查询旁路与运行时强制派发已删除。
+> `memory` 这个 botId 保留为通用执行 Agent（Action Bot）的历史标识。
+> 下文为 2026-10-31 首期设计记录，保留以追溯当时的取舍。
+
 日期：2026-10-31
 目标来源：Notion《Bluebird Memory Bot｜首只专业 Agent 技术架构》
 状态：首期骨架、独立凭证、双入口 Runtime、持久任务队列、Token 级流式、记忆维护服务、人工审批、权限扩展点与工作台已落地；多用户 ACL 与分布式队列仍未实现，见第 9 节。
@@ -183,11 +192,11 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - `node tests/memory-bot.test.js`：9 项，覆盖 Registry、AES-256-GCM 密文/重启解密、真实 `/models` 验证、Bot 会话、独立 Key 工具循环、工具预算截断后的无工具总结、任务裁剪只删已投递终态、任务/审批 API、token SSE/工具事件、并发队列/恢复/失败隔离。
 - `node tests/delete-semantics.test.js`：55 项，覆盖会话删除后的附件回收/共享保留与派生索引清理、历史清理、记忆删除/按会话清理后的派生索引同步、删除墓碑/重启复活防护与同源抽取幂等。
 - `node tests/memory-maintenance.test.js`：5 项，覆盖 update/merge/supersede/archive/withdraw/delete、维护门面白名单、审批闭环、事件不含正文、权限拒绝。
-- `node tests/agent-dispatch.test.js`：13 项，覆盖主控工具派发、主控记忆→委派 Bot 的父会话读/写 scope、审批 waiting/完成/拒绝投递、结果 SSE/snapshot、失败回传、重复投递防护、主 Agent 工具循环与事件 outbox 恢复。
+- `node tests/agent-dispatch.test.js`：8 项，覆盖主控工具派发、主控记忆→委派 Bot 的父会话读/写 scope、审批 waiting/完成/拒绝投递、结果 SSE/snapshot、失败回传、重复投递防护、主 Agent 工具循环与事件 outbox 恢复。
 - `npx jest tests/unit/agent-results-stream.test.ts`：1 项，覆盖结果 SSE 的 401 永久失败、5xx/200 干净关闭可重试、主动 abort 为 `closed` 的连接分类。
 - `npx jest tests/unit/use-bot-result-stream.test.tsx`：2 项，覆盖 Hook 对永久错误只提示不重连、可重试错误按 1s 退避重连、snapshot 打开后重置延迟。
 - v7 壳测试（`tests/unit/ui-v7-*` 六套）覆盖聊天渲染/附件/主页入口卡/模型抽屉/壳冒烟；旧壳的 `memory-bot-screen` 与 `app-smoke` 两套已随 2026-11-19 旧壳删除一并移除。
-- 全量：`npm test` 135 个后端文件 / 2648 项；Jest 18 套 / 143 项；覆盖率校验 backend 2648/2648、runner 2411/2411、frontend 143/143；tsc/lint 通过（以最终交付命令输出为准）。
+- 全量：`npm test` 136 个后端文件 / 2648 项；Jest 18 套 / 143 项；覆盖率校验 backend 2648/2648、runner 2411/2411、frontend 143/143；tsc/lint 通过（以最终交付命令输出为准）。
 - Expo Web export 成功；浏览器 DOM 核对：Agent 团队入口、真实 Memory Bot 状态、工作台三页签、配置页真实服务商/脱敏 Key、维护申请表单与审批列表可渲染；浏览器实际提交一条 update 维护申请后，服务端返回 pending 并在审批列表显示。
 
 ### 8.1 Stub 与真实模型测试区分
@@ -224,4 +233,4 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 | P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；工具预算截断后无工具总结；任务裁剪只删已投递终态；Provider token delta；停止/切会话 abort；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 9 项；SSE/tool event 测试；Jest 5 项工作台测试 + 1 项 App 冒烟 |
 | P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；维护申请表单；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验、真实模型 HTTP SSE E2E |
 
-“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 2648/2648、nodeSuite 237/237、runner 2411/2411、frontend 143/143、CI 135/135。
+“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 2648/2648、nodeSuite 237/237、runner 2411/2411、frontend 143/143、CI 136/136。

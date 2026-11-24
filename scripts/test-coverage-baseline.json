@@ -33,6 +33,7 @@
     "agent-crash-injection",
     "agent-cycle-detection",
     "agent-dead-letter",
+    "agent-delegation-generic",
     "agent-dispatch",
     "agent-error-contract",
     "agent-eval-baseline",
@@ -384,7 +385,7 @@
     },
     "agent-dispatch": {
       "format": "node",
-      "count": 13,
+      "count": 8,
       "runner": true
     },
     "agent-router": {
@@ -820,6 +821,11 @@
     "workspace-files-api": {
       "format": "node",
       "count": 8,
+      "runner": true
+    },
+    "agent-delegation-generic": {
+      "format": "node",
+      "count": 5,
       "runner": true
     }
   },

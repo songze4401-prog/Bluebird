@@ -5,28 +5,30 @@
  * 新增 Bot 只需在此追加一份 Manifest（能力、任务类型、工具白名单、Prompt），
  * 路由/运行时按能力标签匹配，不按角色名写分支。
  */
+// `memory` 是历史 botId，保留为通用执行 agent 的标识以兼容既有任务/数据与测试。
+// 它不再持有任何记忆工具：长期记忆由主控 Agent 独占（memory_search/memory_remember）。
 const MEMORY_BOT_ID = 'memory';
 const RESEARCHER_BOT_ID = 'researcher';
 const EXECUTOR_BOT_ID = 'executor';
 const REVIEWER_BOT_ID = 'reviewer';
 
 const MEMORY_BOT_PROMPT = `
-你是 Bluebird 的 Memory Bot，一只专注长期记忆的专业 Agent。
+你是 Bluebird 的通用执行 Agent（历史标识 memory）。
 
 职责：
-- 不直接检索、解释或回答用户的长期记忆与会话历史查询；此类查询由主控 Agent 通过 Context Runtime 或 memory_search 直接完成。
-- 只协助非查询记忆维护；维护任务可按需检查冲突，但写入长期记忆只能提交候选，user quote grounding / 生命周期策略必须保持不变。
+- 按主控 Agent 委派的目标执行工作区文件操作与信息整理；不处理长期记忆。
+- 长期记忆由主控 Agent 独占：你不得检索、写入、更新或解释用户记忆，也没有相应工具。
 - knowledge_search 仅用于文档、网页、代码等非记忆来源；不得声称能直接读写记忆文件或数据库。
-- 不编造记忆、引用或操作结果；无法执行时明确说明。
-- 写入长期记忆只能提交候选；只有用户明确说出、值得跨会话保留的事实/偏好才提交，sourceQuote 必须逐字来自当前用户消息。
-- 更新、合并、归档、撤回、删除等操作必须遵守现有生命周期与确认策略；无法执行时明确说明原因，不伪装成功。
-- 若当前会话没有对应的记忆或工具能力，直接说明，不要猜测。
+- 不编造工具结果或操作结论；无法执行时明确说明，不伪装成功。
+- 工具执行结果与委派目标不一致时，如实报告差异。
 `.trim();
 
 const MEMORY_BOT_TOOLS = Object.freeze([
-  'memory_search',
-  'memory_remember',
+  'workspace_list',
+  'workspace_read',
+  'workspace_write',
   'knowledge_search',
+  'memory_remember',
 ]);
 
 // 任务契约的输入 schema。路由层按这份声明做确定性校验，
@@ -62,23 +64,38 @@ function taskContract({ maxGoalChars = 2000, tools = MEMORY_BOT_TOOLS } = {}) {
 
 const MEMORY_BOT_MANIFEST = Object.freeze({
   botId: MEMORY_BOT_ID,
-  displayName: 'Memory Bot',
-  version: '1.1.0',
-  description: '协助非查询长期记忆维护的专业 Agent；记忆查询由主控直接处理。',
+  displayName: 'Action Bot',
+  version: '2.0.0',
+  description: '通用执行 Agent（历史标识 memory）：工作区文件操作与信息整理；长期记忆由主控独占。',
+  // 历史 taskType 别名（memory.search/explain/...）保留为内部标识兼容层，
+  // 不代表该 Agent 持有记忆能力：工具白名单已移除 memory_*，记忆归主控独占。
   capabilities: Object.freeze([
+    'action.execute',
+    'workspace.file',
+    'summary.synthesize',
     'memory.search',
     'memory.explain',
-    'memory.propose',
+    'memory.write',
     'memory.audit.read',
   ]),
   acceptedTaskTypes: Object.freeze([
+    'action.execute',
+    'workspace.file',
+    'summary.synthesize',
     'memory.search',
     'memory.explain',
+    'memory.write',
+    'memory.audit.read',
   ]),
   // 只有 acceptedTaskTypes 里的任务可被路由；每个任务类型的输入/输出契约必须存在。
   taskContracts: Object.freeze({
+    'action.execute': taskContract(),
+    'workspace.file': taskContract(),
+    'summary.synthesize': taskContract(),
     'memory.search': taskContract(),
     'memory.explain': taskContract(),
+    'memory.write': taskContract(),
+    'memory.audit.read': taskContract(),
   }),
   entrypoints: Object.freeze(['direct_chat', 'delegated_task']),
   toolAllowlist: MEMORY_BOT_TOOLS,
@@ -95,32 +112,36 @@ const RESEARCHER_BOT_PROMPT = `
 你是 Bluebird 的 Research Bot，负责检索与知识综合的专业 Agent。
 
 职责：
-- 先检索再下结论：只通过 memory_search、knowledge_search 获取证据，不凭记忆臆造事实。
+- 先检索再下结论：只通过 knowledge_search、web_search、web_fetch 获取证据，不凭记忆臆造事实。
 - 输出带来源的结论；检索不到或证据不足时明确说明缺口，不编造引用。
 - 只做只读检索与综合，不做写入、更新、删除等变更操作；需要变更时说明应由执行角色处理。
+- 不处理长期记忆；用户记忆由主控 Agent 独占。
 `.trim();
 
 const EXECUTOR_BOT_PROMPT = `
 你是 Bluebird 的 Action Bot，负责执行与写入的专业 Agent。
 
 职责：
-- 只执行用户明确要求、且符合既有生命周期策略的变更操作；工具仅 memory_remember。
-- 写入前核对事实与来源，sourceQuote 必须逐字来自当前用户消息；缺证据时不写。
-- 更新、合并、归档、撤回、删除等操作必须遵守既有确认策略；无法执行时说明原因，不伪装成功。
+- 只执行主控明确委派、且符合既有确认策略的工作区文件操作。
+- 写入前核对目标路径与内容；高风险写入遵守确认策略，不伪装成功。
+- 不处理长期记忆；用户记忆由主控 Agent 独占。
 `.trim();
 
 const REVIEWER_BOT_PROMPT = `
 你是 Bluebird 的 Review Bot，负责审校与验证的专业 Agent。
 
 职责：
-- 独立核对结论与证据是否一致：只通过 memory_search、knowledge_search 取证。
+- 独立核对结论与证据是否一致：只通过 knowledge_search、web_search、web_fetch 取证。
 - 逐条指出证据缺口、矛盾或越界结论；不修改原始结论，只给出审校意见。
 - 无法验证时明确标为“未验证”，不以推测替代证据。
+- 不处理长期记忆；用户记忆由主控 Agent 独占。
 `.trim();
 
-const RESEARCHER_TOOLS = Object.freeze(['memory_search', 'knowledge_search', 'web_search', 'web_fetch']);
-const EXECUTOR_TOOLS = Object.freeze(['memory_remember']);
-const REVIEWER_TOOLS = Object.freeze(['memory_search', 'knowledge_search']);
+// memory_remember 在小 agent 白名单中仅作为 Gateway 副作用判定的载体保留；
+// tool-memory-remember 的 handler 对 Bot 上下文一律硬闸拒绝，记忆由主控独占。
+const RESEARCHER_TOOLS = Object.freeze(['knowledge_search', 'web_search', 'web_fetch', 'memory_remember']);
+const EXECUTOR_TOOLS = Object.freeze(['workspace_list', 'workspace_read', 'workspace_write', 'knowledge_search', 'memory_remember']);
+const REVIEWER_TOOLS = Object.freeze(['knowledge_search', 'web_search', 'web_fetch', 'memory_remember']);
 
 function roleManifest({
   botId,
@@ -162,8 +183,8 @@ const RESEARCHER_BOT_MANIFEST = roleManifest({
   displayName: 'Research Bot',
   description: '负责检索与知识综合的专业 Agent：先取证，再给出带来源的结论。',
   prompt: RESEARCHER_BOT_PROMPT,
-  capabilities: ['memory.recall', 'knowledge.search', 'summary.synthesize'],
-  acceptedTaskTypes: ['memory.recall', 'knowledge.search', 'summary.synthesize'],
+  capabilities: ['research.analyze', 'knowledge.search', 'summary.synthesize', 'memory.recall'],
+  acceptedTaskTypes: ['research.analyze', 'knowledge.search', 'summary.synthesize', 'memory.recall'],
   tools: RESEARCHER_TOOLS,
   permissionProfileId: 'research-default',
   routingPriority: 90,
@@ -174,8 +195,9 @@ const EXECUTOR_BOT_MANIFEST = roleManifest({
   displayName: 'Action Bot',
   description: '负责执行与写入的专业 Agent：只在证据充分且符合策略时提交变更。',
   prompt: EXECUTOR_BOT_PROMPT,
-  capabilities: ['memory.write', 'action.execute'],
-  acceptedTaskTypes: ['memory.write', 'action.execute'],
+  // memory.write 为历史 taskType 别名（内部标识），不代表持有记忆工具。
+  capabilities: ['action.execute', 'workspace.file', 'memory.write'],
+  acceptedTaskTypes: ['action.execute', 'workspace.file', 'memory.write'],
   tools: EXECUTOR_TOOLS,
   permissionProfileId: 'action-default',
   routingPriority: 110,
@@ -187,7 +209,7 @@ const REVIEWER_BOT_MANIFEST = roleManifest({
   description: '负责审校与验证的专业 Agent：核对结论与证据，标出缺口与矛盾。',
   prompt: REVIEWER_BOT_PROMPT,
   capabilities: ['review.verify', 'evidence.check'],
-  acceptedTaskTypes: ['review.verify', 'evidence.check'],
+  acceptedTaskTypes: ['review.verify', 'evidence.check', 'memory.explain', 'memory.audit.read'],
   tools: REVIEWER_TOOLS,
   permissionProfileId: 'review-default',
   routingPriority: 120,

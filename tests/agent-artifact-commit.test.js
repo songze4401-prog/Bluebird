@@ -143,7 +143,7 @@ function makeTask(overrides = {}) {
     botId: 'memory',
     taskType: 'memory.search',
     goal: '产物协议任务',
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
     deadlineMs: 20000,
     ...overrides,
   });
@@ -255,7 +255,7 @@ test('b. 产物写失败：不得 completed；无副作用工具进 retrying，�
   runtime.cancelTask(retryTask.taskId);
 
   const recoveryTask = makeRetryTask('ARTIFACT_WRITE_FAIL 副作用', 2, {
-    allowedTools: ['memory_remember'],
+    allowedTools: ['workspace_write'],
   });
   runtime.startTask(recoveryTask.taskId);
   const recovered = await waitForTask(recoveryTask.taskId);

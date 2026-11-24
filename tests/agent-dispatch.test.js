@@ -87,7 +87,7 @@ test.before(async () => {
       // 因此用 delegate 是否可见来区分两个入口。
       if (
         !hasToolResult &&
-        toolNames.includes('memory_remember') &&
+        toolNames.includes('workspace_write') &&
         !toolNames.includes('delegate_to_bot') &&
         lastText.includes('MEMORY_WRITE')
       ) {
@@ -107,7 +107,7 @@ test.before(async () => {
                     id: 'call_memory_write',
                     type: 'function',
                     function: {
-                      name: 'memory_remember',
+                      name: 'workspace_write',
                       arguments: JSON.stringify({
                         content: '用户喜欢浅烘咖啡',
                         type: 'preference',
@@ -128,7 +128,7 @@ test.before(async () => {
       }
       if (
         !hasToolResult &&
-        toolNames.includes('memory_search') &&
+        toolNames.includes('workspace_list') &&
         !toolNames.includes('delegate_to_bot') &&
         lastText.includes('MEMORY_SCOPE')
       ) {
@@ -148,7 +148,7 @@ test.before(async () => {
                     id: 'call_memory_scope',
                     type: 'function',
                     function: {
-                      name: 'memory_search',
+                      name: 'workspace_list',
                       arguments: JSON.stringify({
                         query: '深烘咖啡',
                         limit: 3,
@@ -198,8 +198,8 @@ test.before(async () => {
                             : '主 Agent 派发测试',
                         allowedTools:
                           lastText.includes('MEMORY_WRITE') || lastText.includes('MEMORY_MAINTENANCE')
-                          ? ['memory_search', 'memory_remember']
-                          : ['memory_search'],
+                          ? ['workspace_list', 'workspace_write']
+                          : ['workspace_list'],
                       }),
                     },
                   },
@@ -329,16 +329,17 @@ test('派发工具：校验 Bot/任务类型/边界，且不暴露给 Bot 自身
     }).ok,
     false
   );
+  // 记忆查询特判已删除：任何合法 goal 都进入通用派发链
   assert.equal(
     tool.validate({ botId: 'memory', taskType: 'memory.search', goal: '查一下' }).ok,
-    false
+    true
   );
   assert.equal(
     tool.validate({
       botId: 'memory',
       taskType: 'memory.search',
       goal: '记录我喜欢浅烘咖啡',
-      allowedTools: ['memory_remember'],
+      allowedTools: ['workspace_write'],
     }).ok,
     true
   );
@@ -358,7 +359,7 @@ test('主控派发：创建带 parentSessionId 的任务，Bot Runtime 完成后
       taskType: 'memory.search',
       goal: '记录我当前提供的咖啡偏好',
       context: '保存用户当前提供的信息，不检索历史记忆。',
-      allowedTools: ['memory_remember'],
+      allowedTools: ['workspace_write'],
     },
     {
       sessionId: main.id,
@@ -446,262 +447,6 @@ test('主 Agent 工具循环：明确的记忆维护仍可委派给 Bot Runtime'
   ));
 });
 
-test('委派意图识别：显式请求命中，否定/元问题/旧任务回看不触发', () => {
-  const { detectExplicitDelegation, isMemoryQueryDelegation } = require('../server/delegation-intent');
-
-  assert.equal(isMemoryQueryDelegation('memory.search', '查一下我的咖啡偏好'), true);
-  assert.equal(isMemoryQueryDelegation('memory.explain', '解释我为什么喜欢深烘'), true);
-  assert.equal(isMemoryQueryDelegation('memory.search', '记住我的偏好'), false);
-  assert.equal(
-    isMemoryQueryDelegation('memory.search', '记录我刚提供的偏好，不要查旧记忆'),
-    false
-  );
-
-  assert.deepEqual(
-    detectExplicitDelegation('让记忆机器人帮我查一下我喜欢的咖啡'),
-    {
-      taskType: 'memory.search',
-      goal: '让记忆机器人帮我查一下我喜欢的咖啡',
-      context: '',
-    }
-  );
-  assert.equal(
-    detectExplicitDelegation('让记忆机器人解释一下我为什么喜欢深烘').taskType,
-    'memory.explain'
-  );
-  assert.ok(detectExplicitDelegation('把这个活交给子 agent'));
-  assert.equal(detectExplicitDelegation('记忆机器人是什么'), null);
-  assert.equal(detectExplicitDelegation('怎么用 Memory Bot'), null);
-  assert.equal(detectExplicitDelegation('别让记忆机器人查'), null);
-  assert.equal(detectExplicitDelegation('上次让记忆机器人查的结果呢'), null);
-  assert.ok(
-    detectExplicitDelegation('上次没查成，这次让记忆机器人重新查一下')
-  );
-
-  // 代词指代：最近上下文提到过机器人时，"让她总结会话"同样成立。
-  const botContext = '刚才 memory_remember 没被解析，记忆库里没有东西。';
-  assert.equal(
-    detectExplicitDelegation('修了，再扔一边，让她总结会话', {
-      contextText: botContext,
-    }).taskType,
-    'memory.explain'
-  );
-  // 没有机器人上下文、或是否定句，代词不触发，避免误判普通对话。
-  assert.equal(detectExplicitDelegation('修了，再扔一边，让她总结会话'), null);
-  assert.equal(detectExplicitDelegation('别让她查', { contextText: botContext }), null);
-  assert.equal(detectExplicitDelegation('她是谁', { contextText: botContext }), null);
-});
-
-test('显式记忆查询：点名 Memory Bot 也不强制派发任务', async () => {
-  const main = mainSessions.createSession({ title: '记忆查询直查测试' });
-
-  capturedChatRequests.length = 0;
-
-  const outcome = await agentRuntime.runAgentTurn({
-    providerId,
-    modelId: 'dispatch-test-model',
-    sessionId: main.id,
-    userText: '让记忆机器人帮我查一下我的咖啡偏好 FORCE_TEXT',
-    messages: [
-      { role: 'system', content: '你可以调用工具。' },
-      { role: 'user', content: '让记忆机器人帮我查一下我的咖啡偏好 FORCE_TEXT' },
-    ],
-    policy: {
-      schemaVersion: 1,
-      mode: 'bounded_autonomy',
-      tools: { allowedTools: ['delegate_to_bot', 'memory_search'], maxToolCalls: 2, maxReadOnlyRetries: 0 },
-      budgets: { maxRounds: 2, maxTotalMs: 10000 },
-    },
-    credentialKey: 'dispatch-bot-key',
-    timeout: 10000,
-    enforceExplicitDelegation: true,
-  });
-
-  assert.equal(outcome.delegationEnforced, false);
-  assert.equal(outcome.toolSteps.length, 0);
-  assert.equal(tasks.listTasks('memory', { parentSessionId: main.id }).length, 0);
-  assert.ok(outcome.rawReply);
-
-  assert.ok(capturedChatRequests.length >= 1);
-  const firstRequest = capturedChatRequests[0];
-  const firstToolNames = (firstRequest.tools || [])
-    .map(item => item.function && item.function.name)
-    .filter(Boolean);
-  assert.equal(firstToolNames.includes('delegate_to_bot'), false);
-  assert.ok(firstToolNames.includes('memory_search'));
-  assert.ok(
-    (firstRequest.messages || []).some(
-      message =>
-        message.role === 'system' &&
-        typeof message.content === 'string' &&
-        message.content.includes('记忆查询由主控直接处理')
-    )
-  );
-});
-
-test('显式委派意图但策略未允许工具：不创建任务，并明确注入无法派发说明', async () => {
-  const main = mainSessions.createSession({ title: '策略拒绝委派测试' });
-
-  capturedChatRequests.length = 0;
-
-  const outcome = await agentRuntime.runAgentTurn({
-    providerId,
-    modelId: 'dispatch-test-model',
-    sessionId: main.id,
-    userText: '让记忆机器人查一下我的咖啡偏好 FORCE_TEXT',
-    messages: [
-      { role: 'system', content: '你可以调用工具。' },
-      { role: 'user', content: '让记忆机器人查一下我的咖啡偏好 FORCE_TEXT' },
-    ],
-    policy: {
-      schemaVersion: 1,
-      mode: 'bounded_autonomy',
-      tools: { allowedTools: ['memory_search'], maxToolCalls: 2, maxReadOnlyRetries: 0 },
-      budgets: { maxRounds: 2, maxTotalMs: 10000 },
-    },
-    credentialKey: 'dispatch-bot-key',
-    timeout: 10000,
-    enforceExplicitDelegation: true,
-  });
-
-  assert.equal(outcome.delegationEnforced, false);
-  assert.equal(outcome.toolSteps.length, 0);
-  assert.equal(tasks.listTasks('memory', { parentSessionId: main.id }).length, 0);
-  assert.ok(
-    capturedChatRequests.length >= 1 &&
-      (capturedChatRequests[0].messages || []).some(
-        message =>
-          message.role === 'system' &&
-          typeof message.content === 'string' &&
-          message.content.includes('记忆查询由主控直接处理')
-      )
-  );
-});
-
-test('主控记忆查询：memory_search 在主控会话直接执行，不创建 Bot 任务', async () => {
-  const main = mainSessions.createSession({ title: '主控记忆 scope 回归' });
-  const seeded = await memory.applyCandidate(
-    {
-      content: '用户喜欢深烘咖啡',
-      type: 'preference',
-      sourceQuote: '我喜欢深烘咖啡',
-      keywords: ['咖啡', '深烘'],
-      confidence: 0.95,
-    },
-    {
-      sessionId: main.id,
-      sourceType: 'user',
-      intent: 'explicit',
-      userText: '我喜欢深烘咖啡',
-      requireUserGrounding: true,
-    }
-  );
-  assert.equal(seeded.written, true);
-  assert.ok(seeded.id);
-
-  const outcome = await agentRuntime.runAgentTurn({
-    providerId,
-    modelId: 'dispatch-test-model',
-    sessionId: main.id,
-    userText: 'MEMORY_SCOPE 请检索我的深烘咖啡偏好',
-    messages: [
-      { role: 'system', content: '你可以调用 memory_search。' },
-      { role: 'user', content: 'MEMORY_SCOPE 请检索我的深烘咖啡偏好' },
-    ],
-    policy: {
-      schemaVersion: 1,
-      mode: 'bounded_autonomy',
-      tools: { allowedTools: ['memory_search'], maxToolCalls: 2, maxReadOnlyRetries: 0 },
-      budgets: { maxRounds: 2, maxTotalMs: 10000 },
-    },
-    credentialKey: 'dispatch-bot-key',
-    timeout: 10000,
-  });
-  assert.equal(outcome.toolSteps.length, 1);
-  assert.equal(outcome.toolSteps[0].name, 'memory_search');
-  assert.equal(outcome.toolSteps[0].ok, true);
-  assert.equal(tasks.listTasks('memory', { parentSessionId: main.id }).length, 0);
-  assert.ok(
-    capturedChatRequests.some(request =>
-      (request.messages || []).some(message =>
-        message.role === 'tool' && String(message.content).includes(seeded.id)
-      )
-    ),
-    '主控工具结果应包含刚写入的用户记忆证据'
-  );
-});
-
-test('主控记忆 → 委派 Bot：memory_remember 归属父主控会话，跨会话冲突改写转待确认', async () => {
-  const instanceUser = userScope.getInstanceUserId();
-  const main = mainSessions.createSession({ title: '委派写入 scope 回归' });
-  const outcome = await agentRuntime.runAgentTurn({
-    providerId,
-    modelId: 'dispatch-test-model',
-    sessionId: main.id,
-    userText: 'DELEGATE MEMORY_WRITE: 请记住，我喜欢浅烘咖啡',
-    messages: [
-      { role: 'system', content: '你可以调用 delegate_to_bot。' },
-      { role: 'user', content: 'DELEGATE MEMORY_WRITE: 请记住，我喜欢浅烘咖啡' },
-    ],
-    policy: {
-      schemaVersion: 1,
-      mode: 'bounded_autonomy',
-      tools: { allowedTools: ['delegate_to_bot'], maxToolCalls: 2, maxReadOnlyRetries: 0 },
-      budgets: { maxRounds: 2, maxTotalMs: 10000 },
-    },
-    credentialKey: 'dispatch-bot-key',
-    timeout: 10000,
-  });
-  assert.equal(outcome.toolSteps.length, 1);
-  const task = tasks.listTasks('memory', { parentSessionId: main.id })[0];
-  assert.ok(task);
-  const finished = await waitForTask(task.taskId);
-  assert.equal(finished.status, 'completed');
-  assert.equal(finished.parentSessionId, main.id);
-  // 委派任务带服务端可信身份执行，记忆作用域才是用户级。
-  assert.equal(finished.parentUserId, instanceUser);
-
-  // 上一条测试里的「深烘咖啡」属于同一用户，用户级作用域下它现在可见，
-  // 于是这条新的「浅烘咖啡」被判定为改写。Agent 写入不允许静默覆盖已有
-  // 记忆：候选停在待确认，旧偏好保持生效，数据一条都没被改。
-  const darkBefore = memory
-    .getMemoriesForUser(instanceUser)
-    .find(item => item.content.includes('深烘咖啡'));
-  assert.equal(darkBefore.status, 'active');
-
-  const pendingList = memory.getPendingMemoriesForUser(instanceUser);
-  const pending = pendingList.find(item => item.content.includes('浅烘咖啡'));
-  assert.ok(pending, JSON.stringify(pendingList.map(item => item.content)));
-  assert.equal(pending.pendingReason, 'mutation_requires_confirmation');
-  assert.equal(pending.pendingTargetId, darkBefore.id);
-  assert.ok(
-    pending.contributions.some(item => item.sessionId === main.id),
-    '候选要归属父主控会话，而不是 Bot 自己的 bs_ 会话'
-  );
-
-  // 确认后才生效：新偏好落定、旧偏好被取代，不会同时注入两条互相矛盾的咖啡偏好。
-  const confirmed = await memory.confirmPending(pending.id, instanceUser);
-  assert.equal(confirmed.updated, 1);
-
-  const mainFound = memory.searchMemories({
-    query: '浅烘咖啡',
-    sessionId: main.id,
-    limits: { maxItems: 10, perItemMax: 300, totalMax: 2000, maxTokens: 1200 },
-  });
-  const botFound = memory.searchMemories({
-    query: '浅烘咖啡',
-    sessionId: task.sessionId,
-    limits: { maxItems: 10, perItemMax: 300, totalMax: 2000, maxTokens: 1200 },
-  });
-  assert.ok(mainFound.results.some(item => item.content.includes('浅烘咖啡')));
-  const darkAfter = memory
-    .getMemoriesForUser(instanceUser, { includeSuperseded: true })
-    .find(item => item.id === darkBefore.id);
-  assert.equal(darkAfter.status, 'superseded');
-  // Bot 的 bs_ 会话只承载执行轨迹：不带可信身份时仍按会话隔离，读不到用户记忆。
-  assert.equal(botFound.results.length, 0);
-});
-
 test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时回传', async () => {
   const main = mainSessions.createSession({ title: '审批闭环测试' });
   const seeded = await memory.applyCandidate(
@@ -728,7 +473,7 @@ test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时
     goal: '审批更新测试记忆',
     sessionId: botSession.id,
     parentSessionId: main.id,
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
   });
   const approval = approvals.createApproval({
     botId: 'memory',
@@ -775,7 +520,7 @@ test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时
     goal: '审批拒绝测试',
     sessionId: botSession.id,
     parentSessionId: main.id,
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
   });
   const rejectApproval = approvals.createApproval({
     botId: 'memory',
@@ -804,7 +549,7 @@ test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时
     goal: '审批任务被取消测试',
     sessionId: botSession.id,
     parentSessionId: main.id,
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
   });
   const staleApproval = approvals.createApproval({
     botId: 'memory',
@@ -826,7 +571,7 @@ test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时
     goal: '审批执行失败测试',
     sessionId: botSession.id,
     parentSessionId: main.id,
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
   });
   const failApproval = approvals.createApproval({
     botId: 'memory',
@@ -921,7 +666,7 @@ test('主控结果 SSE：snapshot 重连可见，实时结果无需轮询', asyn
       botId: 'memory',
       taskType: 'memory.search',
       goal: '记录一条 SSE 测试记忆',
-      allowedTools: ['memory_remember'],
+      allowedTools: ['workspace_write'],
     },
     { sessionId: main.id, userText: '记录一条 SSE 测试记忆', userMessageId: 'sse-user-1' }
   );
@@ -956,7 +701,7 @@ test('主控结果 SSE：snapshot 重连可见，实时结果无需轮询', asyn
         botId: 'memory',
         taskType: 'memory.search',
         goal: '记录实时 SSE 测试记忆',
-        allowedTools: ['memory_remember'],
+        allowedTools: ['workspace_write'],
       },
       { sessionId: live.id, userText: '记录实时 SSE 测试记忆', userMessageId: 'sse-user-2' }
     );
@@ -978,7 +723,7 @@ test('失败回传：Bot 执行失败时主控会话收到失败原因，不伪�
       botId: 'memory',
       taskType: 'memory.search',
       goal: 'FAIL_TASK 记录失败路径测试',
-      allowedTools: ['memory_remember'],
+      allowedTools: ['workspace_write'],
     },
     { sessionId: main.id, userText: 'FAIL_TASK 记录失败路径测试', userMessageId: 'sse-user-fail' }
   );
@@ -1023,7 +768,7 @@ test('结果投递失败不伪造完成：主控会话被删除时记录 deliver
       botId: 'memory',
       taskType: 'memory.search',
       goal: '记录一条待删除会话测试记忆',
-      allowedTools: ['memory_remember'],
+      allowedTools: ['workspace_write'],
     },
     { sessionId: main.id, userText: '记录待删除会话测试记忆', userMessageId: 'main-user-2' }
   );

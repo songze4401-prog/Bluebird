@@ -153,19 +153,19 @@ test('契约校验：contextRef 超过上限被拒绝', () => {
 });
 
 test('契约校验：allowedTools 类型错误被拒绝', () => {
-  const decision = decide(validInput({ allowedTools: 'memory_search' }));
+  const decision = decide(validInput({ allowedTools: 'workspace_list' }));
   assert.equal(decision.code, 'invalid_task');
   assert.equal(decision.field, 'allowedTools');
 });
 
 test('契约校验：越权工具返回 tool_not_allowed', () => {
-  const decision = decide(validInput({ allowedTools: ['memory_search', 'shell_exec'] }));
+  const decision = decide(validInput({ allowedTools: ['workspace_list', 'shell_exec'] }));
   assert.equal(decision.code, 'tool_not_allowed');
   assert.equal(decision.status, 403);
 });
 
 test('契约校验：allowedTools 重复项被去重后通过', () => {
-  const decision = decide(validInput({ allowedTools: ['memory_search', 'memory_search'] }));
+  const decision = decide(validInput({ allowedTools: ['workspace_list', 'workspace_list'] }));
   assert.equal(decision.ok, true);
 });
 
@@ -407,7 +407,7 @@ test('任务迁移：旧任务读取后补齐规范字段', () => {
         deliveryMessageId: null,
         deliveryStatus: 'not_applicable',
         deliveryErrorCode: null,
-        allowedTools: ['memory_search'],
+        allowedTools: ['workspace_list'],
         deadlineMs: 60000,
         status: 'queued',
         cancelRequested: false,
@@ -550,26 +550,14 @@ test('dispatch：调用方传入的 parentUserId 原样落库（Worker 按它读
   assert.equal(env.created[0].parentUserId, 'trusted-user-42');
 });
 
-test('dispatch：Memory Bot 查询在建会话/任务前拒绝，非查询维护不受影响', () => {
+test('dispatch：不再有记忆查询特判，任何合法任务都正常建会话与任务', () => {
   const env = fakeDispatchEnv();
-  assert.throws(
-    () => env.router.dispatch({ agentId: 'memory', taskType: 'memory.search', goal: '查咖啡偏好' }),
-    error => error instanceof AgentError && error.code === 'memory_query_requires_main_agent'
-  );
-  assert.equal(env.sessionsCreated.length, 0);
-  assert.equal(env.created.length, 0);
-  assert.equal(env.started.length, 0);
+  env.router.dispatch({ agentId: 'memory', taskType: 'memory.search', goal: '查咖啡偏好' });
+  assert.equal(env.sessionsCreated.length, 1);
+  assert.equal(env.created.length, 1);
+  assert.equal(env.started.length, 1);
   const rejected = env.events.find(event => event.eventType === 'route.rejected');
-  assert.equal(rejected.payload.security, 'memory_query_direct_only');
-
-  const maintenance = fakeDispatchEnv();
-  maintenance.router.dispatch({
-    agentId: 'memory',
-    taskType: 'memory.search',
-    goal: '记录用户明确提供的咖啡偏好',
-  });
-  assert.equal(maintenance.created.length, 1);
-  assert.equal(maintenance.started.length, 1);
+  assert.equal(rejected, undefined);
 });
 
 test('dispatch：被拒绝时不建会话、不建任务，并写 route.rejected', () => {
@@ -719,7 +707,9 @@ test('配置：预算越界被拒绝', () => {
 test('兼容层：delegate_to_bot 工具名与必填参数保持不变', () => {
   assert.equal(dispatchTool.definition.name, 'delegate_to_bot');
   assert.deepEqual([...dispatchTool.definition.parameters.required], ['botId', 'taskType', 'goal']);
-  assert.deepEqual([...dispatchTool.definition.parameters.properties.botId.enum], ['memory']);
+  // botId 不再枚举单一角色：任意已注册 Agent 都可作为目标，validate 动态校验。
+  assert.equal(dispatchTool.definition.parameters.properties.botId.enum, undefined);
+  assert.equal(dispatchTool.validate({ taskType: 'memory.search', goal: 'x' }).ok, false);
 });
 
 test('兼容层：没有主控会话时仍返回 session_required', async () => {

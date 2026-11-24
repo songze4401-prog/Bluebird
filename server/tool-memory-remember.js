@@ -186,6 +186,15 @@ const definition = Object.freeze({
   },
 
   async handler(args, context = {}) {
+    // 记忆由主控模型独占：子 Agent（Bot 上下文）一律不得写入长期记忆。
+    // 该工具在 Bot 白名单里只作为 Gateway 副作用判定的载体保留，执行到此硬闸拒绝。
+    if (context && context.agentId) {
+      return {
+        ok: false,
+        code: 'memory_main_agent_only',
+        error: '长期记忆由主控 Agent 独占，子 Agent 不得写入',
+      };
+    }
     if (!context.sessionId || !context.userText) {
       // 缺来源上下文的调用也要留痕：Phase 0 观测显示 Agent 通道此前完全
       // 不可见（0 条写入事件），无从回答「调用失败是否被吞」。

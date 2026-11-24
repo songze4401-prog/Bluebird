@@ -132,7 +132,7 @@ test.before(async () => {
             res,
             200,
             completion(null, {
-              toolCalls: [toolCall('call_g_read', 'memory_search', { query: '污点' })],
+              toolCalls: [toolCall('call_g_read', 'knowledge_search', { query: '污点' })],
             })
           );
           return;
@@ -259,8 +259,8 @@ function refOf(artifact) {
 // ---- f. 跨 Agent 读取继承来源引用与污点 ----
 
 test('用例f：跨 Agent 读取自动追加来源引用，派生产物继承污点', () => {
-  const taskA = makeTask({ agentId: UPSTREAM_BOT, goal: 'TAINT-F 上游任务', allowedTools: ['memory_search'] });
-  const taskB = makeTask({ agentId: BOT, goal: 'TAINT-F 消费任务', allowedTools: ['memory_search'] });
+  const taskA = makeTask({ agentId: UPSTREAM_BOT, goal: 'TAINT-F 上游任务', allowedTools: ['knowledge_search'] });
+  const taskB = makeTask({ agentId: BOT, goal: 'TAINT-F 消费任务', allowedTools: ['knowledge_search'] });
 
   const upstream = upstreamArtifact({ taskId: taskA.taskId, sourceLabels: ['external:web'] });
   const ref = refOf(upstream);
@@ -314,7 +314,7 @@ test('用例f：跨 Agent 读取自动追加来源引用，派生产物继承污
 // ---- j. 断裂读：引用不可解析 → unknown，不误判干净 ----
 
 test('用例j：读取引用不可解析 → 任务 taint 加 unknown，不误判为干净', () => {
-  const taskB = makeTask({ agentId: BOT, goal: 'TAINT-J 断裂读', allowedTools: ['memory_search'] });
+  const taskB = makeTask({ agentId: BOT, goal: 'TAINT-J 断裂读', allowedTools: ['knowledge_search'] });
   const sessionB = sessions.createSession(BOT, { title: 'taint-j-broken', scope: 'worker' });
   const scopeB = workerScope.openWorkerScope({
     botId: BOT,
@@ -366,7 +366,7 @@ test('用例g：污点任务请求副作用工具被拒，只读工具放行', a
   const task = makeTask({
     agentId: BOT,
     goal: '记录外部来源内容（TAINT-G 污点阻断）',
-    allowedTools: ['memory_remember', 'memory_search'],
+    allowedTools: ['memory_remember', 'knowledge_search'],
     taintLabels: ['external:web'],
   });
   assert.ok(task.taintLabels.includes('external:web'));
@@ -386,7 +386,7 @@ test('用例g：污点任务请求副作用工具被拒，只读工具放行', a
   // 同一任务只读工具必须真实执行（不是全禁）。
   const completed = eventsOf(task.taskId, 'tool.completed');
   assert.ok(
-    completed.some(event => event.payload.tool === 'memory_search' && event.payload.ok === true),
+    completed.some(event => event.payload.tool === 'knowledge_search' && event.payload.ok === true),
     '只读工具 memory_search 必须被放行并完成'
   );
   assert.ok(
@@ -397,7 +397,7 @@ test('用例g：污点任务请求副作用工具被拒，只读工具放行', a
   // 每次判定都留审计：policyVersion + 规则 id。
   const decisions = eventsOf(task.taskId, 'tool.policy_decision');
   const writeDecision = decisions.find(event => event.payload.tool === 'memory_remember');
-  const readDecision = decisions.find(event => event.payload.tool === 'memory_search');
+  const readDecision = decisions.find(event => event.payload.tool === 'knowledge_search');
   assert.strictEqual(writeDecision.payload.decision, 'deny');
   assert.strictEqual(writeDecision.payload.policyVersion, 'taint-policy-v1');
   assert.strictEqual(writeDecision.payload.ruleId, 'untrusted-side-effect-deny');
@@ -408,7 +408,7 @@ test('用例g：污点任务请求副作用工具被拒，只读工具放行', a
     taskId: task.taskId,
     taskTaintLabels: task.taintLabels,
     deniedWrite: writeDenied.payload,
-    allowedRead: completed.find(event => event.payload.tool === 'memory_search').payload,
+    allowedRead: completed.find(event => event.payload.tool === 'knowledge_search').payload,
     writeDecision: writeDecision.payload,
     readDecision: readDecision.payload,
     status: finished.status,
@@ -430,7 +430,7 @@ test('用例h：高 trustLevel + 污点不带来任何额外工具权限', async
   const taskH1 = makeTask({
     agentId: BOT,
     goal: 'TAINT-H1 高信任但污点',
-    allowedTools: ['memory_remember', 'memory_search'],
+    allowedTools: ['knowledge_search', 'memory_remember'],
     provenanceRefs: [refOf(verified)],
   });
   assert.ok(taskH1.taintLabels.includes('external:web'), '上游污点必须随引用继承');
@@ -449,7 +449,7 @@ test('用例h：高 trustLevel + 污点不带来任何额外工具权限', async
   const taskH2 = makeTask({
     agentId: BOT,
     goal: 'TAINT-H2 未授权写工具',
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     provenanceRefs: [refOf(verified)],
   });
   runtime.startTask(taskH2.taskId);
@@ -513,11 +513,11 @@ test('用例i：策略版本记录生效，旧产物保留原 policyVersion，�
 
   // 真实 Gateway：新策略下 unverified 只读被拒；未分类标签 fail-closed。
   const authorizer = toolGateway.createToolAuthorizer({
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     getTaintState: () => ({ provenanceRefs: [], taintLabels: ['external:web'] }),
-    toolMeta: { memory_search: { name: 'memory_search', readOnly: true, risk: 'read' } },
+    toolMeta: { memory_search: { name: 'knowledge_search', readOnly: true, risk: 'read' } },
   });
-  const untrustedVerdict = authorizer('memory_search');
+  const untrustedVerdict = authorizer('knowledge_search');
   assert.strictEqual(untrustedVerdict.ok, false);
   assert.strictEqual(untrustedVerdict.code, 'taint_tool_denied');
   assert.strictEqual(untrustedVerdict.ruleId, 'untrusted-deny-all');
@@ -525,17 +525,17 @@ test('用例i：策略版本记录生效，旧产物保留原 policyVersion，�
 
   const unclassified = taintPolicy.evaluate({
     taintLabels: ['weird:foo'],
-    tool: { name: 'memory_search', readOnly: true },
+    tool: { name: 'knowledge_search', readOnly: true },
   });
   assert.strictEqual(unclassified.allowed, false, '未命中规则必须拒绝');
   assert.strictEqual(unclassified.ruleId, 'unclassified-fail-closed');
   assert.strictEqual(unclassified.reason, 'no_rule_matched_fail_closed');
   const authorizerUnclassified = toolGateway.createToolAuthorizer({
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     getTaintState: () => ({ provenanceRefs: [], taintLabels: ['weird:foo'] }),
-    toolMeta: { memory_search: { name: 'memory_search', readOnly: true, risk: 'read' } },
+    toolMeta: { memory_search: { name: 'knowledge_search', readOnly: true, risk: 'read' } },
   });
-  const unclassifiedVerdict = authorizerUnclassified('memory_search');
+  const unclassifiedVerdict = authorizerUnclassified('knowledge_search');
   assert.strictEqual(unclassifiedVerdict.ok, false);
   assert.strictEqual(unclassifiedVerdict.code, 'taint_tool_denied');
   assert.strictEqual(unclassifiedVerdict.ruleId, 'unclassified-fail-closed');

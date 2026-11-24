@@ -56,7 +56,9 @@ test('b. 开启后动态组队：高危任务按能力覆盖组队并给出依�
   const high = policy.plan({ goal: '执行高危写入', taskType: 'action.execute' });
   assert.equal(high.enabled, true);
   assert.equal(high.decision, 'team');
-  assert.deepEqual(high.members, ['executor', 'reviewer']);
+  // 重构后 Action Bot（历史标识 memory）声明 action.execute 能力且排在 manifest 前，
+  // teamMembers 按能力覆盖顺序先选它，再补 review.verify 的 reviewer。
+  assert.deepEqual(high.members, ['memory', 'reviewer']);
   assert.equal(high.dependencies.length, 1);
   assert.ok(high.rationale.includes('high_risk_requires_review'));
 
@@ -95,6 +97,24 @@ test('c. 重规划只受既有 maxAttempts/预算约束，且不把硬失败重�
   assert.equal(allowed.replan, true);
   assert.equal(allowed.reason, 'replan_allowed');
   assert.equal(allowed.nextAgentId, 'reviewer');
+
+  // memory（Action Bot）也是执行型 Agent，失败重规划同样转审校，而不是检索。
+  const fromActionBot = policy.decideReplan({
+    task: { attempts: 1, maxAttempts: 3, agentId: 'memory' },
+    errorCode: 'review_rejected',
+    tokenBudget: 600,
+    tokenUsed: 100,
+  });
+  assert.equal(fromActionBot.nextAgentId, 'reviewer');
+
+  // 检索型 Agent 失败重规划回到检索重取证。
+  const fromResearcher = policy.decideReplan({
+    task: { attempts: 1, maxAttempts: 3, agentId: 'researcher' },
+    errorCode: 'evidence_insufficient',
+    tokenBudget: 600,
+    tokenUsed: 100,
+  });
+  assert.equal(fromResearcher.nextAgentId, 'researcher');
 
   const capped = policy.decideReplan({
     task: { attempts: 3, maxAttempts: 3 },
@@ -162,7 +182,7 @@ test('e. 评测两轮可对比：开启后高危用例产生团队子任务与 r
   const orchestration = tasks.getTask(routed.taskId).route.orchestration;
   assert.equal(orchestration.entry, 'autonomy-policy.plan');
   assert.equal(orchestration.matchingRule, 'capability_coverage');
-  assert.deepEqual(orchestration.matchedAgentIds, ['executor', 'reviewer']);
+  assert.deepEqual(orchestration.matchedAgentIds, ['memory', 'reviewer']);
 
   // 团队子任务的 token 计入用例成本，不会漏计。
   assert.ok(replayCase.tokens > 0);

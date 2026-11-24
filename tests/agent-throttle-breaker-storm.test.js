@@ -323,7 +323,7 @@ test('d. 熔断三态：小样本不开闸、确定性错误不计故障率、�
   const detFile = path.join(TMP, 'breaker-deterministic.json');
   breaker.resetForTests(detFile);
   for (let index = 0; index < 15; index += 1) {
-    const outcome = breaker.record({ kind: 'tool', targetId: 'memory_remember', ok: false, errorCode: 'bad_request', at: N + index * 100, filePath: detFile });
+    const outcome = breaker.record({ kind: 'tool', targetId: 'workspace_write', ok: false, errorCode: 'bad_request', at: N + index * 100, filePath: detFile });
     assert.equal(outcome.outcome, 'deterministic');
   }
   const detSnap = breaker.snapshot({ filePath: detFile, now: N + 2000 });
@@ -386,9 +386,9 @@ test('f. 风暴抑制五条细则 + 上限补位 + digest 与 workflow-store 同
   const baselineDigest = `sha256:${'a'.repeat(64)}`;
   const claim = { benefit: '去掉一轮无证据的检索', baselineDigest, comparatorId: 'candidate' };
   const badClaim = { benefit: '只写了收益' };
-  const planA = { steps: [{ toolName: 'memory_search', args: { q: 'a' } }, { toolName: 'summarize', args: { n: 1 } }] };
+  const planA = { steps: [{ toolName: 'workspace_list', args: { q: 'a' } }, { toolName: 'summarize', args: { n: 1 } }] };
   const planSameButReordered = { steps: [planA.steps[1], planA.steps[0]] };
-  const planB = { steps: [{ toolName: 'memory_search', args: { q: 'b' } }, { toolName: 'summarize', args: { n: 1 } }] };
+  const planB = { steps: [{ toolName: 'workspace_list', args: { q: 'b' } }, { toolName: 'summarize', args: { n: 1 } }] };
   const decide = (extra, at = N) =>
     storm.decide({ taskId: 't1', claim: badClaim, errorFingerprint: 'fp-1', ...extra }, { filePath: file, policy, now: at });
 

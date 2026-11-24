@@ -41,7 +41,7 @@ function makeTask(overrides = {}) {
     botId: 'memory',
     taskType: 'memory.search',
     goal: '恢复测试任务',
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     deadlineMs: 20000,
     ...overrides,
   });
@@ -113,7 +113,7 @@ test('Store：v1 任务文件迁移到 v2 并补齐阶段 3 字段', () => {
           sessionId: 'bs_legacy',
           taskType: 'memory.search',
           goal: '旧任务',
-          allowedTools: ['memory_search'],
+          allowedTools: ['knowledge_search'],
           deadlineMs: 20000,
           status: 'queued',
           attempts: 0,
@@ -379,7 +379,7 @@ test('崩溃注入：子进程 SIGKILL 后恢复只读任务并标记写任务 r
   const script = `
 process.env.BLUEBIRD_DATA_DIR = ${JSON.stringify(TMP)};
 const tasks = require('./server/agents/tasks');
-const readOnly = tasks.createTask({ botId: 'memory', taskType: 'memory.search', goal: '崩溃只读', allowedTools: ['memory_search'], deadlineMs: 20000 });
+const readOnly = tasks.createTask({ botId: 'memory', taskType: 'memory.search', goal: '崩溃只读', allowedTools: ['knowledge_search'], deadlineMs: 20000 });
 tasks.transitionTask(readOnly.taskId, { to: 'accepted' });
 tasks.transitionTask(readOnly.taskId, { to: 'running' });
 tasks.acquireLease(readOnly.taskId, { ownerId: 'dead-child' });

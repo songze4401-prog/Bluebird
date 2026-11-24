@@ -109,7 +109,7 @@ test.before(async () => {
           json(
             res,
             200,
-            completion(null, { toolCalls: [toolCall('call_prov_d', 'memory_search', { query: '污点' })] })
+            completion(null, { toolCalls: [toolCall('call_prov_d', 'knowledge_search', { query: '污点' })] })
           );
           return;
         }
@@ -199,7 +199,7 @@ function makeProducerTask(goal, extra = {}) {
     agentId: 'researcher',
     taskType: 'memory.recall',
     goal,
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     deadlineMs: 30000,
     ...extra,
   });
@@ -386,7 +386,7 @@ test('用例d：来源引用不可解析 → 工具调用 fail-closed 拒绝并�
 
   const denied = eventsOf(task.taskId, 'tool.denied');
   assert.ok(denied.length >= 1, 'Gateway 拒绝必须留痕');
-  assert.strictEqual(denied[0].payload.tool, 'memory_search');
+  assert.strictEqual(denied[0].payload.tool, 'knowledge_search');
   assert.strictEqual(denied[0].payload.errorCode, 'taint_provenance_broken');
   assert.strictEqual(denied[0].payload.mode, 'delegated_task');
 

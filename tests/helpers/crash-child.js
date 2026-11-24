@@ -246,7 +246,7 @@ async function main() {
 
     // 3) 审批记录已落盘、任务未进 waiting_approval（W5 窗口）
     case 'approval-after-record-save': {
-      const taskId = makeTask({ allowedTools: ['memory_search'], deadlineMs: 60000 });
+      const taskId = makeTask({ allowedTools: ['knowledge_search'], deadlineMs: 60000 });
       const memoryId = seedMemory();
       approvals.createApproval({
         botId: BOT,
@@ -280,7 +280,7 @@ async function main() {
 
     // 4) 正常执行中途崩溃（无副作用工具）
     case 'task-after-running': {
-      const taskId = makeTask({ allowedTools: ['memory_search'], toRunning: false });
+      const taskId = makeTask({ allowedTools: ['knowledge_search'], toRunning: false });
       await runtime.runTask(taskId);
       print({ unexpected: '任务进 running 后没有被杀' });
       process.exit(9);

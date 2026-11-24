@@ -14,7 +14,6 @@ function getAgentRuntime() {
 }
 const { classifyError } = require('../model-adapter');
 const { getManifest } = require('./manifest');
-const { isMemoryQueryDelegation } = require('../delegation-intent');
 const { assertRunnable } = require('./registry');
 const { getCredentialKey } = require('./credentials');
 const sessions = require('./sessions');
@@ -475,15 +474,7 @@ async function waitForReviewTask(taskId, timeoutMs) {
 
 function allowedToolsFor(config, manifest, taskTools, agentId = null, taskContext = {}) {
   const manifestSet = new Set(manifest.toolAllowlist);
-  const allowMaintenanceSearch =
-    agentId === 'memory' &&
-    taskContext.mode === 'delegated_task' &&
-    !isMemoryQueryDelegation(taskContext.taskType, taskContext.goal);
-  const configTools = config.toolAllowlist.filter(
-    name =>
-      manifestSet.has(name) &&
-      !(agentId === 'memory' && name === 'memory_search' && !allowMaintenanceSearch)
-  );
+  const configTools = config.toolAllowlist.filter(name => manifestSet.has(name));
   if (!Array.isArray(taskTools)) return configTools;
   const taskSet = new Set(taskTools);
   return configTools.filter(name => taskSet.has(name));

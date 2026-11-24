@@ -32,7 +32,7 @@ function newTask(extra = {}) {
     botId: 'memory',
     taskType: 'memory.search',
     goal: '成本用例任务',
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
     ...extra,
   });
   tasks.transitionTask(task.taskId, { to: 'accepted' });

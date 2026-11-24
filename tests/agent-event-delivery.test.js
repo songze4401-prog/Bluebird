@@ -45,7 +45,7 @@ function makeCompletedTask(parentSessionId) {
     botId: 'memory',
     taskType: 'memory.search',
     goal: '事件投递测试任务',
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
     deadlineMs: 20000,
     parentSessionId,
   });

@@ -227,7 +227,7 @@ async function setupProvider() {
                   {
                     id: 'call_p5c_write',
                     type: 'function',
-                    function: { name: 'memory_remember', arguments: JSON.stringify({ x: 7 }) },
+                    function: { name: 'workspace_write', arguments: JSON.stringify({ x: 7 }) },
                   },
                 ],
               },
@@ -300,7 +300,7 @@ test('d. 真实 runTask：运行开始签发、副作用按新代次放行、终
   resetAll();
   await setupProvider();
   let calls = 0;
-  register('memory_remember', async () => {
+  register('workspace_write', async () => {
     calls += 1;
     return { ok: true, summary: 'written' };
   });
@@ -310,7 +310,7 @@ test('d. 真实 runTask：运行开始签发、副作用按新代次放行、终
       botId: 'memory',
       taskType: 'memory.search',
       goal: 'P5C 真实运行',
-      allowedTools: ['memory_remember'],
+      allowedTools: ['workspace_write'],
       deadlineMs: 20000,
     });
     runtime.startTask(task.taskId);
@@ -376,7 +376,7 @@ function basePlan(overrides = {}) {
     noAnswerThreshold: 0.04,
     reasons: ['general_default'],
     steps: [],
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
     budget: null,
     goalDigest: 'sha256:goal',
     ...overrides,
@@ -386,7 +386,7 @@ function basePlan(overrides = {}) {
 test('e. 迁移桥：只有 migrated 换发、cancelled/revalidated 收回、continued 保持原代次', () => {
   resetAll();
   const step = store.buildStep({
-    toolName: 'memory_search',
+    toolName: 'workspace_list',
     args: { query: 'bluebird', limit: 3 },
     label: '查记忆',
     schemaVersion: 'message-v1',

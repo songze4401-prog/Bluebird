@@ -46,7 +46,7 @@ function makeTask(goal = '失败模式测试') {
     botId: 'memory',
     taskType: 'memory.search',
     goal: `${goal} ${seq}`,
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
     deadlineMs: 20000,
   });
 }
@@ -203,7 +203,7 @@ test('A-10 duplicate_execution：真实幂等键重复建任务只保留一条 �
     botId: 'memory',
     taskType: 'memory.search',
     goal: '幂等重复执行',
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
     idempotencyKey: 'failure-mode-idempotent-key',
   };
   const first = tasks.createTask(params);
@@ -326,7 +326,7 @@ test('A-10 budget_exhausted：真实父任务预算闸门拒绝子任务 → 终
     botId: 'memory',
     taskType: 'memory.search',
     goal: '预算父任务',
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
     runId: 'run_failure_budget',
     runBudget: 1000,
     budget: { maxRounds: 3, maxToolCalls: 6, maxReadOnlyRetries: 1, tokenBudget: 1000 },
@@ -337,7 +337,7 @@ test('A-10 budget_exhausted：真实父任务预算闸门拒绝子任务 → 终
         botId: 'memory',
         taskType: 'memory.search',
         goal: '预算子任务',
-        allowedTools: ['memory_search'],
+        allowedTools: ['workspace_list'],
         parentTaskId: parent.taskId,
         runId: 'run_failure_budget',
         budget: { maxRounds: 3, maxToolCalls: 6, maxReadOnlyRetries: 1, tokenBudget: 5000 },
