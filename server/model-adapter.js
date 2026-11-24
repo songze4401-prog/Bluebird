@@ -14,7 +14,7 @@
  *   给的 provider 对象（id/baseUrl/models/key）；
  * - 复用 openai SDK（OpenAI Chat Completions 兼容格式，DeepSeek 亦兼容），
  *   不重复实现记忆 / 人格 / 情绪注入——那些仍在 index.js 原有流水里；
- * - 能力不虚报：vision 只在模型显式声明 capabilities.vision === true 时可用；
+ * - 能力不虚报：vision/tools/reasoning 只在模型显式声明 true 时使用；
  * - 自定义 Base URL 的 SSRF 防护：保存校验 + 连接测试 + 调用前解析三重把关，
  *   阻断环回 / 私网 / 链路本地 / 云元数据地址（详见 assertPublicUrl）。
  *
@@ -54,6 +54,8 @@ const {
 //   model       模型侧错误（上游 4xx 的业务错误，如模型不存在）
 //   bad_request 请求格式被拒（如图片放错了消息位）
 //   not_configured 没有可用密钥 / 服务商
+//   provider_not_found / provider_disabled / model_not_found / model_disabled 本地配置错误
+//   empty_response 上游成功但未返回有效正文
 //   capability  请求了模型未声明支持的能力（本地拦截，未发请求）
 const ERROR_STATUS = Object.freeze({
   auth: 502,
@@ -64,6 +66,11 @@ const ERROR_STATUS = Object.freeze({
   model: 502,
   bad_request: 400,
   not_configured: 500,
+  provider_not_found: 400,
+  provider_disabled: 503,
+  model_not_found: 400,
+  model_disabled: 409,
+  empty_response: 502,
   capability: 400,
   cancelled: 499,
 });
@@ -77,6 +84,11 @@ const ERROR_MESSAGE = Object.freeze({
   model: '模型返回错误',
   bad_request: '请求格式不被模型服务商接受',
   not_configured: '未配置可用的模型服务商',
+  provider_not_found: '模型服务商不存在',
+  provider_disabled: '模型服务商已禁用',
+  model_not_found: '模型不存在',
+  model_disabled: '模型已禁用',
+  empty_response: '模型没有返回有效内容',
   capability: '当前模型不支持该能力',
   cancelled: '客户端已断开，模型调用已取消',
 });
@@ -398,17 +410,17 @@ function resolveTarget({ providerId, modelId, wantVision = false, keyOverride = 
   const pid = providerId || defaults.providerId;
   const provider = findProvider(pid);
 
-  if (!provider) throw new ModelCallError('not_configured', `服务商不存在：${pid}`);
+  if (!provider) throw new ModelCallError('provider_not_found', `服务商不存在：${pid}`);
   if (provider.enabled === false) {
-    throw new ModelCallError('not_configured', `服务商已禁用：${pid}`);
+    throw new ModelCallError('provider_disabled', `服务商已禁用：${pid}`);
   }
 
   const mid = modelId || defaults.modelId;
   const model = provider.models.find(m => m.id === mid);
 
-  if (!model) throw new ModelCallError('not_configured', `模型不存在：${pid}/${mid}`);
+  if (!model) throw new ModelCallError('model_not_found', `模型不存在：${pid}/${mid}`);
   if (model.enabled === false) {
-    throw new ModelCallError('not_configured', `模型已禁用：${pid}/${mid}`);
+    throw new ModelCallError('model_disabled', `模型已禁用：${pid}/${mid}`);
   }
 
   if (wantVision && model.capabilities && model.capabilities.vision !== true) {
@@ -440,9 +452,9 @@ function resolveVisionTarget({ providerId, modelId, keyOverride = null } = {}) {
 
   // 显式指定或默认服务商不存在/被禁用：明确报 not_configured，
   // 不落入 capability（那会掩盖"服务商没了"的真实原因）
-  if (!provider) throw new ModelCallError('not_configured', `服务商不存在：${pid}`);
+  if (!provider) throw new ModelCallError('provider_not_found', `服务商不存在：${pid}`);
   if (provider.enabled === false) {
-    throw new ModelCallError('not_configured', `服务商已禁用：${pid}`);
+    throw new ModelCallError('provider_disabled', `服务商已禁用：${pid}`);
   }
 
   if (modelId) {
@@ -554,6 +566,79 @@ function getMemoryClient() {
   } catch (_) {
     return null;
   }
+}
+
+function reasoningFallbackText(message) {
+  if (!message || typeof message !== 'object') return '';
+  if (typeof message.reasoning_content === 'string' && message.reasoning_content.trim()) {
+    return message.reasoning_content;
+  }
+  if (typeof message.reasoning === 'string' && message.reasoning.trim()) {
+    return message.reasoning;
+  }
+  return '';
+}
+
+function normalizeCompletion(result, model) {
+  if (!result || !Array.isArray(result.choices)) return result;
+  const choice = result.choices[0];
+  const message = choice && choice.message;
+  if (!message || (typeof message.content === 'string' && message.content)) return result;
+  if (!model || !model.capabilities || model.capabilities.reasoning !== true) return result;
+  const fallback = reasoningFallbackText(message);
+  if (!fallback) return result;
+  message.content = fallback;
+  delete message.reasoning_content;
+  delete message.reasoning;
+  return result;
+}
+
+function createStreamNormalizer(model) {
+  const reasoningEnabled = Boolean(
+    model && model.capabilities && model.capabilities.reasoning === true
+  );
+  let bufferedReasoning = '';
+  let sawContent = false;
+  let sawToolCall = false;
+
+  const normalize = chunk => {
+    if (!reasoningEnabled) return chunk;
+    const choice = chunk && Array.isArray(chunk.choices) ? chunk.choices[0] : null;
+    const delta = choice && choice.delta;
+    if (!delta) return chunk;
+
+    if (typeof delta.content === 'string' && delta.content.trim()) {
+      sawContent = true;
+    }
+    if (Array.isArray(delta.tool_calls) && delta.tool_calls.length) {
+      sawToolCall = true;
+    }
+
+    if (sawContent || sawToolCall) {
+      delete delta.reasoning_content;
+      delete delta.reasoning;
+      return chunk;
+    }
+
+    const fallback = reasoningFallbackText(delta);
+    if (fallback) {
+      bufferedReasoning += fallback;
+      delete delta.reasoning_content;
+      delete delta.reasoning;
+    }
+    return chunk;
+  };
+
+  normalize.flush = () => {
+    if (!bufferedReasoning || sawContent || sawToolCall) return null;
+    const content = bufferedReasoning;
+    bufferedReasoning = '';
+    return {
+      choices: [{ index: 0, delta: { content }, finish_reason: 'stop' }],
+    };
+  };
+
+  return normalize;
 }
 
 // ---- 统一调用 ----
@@ -721,16 +806,25 @@ async function createChatCompletion({
   }
 
   if (!stream) {
+    const normalized = normalizeCompletion(result, target.model);
     gate.settle(true);
     monitor.complete({
       status: 'success',
       durationMs: Date.now() - startedAt,
-      usage: result && result.usage ? result.usage : null,
+      usage: normalized && normalized.usage ? normalized.usage : null,
     });
-    return result;
+    return normalized;
   }
 
-  return wrapMonitoredStream(result, monitor, startedAt, (ok, code) => gate.settle(ok, ok ? null : streamSettleKind(code)));
+  return wrapMonitoredStream(
+    result,
+    monitor,
+    startedAt,
+    (ok, code) => gate.settle(ok, ok ? null : streamSettleKind(code)),
+    createStreamNormalizer(target.model),
+    signal,
+    key
+  );
 }
 
 /**
@@ -755,9 +849,28 @@ function monitoringStatusForKind(kind) {
 // 流式响应没有统一的 usage 承诺：能拿到就用供应商真实值，拿不到就明确标 missing。
 // 迭代正常结束记 success，调用方提前 return（客户端断连）记 cancelled，
 // 迭代抛错记 failed；原始错误对象原样抛回，保持上层错误语义不变。
-function wrapMonitoredStream(stream, monitor, startedAt, onSettle = null) {
+function isAbortError(error) {
+  return Boolean(
+    error &&
+      (error.name === 'AbortError' ||
+        error.name === 'APIUserAbortError' ||
+        error.code === 'ABORT_ERR' ||
+        error.code === 'ERR_ABORTED')
+  );
+}
+
+function wrapMonitoredStream(
+  stream,
+  monitor,
+  startedAt,
+  onSettle = null,
+  normalizeChunk = null,
+  signal = null,
+  key = null
+) {
   let settled = false;
   let usage = null;
+  let finalPending = false;
 
   const finish = (status, errorCode = null) => {
     if (settled) return;
@@ -780,6 +893,11 @@ function wrapMonitoredStream(stream, monitor, startedAt, onSettle = null) {
     if (onSettle) onSettle(status === 'success', status === 'success' ? null : String(errorCode || status));
   };
 
+  const cancelled = () => {
+    finish('cancelled', 'client_closed');
+    return new ModelCallError('cancelled', '客户端已断开，模型调用已取消');
+  };
+
   return new Proxy(stream, {
     get(target, property) {
       if (property === Symbol.asyncIterator) {
@@ -787,32 +905,69 @@ function wrapMonitoredStream(stream, monitor, startedAt, onSettle = null) {
           const iterator = target[Symbol.asyncIterator]();
           return {
             async next() {
+              if (signal && signal.aborted) throw cancelled();
+              if (finalPending) {
+                finalPending = false;
+                finish('success');
+                return { done: true, value: undefined };
+              }
               try {
                 const step = await iterator.next();
+                if (signal && signal.aborted) throw cancelled();
                 if (step.done) {
+                  const flushed =
+                    normalizeChunk && typeof normalizeChunk.flush === 'function'
+                      ? normalizeChunk.flush()
+                      : null;
+                  if (flushed) {
+                    finalPending = true;
+                    return { done: false, value: flushed };
+                  }
                   finish('success');
-                } else if (step.value && step.value.usage) {
+                  return step;
+                }
+                if (step.value && step.value.usage) {
                   usage = step.value.usage;
+                }
+                if (step.value && typeof normalizeChunk === 'function') {
+                  step.value = normalizeChunk(step.value);
                 }
                 return step;
               } catch (error) {
-                finish('failed', error && error.code ? String(error.code) : 'stream_error');
-                throw error;
+                if ((signal && signal.aborted) || isAbortError(error)) {
+                  throw cancelled();
+                }
+                const normalized = normalizeSdkError(error, key);
+                finish('failed', normalized.kind);
+                throw normalized;
               }
             },
             async return(value) {
               finish('cancelled', 'client_closed');
-              if (typeof iterator.return === 'function') {
-                return iterator.return(value);
+              if (typeof iterator.return !== 'function') return { done: true, value };
+              try {
+                return await iterator.return(value);
+              } catch (error) {
+                if ((signal && signal.aborted) || isAbortError(error)) {
+                  return { done: true, value };
+                }
+                throw normalizeSdkError(error, key);
               }
-              return { done: true, value };
             },
             async throw(error) {
-              finish('failed', 'stream_error');
-              if (typeof iterator.throw === 'function') {
-                return iterator.throw(error);
+              if ((signal && signal.aborted) || isAbortError(error)) {
+                throw cancelled();
               }
-              throw error;
+              const normalized = normalizeSdkError(error, key);
+              finish('failed', normalized.kind);
+              if (typeof iterator.throw === 'function') {
+                try {
+                  return await iterator.throw(error);
+                } catch (streamError) {
+                  throw normalizeSdkError(streamError, key);
+                }
+              }
+              throw normalized;
             },
           };
         };

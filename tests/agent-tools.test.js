@@ -1165,7 +1165,11 @@ async function main() {
   resetScript();
   scripted.push({ emptyChoices: true });
   const emptyChat = await req('/chat', { method: 'POST', body: { message: '空响应测试' } });
-  check('F3 空 choices：/chat 返回 500 而非进程级崩溃', emptyChat.status === 500, `status=${emptyChat.status}`);
+  check(
+    'F3 空 choices：/chat 返回 502 empty_response 而非进程级崩溃',
+    emptyChat.status === 502 && emptyChat.json && emptyChat.json.code === 'empty_response',
+    `status=${emptyChat.status}`
+  );
   check('F3 空 choices：不泄露 TypeError 细节', !JSON.stringify(emptyChat.json).includes('TypeError'));
 
   resetScript();
@@ -1173,8 +1177,8 @@ async function main() {
   const emptyStream = await readSse('/chat/stream', { message: '空响应测试' });
   const emptyErr = emptyStream.events.find(e => e.type === 'error');
   check(
-    'F3 空 choices：流式发可控 error（模型没有返回有效内容）',
-    !!emptyErr && emptyErr.error === '模型没有返回有效内容',
+    'F3 空 choices：流式发可控 error（empty_response）',
+    !!emptyErr && emptyErr.error === '模型没有返回有效内容' && emptyErr.code === 'empty_response',
     JSON.stringify(emptyStream.events)
   );
   check('F3 空 choices：流式不发 done', !emptyStream.events.some(e => e.type === 'done'));

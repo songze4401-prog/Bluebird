@@ -524,7 +524,12 @@ export function useChatSession({
         }
 
         if (outcome.kind === 'error') {
-          options.onStreamError(outcome.message, streamTempId);
+          const apiError = apiErrorFromPayload(
+            { error: outcome.message, code: outcome.code },
+            outcome.status || 0,
+            outcome.message
+          );
+          options.onStreamError(errorMessageWithHint(apiError), streamTempId);
           return;
         }
 

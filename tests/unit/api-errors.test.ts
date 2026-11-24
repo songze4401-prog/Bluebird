@@ -104,6 +104,21 @@ describe('code → 可执行提示', () => {
     }
   });
 
+  it('模型配置与空响应错误都有明确提示', () => {
+    for (const code of [
+      'provider_not_found',
+      'provider_disabled',
+      'model_not_found',
+      'model_disabled',
+      'empty_response',
+      'invalid_message',
+    ]) {
+      const error = apiErrorFromPayload({ error: 'e', code }, 400, 'x');
+
+      expect(error.actionHint).toBeTruthy();
+    }
+  });
+
   it('未知 code 不编造提示（保持服务端原文）', () => {
     const error = apiErrorFromPayload(
       { error: '某个未来才有的错误', code: 'brand_new_code' },

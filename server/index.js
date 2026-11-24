@@ -830,7 +830,7 @@ async function prepareChatRequest(req) {
 
   // 纯发图（无文字）合法：有附件时放空文本校验
   if (!attachments.length && (typeof message !== 'string' || !message.trim())) {
-    return { error: [400, { error: '消息不能为空' }] };
+    return { error: [400, { error: '消息不能为空', code: 'invalid_message' }] };
   }
 
   // 会话必须已存在且属于本人：跨会话或未知会话一律拒绝，保证严格隔离
@@ -1867,8 +1867,8 @@ app.post('/chat', requireAuth, async (req, res) => {
       rawReply = agentStopReply(agentOutcome.stopReason);
     }
 
-    if (!rawReply) {
-      throw new Error('模型没有返回有效内容');
+    if (typeof rawReply !== 'string' || !rawReply.trim()) {
+      throw new ModelCallError('empty_response', '模型没有返回有效内容');
     }
 
     rawReply = auditChatReply(rawReply, ctx, toolSteps);
@@ -1949,11 +1949,13 @@ app.post('/chat', requireAuth, async (req, res) => {
       console.error('AI API Error:', error.kind, error.message);
       monitoring.recordTask({
         status:
-          error.kind === 'timeout'
-            ? 'timeout'
-            : error.kind === 'auth'
-              ? 'denied'
-              : 'failed',
+          error.kind === 'cancelled'
+            ? 'cancelled'
+            : error.kind === 'timeout'
+              ? 'timeout'
+              : error.kind === 'auth'
+                ? 'denied'
+                : 'failed',
         termination: 'model_error',
         durationMs: Date.now() - userMessageReceivedAt,
         rounds: lastAgentRounds || 1,
@@ -2303,6 +2305,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         temperature: 0.8,
         maxTokens: 8192,
         timeout: 90000,
+        signal: disconnect.signal,
         stream: true,
         messages: outgoingMessages,
       });
@@ -2371,16 +2374,20 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   if (streamError) {
     emitContextTrace(ctxForTrace);
     finishSse(
-      'failed',
+      streamError instanceof ModelCallError && streamError.kind === 'cancelled'
+        ? 'aborted'
+        : 'failed',
       streamError instanceof ModelCallError ? streamError.kind : 'stream_error'
     );
     monitoring.recordTask({
       status:
-        streamError instanceof ModelCallError && streamError.kind === 'timeout'
-          ? 'timeout'
-          : streamError instanceof ModelCallError && streamError.kind === 'auth'
-            ? 'denied'
-            : 'failed',
+        streamError instanceof ModelCallError && streamError.kind === 'cancelled'
+          ? 'cancelled'
+          : streamError instanceof ModelCallError && streamError.kind === 'timeout'
+            ? 'timeout'
+            : streamError instanceof ModelCallError && streamError.kind === 'auth'
+              ? 'denied'
+              : 'failed',
       termination: 'model_error',
       durationMs: Date.now() - userMessageReceivedAt,
       rounds: agentOn ? lastAgentRounds : 1,
@@ -2405,7 +2412,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
     return;
   }
 
-  if (!rawReply) {
+  if (typeof rawReply !== 'string' || !rawReply.trim()) {
     finishSse('failed', 'empty_response');
     monitoring.recordTask({
       status: 'failed',
@@ -2415,7 +2422,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
       toolCount: lastAgentToolCount,
       errorCode: 'empty_response',
     });
-    sendEvent({ type: 'error', error: '模型没有返回有效内容' });
+    sendEvent({ type: 'error', error: '模型没有返回有效内容', code: 'empty_response' });
     res.end();
     return;
   }

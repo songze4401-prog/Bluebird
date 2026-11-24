@@ -432,8 +432,8 @@ async function main() {
     },
   });
   check(
-    '请求级无效模型 → 500 not_configured',
-    badModel.status === 500 && badModel.json && badModel.json.code === 'not_configured',
+    '请求级无效模型 → 400 model_not_found',
+    badModel.status === 400 && badModel.json && badModel.json.code === 'model_not_found',
     JSON.stringify(badModel.json)
   );
   check(

@@ -18,7 +18,7 @@ function option(name, fallback = null) {
 function usage() {
   console.log(
     'Usage: node scripts/real-model-e2e.js --run [--provider deepseek|custom] ' +
-      '[--model MODEL] [--base-url URL] [--no-tools] [--agent] [--out FILE]'
+      '[--model MODEL] [--base-url URL] [--no-tools] [--reasoning] [--agent] [--out FILE]'
   );
   console.log('Credentials: DEEPSEEK_API_KEY or BLUEBIRD_REAL_API_KEY.');
   console.log('Exit codes: 0=all required checks passed, 1=executed with failures, 2=not verified.');
@@ -44,6 +44,8 @@ const outFile = option('--out', process.env.BLUEBIRD_REAL_E2E_OUT || '');
 const runAgent = args.includes('--agent') || process.env.BLUEBIRD_REAL_AGENT === '1';
 const toolsEnabled =
   !args.includes('--no-tools') && process.env.BLUEBIRD_REAL_TOOLS !== '0';
+const reasoningEnabled =
+  args.includes('--reasoning') || process.env.BLUEBIRD_REAL_REASONING === '1';
 
 function notVerified(reason) {
   console.error(`NOT VERIFIED — ${reason}`);
@@ -58,6 +60,9 @@ if (!apiKey) notVerified('缺少真实 Provider 凭证。');
 if (providerKind === 'custom' && !baseUrl) notVerified('custom Provider 缺少 base URL。');
 if (providerKind === 'deepseek' && baseUrl) {
   notVerified('deepseek Provider 使用内置地址，不支持 --base-url；自定义地址请使用 --provider custom。');
+}
+if (providerKind === 'deepseek' && reasoningEnabled) {
+  notVerified('内置 deepseek-chat 未声明 reasoning 能力；推理模型请使用 --provider custom --reasoning。');
 }
 if (process.env.BLUEBIRD_ALLOW_PRIVATE_BASE_URL === '1') {
   notVerified('BLUEBIRD_ALLOW_PRIVATE_BASE_URL=1 只能用于本地桩，不能用于真实 E2E。');
@@ -371,7 +376,7 @@ async function main() {
           {
             id: modelId,
             name: modelId,
-            capabilities: { tools: toolsEnabled, vision: false },
+            capabilities: { tools: toolsEnabled, vision: false, reasoning: reasoningEnabled },
           },
         ],
       },
@@ -544,6 +549,7 @@ function report() {
       kind: providerKind,
       id: providerId,
       modelId,
+      reasoning: reasoningEnabled,
       baseUrl: parsedBase ? `${parsedBase.protocol}//${parsedBase.host}` : null,
     },
     summary: {
