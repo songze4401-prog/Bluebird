@@ -43,7 +43,7 @@ function makeTask(overrides = {}) {
     botId: 'memory',
     taskType: 'memory.search',
     goal: `审批恢复任务 ${taskSeq}`,
-    allowedTools: ['memory_remember'],
+    allowedTools: ['workspace_write'],
     deadlineMs: 5000,
     ...overrides,
   });

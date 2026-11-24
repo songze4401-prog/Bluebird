@@ -28,7 +28,7 @@ function createFailedTask(attempts, maxAttempts = 3) {
     botId: 'memory',
     taskType: 'memory.search',
     goal: '死信用例任务',
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
     deadlineMs: 20000,
   });
   tasks.transitionTask(task.taskId, { to: 'accepted' });

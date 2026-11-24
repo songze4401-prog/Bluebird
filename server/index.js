@@ -1768,9 +1768,6 @@ app.post('/chat', requireAuth, async (req, res) => {
         messages: ctx.requestMessages,
         policy: ctx.agentPolicy,
         onRequest: requestMeta => recordSentForContext(ctx, requestMeta),
-        // 用户明确点名 Memory Bot / 子 agent 时由运行时先真实派发，
-        // 不依赖模型是否自愿发起工具调用。
-        enforceExplicitDelegation: true,
       });
 
       agentOutcome = outcome;
@@ -2212,8 +2209,6 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         messages: ctx.requestMessages,
         policy: ctx.agentPolicy,
         onRequest: requestMeta => recordSentForContext(ctx, requestMeta),
-        // 与 /chat 一致：显式子 agent 请求必须真实派发，不能只靠模型自觉。
-        enforceExplicitDelegation: true,
       });
 
       if (outcome.completion) {

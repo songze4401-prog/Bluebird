@@ -40,14 +40,14 @@ flowchart LR
     - **Auth / Rate / CORS** — Bearer、60/min、CORS 精确来源白名单（鉴权与限流先于 body 解析）
     - **Chat 路由** — /chat、/chat/stream、Context Runtime（已验证）
     - **Agent Runtime** — 工具注册、预算、执行、去重（已验证）
-    - **Memory Bot** — registry/config/vault/sessions/tasks/approvals/delivery（已实现；维护操作走审批 API，模型不可自行触发）
+    - **Agent 团队** — memory（Action Bot，历史 id）/ researcher / executor / reviewer 四个已注册 Agent，共用 registry/config/vault/sessions/tasks/approvals/delivery；长期记忆由主控独占，子 Agent 不持有记忆检索工具
     - **Memory Engine** — 搜索、候选、生命周期、贡献（已验证 / 设计取舍）
     - **统一检索** — connectors、store、BM25/exact/vector、RRF（backend 已验证；无 UI）
     - **域服务** — emotion/persona/presence/stickers/uploads（已验证）
     - **持久化** — sessions/memory/tasks/events/outbox/index（原子写；保留策略已实现：会话 200 / 消息 1000 / 分页 200）
     - **监控** — trace、metrics、alerts、health（已验证 / 只读）
   - **工程保障** — 测试、CI、覆盖率、文档（通过；计数对齐 scripts/test-coverage-baseline.json 单一基线）
-    - **后端测试** — 135 文件 / 2648 项；真实 HTTP + stub（通过）
+    - **后端测试** — 136 文件 / 2649 项；真实 HTTP + stub（通过）
     - **前端测试** — 18 套 / 143 项；apiFetch mock（通过 / 无 App E2E）
     - **CI** — GitHub Actions；push 仅 main、PR 指向 main，覆盖率脚本单次执行（通过）
     - **文档** — AGENTS/docs/README 计数同源（scripts/sync-doc-counts.js 单一基线，CI --check 兜底）
@@ -71,7 +71,7 @@ flowchart LR
 - **记忆注入**：`prepareChatRequest` → `runContextRuntime` → `retrieveMemory` → `memory.searchMemories`（带服务端可信 `userId`，即用户级作用域；无身份时 fail-closed 退回会话级）→ `buildContext` → 模型。
 - **外部知识**：`retrieveKnowledge` → `retrieval.searchForContext` → 只注入 document/web/code；memory/conversation 走独立记忆通道。
 - **主控工具**：`runAgentTurn` → `executeToolCall` → `memory_search`/`memory_remember`/`knowledge_search`/`delegate_to_bot`。
-- **委派**：`delegate_to_bot` → Router（`parentUserId` = 调用方上下文身份，缺省落回实例用户）→ Bot 会话 + task → queue → Bot Runtime → tools（记忆读写归属父主控会话 + `parentUserId`）→ result delivery → 父会话。
+- **委派**：`delegate_to_bot`（`botId` 必填，可派给任意已注册小 Agent）→ Router（`parentUserId` = 调用方上下文身份，缺省落回实例用户）→ Bot 会话 + task → queue → Bot Runtime → tools → result delivery → 父会话。记忆的查/写由主控直接调用，不委派。
 - **审批**：approval API → `memory-service` → `memory.js` → atomic write；结果投递闭环（result-delivery.js + SSE snapshot，`bot-result-<taskId>` 幂等）。
 - **落盘**：sessions/memory/emotion/presence/agents/tasks/events 各有独立 JSON 文件；没有跨文件事务。
 

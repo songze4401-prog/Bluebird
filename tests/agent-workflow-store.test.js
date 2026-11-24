@@ -62,7 +62,7 @@ function basePlan(overrides = {}) {
     noAnswerThreshold: 0.04,
     reasons: ['general_default'],
     steps: [],
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
     budget: null,
     goalDigest: 'sha256:goal',
     ...overrides,
@@ -71,7 +71,7 @@ function basePlan(overrides = {}) {
 
 function step(overrides = {}) {
   return store.buildStep({
-    toolName: 'memory_search',
+    toolName: 'workspace_list',
     args: { query: 'bluebird', limit: 3 },
     label: '查记忆',
     ...overrides,
@@ -504,7 +504,7 @@ test('A-01 §13 复用检查逐项 fail-closed：输入/污点/时效/schema/验
 
 test('A-01 迁移：未开始节点迁新版本、运行中节点保原版本、可复用产物复用且保留 provenance/taint', () => {
   const s = store.buildStep({
-    toolName: 'memory_search',
+    toolName: 'workspace_list',
     args: { query: 'bluebird', limit: 3 },
     label: '查记忆',
     schemaVersion: 'message-v1',
@@ -575,11 +575,11 @@ test('A-01 迁移：未开始节点迁新版本、运行中节点保原版本、
   // 复用既有 op-ledger override 语义：不同 override 派生不同 opKey（旧副作用不会被误复用）。
   assert.notStrictEqual(
     store.stepKeyFor({
-      toolName: 'memory_search',
+      toolName: 'workspace_list',
       args: { query: 'bluebird', limit: 3 },
       override: compensation.override,
     }),
-    store.stepKeyFor({ toolName: 'memory_search', args: { query: 'bluebird', limit: 3 } })
+    store.stepKeyFor({ toolName: 'workspace_list', args: { query: 'bluebird', limit: 3 } })
   );
 
   // 迁移审计落既有 audit 文件，可追 mapping 与原因。

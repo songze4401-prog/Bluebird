@@ -150,7 +150,7 @@ const providerServer = http.createServer((req, res) => {
               index: 0,
               id: 'call_stream',
               type: 'function',
-              function: { name: 'memory_search', arguments: '' },
+              function: { name: 'knowledge_search', arguments: '' },
             }],
           },
           finish_reason: null,
@@ -189,7 +189,7 @@ const providerServer = http.createServer((req, res) => {
             id: `call_budget_${index}`,
             type: 'function',
             function: {
-              name: 'memory_search',
+              name: 'knowledge_search',
               arguments: JSON.stringify({ query: `咖啡 ${index}`, limit: 3 }),
             },
           }));
@@ -212,7 +212,7 @@ const providerServer = http.createServer((req, res) => {
         jsonResponse(
           res,
           200,
-          completion(null, toolCall('memory_search', { query: '咖啡', limit: 3 }))
+          completion(null, toolCall('knowledge_search', { query: '咖啡', limit: 3 }))
         );
         return;
       }
@@ -527,10 +527,12 @@ test('直接对话：Bot 独立 Key 隔离，记忆查询工具调用被拒绝',
   assert.equal(result.ok, true);
   assert.equal(result.sessionId, session.id);
   assert.equal(result.message.role, 'assistant');
-  const deniedSearch = result.toolSteps.find(step => step.name === 'memory_search');
-  assert.ok(deniedSearch, '即使模型伪造查询调用也应留下拒绝结果');
-  assert.equal(deniedSearch.ok, false);
-  assert.match(deniedSearch.summary, /策略不允许/);
+  // 新架构：Bot 没有任何记忆工具，记忆由主控独占
+  assert.equal(
+    result.toolSteps.some(step => step.name === 'memory_search' || step.name === 'memory_remember'),
+    false,
+    'Bot 不应有记忆工具步骤'
+  );
   assert.equal(
     result.evidence.some(item => item.id === 'm-memory-bot-test'),
     false,
@@ -547,7 +549,11 @@ test('直接对话：Bot 独立 Key 隔离，记忆查询工具调用被拒绝',
     sessionId: anonymousSession.id,
     message: '请检索我关于咖啡的长期记忆。',
   });
-  assert.ok(anonymous.toolSteps.some(step => step.name === 'memory_search' && !step.ok));
+  assert.equal(
+    anonymous.toolSteps.some(step => step.name === 'memory_search' || step.name === 'memory_remember'),
+    false,
+    'Bot 无记忆工具，不得检索长期记忆'
+  );
   assert.equal(
     anonymous.evidence.some(item => item.id === 'm-memory-bot-test'),
     false,
@@ -571,7 +577,7 @@ test('主控委派：任务状态、结构化结果与取消', async () => {
     taskType: 'memory.search',
     goal: '整理我的咖啡偏好',
     context: '只返回与咖啡相关的记忆。',
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     deadlineMs: 20000,
   });
   runtime.startTask(task.taskId);
@@ -585,7 +591,7 @@ test('主控委派：任务状态、结构化结果与取消', async () => {
     botId: 'memory',
     taskType: 'memory.explain',
     goal: '解释一条记忆',
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     deadlineMs: 20000,
   });
   const cancelled = runtime.cancelTask(queued.taskId);
@@ -628,7 +634,7 @@ test('工具预算：超出旧上限后保留无工具总结轮，不返回 empt
       botId: 'memory',
       taskType: 'memory.search',
       goal: '记录用户提供的咖啡偏好并核对现有冲突',
-      allowedTools: ['memory_search', 'memory_remember', 'knowledge_search'],
+      allowedTools: ['knowledge_search', 'knowledge_search', 'knowledge_search'],
       deadlineMs: 20000,
     });
     runtime.startTask(task.taskId);
@@ -665,7 +671,7 @@ test('持久任务队列：并发限制、失败隔离与重启恢复', async ()
       botId: 'memory',
       taskType: 'memory.search',
       goal,
-      allowedTools: ['memory_search'],
+      allowedTools: ['knowledge_search'],
       deadlineMs: 20000,
     })
   );
@@ -690,7 +696,7 @@ test('持久任务队列：并发限制、失败隔离与重启恢复', async ()
     botId: 'memory',
     taskType: 'memory.search',
     goal: '重启恢复任务',
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     deadlineMs: 20000,
   });
   tasks.transitionTask(interrupted.taskId, { to: 'accepted' });
@@ -709,7 +715,7 @@ test('持久任务队列：并发限制、失败隔离与重启恢复', async ()
     botId: 'memory',
     taskType: 'memory.search',
     goal: '失败任务',
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     deadlineMs: 20000,
   });
   runtime.startTask(failing.taskId);
@@ -722,7 +728,7 @@ test('持久任务队列：并发限制、失败隔离与重启恢复', async ()
     botId: 'memory',
     taskType: 'memory.search',
     goal: '失败后的队列任务',
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     deadlineMs: 20000,
   });
   runtime.startTask(afterFailure.taskId);
@@ -745,7 +751,7 @@ test('队列活性：唯一任务瞬态失败进 retrying 后，退避到期必�
       botId: 'memory',
       taskType: 'memory.search',
       goal: '瞬态失败自动重试',
-      allowedTools: ['memory_search'],
+      allowedTools: ['knowledge_search'],
       deadlineMs: 20000,
     });
     runtime.startTask(solo.taskId);
@@ -864,21 +870,22 @@ test('HTTP API：鉴权由外层注入，配置/凭证/会话/任务均走真实
       botId: 'memory',
       taskType: 'memory.search',
       goal: '查一下我的咖啡偏好',
-      allowedTools: ['memory_search'],
+      allowedTools: ['knowledge_search'],
       deadlineMs: 20000,
     },
   });
+  // 历史 memory.* 任务类型不再允许通过 HTTP 新建：记忆由主控直接处理
   assert.equal(rejectedQuery.status, 403);
-  assert.equal(rejectedQuery.json.code, 'memory_query_requires_main_agent');
-  assert.equal(tasks.allTasks().length, beforeQueryTasks, '查询请求不得创建 Memory Bot 任务');
+  assert.equal(rejectedQuery.json.code, 'memory_main_agent_only');
+  assert.equal(tasks.allTasks().length, beforeQueryTasks, '记忆任务不得经子 Agent 创建');
 
   const task = await api('/agent-tasks', {
     method: 'POST',
     body: {
       botId: 'memory',
-      taskType: 'memory.search',
+      taskType: 'action.execute',
       goal: '记录用户提供的咖啡偏好并核对现有冲突',
-      allowedTools: ['memory_search'],
+      allowedTools: ['knowledge_search'],
       deadlineMs: 20000,
     },
   });

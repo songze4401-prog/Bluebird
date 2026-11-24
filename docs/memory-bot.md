@@ -1,5 +1,14 @@
 # 云岫 Bluebird — Memory Bot 首期：基线审计与实现
 
+> **2026-11-24 架构变更（现行实现以此为准）**
+> 长期记忆改由主控模型独占：`memory_search` / `memory_remember` 只注册在主控工具表，
+> 子 Agent 不持有 `memory_search`；`memory_remember` 虽保留在子 Agent 白名单作为
+> Gateway 副作用判定载体，但其 handler 对 `agentId` 非空的上下文一律硬闸拒绝
+> （`memory_main_agent_only`）。`delegate_to_bot` 已通用化（`botId` 必填，可派给
+> researcher / executor / memory / reviewer），记忆查询旁路与运行时强制派发已删除。
+> `memory` 这个 botId 保留为通用执行 Agent（Action Bot）的历史标识。
+> 下文为 2026-10-31 首期设计记录，保留以追溯当时的取舍。
+
 日期：2026-10-31
 目标来源：Notion《Bluebird Memory Bot｜首只专业 Agent 技术架构》
 状态：首期骨架、独立凭证、双入口 Runtime、持久任务队列、Token 级流式、记忆维护服务、人工审批、权限扩展点与工作台已落地；多用户 ACL 与分布式队列仍未实现，见第 9 节。
@@ -82,7 +91,7 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - 直接对话：创建/恢复 Bot 会话，追加用户消息；调用同一 Runtime；保存用户与助手消息、工具摘要。
 - 委派任务：`POST /agent-tasks` 创建 queued 任务；持久化队列按 `BLUEBIRD_AGENT_TASK_CONCURRENCY`（默认 2，1–4）并发执行；状态为 accepted → running → completed/failed/cancelled/timed_out。
 - 队列恢复：服务启动时把 crash 时停在 accepted/running 的任务重新入队并记录 `task.recovered`；`waiting_approval` 不自动执行。队列是单进程持久化调度，不引入分布式队列。
-- 失败处理：模型/工具/审批失败写入 `errorCode` 与终态，队列继续下一个任务；`BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS` >1 时只对只读任务（未启用 `memory_remember`）的瞬时模型错误尝试重试，写入任务不自动重试，避免重复操作。
+- 失败处理：模型/工具/审批失败写入 `errorCode` 与终态，队列继续下一个任务；`BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS` >1 时只对只读任务（未启用副作用工具 `memory_remember` / `workspace_write`）的瞬时模型错误尝试重试，写入任务不自动重试，避免重复操作。
 - 取消：`POST /agent-tasks/:taskId/cancel` 标记取消并中止模型/工具调用；终态任务不可回写。
 - 流式：`POST /agents/:botId/chat/stream` 使用真实 Token 级 delta（来自 Provider 流式响应），保留 `tool_start`/`tool_end` 状态事件；工具轮不把参数或内部推理下发。UI 通过 XHR SSE 逐字渲染，并保留工具摘要。
 - 工作台交互：流式期间提供停止按钮；切换会话/新建会话会 abort 当前流并丢弃迟到结果，不会把旧会话回复写进新会话。工作台直接创建的是独立 Bot 任务（无 `parentSessionId`），任务卡明确显示归属；主控委派任务才显示父会话归属。维护表单的 update 默认不下发 `type`（保持原类型），withdraw 的记忆 scope 只写入 `payload.sessionId`，不把 Bot 会话混作记忆 scope。
@@ -91,15 +100,15 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - Worker 执行协议：每次任务执行有独立 `runId`、心跳与 checkpoint 事件、会话 owner/作用域/生命周期和统一结果 schema（completed/failed/cancelled/timed_out 同形）；上下文只投影任务指令与授权数据，工具调用先过任务白名单网关。详见 `docs/agent-runtime-stage2.md`。
 - 状态持久化与恢复：任务迁移由 `state-machine.js` 校验，Store 接口 `task-store.js` 负责 schema v1→v2；租约/心跳/retryAt/lastErrorCode/checkpointVersion/runs 落库；重启时只读任务重排队、含写工具的任务标记 `uncertain` 需人工处理；结果投递按 taskId 幂等。详见 `docs/agent-runtime-stage3.md`。
 - 进程外监督：`scripts/bluebird-watchdog.js` 检测心跳/租约/队列/存储/磁盘/投递，按白名单执行告警、暂停接单、离线恢复与升级人工（冷却+次数上限+熔断）；`scripts/bluebird-supervisor.js` 按退避重启主服务。暂停接单通过 `agents/intake-pause.json` 生效，Router 返回 503。详见 `docs/agent-runtime-stage4.md`。
-- 记忆作用域：委派任务把 `parentSessionId` 作为 `memoryScopeSessionId` 传给 Bot 工具；Bot 的 `bs_*` 会话只承载执行轨迹和工具日志，不再充当记忆 scope。这样主控会话的长期记忆可被委派 Bot 检索，Bot 的 `memory_remember` 也归属父会话；直接 Bot 对话没有父会话时仍回落 Bot 会话 scope。
+- 记忆作用域：长期记忆由主控 Agent 独占；子 Agent 不持有 `memory_search` / `memory_remember`，其 `bs_*` 会话只承载执行轨迹与工具日志。委派任务仍把 `parentSessionId` 传入工具上下文，用于执行轨迹归属与非记忆工具的作用域判定。
 - 凭证绑定：Bot 的 `credential.providerId` 必须与当前 `modelProfile.providerId` 一致；registry 会显示 `credential_provider_mismatch`，运行时会拒绝把旧 Key 发往新服务商。切换服务商后必须重新录入该 Bot 的 Key。
-- 委派写入接地：任务保存主控用户原话 `parentUserText`；Bot 的 `memory_remember` 用该原话做 `sourceQuote` 接地，不再信任主控模型生成的 goal。旧任务/直接任务才回落到 goal。
+- 委派写入接地：主控 `memory_remember` 仍用当前用户原话做 `sourceQuote` 接地；子 Agent 不得写入长期记忆（handler 对 `agentId` 非空硬闸拒绝）。
 - Agent 写入确认：`memory_remember` 的 CREATE 仍可自动落地；UPDATE/MERGE/SUPERSEDE 会生成 pending 候选，必须通过 `POST /memory/confirm` 确认后才改写或替代已有记忆。自动记忆抽取保留原有策略，不改变既有后台行为。
 - 结果回传：任务完成/失败统一走 `result-delivery`：写入 Task Store 后，以固定消息 id `bot-result-<taskId>` 追加到父主控会话；记录 `deliveredToParentAt`、`deliveryMessageId`、`deliveryStatus` 或 `deliveryErrorCode`。主控前端通过 `GET /agent-results/stream?sessionId=...` 接收实时 `result`/`delivery_failed`，snapshot 覆盖断线重连；前端按消息 id 去重，因此重复投递不会生成第二条。任务页继续作为审计/状态入口。
 - 结果流时序契约：服务端建连时先写一帧 snapshot，并在同一个同步块里完成订阅，因此客户端收到这帧即代表订阅已建立。结果投递早于订阅时，客户端只会收到 snapshot（结果嵌在 `results` 里），不会再有顶层 `result` 事件；订阅建立之后的投递才以顶层 `result` 事件实时到达。两种情况前端都要能消费——`lib/agent-results-stream.ts` 的 snapshot 分支会把 `results` 逐条回放给 `onResult`，所以“先投递后建连”和“先建连后投递”都不会丢结果。
 - 审批结果投递：审批执行成功/失败、审批被拒绝、审批执行中断在更新关联任务终态后同步调用 Result Delivery；`waiting_approval` 是暂停态，`runTask` 不会覆盖它，审批完成后由审批执行器推进任务并实时回传父会话。
 - 事件可靠性：`appendEvent` 先写持久 outbox，再写主事件文件；主文件写失败时事件仍在 outbox，启动/读取时重试，不再被 `safeEvent` 静默丢弃。
-- 生命周期边界：`user_preference` 与 `project_fact` 过期后都走 `revalidate`——上下文注入保留条目并标记待验证，`memory_search` 仍可检索到；不再有 `demote_to_pending` 的“上下文静默消失、检索仍可见”双路径。Bot 会话达到 200 条时优先复用最早的空会话，只有 200 条都含消息才返回 `agent_session_limit`。任务类型仅接受 `memory.search` / `memory.explain`；`memory.maintain` / `memory.audit` 未实现，直接返回 `invalid_task_type`，维护操作只能走审批 API。
+- 生命周期边界：`user_preference` 与 `project_fact` 过期后都走 `revalidate`——上下文注入保留条目并标记待验证，`memory_search` 仍可检索到；不再有 `demote_to_pending` 的“上下文静默消失、检索仍可见”双路径。Bot 会话达到 200 条时优先复用最早的空会话，只有 200 条都含消息才返回 `agent_session_limit`。任务类型按各 Agent manifest 受理；历史 `memory.search` / `memory.explain` 只保留存量兼容，新任务由主控直接处理，`delegate_to_bot`、`POST /agent-tasks`、`POST /agent-plans` 与聊天计划入口都会拒绝 `memory.*`。
 - 结果流重连：`agent-results-stream` 区分永久失败与瞬时失败。401/403/404 不重试并提示错误；`status=0`、429、5xx 和“200 但流被关闭”按指数退避重连（上限 15s），重连后以 snapshot 补齐结果；主动 abort 标记为 `closed`，不计错误。
 - 数据保留：任务达到 500 条时只裁剪“终态且已投递/无需投递”的任务；queued/running/waiting_approval 与投递失败任务保留，若全部不可裁剪则返回 `agent_task_limit`（409）。删除主控会话会释放仅被该会话引用的上传图片，并立即删除 `conversation:<sessionId>` 派生索引；记忆 delete/clear/clear-session/archive/withdraw 后同步 `memory:<id>` 派生来源与向量。记忆本身没有附件存储，聊天图片归消息所有，删除记忆不会误删消息图片。
 
@@ -183,11 +192,11 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 - `node tests/memory-bot.test.js`：9 项，覆盖 Registry、AES-256-GCM 密文/重启解密、真实 `/models` 验证、Bot 会话、独立 Key 工具循环、工具预算截断后的无工具总结、任务裁剪只删已投递终态、任务/审批 API、token SSE/工具事件、并发队列/恢复/失败隔离。
 - `node tests/delete-semantics.test.js`：55 项，覆盖会话删除后的附件回收/共享保留与派生索引清理、历史清理、记忆删除/按会话清理后的派生索引同步、删除墓碑/重启复活防护与同源抽取幂等。
 - `node tests/memory-maintenance.test.js`：5 项，覆盖 update/merge/supersede/archive/withdraw/delete、维护门面白名单、审批闭环、事件不含正文、权限拒绝。
-- `node tests/agent-dispatch.test.js`：13 项，覆盖主控工具派发、主控记忆→委派 Bot 的父会话读/写 scope、审批 waiting/完成/拒绝投递、结果 SSE/snapshot、失败回传、重复投递防护、主 Agent 工具循环与事件 outbox 恢复。
+- `node tests/agent-dispatch.test.js`：8 项，覆盖主控工具派发、主控记忆→委派 Bot 的父会话读/写 scope、审批 waiting/完成/拒绝投递、结果 SSE/snapshot、失败回传、重复投递防护、主 Agent 工具循环与事件 outbox 恢复。
 - `npx jest tests/unit/agent-results-stream.test.ts`：1 项，覆盖结果 SSE 的 401 永久失败、5xx/200 干净关闭可重试、主动 abort 为 `closed` 的连接分类。
 - `npx jest tests/unit/use-bot-result-stream.test.tsx`：2 项，覆盖 Hook 对永久错误只提示不重连、可重试错误按 1s 退避重连、snapshot 打开后重置延迟。
 - v7 壳测试（`tests/unit/ui-v7-*` 六套）覆盖聊天渲染/附件/主页入口卡/模型抽屉/壳冒烟；旧壳的 `memory-bot-screen` 与 `app-smoke` 两套已随 2026-11-19 旧壳删除一并移除。
-- 全量：`npm test` 135 个后端文件 / 2648 项；Jest 18 套 / 143 项；覆盖率校验 backend 2648/2648、runner 2411/2411、frontend 143/143；tsc/lint 通过（以最终交付命令输出为准）。
+- 全量：`npm test` 136 个后端文件 / 2649 项；Jest 18 套 / 143 项；覆盖率校验 backend 2649/2649、runner 2412/2412、frontend 143/143；tsc/lint 通过（以最终交付命令输出为准）。
 - Expo Web export 成功；浏览器 DOM 核对：Agent 团队入口、真实 Memory Bot 状态、工作台三页签、配置页真实服务商/脱敏 Key、维护申请表单与审批列表可渲染；浏览器实际提交一条 update 维护申请后，服务端返回 pending 并在审批列表显示。
 
 ### 8.1 Stub 与真实模型测试区分
@@ -202,9 +211,9 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 
 1. **多用户 ACL**：仍是单用户本地部署；`botId + sessionId` 已隔离，`permissions.js` 保留扩展点，但无用户身份/文档 ACL。
 2. **分布式任务队列**：持久化队列是单进程；没有跨进程 worker、分布式锁或重启后保留 in-flight 模型连接。
-3. **自动重试**：默认 `maxAttempts=1`；只有显式提高 `BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS` 且任务未启用 `memory_remember` 时，才对瞬时模型错误重试。有副作用的维护/写入任务不自动重试；失败会显式落库并继续队列。
+3. **自动重试**：默认 `maxAttempts=1`；只有显式提高 `BLUEBIRD_AGENT_TASK_MAX_ATTEMPTS` 且任务未启用副作用工具（`memory_remember` / `workspace_write`）时，才对瞬时模型错误重试。有副作用的维护/写入任务不自动重试；失败会显式落库并继续队列。
 4. **审批发起 UI**：工作台已提供维护申请表单（update/merge/supersede/archive/withdraw/delete），申请仍必须经批准与独立执行；未提供批量申请或审批模板。
-5. **其他 Bot**：只注册 Memory Bot；Research/Coding/Browser 等保持“预留 · 未注册”。
+5. **其他 Bot**：已注册 `memory`（通用 Action Bot）、`researcher`、`executor`、`reviewer`；Coding/Browser 等保持“预留 · 未注册”。
 6. **记忆维护模型工具**：维护操作只通过已鉴权审批接口执行，没有注册为模型可自行调用的工具；这是防止模型自主触发不可逆操作的安全边界。
 
 ## 10. 关键决策
@@ -224,4 +233,4 @@ lib/agent-results-stream.ts   # 主控结果 XHR SSE（实时 + snapshot）
 | P1 任务队列 + 流式 + UI | 持久化队列并发/恢复/失败隔离；工具预算截断后无工具总结；任务裁剪只删已投递终态；Provider token delta；停止/切会话 abort；Prompt/工具白名单/任务表单/审批操作 UI | `tests/memory-bot.test.js` 9 项；SSE/tool event 测试；Jest 5 项工作台测试 + 1 项 App 冒烟 |
 | P2 权限扩展点 + 回归 | `permissions.js` 单用户检查 + extensionPoint；维护申请表单；文档/CI/覆盖率基线 | `npx tsc --noEmit`、`npm run lint`、全量覆盖率校验、真实模型 HTTP SSE E2E |
 
-“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 2648/2648、nodeSuite 237/237、runner 2411/2411、frontend 143/143、CI 135/135。
+“P2 回归”中的全量结果以 `scripts/verify-test-coverage.js` 输出为准：backend 2649/2649、nodeSuite 237/237、runner 2412/2412、frontend 143/143、CI 136/136。

@@ -541,7 +541,7 @@ test('P2-04：任务超过 deadlineMs 后收敛为 timed_out', async () => {
     botId: 'memory',
     taskType: 'memory.search',
     goal: '检索一条不存在的记忆',
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
     deadlineMs: 5000,
   });
 

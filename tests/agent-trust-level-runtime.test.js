@@ -226,7 +226,7 @@ function makeProducerTask(goal, { requiresReview = false } = {}) {
     agentId: 'researcher',
     taskType: 'memory.recall',
     goal,
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     deadlineMs: 30000,
   });
   if (requiresReview) tasks.updateTask(task.taskId, { requiresReview: true });

@@ -50,7 +50,7 @@ function staleTask(overrides = {}) {
     botId: 'memory',
     taskType: 'memory.search',
     goal: '卡死任务',
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     deadlineMs: 20000,
     ...overrides,
   });
@@ -343,7 +343,7 @@ test('Watchdog：队列积压触发暂停，恢复后自动解除', () => {
       botId: 'memory',
       taskType: 'memory.search',
       goal: `排队任务${i}`,
-      allowedTools: ['memory_search'],
+      allowedTools: ['knowledge_search'],
       deadlineMs: 20000,
     });
   }
@@ -383,7 +383,7 @@ test('Watchdog：投递失败产生告警审计', () => {
     botId: 'memory',
     taskType: 'memory.search',
     goal: '投递失败任务',
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     deadlineMs: 20000,
     parentSessionId: parent.id,
   });

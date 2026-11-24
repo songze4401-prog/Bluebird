@@ -215,14 +215,11 @@ test('a. plan schema 扩展 digest 中性：旧计划复读不损坏，publishGa
   );
 });
 
-test('b. Planner 生成的记忆查询不得派发给 Memory Bot', () => {
+test('b. 记忆查询特判已删除：Planner 查询计划正常派发', () => {
   resetAll();
   const before = tasks.allTasks().length;
-  assert.throws(
-    () => planner.planAndCreate({ goal: '检索一下之前保存的发票抬头' }),
-    error => error.code === 'memory_query_requires_main_agent'
-  );
-  assert.equal(tasks.allTasks().length, before, '拒绝查询计划不得创建 Memory Bot 任务');
+  planner.planAndCreate({ goal: '检索一下之前保存的发票抬头' });
+  assert.equal(tasks.allTasks().length > before, true, '查询计划不再被拒绝');
 });
 
 test('c. 修订主链：验证拒绝终态 → v2 + 只重跑缺证节点 + 上游产物显式共享', async () => {

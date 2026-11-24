@@ -37,7 +37,7 @@ function makeTask(overrides = {}) {
     botId: 'memory',
     taskType: 'memory.search',
     goal: `审批策略任务 ${taskSeq}`,
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     deadlineMs: 5000,
     ...overrides,
   });
@@ -171,7 +171,7 @@ test('b. R3 长时间 pending 仍 pending，期间资源期限照常生效', () 
 });
 
 test('c. waiting_approval 资源期限耗尽：无副作用 timed_out、有副作用 recovery，审批仍 pending', () => {
-  const noEffectTask = makeTask({ allowedTools: ['memory_search'] });
+  const noEffectTask = makeTask({ allowedTools: ['knowledge_search'] });
   const noEffectApproval = approvals.createApproval({
     botId: 'memory',
     operation: 'archive',
@@ -185,7 +185,7 @@ test('c. waiting_approval 资源期限耗尽：无副作用 timed_out、有副�
   assert.equal(noEffect.errorCode, 'deadline_exceeded');
   assert.equal(approvals.getApproval(noEffectApproval.approvalId).status, 'pending');
 
-  const sideEffectTask = makeTask({ allowedTools: ['memory_remember'] });
+  const sideEffectTask = makeTask({ allowedTools: ['workspace_write'] });
   const sideEffectApproval = approvals.createApproval({
     botId: 'memory',
     operation: 'archive',

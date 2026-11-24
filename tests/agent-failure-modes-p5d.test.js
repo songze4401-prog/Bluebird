@@ -51,7 +51,7 @@ function makeTask(goal = 'P5-D 失败模式', extra = {}) {
     botId: 'memory',
     taskType: 'memory.search',
     goal: `${goal} ${seq}`,
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     deadlineMs: 20000,
     ...extra,
   });
@@ -303,7 +303,7 @@ test('P5-D FM-3：父窄子宽拒绝且零落盘；省略声明继承收窄；�
   resetAll();
   const before = Object.keys(tasks.rawTasksById()).length;
   const parent = makeTask('父任务（窄授权）');
-  assert.strictEqual(parent.allowedTools.join(','), 'memory_search');
+  assert.strictEqual(parent.allowedTools.join(','), 'knowledge_search');
 
   // 子任务显式声明父任务没有的工具 → fail-closed 拒绝。
   assert.throws(
@@ -312,7 +312,7 @@ test('P5-D FM-3：父窄子宽拒绝且零落盘；省略声明继承收窄；�
         botId: 'memory',
         taskType: 'memory.explain',
         goal: '子任务越权',
-        allowedTools: ['memory_search', 'memory_remember'],
+        allowedTools: ['workspace_write', 'workspace_write'],
         parentTaskId: parent.taskId,
       }),
     error => {
@@ -340,14 +340,14 @@ test('P5-D FM-3：父窄子宽拒绝且零落盘；省略声明继承收窄；�
     goal: '子任务省略声明',
     parentTaskId: parent.taskId,
   });
-  assert.strictEqual(implicit.allowedTools.join(','), 'memory_search');
+  assert.strictEqual(implicit.allowedTools.join(','), 'knowledge_search');
 
   // 交集内的显式声明放行。
   const inside = tasks.createTask({
     botId: 'memory',
     taskType: 'memory.explain',
     goal: '子任务在交集内',
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     parentTaskId: parent.taskId,
   });
   assert.strictEqual(inside.parentTaskId, parent.taskId);
@@ -362,10 +362,10 @@ test('P5-D FM-3：父窄子宽拒绝且零落盘；省略声明继承收窄；�
     botId: 'memory',
     taskType: 'memory.explain',
     goal: '全量父任务下的子任务',
-    allowedTools: ['memory_remember'],
+    allowedTools: ['workspace_write'],
     parentTaskId: openParent.taskId,
   });
-  assert.strictEqual(openChild.allowedTools.join(','), 'memory_remember');
+  assert.strictEqual(openChild.allowedTools.join(','), 'workspace_write');
 });
 
 // ---- d. FM-2：validateHandoff 纯函数（缺失阻断 / 引用重建 / 纯文本 fail-closed） ----
@@ -480,7 +480,7 @@ test('P5-D FM-5：同源 Producer 不得自查自批（409）、分类为 escala
     botId: 'reviewer',
     taskType: 'review.verify',
     goal: '同源自审任务',
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
   });
   assert.throws(
     () =>
@@ -503,7 +503,7 @@ test('P5-D FM-5：同源 Producer 不得自查自批（409）、分类为 escala
       code: 'verification_review_not_independent',
       evidence: [],
     },
-    task: { allowedTools: ['memory_search'] },
+    task: { allowedTools: ['knowledge_search'] },
   });
   assert.strictEqual(resolution.action, 'approval', '同源偏差必须落在人工审批节点');
   assert.strictEqual(resolution.errorCode, 'verification_review_not_independent');

@@ -28,7 +28,7 @@ function makeTask() {
     botId: 'memory',
     taskType: 'memory.search',
     goal: `§24 迁移校验 ${seq}`,
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
   });
 }
 

@@ -115,16 +115,13 @@ test('a. 目标 → 计划落盘：有序步骤 + 能力要求 + 依赖，返回
   }));
 });
 
-test('b. Planner 的记忆查询计划不能创建 Memory Bot 任务', () => {
+test('b. 记忆查询特判已删除：Planner 计划正常创建任务', () => {
   const before = tasks.allTasks().length;
-  assert.throws(
-    () => planner.planAndCreate({
-      goal: '检索并总结我去年的旅行偏好',
-      agentId: 'memory',
-    }),
-    error => error.code === 'memory_query_requires_main_agent'
-  );
-  assert.equal(tasks.allTasks().length, before, '拒绝查询计划不得创建任何任务');
+  planner.planAndCreate({
+    goal: '检索并总结我去年的旅行偏好',
+    agentId: 'memory',
+  });
+  assert.equal(tasks.allTasks().length > before, true, '不再拒绝查询计划，正常建任务');
 });
 
 test('c. 拆不出来 → 显式失败（capability_not_found），零计划、零任务', () => {

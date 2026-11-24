@@ -132,10 +132,16 @@ test('交付物1b 匹配不到 → 显式失败且不创建任务', () => {
       return true;
     }
   );
-  // ② 能力存在，但没有任何注册主体把它列入受理任务类型（不静默回落默认 Bot）。
+  // ② 能力已声明，但没有任何注册主体把它列入受理任务类型（不静默回落默认 Bot）。
+  // 重构后 Action Bot 把 memory.audit.read 同时列入 capabilities/acceptedTaskTypes，
+  // 这里覆盖假主体的受理类型，复刻“只声明能力、未声明受理”的原前提。
+  const declaredOnlyOrchestrator = makeOrchestrator({
+    capabilities: ['memory.audit.read'],
+    acceptedTaskTypes: ['memory.search'],
+  });
   assert.throws(
     () =>
-      orchestrator.orchestrate({
+      declaredOnlyOrchestrator.orchestrate({
         intent: '审计记忆',
         capability: 'memory.audit.read',
         taskType: 'memory.audit.read',
@@ -677,16 +683,22 @@ test('路由可追踪（真实注册表）：三个真实 Agent 按目标分派�
   const orchestrator = makeRealRegistryOrchestrator();
   const cases = [
     {
-      capability: 'memory.recall',
-      taskType: 'memory.recall',
-      goal: '检索关于浅烘咖啡的既有偏好证据',
+      capability: 'research.analyze',
+      taskType: 'research.analyze',
+      goal: '检索关于浅烘咖啡的资料并总结',
       expected: 'researcher',
     },
     {
-      capability: 'memory.write',
-      taskType: 'memory.write',
-      goal: '把用户偏好浅烘写入长期记忆',
+      capability: 'action.execute',
+      taskType: 'action.execute',
+      goal: '执行用户当前请求的文件整理',
       expected: 'executor',
+      // 重构后 Action Bot（历史标识 memory）同样声明并受理 memory.write，
+      // 因此候选集有两个主体；router 仍按 routingPriority 选中 executor，
+      // 但轨迹里的候选/匹配集合必须如实反映双候选。
+      matched: ['executor', 'memory'],
+      candidateOrder: ['memory', 'executor'],
+      eventMatched: 'executor,memory',
     },
     {
       capability: 'review.verify',
@@ -706,8 +718,8 @@ test('路由可追踪（真实注册表）：三个真实 Agent 按目标分派�
     assert.equal(result.task.agentId, item.expected);
     assert.equal(result.decision.selectedAgentId, item.expected);
     assert.equal(result.orchestration.basis, 'explicit_capability');
-    assert.deepEqual(result.orchestration.matchedAgentIds, [item.expected]);
-    assert.deepEqual(result.orchestration.candidateOrder, [item.expected]);
+    assert.deepEqual(result.orchestration.matchedAgentIds, item.matched || [item.expected]);
+    assert.deepEqual(result.orchestration.candidateOrder, item.candidateOrder || [item.expected]);
     assert.equal(result.orchestration.registeredAgents, 4);
     assert.equal(result.orchestration.allocation, 'selected_with_capacity');
 
@@ -726,7 +738,7 @@ test('路由可追踪（真实注册表）：三个真实 Agent 按目标分派�
     assert.equal(decided.payload.selected, item.expected);
     assert.equal(decided.payload.candidates, item.expected);
     assert.equal(decided.payload.orchestrationBasis, 'explicit_capability');
-    assert.equal(decided.payload.orchestrationMatchedAgents, item.expected);
+    assert.equal(decided.payload.orchestrationMatchedAgents, item.eventMatched || item.expected);
     assert.equal(decided.payload.orchestrationRegisteredAgents, 4);
 
     return {

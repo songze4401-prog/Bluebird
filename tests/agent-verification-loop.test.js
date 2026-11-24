@@ -243,7 +243,7 @@ function makeProducerTask(goal, { requiresReview = false, botId = 'researcher' }
     agentId: botId,
     taskType: botId === 'executor' ? 'memory.write' : 'memory.recall',
     goal,
-    allowedTools: botId === 'executor' ? ['memory_search', 'memory_remember'] : ['memory_search'],
+    allowedTools: botId === 'executor' ? ['knowledge_search', 'memory_remember'] : ['knowledge_search'],
     deadlineMs: 20000,
   });
   if (requiresReview) tasks.updateTask(task.taskId, { requiresReview: true });

@@ -9,6 +9,7 @@
  */
 const { EventEmitter } = require('events');
 const tasks = require('./tasks');
+const { getManifest } = require('./manifest');
 const mainSessions = require('../sessions');
 
 const emitter = new EventEmitter();
@@ -22,8 +23,12 @@ function messageIdFor(taskId) {
 }
 
 function formatDelivery(task, status, result, errorCode) {
+  const manifest = getManifest(task.botId);
+  const label = manifest
+    ? `${manifest.displayName}（${manifest.botId}）`
+    : task.botId || '子 Agent';
   const lines = [
-    status === 'completed' ? '【Memory Bot 任务完成】' : '【Memory Bot 任务未完成】',
+    status === 'completed' ? `【${label}任务完成】` : `【${label}任务未完成】`,
     `任务 ID：${task.taskId}`,
     `状态：${status}`,
     `目标：${task.goal}`,

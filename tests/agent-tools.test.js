@@ -496,14 +496,14 @@ async function main() {
     tasks.listTasks('memory', { limit: 100 }).length === botTaskCountBefore
   );
   check(
-    '查询请求暴露 memory_search 而不暴露 delegate_to_bot',
+    '查询请求暴露 memory_search，delegate_to_bot 也不再被隐藏',
     Array.isArray(stubCalls[0].tools) &&
       stubCalls[0].tools.some(tool => tool.function.name === 'memory_search') &&
-      !stubCalls[0].tools.some(tool => tool.function.name === 'delegate_to_bot')
+      stubCalls[0].tools.some(tool => tool.function.name === 'delegate_to_bot')
   );
   check(
-    '主控直接查询说明已注入 system',
-    stubCalls[0].messages.some(
+    '不再注入记忆查询旁路的 system 提示',
+    !stubCalls[0].messages.some(
       message =>
         message.role === 'system' &&
         String(message.content).includes('记忆查询由主控直接处理')
@@ -531,10 +531,9 @@ async function main() {
   });
   check('模型尝试委派后仍由主控直接检索并回答', attemptedDelegate.status === 200 && attemptedDelegate.json.reply.includes('拿铁'));
   check(
-    '模型伪装成维护目标的委派仍在创建任务前被拒绝',
+    '模型显式委派不再被旧记忆查询特判拒绝，进入正常派发链（本测试环境 Bot 未配凭证故不可用）',
     attemptedDelegate.json.toolSteps?.[0]?.name === 'delegate_to_bot' &&
-      attemptedDelegate.json.toolSteps[0].ok === false &&
-      attemptedDelegate.json.toolSteps[0].summary.includes('记忆查询必须由主控 Agent 直接执行') &&
+      !attemptedDelegate.json.toolSteps[0].summary.includes('记忆查询必须由主控') &&
       tasks.listTasks('memory', { limit: 100 }).length === botTaskCountBefore
   );
   check(
@@ -615,12 +614,11 @@ async function main() {
   check('恰好 2 轮模型调用', stubCalls.length === 2, `calls=${stubCalls.length}`);
   check('首轮带 tools 与 tool_choice=auto', Array.isArray(stubCalls[0].tools) && stubCalls[0].tool_choice === 'auto');
   check(
-    '记忆查询首轮工具包含直接检索，并隐藏 delegate_to_bot',
-    stubCalls[0].tools.length === 5 &&
-      stubCalls[0].tools.some(tool => tool.function.name === 'memory_search') &&
+    '首轮工具包含记忆与检索工具，delegate_to_bot 也不再隐藏',
+    stubCalls[0].tools.some(tool => tool.function.name === 'memory_search') &&
       stubCalls[0].tools.some(tool => tool.function.name === 'memory_remember') &&
       stubCalls[0].tools.some(tool => tool.function.name === 'knowledge_search') &&
-      !stubCalls[0].tools.some(tool => tool.function.name === 'delegate_to_bot') &&
+      stubCalls[0].tools.some(tool => tool.function.name === 'delegate_to_bot') &&
       stubCalls[0].tools.some(tool => tool.function.name === 'web_search') &&
       stubCalls[0].tools.some(tool => tool.function.name === 'web_fetch')
   );

@@ -166,10 +166,10 @@ test.before(async () => {
                 content: null,
                 tool_calls: [
                   {
-                    id: 'call_knowledge_search',
+                    id: 'call_memory_search_denied',
                     type: 'function',
                     function: {
-                      name: 'knowledge_search',
+                      name: 'memory_search',
                       arguments: JSON.stringify({ query: '咖啡' }),
                     },
                   },
@@ -275,7 +275,7 @@ test('Memory Bot direct chat：模型即使伪造 memory_search 调用也无法�
     .map(tool => tool.function && tool.function.name)
     .filter(Boolean);
   assert.ok(!names.includes('memory_search'));
-  assert.ok(names.includes('memory_remember'));
+  assert.ok(!names.includes('memory_remember'), '记忆工具不暴露给子 Agent 模型');
 });
 
 test.after(async () => {
@@ -315,7 +315,7 @@ function makeTask(overrides = {}) {
     botId: 'memory',
     taskType: 'memory.search',
     goal: '普通检索任务',
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     deadlineMs: 20000,
     ...overrides,
   });
@@ -354,7 +354,7 @@ test('投影：只给 system + 一条任务指令，不复制主控历史', () =
       goal: '查咖啡偏好',
       context: '只返回与咖啡相关的记忆',
       contextRef: 'session:s1#message:m1',
-      allowedTools: ['memory_search'],
+      allowedTools: ['knowledge_search'],
       parentSessionId: 's_main',
       workerSessionId: 'bs_worker',
       parentUserText: '',
@@ -370,7 +370,7 @@ test('投影：只给 system + 一条任务指令，不复制主控历史', () =
   assert.match(projection.messages[1].content, /只返回与咖啡相关的记忆/);
   assert.match(projection.messages[1].content, /上下文引用：session:s1#message:m1/);
   assert.equal(projection.memoryScopeSessionId, 's_main');
-  assert.deepEqual(projection.authorization.allowedTools, ['memory_search']);
+  assert.deepEqual(projection.authorization.allowedTools, ['knowledge_search']);
   assert.equal(projection.authorization.path, 'fast');
 });
 
@@ -450,8 +450,8 @@ test('结果 schema：非法状态直接拒绝', () => {
 // ---- C. 工具权限网关 ----
 
 test('网关：任务白名单之外的工具有明确短码', () => {
-  const authorize = createToolAuthorizer({ allowedTools: ['memory_search'] });
-  assert.deepEqual(authorize('knowledge_search'), {
+  const authorize = createToolAuthorizer({ allowedTools: ['knowledge_search'] });
+  assert.deepEqual(authorize('memory_search'), {
     ok: false,
     code: 'task_tool_denied',
   });
@@ -459,27 +459,27 @@ test('网关：任务白名单之外的工具有明确短码', () => {
 
 test('网关：策略 answer_only 拒绝所有工具', () => {
   const authorize = createToolAuthorizer({
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
     policy: { mode: 'answer_only', tools: { allowedTools: null } },
   });
-  assert.equal(authorize('memory_search').code, 'policy_tool_denied');
+  assert.equal(authorize('knowledge_search').code, 'policy_tool_denied');
 });
 
 test('网关：策略白名单进一步收窄', () => {
   const authorize = createToolAuthorizer({
     allowedTools: ['memory_search', 'knowledge_search'],
-    policy: { mode: 'bounded_autonomy', tools: { allowedTools: ['memory_search'] } },
+    policy: { mode: 'bounded_autonomy', tools: { allowedTools: ['knowledge_search'] } },
   });
-  assert.equal(authorize('knowledge_search').code, 'policy_tool_denied');
-  assert.equal(authorize('memory_search').ok, true);
+  assert.equal(authorize('knowledge_search').ok, true);
+  assert.equal(authorize('memory_search').code, 'policy_tool_denied');
 });
 
-test('Memory Bot Runtime：查询禁用 memory_search，明确维护任务保留原有检索能力', async () => {
+test('Memory Bot Runtime：委派任务不向模型暴露记忆工具，知识检索可用', async () => {
   const manifest = require('../server/agents/manifest').MEMORY_BOT_MANIFEST;
   const config = { toolAllowlist: manifest.toolAllowlist };
   const botTools = runtime.allowedToolsFor(config, manifest, null, 'memory');
   assert.ok(!botTools.includes('memory_search'));
-  assert.ok(botTools.includes('memory_remember'));
+  assert.ok(!botTools.includes('memory_remember'), 'memory_remember 仅作副作用载体，不暴露给模型');
   assert.ok(botTools.includes('knowledge_search'));
   const queryTools = runtime.allowedToolsFor(config, manifest, null, 'memory', {
     mode: 'delegated_task',
@@ -492,17 +492,31 @@ test('Memory Bot Runtime：查询禁用 memory_search，明确维护任务保留
     taskType: 'memory.search',
     goal: '记录我刚提供的偏好',
   });
-  assert.ok(maintenanceTools.includes('memory_search'));
-  assert.ok(maintenanceTools.includes('memory_remember'));
-  assert.ok(runtime.allowedToolsFor(config, manifest, null, 'researcher').includes('memory_search'));
-
-  const knowledgeTool = require('../server/tool-knowledge-search');
-  const denied = await knowledgeTool.definition.handler(
-    { query: '咖啡偏好', sources: ['memory'], limit: 5 },
-    { agentId: 'memory', sessionId: 'bs_memory_query_guard' }
+  // 新架构：委托任务一律不授予记忆工具，记忆由主控独占。
+  assert.ok(!maintenanceTools.includes('memory_search'));
+  assert.ok(!maintenanceTools.includes('memory_remember'));
+  assert.ok(maintenanceTools.includes('knowledge_search'));
+  const researcherManifest = require('../server/agents/manifest').RESEARCHER_BOT_MANIFEST;
+  const researcherTools = runtime.allowedToolsFor(
+    { toolAllowlist: researcherManifest.toolAllowlist },
+    researcherManifest,
+    null,
+    'researcher'
   );
-  assert.equal(denied.ok, false);
-  assert.equal(denied.code, 'memory_source_disabled');
+  assert.ok(!researcherTools.includes('memory_search'));
+  assert.ok(researcherTools.includes('knowledge_search'));
+  assert.ok(!researcherTools.includes('memory_remember'), '只读角色不携带副作用载体');
+  assert.ok(researcherTools.includes('web_search'));
+
+  // 新架构：memory_remember 虽在小 agent 白名单里作为副作用判定载体保留，
+  // handler 仍对 Bot 上下文硬闸拒绝，真实记忆写入由主控独占。
+  const rememberTool = require('../server/tool-memory-remember');
+  const blocked = await rememberTool.definition.handler(
+    { content: '咖啡偏好', type: 'preference' },
+    { agentId: 'memory', sessionId: 'bs_memory_guard', userText: '我喜欢咖啡' }
+  );
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.code, 'memory_main_agent_only');
 });
 
 // ---- D. Worker 会话：owner / 作用域 / 生命周期 ----
@@ -753,20 +767,20 @@ test('执行：超过 deadlineMs 收敛为 timed_out', async () => {
 test('执行：未授权工具被网关拒绝并写 tool.denied 审计事件', async () => {
   const task = makeTask({
     goal: 'TOOL_DENY 未授权工具',
-    allowedTools: ['memory_search'],
+    allowedTools: ['knowledge_search'],
   });
   runtime.startTask(task.taskId);
   const finished = await waitForTask(task.taskId);
   assert.equal(finished.status, 'completed');
   assert.ok(finished.result.toolSteps.length >= 1);
-  assert.equal(finished.result.toolSteps[0].name, 'knowledge_search');
+  assert.equal(finished.result.toolSteps[0].name, 'memory_search');
   assert.equal(finished.result.toolSteps[0].ok, false);
   const events = tasks.listEvents('memory', { limit: 300 });
   const denied = events.filter(
     event => event.taskId === task.taskId && event.eventType === 'tool.denied'
   );
   assert.equal(denied.length, 1);
-  assert.equal(denied[0].payload.tool, 'knowledge_search');
+  assert.equal(denied[0].payload.tool, 'memory_search');
   assert.equal(denied[0].payload.errorCode, 'task_tool_denied');
   assert.ok(!JSON.stringify(denied).includes('咖啡'));
 });
@@ -1892,7 +1906,7 @@ test('并发：5 条混合角色受 TASK_CONCURRENCY=2 约束，结果/产物/�
     {
       agentId: 'researcher',
       taskType: 'memory.recall',
-      allowedTools: ['memory_search'],
+      allowedTools: ['knowledge_search'],
       marker: 'MIX_RESEARCH_ALPHA',
     },
     {
@@ -1910,7 +1924,7 @@ test('并发：5 条混合角色受 TASK_CONCURRENCY=2 约束，结果/产物/�
     {
       agentId: 'memory',
       taskType: 'memory.search',
-      allowedTools: ['memory_search'],
+      allowedTools: ['knowledge_search'],
       marker: 'MIX_MEMORY_DELTA',
     },
     {
@@ -2090,7 +2104,7 @@ test('端到端：researcher→executor→reviewer 共享结论可追溯；execu
     'researcher',
     'memory.recall',
     'E2E_RESEARCH 产出结论 A 的事实依据',
-    ['memory_search']
+    ['knowledge_search']
   );
   const executor = await runAgentTask(
     'executor',
@@ -2108,7 +2122,7 @@ test('端到端：researcher→executor→reviewer 共享结论可追溯；execu
     'memory',
     'memory.search',
     'E2E_THIRD 第三方按版本读 B',
-    ['memory_search']
+    ['knowledge_search']
   );
 
   // 证据点 1：任务状态（真实任务完成 + 状态版本推进 + 会话归属自己的任务）。

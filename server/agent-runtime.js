@@ -39,29 +39,7 @@ const knowledgeSearchTool = require('./tool-knowledge-search');
 const delegateToBotTool = require('./tool-dispatch-bot');
 const { truncateText } = require('./text-utils');
 const { buildPolicyInstruction } = require('./agent-policy');
-const { detectExplicitDelegation, isMemoryQueryDelegation } = require('./delegation-intent');
-const { classifyIntent, INTENTS } = require('./context/orchestrator');
 const { parseTextualToolCalls, stripToolProtocolText } = require('./textual-tool-calls');
-
-const FORCED_DELEGATION_INSTRUCTION = `
-【服务端已执行子 agent 委派】
-本轮用户明确要求把任务交给 Memory Bot / 子 agent 处理。系统已经在本次请求中实际调用 delegate_to_bot，工具结果在上一条 tool 消息里。
-你必须只依据该工具结果回复：
-- ok=true 时，简短说明任务已提交、会异步执行，结果稍后回到当前会话或任务页；不要声称任务已经完成，不要编造进度、队列或失败信息。
-- ok=false 时，如实说明提交失败的原因，不得改口说已经派发成功。
-- 不要再调用 delegate_to_bot。
-`.trim();
-
-const FORCED_DELEGATION_DENIED_INSTRUCTION = `
-【本次无法调用子 agent】
-用户明确要求把任务交给 Memory Bot / 子 agent，但当前 Agent 策略不允许调用 delegate_to_bot，系统无法派发任务。
-你必须如实说明当前无法派发及原因；绝不能说已经派发、已经在队列里或正在处理。
-`.trim();
-
-const DIRECT_MEMORY_QUERY_INSTRUCTION = `
-【记忆查询由主控直接处理】
-不要把记忆查询委派给 Memory Bot。主控可直接使用当前 Context Runtime 上下文和 memory_search 工具检索，再基于实际证据回答。
-`.trim();
 
 // ---- 可调参数（环境变量，加载时读取；开关除外——开关每请求重读） ----
 // 逐个显式读取（不用动态 process.env[name]：既让 lint 的
@@ -929,12 +907,11 @@ function normalizeToolCall(call) {
  *   isClientGone           断连探针；每一轮模型调用前检查
  *   onToolEvent            工具生命周期事件回调（SSE 用）
  *
- * 返回 { rawReply, toolSteps, rounds, completion, delegationEnforced }：
+ * 返回 { rawReply, toolSteps, rounds, completion }：
  *   rawReply    最终文本（交 completeChatTurn 清洗落盘）
  *   toolSteps   工具执行摘要数组（独立字段，禁敏感内容）
  *   rounds      实际模型调用轮数
  *   completion  末轮 completion（调用方取 model 回执）；断连未调用时为 null
- *   delegationEnforced  本次是否由运行时强制实际调用了 delegate_to_bot
  */
 async function runAgentTurn({
   providerId,
@@ -967,9 +944,6 @@ async function runAgentTurn({
   credentialKey = null,
   stream = false,
   onDelta = null,
-  // 主控聊天入口开启：用户明确点名 Memory Bot / 子 agent 时，
-  // 不走"等模型自觉调用"，由运行时先真实调用 delegate_to_bot。
-  enforceExplicitDelegation = false,
 }) {
   logSwitchIfChanged();
 
@@ -1068,14 +1042,7 @@ async function runAgentTurn({
       sideEffect,
       failOpen,
     };
-    let result =
-      toolName === 'delegate_to_bot' && memoryQueryRequest
-        ? {
-            ok: false,
-            code: 'memory_query_requires_main_agent',
-            error: '记忆查询必须由主控 Agent 直接执行，不能派发给 Memory Bot',
-          }
-        : await executeToolCall(toolName, rawArgs, toolContext);
+    let result = await executeToolCall(toolName, rawArgs, toolContext);
     toolCallCount += 1;
 
     const toolDef = tools.get(toolName);
@@ -1171,101 +1138,17 @@ async function runAgentTurn({
     return result;
   };
 
-  // 显式子 agent 请求：先由运行时真实调用 delegate_to_bot，再让模型
-  // 依据工具结果回复。模型是否"愿意"调用工具不再决定任务是否真的派出。
-  // 只在调用方显式开启（主控聊天）时生效；策略关闭或不允许该工具时不派发。
-  let forcedDelegationDispatched = false;
-  let forcedDelegationNotice = '';
-  let memoryQueryRequest =
-    classifyIntent(userText) === INTENTS.MEMORY_QUERY &&
-    isMemoryQueryDelegation('memory.search', userText);
-
-  if (
-    enforceExplicitDelegation &&
-    !(typeof isClientGone === 'function' && isClientGone()) &&
-    Date.now() - startedAt <= maxTotalMs
-  ) {
-    const intent = detectExplicitDelegation(userText, {
-      // 代词指代（"让她总结"）需要最近一轮助手正文作为上下文；
-      // 只取最近两条助手消息，避免把久远话题误当成当前委派对象。
-      contextText: (Array.isArray(messages) ? messages : [])
-        .filter(item => item && item.role === 'assistant' && typeof item.content === 'string')
-        .slice(-2)
-        .map(item => item.content)
-        .join('\n'),
-    });
-
-    if (
-      intent &&
-      (memoryQueryRequest || isMemoryQueryDelegation(intent.taskType, intent.goal))
-    ) {
-      memoryQueryRequest = true;
-      forcedDelegationNotice = DIRECT_MEMORY_QUERY_INSTRUCTION;
-      console.log('[agent-delegate] enforced=false reason=memory_query_direct');
-    } else if (intent) {
-      if (
-        tools.has('delegate_to_bot') &&
-        policyAllowsTool(activePolicy, 'delegate_to_bot')
-      ) {
-        const forcedCall = normalizeToolCall({
-          id: `call_forced_delegate_${crypto.randomUUID()}`,
-          type: 'function',
-          function: {
-            name: 'delegate_to_bot',
-            arguments: JSON.stringify({
-              botId: 'memory',
-              taskType: intent.taskType,
-              goal: intent.goal,
-              ...(intent.context ? { context: intent.context } : {}),
-            }),
-          },
-        });
-
-        conversation.push(
-          tagModelMessage(
-            {
-              role: 'assistant',
-              content: null,
-              tool_calls: [forcedCall],
-            },
-            'assistant-tool-call:forced-delegation'
-          )
-        );
-
-        const result = await performToolCall(forcedCall, 1);
-        forcedDelegationDispatched = true;
-        forcedDelegationNotice = FORCED_DELEGATION_INSTRUCTION;
-
-        console.log(
-          `[agent-delegate] enforced=true taskType=${intent.taskType}` +
-            ` ok=${result.ok === true} code=${result.code || 'none'}`
-        );
-      } else {
-        forcedDelegationNotice = FORCED_DELEGATION_DENIED_INSTRUCTION;
-        console.log('[agent-delegate] enforced=false reason=policy_tool_denied');
-      }
-    }
-  }
-
-  if (memoryQueryRequest && !forcedDelegationNotice) {
-    forcedDelegationNotice = DIRECT_MEMORY_QUERY_INSTRUCTION;
-  }
-  const systemInstructions = [instruction, forcedDelegationNotice]
-    .filter(Boolean)
-    .join('\n\n');
-
-  if (systemInstructions) {
+  // 子 agent 委派由模型通过 delegate_to_bot 工具自主发起：主控不再强制派发，
+  // 也不再有"记忆查询旁路"——记忆的查/写由主控直接用 memory_search/memory_remember 完成。
+  if (instruction) {
     const insertAt = conversation[0] && conversation[0].role === 'system' ? 1 : 0;
     conversation.splice(insertAt, 0, {
       role: 'system',
-      content: systemInstructions,
+      content: instruction,
     });
   }
 
-  // 已派发或正在查询记忆时不把 delegate_to_bot 暴露给模型；查询始终由主控直查。
-  const requestSpecs = forcedDelegationDispatched || memoryQueryRequest
-    ? specs.filter(spec => spec.function.name !== 'delegate_to_bot')
-    : specs;
+  const requestSpecs = specs;
 
   for (let round = 1; round <= maxRounds; round += 1) {
     if (typeof isClientGone === 'function' && isClientGone()) {
@@ -1520,7 +1403,6 @@ async function runAgentTurn({
     toolCallCount,
     readOnlyRetries,
     reachedMaxRounds,
-    delegationEnforced: forcedDelegationDispatched,
     usage: usageTotals,
   };
 }

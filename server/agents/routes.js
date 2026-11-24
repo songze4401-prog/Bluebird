@@ -196,7 +196,7 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
         (agent.credential && agent.credential.credentialId);
       if (!credentialId) {
         return res.status(409).json({
-          error: 'Memory Bot 未配置 API Key',
+          error: `${botId} 未配置 API Key`,
           code: 'credential_not_configured',
         });
       }
@@ -374,10 +374,25 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
     '/agent-plans',
     route(async (req, res) => {
       const body = req.body || {};
+      const nodes = Array.isArray(body.nodes) ? body.nodes : [];
+      // 历史 memory.* 能力不允许进入新计划：长期记忆由主控直接处理。
+      if (
+        nodes.some(
+          node =>
+            node &&
+            typeof node.taskType === 'string' &&
+            node.taskType.trim().startsWith('memory.')
+        )
+      ) {
+        return res.status(403).json({
+          error: '长期记忆由主控 Agent 直接处理，不能创建 memory.* 子任务',
+          code: 'memory_main_agent_only',
+        });
+      }
       const compiled = planCompiler.compilePlan({
         goal: typeof body.goal === 'string' ? body.goal : '',
         mode: body.mode,
-        nodes: Array.isArray(body.nodes) ? body.nodes : [],
+        nodes,
         declaredAgents: Array.isArray(body.declaredAgents) ? body.declaredAgents : null,
       });
       audit(req, 'agent.plan.compile', { target: 'agent_plan' });
@@ -648,6 +663,17 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
     route(async (req, res) => {
       const body = req.body || {};
       const agentId = body.agentId || body.botId || 'memory';
+      // 历史 memory.* 任务类型只保留存量兼容，不再允许通过 HTTP 新建：
+      // 长期记忆由主控 Agent 自己用 memory_search/memory_remember 完成。
+      if (
+        typeof body.taskType === 'string' &&
+        body.taskType.trim().startsWith('memory.')
+      ) {
+        return res.status(403).json({
+          error: '长期记忆由主控 Agent 直接处理，不能创建子 Agent 任务',
+          code: 'memory_main_agent_only',
+        });
+      }
       if (body.sessionId && !sessions.getSession(agentId, body.sessionId)) {
         return res.status(404).json({
           error: 'Bot 会话不存在',

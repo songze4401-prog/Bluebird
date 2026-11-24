@@ -289,7 +289,7 @@ test('P5-E 真实链路：低风险任务 risk.assessed 留审计、不抬审校
     botId: 'memory',
     taskType: 'memory.search',
     goal: `P5-E 低风险 ${seq}`,
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
     deadlineMs: 20000,
   });
   runtime.startTask(task.taskId);

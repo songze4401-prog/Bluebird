@@ -49,7 +49,7 @@ function makeTask(overrides = {}) {
     botId: 'memory',
     taskType: 'memory.search',
     goal: 'B-06 预算原子计量用例',
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
     deadlineMs: 20000,
     ...overrides,
   });

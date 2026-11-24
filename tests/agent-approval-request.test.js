@@ -43,7 +43,7 @@ function makeTaskWithApproval() {
     botId: 'memory',
     taskType: 'memory.search',
     goal: `审批取消任务 ${taskSeq}`,
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
     deadlineMs: 5000,
   });
   const approval = approvals.createApproval({

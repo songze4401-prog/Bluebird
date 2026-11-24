@@ -17,7 +17,6 @@ const circuitBreaker = require('./circuit-breaker');
 const { getInstanceUserId } = require('../user-scope');
 const { CONTRACT_VERSION } = require('./contract');
 const orchestrator = require('../context/orchestrator');
-const { isMemoryQueryDelegation } = require('../delegation-intent');
 const PRIORITY_VALUES = Object.freeze(['high', 'normal', 'low']);
 // B-06（§25）：路由冻结的 Task Token 硬上限。
 // A 类常量：与路由 profile 的轮次/工具上限一同冻结进任务，不代表供应商真实配额，
@@ -31,7 +30,6 @@ const STATUS_BY_CODE = Object.freeze({
   agent_not_available: 409,
   agent_queue_full: 409,
   agent_circuit_open: 503,
-  memory_query_requires_main_agent: 403,
 });
 // 多个候选都被拒绝时，取最能说明输入问题的错误。
 const REJECTION_PRECEDENCE = Object.freeze([
@@ -167,7 +165,6 @@ const MESSAGES = Object.freeze({
   agent_not_available: 'Agent 当前不可用',
   agent_queue_full: '任务队列已满，请稍后重试',
   agent_circuit_open: '该 Agent 近期连续失败，已暂时熔断，请稍后重试',
-  memory_query_requires_main_agent: '记忆查询由主控 Agent 直接执行',
 });
 
 function rejection(decision, { code, status, message, field }) {
@@ -494,9 +491,6 @@ function routeEventPayload(decision, extra = {}) {
         }
       : {}),
     ...(extra.idempotent !== undefined ? { idempotent: extra.idempotent === true } : {}),
-    ...(extra.security === 'memory_query_direct_only'
-      ? { security: 'memory_query_direct_only' }
-      : {}),
   };
 }
 
@@ -583,20 +577,6 @@ function createRouter(overrides = {}) {
 
     const normalized = internal.normalized;
     const agentId = decision.selectedAgentId;
-    if (
-      agentId === 'memory' &&
-      isMemoryQueryDelegation(decision.taskType, normalized.goal)
-    ) {
-      writeRouteEvent(appendEvent, agentId, 'route.rejected', decision, {
-        priority: normalized.priority,
-        security: 'memory_query_direct_only',
-      });
-      throw new AgentError(
-        'memory_query_requires_main_agent',
-        '记忆查询由主控 Agent 直接执行，不派发给 Memory Bot',
-        403
-      );
-    }
     const existing = taskStore.findByIdempotencyKey(agentId, normalized.idempotencyKey);
     if (existing) {
       writeRouteEvent(appendEvent, agentId, 'route.decided', decision, {

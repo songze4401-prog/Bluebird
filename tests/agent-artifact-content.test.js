@@ -33,7 +33,7 @@ function makeTask(goal = '产物正文测试') {
     botId: 'memory',
     taskType: 'memory.search',
     goal: `${goal} ${seq}`,
-    allowedTools: ['memory_search'],
+    allowedTools: ['workspace_list'],
   });
 }
 

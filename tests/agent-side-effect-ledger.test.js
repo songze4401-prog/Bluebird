@@ -376,7 +376,7 @@ async function setupProvider() {
                   {
                     id: 'call_p2_write',
                     type: 'function',
-                    function: { name: 'memory_remember', arguments: JSON.stringify({ x: 2 }) },
+                    function: { name: 'workspace_write', arguments: JSON.stringify({ x: 2 }) },
                   },
                 ],
               },
@@ -438,7 +438,7 @@ test('b. begin 后未补终态（崩溃残留）→ 任务 recovery，工具不�
 
   let calls = 0;
   // 覆盖同名工具，仅为计数；readOnly:false 与真身一致。
-  register('memory_remember', async () => {
+  register('workspace_write', async () => {
     calls += 1;
     return { ok: true, summary: 'written' };
   });
@@ -448,7 +448,7 @@ test('b. begin 后未补终态（崩溃残留）→ 任务 recovery，工具不�
       botId: 'memory',
       taskType: 'memory.search',
       goal: 'P2_UNKNOWN 任务',
-      allowedTools: ['memory_remember'],
+      allowedTools: ['workspace_write'],
       deadlineMs: 20000,
     });
 
@@ -456,8 +456,8 @@ test('b. begin 后未补终态（崩溃残留）→ 任务 recovery，工具不�
     ledger.begin({
       agentId: 'memory',
       taskId: task.taskId,
-      stepId: ledger.deriveStepId({ toolName: 'memory_remember', args: { x: 2 } }),
-      toolName: 'memory_remember',
+      stepId: ledger.deriveStepId({ toolName: 'workspace_write', args: { x: 2 } }),
+      toolName: 'workspace_write',
       args: { x: 2 },
     });
     calls = 1;
