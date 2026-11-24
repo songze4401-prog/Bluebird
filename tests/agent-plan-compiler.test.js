@@ -43,7 +43,7 @@ function eventsOf(type) {
   return tasks.listEvents('memory', { limit: 200 }).filter(event => event.eventType === type);
 }
 
-const NODE_SEARCH = { key: 'find', taskType: 'memory.search', goal: '检索发票抬头' };
+const NODE_SEARCH = { key: 'find', taskType: 'action.execute', goal: '整理发票抬头材料' };
 const NODE_SUM = { key: 'sum', taskType: 'summary.synthesize', goal: '汇总检索结果' };
 
 test('a. 合法跨 Agent 两节点 DAG：执行者由路由解析，definitions 带解析结果', () => {

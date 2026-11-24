@@ -225,7 +225,7 @@ function getCredentialKey(credentialId, botId, expectedProviderId = null) {
   assertBot(botId);
   const record = getCredential(credentialId, botId);
   if (!record) {
-    throw new AgentError('credential_not_configured', 'Memory Bot 未配置 API Key', 409);
+    throw new AgentError('credential_not_configured', 'Agent 未配置 API Key', 409);
   }
   const expected = typeof expectedProviderId === 'string' ? expectedProviderId.trim() : '';
   if (expected && record.providerId !== expected) {

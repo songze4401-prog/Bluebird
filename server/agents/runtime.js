@@ -135,8 +135,11 @@ function decideFailureDisposition({
   // FM-2 交接上下文丢失（§17）：必需约束未传递，Worker 未启动 → recovery，
   // 由人工补齐或从已验证引用重建后恢复，不能盲目重跑。
   const handoffFailure = errorCode === 'handoff_context_missing';
+  // 副作用判定按真实写工具（tasks.SIDE_EFFECT_TOOLS）走；记忆工具只属于主控，
+  // 不再作为子 Agent 任务的副作用标记。
   const hasSideEffects =
-    Array.isArray(allowedTools) && allowedTools.includes('memory_remember');
+    Array.isArray(allowedTools) &&
+    allowedTools.some(name => tasks.SIDE_EFFECT_TOOLS.includes(name));
   const retryable =
     !cancelled &&
     !sideEffectFailure &&
@@ -472,9 +475,15 @@ async function waitForReviewTask(taskId, timeoutMs) {
   return tasks.getRawTask(taskId);
 }
 
+// 记忆工具只属于主控，不从子 Agent 的模型可见工具中暴露；manifest 里的
+// memory_remember 仅作为副作用判定载体保留。
+const MODEL_HIDDEN_TOOLS = new Set(['memory_remember']);
+
 function allowedToolsFor(config, manifest, taskTools, agentId = null, taskContext = {}) {
   const manifestSet = new Set(manifest.toolAllowlist);
-  const configTools = config.toolAllowlist.filter(name => manifestSet.has(name));
+  const configTools = config.toolAllowlist.filter(
+    name => manifestSet.has(name) && !MODEL_HIDDEN_TOOLS.has(name)
+  );
   if (!Array.isArray(taskTools)) return configTools;
   const taskSet = new Set(taskTools);
   return configTools.filter(name => taskSet.has(name));
@@ -859,11 +868,11 @@ function emptyReplyError(stopReason) {
   if (stopReason === 'tool_call_budget') {
     return new AgentError(
       'tool_call_budget',
-      'Memory Bot 工具调用预算已用尽，未能生成总结',
+      '子 Agent 工具调用预算已用尽，未能生成总结',
       502
     );
   }
-  return new AgentError('empty_reply', 'Memory Bot 没有返回内容', 502);
+  return new AgentError('empty_reply', '子 Agent 没有返回内容', 502);
 }
 
 async function chat(botId, {

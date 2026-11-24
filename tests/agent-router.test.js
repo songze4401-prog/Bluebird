@@ -714,7 +714,7 @@ test('兼容层：delegate_to_bot 工具名与必填参数保持不变', () => {
 
 test('兼容层：没有主控会话时仍返回 session_required', async () => {
   const result = await dispatchTool.definition.handler(
-    { botId: 'memory', taskType: 'memory.search', goal: '记录咖啡偏好' },
+    { botId: 'memory', taskType: 'action.execute', goal: '整理文件' },
     {}
   );
   assert.equal(result.ok, false);
@@ -724,8 +724,8 @@ test('兼容层：没有主控会话时仍返回 session_required', async () => 
 test('兼容层：Agent 未就绪时返回既有 bot_not_ready 短码', async () => {
   const main = mainSessions.createSession({ title: 'Router 兼容层测试' });
   const result = await dispatchTool.definition.handler(
-    { botId: 'memory', taskType: 'memory.search', goal: '记录咖啡偏好' },
-    { sessionId: main.id, userText: '请记录咖啡偏好' }
+    { botId: 'memory', taskType: 'action.execute', goal: '整理文件' },
+    { sessionId: main.id, userText: '请整理文件' }
   );
   assert.equal(result.ok, false);
   assert.equal(result.code, 'bot_not_ready');

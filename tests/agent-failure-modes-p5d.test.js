@@ -312,7 +312,7 @@ test('P5-D FM-3：父窄子宽拒绝且零落盘；省略声明继承收窄；�
         botId: 'memory',
         taskType: 'memory.explain',
         goal: '子任务越权',
-        allowedTools: ['memory_remember', 'memory_remember'],
+        allowedTools: ['workspace_write', 'workspace_write'],
         parentTaskId: parent.taskId,
       }),
     error => {
@@ -362,10 +362,10 @@ test('P5-D FM-3：父窄子宽拒绝且零落盘；省略声明继承收窄；�
     botId: 'memory',
     taskType: 'memory.explain',
     goal: '全量父任务下的子任务',
-    allowedTools: ['memory_remember'],
+    allowedTools: ['workspace_write'],
     parentTaskId: openParent.taskId,
   });
-  assert.strictEqual(openChild.allowedTools.join(','), 'memory_remember');
+  assert.strictEqual(openChild.allowedTools.join(','), 'workspace_write');
 });
 
 // ---- d. FM-2：validateHandoff 纯函数（缺失阻断 / 引用重建 / 纯文本 fail-closed） ----

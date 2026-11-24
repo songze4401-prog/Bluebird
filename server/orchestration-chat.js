@@ -33,8 +33,12 @@ function extractPlanBlock(reply) {
 }
 
 function buildPromptAppendix(capabilities) {
+  // 历史 memory.* 能力不再提供给模型编排：记忆由主控直接处理。
   const list = Array.isArray(capabilities)
-    ? capabilities.filter(item => typeof item === 'string' && item.trim()).slice(0, 24)
+    ? capabilities
+        .filter(item => typeof item === 'string' && item.trim())
+        .filter(item => !item.trim().startsWith('memory.'))
+        .slice(0, 24)
     : [];
   return [
     '【复杂任务编排协议（可选）】',
@@ -74,6 +78,21 @@ function wireOrchestration({ policy, reply, userText = '', userId = null, sessio
   const orchestrationEngine = require('./agents/orchestration-engine');
   const mode = extracted.parsed.mode === 'single' ? 'single' : 'dag';
   const nodes = Array.isArray(extracted.parsed.nodes) ? extracted.parsed.nodes : [];
+  // 历史 memory.* 能力不允许进入新计划：长期记忆由主控直接处理。
+  if (
+    nodes.some(
+      node =>
+        node &&
+        typeof node.taskType === 'string' &&
+        node.taskType.trim().startsWith('memory.')
+    )
+  ) {
+    return {
+      reply: rest,
+      orchestration: null,
+      reason: 'memory_main_agent_only',
+    };
+  }
   const declaredAgents = Array.isArray(extracted.parsed.agents) ? extracted.parsed.agents : null;
   let compiled = null;
   try {

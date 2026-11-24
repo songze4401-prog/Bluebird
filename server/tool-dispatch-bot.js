@@ -1,11 +1,11 @@
 /**
- * 主控 → Memory Bot 的受控派发工具。
+ * 主控 → 子 Agent 的受控派发工具。
  *
- * 工具只负责创建并排队一个已有的 agent task；执行仍由 Memory Bot Runtime
+ * 工具只负责创建并排队一个已有的 agent task；执行仍由子 Agent Runtime
  * 完成，结果写入 Task Store 并投递回主控当前会话。它不是第二套执行器，
  * 也不允许主控直接调用记忆维护接口。
  */
-const { getManifest, isKnownBot } = require('./agents/manifest');
+const { getManifest, isKnownBot, listManifests } = require('./agents/manifest');
 // Phase 1 交付物 1：创建/排队统一走唯一编排入口（内部复用 Router，不另起一套）。
 const orchestrator = require('./agents/orchestrator');
 const mainSessions = require('./sessions');
@@ -25,6 +25,27 @@ const TOOL_ERROR_CODES = Object.freeze({
   agent_queue_full: 'agent_queue_full',
 });
 
+// 历史 memory.* 任务类型仍存在于 manifest 里做存量兼容，但新任务一律由主控
+// 直接处理记忆：不得再通过 delegate_to_bot 创建。
+function isLegacyMemoryTaskType(taskType) {
+  return typeof taskType === 'string' && taskType.startsWith('memory.');
+}
+
+function delegatableTaskTypes() {
+  return listManifests()
+    .map(manifest => ({
+      botId: manifest.botId,
+      taskTypes: (manifest.acceptedTaskTypes || []).filter(
+        taskType => !isLegacyMemoryTaskType(taskType)
+      ),
+    }))
+    .filter(item => item.taskTypes.length);
+}
+
+const TASK_TYPE_GUIDE = delegatableTaskTypes()
+  .map(item => `${item.botId}: ${item.taskTypes.join(' / ')}`)
+  .join('；');
+
 function validate(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     return { ok: false, error: '参数必须是 JSON 对象' };
@@ -37,6 +58,12 @@ function validate(args) {
     return { ok: false, error: `未知的 Agent：${botId}` };
   }
   const manifest = getManifest(botId);
+  if (isLegacyMemoryTaskType(args.taskType)) {
+    return {
+      ok: false,
+      error: '长期记忆由主控 Agent 直接处理，不要委派给子 Agent',
+    };
+  }
   if (!manifest.acceptedTaskTypes.includes(args.taskType)) {
     return { ok: false, error: `taskType 不在 ${botId} 受理范围` };
   }
@@ -61,7 +88,7 @@ function validate(args) {
     const allowed = new Set(manifest.toolAllowlist);
     for (const name of args.allowedTools) {
       if (typeof name !== 'string' || !allowed.has(name)) {
-        return { ok: false, error: 'allowedTools 超出 Memory Bot 能力范围' };
+        return { ok: false, error: `allowedTools 超出 ${botId} 能力范围` };
       }
     }
     allowedTools = [...new Set(args.allowedTools)];
@@ -82,7 +109,8 @@ const definition = Object.freeze({
   name: 'delegate_to_bot',
   description:
     '把一个明确的任务派发给已注册的小 Agent（researcher / executor / memory / reviewer）。' +
-    '必须先选定 botId 与该 Agent 支持的 taskType；不会在当前轮同步返回执行结果，' +
+    `可派发的 botId 与任务类型：${TASK_TYPE_GUIDE}。` +
+    '必须先选定 botId 与该 Agent 支持的任务类型；不会在当前轮同步返回执行结果，' +
     '任务完成后结果会写入当前会话，用户也可以在任务页查看。' +
     '长期记忆的查询与写入由主控 Agent 自己用 memory_search / memory_remember 完成，不要用此工具处理记忆。',
   parameters: Object.freeze({
@@ -94,7 +122,7 @@ const definition = Object.freeze({
       }),
       taskType: Object.freeze({
         type: 'string',
-        description: '任务类型；必须是目标 Agent acceptedTaskTypes 之一（validate 动态校验）',
+        description: `任务类型；必须是目标 Agent 受理的类型。可选值：${TASK_TYPE_GUIDE}`,
       }),
       goal: Object.freeze({
         type: 'string',
@@ -124,6 +152,9 @@ const definition = Object.freeze({
     if (!checked.ok) {
       return { ok: false, code: 'invalid_args', error: checked.error };
     }
+    // 使用校验后的规范参数：botId/goal 已 trim，allowedTools 已去重。
+    const normalized = checked.args;
+    const target = getManifest(normalized.botId);
     const mainSessionId =
       context && typeof context.sessionId === 'string' ? context.sessionId.trim() : '';
     if (!mainSessionId || !mainSessions.getSession(mainSessionId)) {
@@ -138,12 +169,12 @@ const definition = Object.freeze({
     try {
       const { task, idempotent } = orchestrator.orchestrate(
         {
-          agentId: args.botId,
-          capability: args.taskType,
-          taskType: args.taskType,
-          goal: args.goal,
-          context: args.context || '',
-          allowedTools: args.allowedTools || null,
+          agentId: normalized.botId,
+          capability: normalized.taskType,
+          taskType: normalized.taskType,
+          goal: normalized.goal,
+          context: normalized.context || '',
+          allowedTools: normalized.allowedTools || null,
           // 父会话同时是委派任务的记忆 scope；Bot session 只承载执行轨迹。
           parentSessionId: mainSessionId,
           parentMessageId: context.userMessageId || null,
@@ -166,7 +197,7 @@ const definition = Object.freeze({
         path: task.route ? task.route.path : null,
         idempotent: idempotent === true,
         resultPending: true,
-        summary: '已提交给 Memory Bot，状态与结果可从任务页或当前会话接收。',
+        summary: `已提交给 ${target.displayName}（${target.botId}），状态与结果可从任务页或当前会话接收。`,
       };
     } catch (error) {
       if (error && typeof error.code === 'string' && TOOL_ERROR_CODES[error.code]) {

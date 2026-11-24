@@ -32,13 +32,21 @@ test('manifest：不存在记忆专岗角色，三个小 agent 不持有记忆�
   assert.deepEqual(ids, ['executor', 'memory', 'researcher', 'reviewer']);
 
   for (const item of manifest.listManifests()) {
-    // memory_search 完全移除；memory_remember 仅作为 Gateway 副作用判定载体保留，
-    // 运行时由 handler 的 agentId 硬闸拒绝，见下方测试。
+    // 子 Agent 不持有 memory_search；只读角色也不持有 memory_remember。
+    // memory_remember 仅在执行型 Agent（memory/executor）白名单里作副作用标记载体，
+    // 由 agents/runtime 的 allowedToolsFor 从模型可见工具中过滤。
     assert.equal(
       item.toolAllowlist.includes('memory_search'),
       false,
       `${item.botId} 不应持有 memory_search`
     );
+    if (item.botId === 'researcher' || item.botId === 'reviewer') {
+      assert.equal(
+        item.toolAllowlist.includes('memory_remember'),
+        false,
+        `${item.botId} 不应持有 memory_remember`
+      );
+    }
   }
   // memory 这个 id 保留为通用执行 agent，但不再是记忆专岗
   const generic = manifest.getManifest('memory');
@@ -51,8 +59,16 @@ test('delegate_to_bot：botId 必填且可派给任意已注册 agent', () => {
   const tool = require('../server/tool-dispatch-bot').definition;
   assert.equal(tool.validate({ taskType: 'research.analyze', goal: 'x' }).ok, false);
   assert.equal(tool.validate({ botId: 'nonexistent', taskType: 'research.analyze', goal: 'x' }).ok, false);
+  // 历史 memory.* 任务类型不再允许委派：记忆由主控直接处理
+  assert.equal(tool.validate({ botId: 'memory', taskType: 'memory.search', goal: 'x' }).ok, false);
   const ok = tool.validate({ botId: 'researcher', taskType: 'research.analyze', goal: 'x' });
   assert.equal(ok.ok, true, JSON.stringify(ok));
+});
+
+test('副作用判定覆盖真实写工具与历史记忆载体，且不再只认 memory_remember', () => {
+  const { SIDE_EFFECT_TOOLS } = require('../server/agents/tasks');
+  assert.ok(SIDE_EFFECT_TOOLS.includes('workspace_write'));
+  assert.ok(SIDE_EFFECT_TOOLS.includes('memory_remember'));
 });
 
 test('主控仍持有记忆工具（记忆由模型负责）', () => {

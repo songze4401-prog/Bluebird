@@ -28,6 +28,8 @@ const MEMORY_BOT_TOOLS = Object.freeze([
   'workspace_read',
   'workspace_write',
   'knowledge_search',
+  // 历史副作用标记载体：不暴露给模型（agents/runtime 的 allowedToolsFor 会过滤），
+  // handler 对 agentId 非空仍硬闸拒绝；仅用于任务副作用判定。
   'memory_remember',
 ]);
 
@@ -137,11 +139,11 @@ const REVIEWER_BOT_PROMPT = `
 - 不处理长期记忆；用户记忆由主控 Agent 独占。
 `.trim();
 
-// memory_remember 在小 agent 白名单中仅作为 Gateway 副作用判定的载体保留；
-// tool-memory-remember 的 handler 对 Bot 上下文一律硬闸拒绝，记忆由主控独占。
-const RESEARCHER_TOOLS = Object.freeze(['knowledge_search', 'web_search', 'web_fetch', 'memory_remember']);
+// 子 Agent 不向模型暴露任何记忆工具；memory_remember 只在执行型 Agent 的
+// manifest 白名单里充当副作用判定载体，由 allowedToolsFor 从模型可见工具中过滤。
+const RESEARCHER_TOOLS = Object.freeze(['knowledge_search', 'web_search', 'web_fetch']);
 const EXECUTOR_TOOLS = Object.freeze(['workspace_list', 'workspace_read', 'workspace_write', 'knowledge_search', 'memory_remember']);
-const REVIEWER_TOOLS = Object.freeze(['knowledge_search', 'web_search', 'web_fetch', 'memory_remember']);
+const REVIEWER_TOOLS = Object.freeze(['knowledge_search', 'web_search', 'web_fetch']);
 
 function roleManifest({
   botId,

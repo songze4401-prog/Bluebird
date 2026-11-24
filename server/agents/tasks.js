@@ -2016,7 +2016,7 @@ function priorityRank(priority) {
 
 // ---- 阶段 3：租约、运行历史、重试与恢复 ----
 
-const SIDE_EFFECT_TOOLS = Object.freeze(['memory_remember']);
+const SIDE_EFFECT_TOOLS = Object.freeze(['memory_remember', 'workspace_write']);
 const LEASE_TTL_DEFAULT_MS = 60000;
 const RUN_HISTORY_MAX = 5;
 

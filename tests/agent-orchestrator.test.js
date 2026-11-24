@@ -683,15 +683,15 @@ test('路由可追踪（真实注册表）：三个真实 Agent 按目标分派�
   const orchestrator = makeRealRegistryOrchestrator();
   const cases = [
     {
-      capability: 'memory.recall',
-      taskType: 'memory.recall',
-      goal: '检索关于浅烘咖啡的既有偏好证据',
+      capability: 'research.analyze',
+      taskType: 'research.analyze',
+      goal: '检索关于浅烘咖啡的资料并总结',
       expected: 'researcher',
     },
     {
-      capability: 'memory.write',
-      taskType: 'memory.write',
-      goal: '把用户偏好浅烘写入长期记忆',
+      capability: 'action.execute',
+      taskType: 'action.execute',
+      goal: '执行用户当前请求的文件整理',
       expected: 'executor',
       // 重构后 Action Bot（历史标识 memory）同样声明并受理 memory.write，
       // 因此候选集有两个主体；router 仍按 routingPriority 选中 executor，

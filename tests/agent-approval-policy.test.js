@@ -185,7 +185,7 @@ test('c. waiting_approval 资源期限耗尽：无副作用 timed_out、有副�
   assert.equal(noEffect.errorCode, 'deadline_exceeded');
   assert.equal(approvals.getApproval(noEffectApproval.approvalId).status, 'pending');
 
-  const sideEffectTask = makeTask({ allowedTools: ['memory_remember'] });
+  const sideEffectTask = makeTask({ allowedTools: ['workspace_write'] });
   const sideEffectApproval = approvals.createApproval({
     botId: 'memory',
     operation: 'archive',

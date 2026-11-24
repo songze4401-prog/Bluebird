@@ -346,7 +346,7 @@ test('恢复：recovery 结果按 taskId 幂等投递到父会话', () => {
   resultDelivery.recoverPending();
   const after = mainSessions.getMessages(parent.id);
   assert.equal(after.length, before + 1);
-  assert.ok(after.at(-1).content.includes('【Memory Bot 任务未完成】'));
+  assert.ok(after.at(-1).content.includes('【Action Bot（memory）任务未完成】'));
   assert.ok(after.at(-1).content.includes('recovery'));
   resultDelivery.recoverPending();
   assert.equal(mainSessions.getMessages(parent.id).length, before + 1);

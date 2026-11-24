@@ -275,7 +275,7 @@ test('Memory Bot direct chat：模型即使伪造 memory_search 调用也无法�
     .map(tool => tool.function && tool.function.name)
     .filter(Boolean);
   assert.ok(!names.includes('memory_search'));
-  assert.ok(names.includes('memory_remember'));
+  assert.ok(!names.includes('memory_remember'), '记忆工具不暴露给子 Agent 模型');
 });
 
 test.after(async () => {
@@ -474,12 +474,12 @@ test('网关：策略白名单进一步收窄', () => {
   assert.equal(authorize('memory_search').code, 'policy_tool_denied');
 });
 
-test('Memory Bot Runtime：委派任务无 memory_search，知识检索可用但记忆写入被硬闸拒绝', async () => {
+test('Memory Bot Runtime：委派任务不向模型暴露记忆工具，知识检索可用', async () => {
   const manifest = require('../server/agents/manifest').MEMORY_BOT_MANIFEST;
   const config = { toolAllowlist: manifest.toolAllowlist };
   const botTools = runtime.allowedToolsFor(config, manifest, null, 'memory');
   assert.ok(!botTools.includes('memory_search'));
-  assert.ok(botTools.includes('memory_remember'));
+  assert.ok(!botTools.includes('memory_remember'), 'memory_remember 仅作副作用载体，不暴露给模型');
   assert.ok(botTools.includes('knowledge_search'));
   const queryTools = runtime.allowedToolsFor(config, manifest, null, 'memory', {
     mode: 'delegated_task',
@@ -492,9 +492,9 @@ test('Memory Bot Runtime：委派任务无 memory_search，知识检索可用但
     taskType: 'memory.search',
     goal: '记录我刚提供的偏好',
   });
-  // 新架构：委托任务一律不授予 memory_search，记忆由主控独占。
+  // 新架构：委托任务一律不授予记忆工具，记忆由主控独占。
   assert.ok(!maintenanceTools.includes('memory_search'));
-  assert.ok(maintenanceTools.includes('memory_remember'));
+  assert.ok(!maintenanceTools.includes('memory_remember'));
   assert.ok(maintenanceTools.includes('knowledge_search'));
   const researcherManifest = require('../server/agents/manifest').RESEARCHER_BOT_MANIFEST;
   const researcherTools = runtime.allowedToolsFor(
@@ -505,7 +505,7 @@ test('Memory Bot Runtime：委派任务无 memory_search，知识检索可用但
   );
   assert.ok(!researcherTools.includes('memory_search'));
   assert.ok(researcherTools.includes('knowledge_search'));
-  assert.ok(researcherTools.includes('memory_remember'));
+  assert.ok(!researcherTools.includes('memory_remember'), '只读角色不携带副作用载体');
   assert.ok(researcherTools.includes('web_search'));
 
   // 新架构：memory_remember 虽在小 agent 白名单里作为副作用判定载体保留，

@@ -874,15 +874,16 @@ test('HTTP API：鉴权由外层注入，配置/凭证/会话/任务均走真实
       deadlineMs: 20000,
     },
   });
-  // 记忆查询特判已删除：任务正常创建（202），由通用派发链接管
-  assert.equal(rejectedQuery.status, 202);
-  assert.equal(tasks.allTasks().length, beforeQueryTasks + 1);
+  // 历史 memory.* 任务类型不再允许通过 HTTP 新建：记忆由主控直接处理
+  assert.equal(rejectedQuery.status, 403);
+  assert.equal(rejectedQuery.json.code, 'memory_main_agent_only');
+  assert.equal(tasks.allTasks().length, beforeQueryTasks, '记忆任务不得经子 Agent 创建');
 
   const task = await api('/agent-tasks', {
     method: 'POST',
     body: {
       botId: 'memory',
-      taskType: 'memory.search',
+      taskType: 'action.execute',
       goal: '记录用户提供的咖啡偏好并核对现有冲突',
       allowedTools: ['knowledge_search'],
       deadlineMs: 20000,

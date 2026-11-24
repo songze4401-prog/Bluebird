@@ -1,6 +1,6 @@
 /* global __dirname */
 /**
- * 主控 → Memory Bot 派发与结果回传测试。
+ * 主控 → 子 Agent 派发与结果回传测试。
  * 使用真实 HTTP stub Provider；验证任务创建、Bot Runtime、任务结果、
  * 主控会话投递与事件 outbox，不依赖外部模型。
  */
@@ -188,7 +188,7 @@ test.before(async () => {
                       name: 'delegate_to_bot',
                       arguments: JSON.stringify({
                         botId: 'memory',
-                        taskType: 'memory.search',
+                        taskType: 'action.execute',
                         goal: lastText.includes('MEMORY_SCOPE')
                           ? 'MEMORY_SCOPE 检索主控深烘咖啡偏好'
                           : lastText.includes('MEMORY_MAINTENANCE')
@@ -312,32 +312,36 @@ async function waitForTask(taskId, timeoutMs = 5000) {
 test('派发工具：校验 Bot/任务类型/边界，且不暴露给 Bot 自身工具清单', () => {
   assert.equal(tool.name, 'delegate_to_bot');
   assert.equal(
-    tool.validate({ botId: 'other', taskType: 'memory.search', goal: 'x' }).ok,
+    tool.validate({ botId: 'other', taskType: 'action.execute', goal: 'x' }).ok,
     false
   );
   assert.equal(
     tool.validate({ botId: 'memory', taskType: 'shell.exec', goal: 'x' }).ok,
     false
   );
-  assert.equal(tool.validate({ botId: 'memory', taskType: 'memory.search' }).ok, false);
+  assert.equal(tool.validate({ botId: 'memory', taskType: 'action.execute' }).ok, false);
   assert.equal(
     tool.validate({
       botId: 'memory',
-      taskType: 'memory.search',
+      taskType: 'action.execute',
       goal: 'x',
       allowedTools: ['shell_exec'],
     }).ok,
     false
   );
-  // 记忆查询特判已删除：任何合法 goal 都进入通用派发链
+  // 历史 memory.* 任务类型不再允许委派：记忆由主控直接处理
   assert.equal(
     tool.validate({ botId: 'memory', taskType: 'memory.search', goal: '查一下' }).ok,
+    false
+  );
+  assert.equal(
+    tool.validate({ botId: 'memory', taskType: 'action.execute', goal: '整理文件' }).ok,
     true
   );
   assert.equal(
     tool.validate({
       botId: 'memory',
-      taskType: 'memory.search',
+      taskType: 'action.execute',
       goal: '记录我喜欢浅烘咖啡',
       allowedTools: ['workspace_write'],
     }).ok,
@@ -356,7 +360,7 @@ test('主控派发：创建带 parentSessionId 的任务，Bot Runtime 完成后
   const result = await tool.handler(
     {
       botId: 'memory',
-      taskType: 'memory.search',
+      taskType: 'action.execute',
       goal: '记录我当前提供的咖啡偏好',
       context: '保存用户当前提供的信息，不检索历史记忆。',
       allowedTools: ['workspace_write'],
@@ -385,7 +389,7 @@ test('主控派发：创建带 parentSessionId 的任务，Bot Runtime 完成后
   assert.ok(finished.deliveredToParentAt);
 
   const history = mainSessions.getMessages(main.id);
-  assert.ok(history.some(message => message.content.includes('【Memory Bot 任务完成】')));
+  assert.ok(history.some(message => message.content.includes('【Action Bot（memory）任务完成】')));
   assert.ok(history.some(message => message.content.includes(result.taskId)));
 
   const events = tasks.listEvents('memory', { limit: 100 });
@@ -409,7 +413,7 @@ test('主控派发：创建带 parentSessionId 的任务，Bot Runtime 完成后
   assert.equal(tasks.listTasks('memory', { parentSessionId: 'other' }).length, 0);
 });
 
-test('主 Agent 工具循环：明确的记忆维护仍可委派给 Bot Runtime', async () => {
+test('主 Agent 工具循环：通用任务可委派给 Bot Runtime', async () => {
   const main = mainSessions.createSession({ title: '主 Agent 工具派发' });
   const outcome = await agentRuntime.runAgentTurn({
     providerId,
@@ -443,7 +447,7 @@ test('主 Agent 工具循环：明确的记忆维护仍可委派给 Bot Runtime'
   const finished = await waitForTask(task.taskId);
   assert.equal(finished.status, 'completed');
   assert.ok(mainSessions.getMessages(main.id).some(message =>
-    message.content.includes('【Memory Bot 任务完成】')
+    message.content.includes('【Action Bot（memory）任务完成】')
   ));
 });
 
@@ -469,7 +473,7 @@ test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时
   const botSession = botSessions.createSession('memory', { title: '审批测试' });
   const task = tasks.createTask({
     botId: 'memory',
-    taskType: 'memory.search',
+    taskType: 'action.execute',
     goal: '审批更新测试记忆',
     sessionId: botSession.id,
     parentSessionId: main.id,
@@ -511,12 +515,12 @@ test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时
   assert.ok(
     mainSessions
       .getMessages(main.id)
-      .some(message => message.content.includes('【Memory Bot 任务完成】'))
+      .some(message => message.content.includes('【Action Bot（memory）任务完成】'))
   );
 
   const rejectTask = tasks.createTask({
     botId: 'memory',
-    taskType: 'memory.search',
+    taskType: 'action.execute',
     goal: '审批拒绝测试',
     sessionId: botSession.id,
     parentSessionId: main.id,
@@ -538,14 +542,14 @@ test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时
       .getMessages(main.id)
       .some(
         message =>
-          message.content.includes('【Memory Bot 任务未完成】') &&
+          message.content.includes('【Action Bot（memory）任务未完成】') &&
           message.content.includes('approval_rejected')
       )
   );
 
   const staleTask = tasks.createTask({
     botId: 'memory',
-    taskType: 'memory.search',
+    taskType: 'action.execute',
     goal: '审批任务被取消测试',
     sessionId: botSession.id,
     parentSessionId: main.id,
@@ -567,7 +571,7 @@ test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时
 
   const failTask = tasks.createTask({
     botId: 'memory',
-    taskType: 'memory.search',
+    taskType: 'action.execute',
     goal: '审批执行失败测试',
     sessionId: botSession.id,
     parentSessionId: main.id,
@@ -591,7 +595,7 @@ test('审批闭环：waiting_approval 不被 runTask 覆盖，执行完成实时
       .getMessages(main.id)
       .some(
         message =>
-          message.content.includes('【Memory Bot 任务未完成】') &&
+          message.content.includes('【Action Bot（memory）任务未完成】') &&
           message.content.includes(failTask.taskId)
       )
   );
@@ -664,7 +668,7 @@ test('主控结果 SSE：snapshot 重连可见，实时结果无需轮询', asyn
   const first = await tool.handler(
     {
       botId: 'memory',
-      taskType: 'memory.search',
+      taskType: 'action.execute',
       goal: '记录一条 SSE 测试记忆',
       allowedTools: ['workspace_write'],
     },
@@ -684,7 +688,7 @@ test('主控结果 SSE：snapshot 重连可见，实时结果无需轮询', asyn
   assert.ok(snapshotItem.message.id.startsWith('bot-result-'));
   const snapshotTask = tasks.getTask(first.taskId);
   assert.ok(
-    snapshotItem.message.content.includes('【Memory Bot 任务完成】'),
+    snapshotItem.message.content.includes('【Action Bot（memory）任务完成】'),
     `交付文案应为完成态，实际内容：${snapshotItem.message.content}｜任务终态：${snapshotTask.status}/${snapshotTask.errorCode}`
   );
 
@@ -699,7 +703,7 @@ test('主控结果 SSE：snapshot 重连可见，实时结果无需轮询', asyn
     const second = await tool.handler(
       {
         botId: 'memory',
-        taskType: 'memory.search',
+        taskType: 'action.execute',
         goal: '记录实时 SSE 测试记忆',
         allowedTools: ['workspace_write'],
       },
@@ -721,7 +725,7 @@ test('失败回传：Bot 执行失败时主控会话收到失败原因，不伪�
   const result = await tool.handler(
     {
       botId: 'memory',
-      taskType: 'memory.search',
+      taskType: 'action.execute',
       goal: 'FAIL_TASK 记录失败路径测试',
       allowedTools: ['workspace_write'],
     },
@@ -732,7 +736,7 @@ test('失败回传：Bot 执行失败时主控会话收到失败原因，不伪�
   assert.ok(finished.errorCode);
   assert.equal(finished.deliveryStatus, 'delivered');
   const history = mainSessions.getMessages(main.id);
-  assert.ok(history.some(message => message.content.includes('【Memory Bot 任务未完成】')));
+  assert.ok(history.some(message => message.content.includes('【Action Bot（memory）任务未完成】')));
   assert.ok(history.some(message => message.content.includes('错误码：')));
 });
 
@@ -766,7 +770,7 @@ test('结果投递失败不伪造完成：主控会话被删除时记录 deliver
   const result = await tool.handler(
     {
       botId: 'memory',
-      taskType: 'memory.search',
+      taskType: 'action.execute',
       goal: '记录一条待删除会话测试记忆',
       allowedTools: ['workspace_write'],
     },

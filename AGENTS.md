@@ -215,7 +215,7 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-136 files, 2648 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
+136 files, 2649 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
 node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js tests/monitoring.test.js   # node:test suites (237)
@@ -235,7 +235,7 @@ node tests/agent-cost-tracking.test.js     # 3
 node tests/agent-crash-injection.test.js   # 4 — real SIGKILL crash injection (P5): handler-returned-but-unrecorded leaves one unknown ledger row and recovery without re-running the handler, artifacts persisted before state commit stay pending-commit and converge as pending, approval-record-before-state-move self-heals to waiting_approval, an interrupted read-only run leaves no intermediate state
 node tests/agent-cycle-detection.test.js   # 6 — §17 delegation and artifact-lineage cycle detection with a readable cycle path: wired into the delegation entry and artifact persist path, cycles are rejected before any write, and legal chains pass
 node tests/agent-dead-letter.test.js       # 4
-node tests/agent-delegation-generic.test.js # 5
+node tests/agent-delegation-generic.test.js # 6
 node tests/agent-dispatch.test.js          # 8 — main tool → Bot task, explicit delegation intent detection, runtime-enforced delegate_to_bot dispatch even when the model does not call tools (policy-denied case documented), parent-memory read/write scope (agent rewrite of an existing memory parks a pending candidate until confirmed), parentUserId on the task, approval delivery, result SSE/snapshot, failure delivery, dedupe, outbox recovery
 node tests/agent-error-contract.test.js    # 6 — §23 seven-field contract for validation_failed/not_authorized/budget_exceeded/dependency_failed/internal_error: all fields present, same input yields the same fingerprint, retryable follows the spec, and existing code/error/status keys are untouched
 node tests/agent-eval-baseline.test.js     # 7
