@@ -25,7 +25,7 @@
     "protocol_marker_leak": "marker_retained",
     "agent_stream": "single_delta",
     "ordinary_stream_disconnect_signal": "runtime_cancelled",
-    "non_memory_snapshot": "memory_only_query",
+    "non_memory_snapshot": "all_agents_query",
     "context_window": "unknown_guard_24000"
   }
 }

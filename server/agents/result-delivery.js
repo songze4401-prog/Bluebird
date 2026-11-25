@@ -334,9 +334,9 @@ function snapshotForSession(sessionId, limit = SNAPSHOT_LIMIT) {
     // 单个会话恢复失败不影响 SSE 建连。
   }
   const results = [];
-  for (const task of tasks.listTasks('memory', {
-    limit,
+  for (const task of tasks.listTasksScoped({
     parentSessionId: sessionId,
+    limit,
   })) {
     if (task.deliveryMessageId) {
       const messages = mainSessions.getMessages(sessionId);

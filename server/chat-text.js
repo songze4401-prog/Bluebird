@@ -106,10 +106,7 @@ function auditChatReply(rawReply, ctx, toolSteps) {
   const verdict = auditTaskClaims(rawReply, {
     lookupTask: id => agentTasks.getTask(id),
     listSessionTasks: () =>
-      agentTasks.listTasks('memory', {
-        parentSessionId: ctx.sessionId,
-        limit: 50,
-      }),
+      agentTasks.listTasksScoped({ parentSessionId: ctx.sessionId, limit: 50 }),
     dispatchedThisTurn: Array.isArray(toolSteps)
       ? toolSteps.some(step => step && step.name === 'delegate_to_bot' && step.ok === true)
       : false,

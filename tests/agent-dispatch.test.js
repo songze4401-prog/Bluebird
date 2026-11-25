@@ -32,6 +32,7 @@ let memory;
 let tool;
 let runtime;
 let agentRuntime;
+let resultDelivery;
 let approvals;
 let userScope;
 let apiServer;
@@ -255,6 +256,7 @@ test.before(async () => {
   runtime = require('../server/agents/runtime');
   approvals = require('../server/agents/approvals');
   agentRuntime = require('../server/agent-runtime');
+  resultDelivery = require('../server/agents/result-delivery');
   userScope = require('../server/user-scope');
 
   const added = apiConfigs.addModelProvider({
@@ -287,6 +289,23 @@ test.before(async () => {
     apiKey: 'dispatch-bot-key',
   });
   config.setCredentialId('memory', credential.credentialId);
+  // researcher 也接同一个桩 Provider：跨 Agent 的快照与任务页用例需要它真能执行。
+  config.updateConfig('researcher', {
+    enabled: true,
+    modelProfile: {
+      providerId,
+      modelId: 'dispatch-test-model',
+      temperature: 0.2,
+      maxTokens: 256,
+      timeoutMs: 20000,
+    },
+  });
+  const researchCredential = credentials.putCredential({
+    botId: 'researcher',
+    providerId,
+    apiKey: 'dispatch-bot-key',
+  });
+  config.setCredentialId('researcher', researchCredential.credentialId);
 });
 
 test.after(async () => {
@@ -718,6 +737,134 @@ test('主控结果 SSE：snapshot 重连可见，实时结果无需轮询', asyn
   } finally {
     liveStream.abort();
   }
+});
+
+test('跨 Agent 结果快照：非 memory Agent 的任务同样进入重连 snapshot', async () => {
+  const main = mainSessions.createSession({ title: '跨 Agent 快照测试' });
+  const research = await tool.handler(
+    { botId: 'researcher', taskType: 'research.analyze', goal: 'CROSS_AGENT 调研桩返回' },
+    { sessionId: main.id, userText: 'CROSS_AGENT 调研桩返回', userMessageId: 'cross-1' }
+  );
+  assert.equal(research.ok, true, JSON.stringify(research));
+  const researchDone = await waitForTask(research.taskId);
+  assert.ok(
+    tasks.isTerminalStatus(researchDone.status),
+    `researcher 任务未进入终态：${researchDone.status}/${researchDone.errorCode}`
+  );
+
+  const followUp = await tool.handler(
+    { botId: 'memory', taskType: 'action.execute', goal: 'CROSS_AGENT 执行桩返回' },
+    { sessionId: main.id, userText: 'CROSS_AGENT 执行桩返回', userMessageId: 'cross-2' }
+  );
+  await waitForTask(followUp.taskId);
+
+  const other = mainSessions.createSession({ title: '跨会话隔离对照' });
+  const otherTask = await tool.handler(
+    { botId: 'researcher', taskType: 'research.analyze', goal: 'CROSS_AGENT 其他会话' },
+    { sessionId: other.id, userText: 'CROSS_AGENT 其他会话', userMessageId: 'cross-3' }
+  );
+  await waitForTask(otherTask.taskId);
+
+  const snapshot = resultDelivery.snapshotForSession(main.id);
+  const ids = snapshot.map(item => item.taskId);
+  assert.ok(
+    ids.includes(research.taskId),
+    `快照只列出了 memory 任务，漏掉 researcher 任务：${JSON.stringify(ids)}`
+  );
+  assert.ok(ids.includes(followUp.taskId), `快照缺少同会话的 memory 任务：${JSON.stringify(ids)}`);
+  assert.ok(
+    !ids.includes(otherTask.taskId),
+    `快照串会话了：${JSON.stringify(ids)} 不应含 ${otherTask.taskId}`
+  );
+  assert.ok(
+    ids.indexOf(research.taskId) > ids.indexOf(followUp.taskId),
+    `快照未按创建时间倒序：${JSON.stringify(ids)}`
+  );
+
+  const capped = resultDelivery.snapshotForSession(main.id, 1);
+  assert.equal(capped.length, 1, JSON.stringify(capped.map(item => item.taskId)));
+  assert.equal(capped[0].taskId, followUp.taskId);
+
+  const reconnect = await readSseUntil(
+    `${apiBase}/agent-results/stream?sessionId=${encodeURIComponent(main.id)}`,
+    event =>
+      event.type === 'snapshot' &&
+      Array.isArray(event.results) &&
+      event.results.some(item => item.taskId === research.taskId && item.message)
+  );
+  assert.equal(reconnect.type, 'snapshot');
+  const researchItem = reconnect.results.find(item => item.taskId === research.taskId);
+  assert.ok(researchItem.message.id.startsWith('bot-result-'));
+  assert.ok(
+    researchItem.message.content.includes('Research Bot'),
+    `交付文案应标明 Research Bot 来源，实际：${researchItem.message.content}`
+  );
+});
+
+test('跨 Agent 声明核对：会话内 researcher 近期任务可证明派发声明', async () => {
+  const { auditChatReply } = require('../server/chat-text');
+  const main = mainSessions.createSession({ title: '跨 Agent 声明核对' });
+  const research = await tool.handler(
+    { botId: 'researcher', taskType: 'research.analyze', goal: 'CLAIM 调研桩返回' },
+    { sessionId: main.id, userText: 'CLAIM 调研桩返回', userMessageId: 'claim-1' }
+  );
+  await waitForTask(research.taskId);
+
+  const reply = auditChatReply(
+    '已交给研究员处理，任务在排队，完成后我会在本会话回传。',
+    { sessionId: main.id },
+    []
+  );
+  assert.ok(
+    !reply.includes('系统校验'),
+    `会话内确有 researcher 近期任务，仍被判成无据派发：${reply}`
+  );
+
+  const empty = mainSessions.createSession({ title: '无任务对照' });
+  const falseClaim = auditChatReply(
+    '已交给研究员处理，任务在排队，完成后我会在本会话回传。',
+    { sessionId: empty.id },
+    []
+  );
+  assert.ok(
+    falseClaim.includes('系统校验'),
+    `无任何任务的会话里凭空声称派发，必须被核对拦下：${falseClaim}`
+  );
+});
+
+test('任务页跨 Agent：省略 botId 查全部 Agent，带 botId 只查该 Agent', async () => {
+  const main = mainSessions.createSession({ title: '任务页跨 Agent' });
+  const research = await tool.handler(
+    { botId: 'researcher', taskType: 'research.analyze', goal: 'PAGE 调研桩返回' },
+    { sessionId: main.id, userText: 'PAGE 调研桩返回', userMessageId: 'page-1' }
+  );
+  await waitForTask(research.taskId);
+  const action = await tool.handler(
+    { botId: 'memory', taskType: 'action.execute', goal: 'PAGE 执行桩返回' },
+    { sessionId: main.id, userText: 'PAGE 执行桩返回', userMessageId: 'page-2' }
+  );
+  await waitForTask(action.taskId);
+
+  const all = await fetch(
+    `${apiBase}/agent-tasks?parentSessionId=${encodeURIComponent(main.id)}`
+  ).then(response => response.json());
+  const allIds = all.tasks.map(item => item.taskId);
+  assert.ok(
+    allIds.includes(research.taskId) && allIds.includes(action.taskId),
+    `任务页只列出了部分 Agent：${JSON.stringify(allIds)}`
+  );
+  assert.ok(
+    all.tasks.every(item => item.parentSessionId === main.id),
+    '任务页串会话了'
+  );
+
+  const onlyResearch = await fetch(
+    `${apiBase}/agent-tasks?botId=researcher&parentSessionId=${encodeURIComponent(main.id)}`
+  ).then(response => response.json());
+  assert.deepEqual(
+    onlyResearch.tasks.map(item => item.taskId),
+    [research.taskId]
+  );
 });
 
 test('失败回传：Bot 执行失败时主控会话收到失败原因，不伪造完成', async () => {
