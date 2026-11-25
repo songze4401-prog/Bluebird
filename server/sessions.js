@@ -614,15 +614,14 @@ function createSession({ title, userId = null } = {}) {
 // 反向修改内存缓存，再被后续 saveStore 写回文件。
 // 2026-11-22：历史里可能残留模型写成正文的工具协议块。读取时统一剥掉，
 // 既避免旧气泡继续显示裸协议，也避免模型读到自己的旧协议文本后反复模仿。
-const { stripToolProtocolText } = require('./textual-tool-calls');
-const TOOL_PROTOCOL_RE = /<tool_calls?\b|[|｜]{1,3}DSML[|｜]{1,3}/i;
+const { stripToolProtocolText, looksLikeToolProtocol } = require('./textual-tool-calls');
 
 function cloneMessage(item) {
   const copy = { ...item };
   if (
     copy.role === 'assistant' &&
     typeof copy.content === 'string' &&
-    TOOL_PROTOCOL_RE.test(copy.content)
+    looksLikeToolProtocol(copy.content)
   ) {
     copy.content =
       stripToolProtocolText(copy.content) ||

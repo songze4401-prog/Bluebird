@@ -923,9 +923,9 @@ async function main() {
   );
   checkCase(
     'protocol_marker_leak',
-    leaked.includes('[memory_remember 候选]') && leaked.includes('<tool_call')
-      ? 'marker_retained'
-      : 'marker_stripped',
+    !leaked.includes('[memory_remember 候选]') && !leaked.includes('<tool_call')
+      ? 'marker_stripped'
+      : 'marker_retained',
     leaked
   );
 

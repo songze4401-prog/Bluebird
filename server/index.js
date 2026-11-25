@@ -474,7 +474,7 @@ const modelCalibration = require('./model-calibration');
 
 // 情绪标签剥离：全量（/chat）与增量（/chat/stream）共用同一套规则。
 const { stripMoodTags, createMoodTagStripper } = require('./stream-strip');
-const { stripToolProtocolText } = require('./textual-tool-calls');
+const { stripToolProtocolText, looksLikeToolProtocol } = require('./textual-tool-calls');
 
 // 单实例守卫：必须在 listen 之前、且必须在路由注册之后调用，
 // 这样被测试 require 时不会先抢锁再崩，而是走到 listen 拦截那里正常起来。
@@ -1292,7 +1292,7 @@ function completeChatTurn({
   const { reply: moodStripped, mood } = stripMoodTags(rawReply);
   // 工具协议文本兜底（2026-11-22）：工具未启用（如视觉模型轮次）或模型把
   // 调用写成正文时，<tool_call>…</tool_call> 绝不能进入气泡或落盘历史。
-  const protocolMarkup = /<tool_calls?\b|[|｜]{1,3}DSML[|｜]{1,3}/i.test(moodStripped);
+  const protocolMarkup = looksLikeToolProtocol(moodStripped);
   const strippedReply = stripToolProtocolText(moodStripped);
   // 整条回复只有协议块时给一句可读的兜底，不能留空气泡。
   const cleanedReply =

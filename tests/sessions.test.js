@@ -214,13 +214,40 @@ async function waitReady() {
         role: 'assistant',
         content: '<tool_call>memory_remember\n{"content":"y"}</tool_call>',
       },
+      {
+        role: 'assistant',
+        // 未闭合的截断形态：尾部整段丢弃，只留前面的正文
+        content: ['结果如下。', '<tool_callmemory_remember', '{"z":1}'].join(String.fromCharCode(10)),
+      },
+      {
+        role: 'assistant',
+        // 模型把内部提示词里的候选标记原样 echoed 出来
+        content: '[memory_remember 候选] 林舟喜欢 Python。',
+      },
+      {
+        role: 'assistant',
+        // 代码示例里的协议写法必须原样保留
+        content: ['写法示例：', '```', '<tool_callmemory_remember', '```', '以上。'].join(String.fromCharCode(10)),
+      },
     ]);
     const protoMsgs = sessions.getMessages(proto.id);
     check(
       '历史读取剥离工具协议块（纯协议消息给兜底文案）',
-      protoMsgs.length === 2 &&
+      protoMsgs.length === 5 &&
         protoMsgs[0].content === '记一下。' &&
         protoMsgs[1].content === '（这条消息原本是一次未能执行的工具调用）',
+      JSON.stringify(protoMsgs.map(m => m.content))
+    );
+    check(
+      '历史读取同样剥离未闭合协议与内部候选标记',
+      protoMsgs[2].content === '结果如下。' &&
+        protoMsgs[3].content === '林舟喜欢 Python。',
+      JSON.stringify(protoMsgs.map(m => m.content))
+    );
+    check(
+      '历史读取保留代码示例里的协议写法',
+      protoMsgs[4].content.includes('<tool_' + 'callmemory_remember') &&
+        protoMsgs[4].content.includes('以上。'),
       JSON.stringify(protoMsgs.map(m => m.content))
     );
     sessions.deleteSession(proto.id);
