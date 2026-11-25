@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-11-25",
+  "capturedCommit": "8ac21756dd3918debea650fea543b7f1919c8d80",
+  "note": "当前行为特征基线；包含已知缺陷与必须保留的保护行为。修复产品缺陷时必须同步更新对应 observed 值。",
+  "cases": {
+    "reasoning_only_nonstream": "http_500_empty_content",
+    "reasoning_only_stream": "sse_error_without_code",
+    "unknown_model": "http_500_not_configured",
+    "empty_message": "http_400_without_code",
+    "memory_extraction_custom_provider": "hardcoded_deepseek_chat",
+    "explicit_correction_temporary_marker": "reject_temporary_state",
+    "temporary_preference_guard": "reject_temporary_state",
+    "claim_guard_zero_result": "false_failure_claim",
+    "protocol_marker_leak": "marker_retained",
+    "agent_stream": "single_delta",
+    "ordinary_stream_disconnect_signal": "signal_not_passed",
+    "non_memory_snapshot": "memory_only_query",
+    "context_window": "unknown_guard_24000"
+  }
+}
