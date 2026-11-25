@@ -56,6 +56,11 @@ const REPORTED_MEMORY_INTENT_RE =
   /(?:(?:他说|她说|朋友(?:曾)?说|有人说|别人说|同事说|家人说|they said|he said|she said|someone said)|(?:我在)?[^。.!?;\n]{0,24}(?:文章|帖子|书|邮件|网页|新闻|视频|聊天记录|评论|原文|引用)(?:里|中|上)?[^。.!?;\n]{0,12}(?:看到|看见|读到|听到|写着|写道|提到|表示|说|要求|建议)|\baccording to\b[^.!?\n]{0,80}|\b(?:a|an|the|this)\s+(?:article|post|book|email|webpage|news(?: report)?|video|message|quote|citation)\s+(?:says|said|writes|wrote|asks|asked|recommends|recommended|states|stated)\b|\bI (?:read|saw|heard|found)\b[^.!?\n]{0,80}\b(?:article|post|book|email|webpage|news|video|message|quote|citation)\b[^.!?\n]{0,20}(?:says|said|writes|wrote|asks|asked|recommends|recommended)?)$/i;
 const EXPLICIT_CORRECTION_RE =
   /(更正|纠正|改成|改为|改(?:喝|用|叫|住|选)|换成|现在(?:我|用户)?(?:喜欢|用|叫|住|选择)|不再|已经不|不是.{0,20}(而是|改为|换成))/;
+const MEMORY_CORRECTION_CONTEXT_RE =
+  /(记忆|偏好|画像|记住|记下|常住|居住地|住在|搬到|搬家|居住|名字|职业|过敏|项目代号|生日|车牌|编辑器|喜欢|不爱|改(?:喝|用|叫|住|选)|不再(?:喝|用|叫|住|选|喜欢)|现在(?:我|用户)?(?:喜欢|用|叫|住|选择))/;
+const MEMORY_CORRECTION_MARKER_RE =
+  /(更正|纠正|改成|改为|换成|不再|已经不|不是.{0,20}(?:而是|改为|换成))/;
+const MEMORY_CORRECTION_STRONG_RE = /(改(?:喝|用|叫|住|选)|换成)/;
 const ACTIVE_CONFIDENCE = Object.freeze({
   [CATEGORY.STABLE_FACT]: 0.82,
   [CATEGORY.LONG_TERM_PREFERENCE]: 0.88,
@@ -125,6 +130,13 @@ function detectExplicitCorrection(text) {
   return EXPLICIT_CORRECTION_RE.test(String(text || ''));
 }
 
+function detectMemoryCorrectionIntent(text) {
+  const value = String(text || '');
+  const correction =
+    MEMORY_CORRECTION_MARKER_RE.test(value) || MEMORY_CORRECTION_STRONG_RE.test(value);
+  return correction && MEMORY_CORRECTION_CONTEXT_RE.test(value);
+}
+
 function resolveProvenance(candidate = {}, options = {}) {
   const explicit = candidate.provenance || options.provenance;
 
@@ -163,6 +175,12 @@ function classifyCategory(candidate = {}, provenance) {
     return CATEGORY.BEHAVIOR_PATTERN;
   }
   if (MOOD_RE.test(text)) return CATEGORY.TEMPORARY_STATE;
+  if (candidate.explicitCorrection === true) {
+    if (type === 'identity' || type === 'relationship') return CATEGORY.STABLE_FACT;
+    if (type === 'preference') return CATEGORY.LONG_TERM_PREFERENCE;
+    if (type === 'goal' || DECISION_RE.test(text)) return CATEGORY.PROJECT_DECISION;
+    return CATEGORY.STABLE_FACT;
+  }
   if (TEMPORARY_RE.test(text) && type !== 'goal') {
     return CATEGORY.TEMPORARY_STATE;
   }
@@ -539,6 +557,7 @@ module.exports = {
   detectPersistentIntent,
   detectExplicitMemoryIntent,
   detectExplicitCorrection,
+  detectMemoryCorrectionIntent,
   resolveProvenance,
   classifyCategory,
   buildEvidence,

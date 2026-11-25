@@ -18,6 +18,24 @@ const TEMPORARY_RE =
   /(今天|今晚|明天|昨天|此刻|现在|目前|这周|本周|这个月|临时|暂时|短期|一次性)/;
 const MOOD_RE = /(心情|情绪|有点累|累了|困了|饿了|开心|难过|生气|焦虑|无聊)/;
 
+const CORRECTION_PROPERTY_RULES = Object.freeze([
+  ['residence', /(住在|常住|居住地|搬家|搬到|住(?:在|于))/],
+  ['work', /(工作|上班|坐班|职业|任职)/],
+  ['drink', /(喝|咖啡|美式|拿铁|茶|酒)/],
+  ['name', /(名字|名叫|我叫|用户叫)/],
+  ['allergy', /(过敏|花生|粉尘|青霉素)/],
+  ['project', /(项目|代号)/],
+  ['editor', /(编辑器|VSCode|VS Code|Vim)/],
+  ['birthday', /(生日|出生日期)/],
+  ['plate', /(车牌|牌照)/],
+]);
+
+function correctionProperty(value) {
+  const text = String(value || '');
+  const hit = CORRECTION_PROPERTY_RULES.find(([, pattern]) => pattern.test(text));
+  return hit ? hit[0] : null;
+}
+
 function isTemporaryCandidate(candidate) {
   if (!candidate || !candidate.content) return false;
   // 显式给出有效期的事件不按“临时状态污染长期偏好”处理。
@@ -51,7 +69,11 @@ function decide({ candidate, matches = [], target = null, rules = DEFAULT_RULES 
     return reject('no_content');
   }
 
-  if (isTemporaryCandidate(candidate)) {
+  const explicitCorrection = candidate.explicitCorrection === true;
+  if (
+    isTemporaryCandidate(candidate) &&
+    !(explicitCorrection && !MOOD_RE.test(candidate.content))
+  ) {
     return reject('temporary_state');
   }
 
@@ -68,7 +90,7 @@ function decide({ candidate, matches = [], target = null, rules = DEFAULT_RULES 
   if (target) {
     return {
       decision: DECISION.UPDATE,
-      reason: 'explicit_target_update',
+      reason: explicitCorrection ? 'explicit_correction_target' : 'explicit_target_update',
       target,
     };
   }
@@ -96,6 +118,13 @@ function decide({ candidate, matches = [], target = null, rules = DEFAULT_RULES 
     };
   }
 
+  const correctionPropertyValue = explicitCorrection
+    ? correctionProperty(candidate.content)
+    : null;
+  const conflictMin =
+    explicitCorrection && correctionPropertyValue
+      ? Math.min(rules.conflictMin, 0.2)
+      : rules.conflictMin;
   const conflicts = matches.filter(
     match =>
       match &&
@@ -103,9 +132,26 @@ function decide({ candidate, matches = [], target = null, rules = DEFAULT_RULES 
       match.visible !== false &&
       match.sameType &&
       match.sharedKeyword &&
-      match.similarity >= rules.conflictMin &&
+      (!explicitCorrection ||
+        (correctionPropertyValue &&
+          correctionProperty(match.item.content) === correctionPropertyValue)) &&
+      match.similarity >= conflictMin &&
       match.similarity < rules.duplicateMin
   );
+
+  if (
+    explicitCorrection &&
+    !correctionPropertyValue &&
+    matches.some(
+      match =>
+        match &&
+        match.sameType &&
+        match.sharedKeyword &&
+        match.similarity >= 0.2
+    )
+  ) {
+    return needsConfirmation('ambiguous_correction_target');
+  }
 
   if (conflicts.length > 1) {
     return needsConfirmation('ambiguous_conflict', null, {
@@ -116,12 +162,16 @@ function decide({ candidate, matches = [], target = null, rules = DEFAULT_RULES 
   if (conflicts.length === 1) {
     return {
       decision: DECISION.SUPERSEDE,
-      reason: 'contradicts_existing',
+      reason: explicitCorrection ? 'explicit_correction' : 'contradicts_existing',
       target: conflicts[0].item,
     };
   }
 
-  return { decision: DECISION.CREATE, reason: 'new_fact', target: null };
+  return {
+    decision: DECISION.CREATE,
+    reason: explicitCorrection ? 'explicit_correction_new_fact' : 'new_fact',
+    target: null,
+  };
 }
 
 module.exports = {
