@@ -63,6 +63,9 @@ process.env.BLUEBIRD_AGENT_TOOLS = '';
 process.env.BLUEBIRD_CLAIM_GUARD = '0';
 // Claim Guard 断言监控事件，覆盖门禁默认关闭全局监控时也要显式启用。
 process.env.BLUEBIRD_MONITORING = '1';
+// 本文件按 60+ 次真实 HTTP 断言同一条链路，生产默认 60 次/分钟会把尾部用例
+// 压成 429。这里只抬高本进程的窗口，产品默认值不变。
+process.env.BLUEBIRD_RATE_LIMIT_PER_WINDOW = '1000';
 
 const SERVER = path.join(__dirname, '..', 'server');
 
@@ -185,17 +188,88 @@ require.cache[openaiTarget] = {
               }
               // 畸形响应：空 choices（F3 回归——验证可选链降级不抛 TypeError）
               if (step.emptyChoices) {
+                if (args.stream) {
+                  return (async function* () {
+                    yield { model: 'deepseek-chat', choices: [] };
+                  })();
+                }
                 return { model: 'deepseek-chat', choices: [] };
               }
-              // 流式请求必须返回 async iterable——即使剧本带 toolCalls
-              // （Agent 路径不流式；走到这里说明是非 Agent 的普通流式聊天）。
+              // 流式请求必须返回 async iterable：Agent 路径同样可以按 token
+              // 分片返回正文。剧本字段：
+              //   streamChunks: ['a','b']        正文分片（顺序即到达顺序）
+              //   streamPieces: [{content|reasoningContent|toolCall}]  混合分片，按序到达
+              //   toolCalls: [...]               自动翻译成 tool_calls 增量（排在正文分片之后）
+              //   chunkDelayMs: 60               分片间隔，用于测首字时间
               if (args.stream) {
+                const pieces = [];
+                const push = delta => pieces.push({ delta });
+                for (const piece of Array.isArray(step.streamChunks) ? step.streamChunks : []) {
+                  push({ content: piece });
+                }
+                for (const piece of Array.isArray(step.streamPieces) ? step.streamPieces : []) {
+                  if (!piece || typeof piece !== 'object') continue;
+                  if (typeof piece.content === 'string') push({ content: piece.content });
+                  if (typeof piece.reasoningContent === 'string') {
+                    push({ reasoning_content: piece.reasoningContent });
+                  }
+                  if (piece.toolCall) {
+                    push({ tool_calls: [piece.toolCall] });
+                  }
+                }
+                // 只有 Agent 轮（请求带 tools）才把 toolCalls 剧本翻译成流式增量；
+                // 普通流式路径带 tool_calls 分片没有意义，还会改变既有断言。
+                if (
+                  Array.isArray(step.toolCalls) &&
+                  Array.isArray(args.tools) &&
+                  args.tools.length
+                ) {
+                  step.toolCalls.forEach((call, index) => {
+                    push({
+                      tool_calls: [
+                        {
+                          index,
+                          id: call.id,
+                          type: 'function',
+                          function: {
+                            name: call.function.name,
+                            arguments: call.function.arguments,
+                          },
+                        },
+                      ],
+                    });
+                  });
+                }
                 const text = typeof step.content === 'string' ? step.content : '';
+                if (!pieces.length && text) push({ content: text });
+                const lastIndex = pieces.length - 1;
+                const finishReason =
+                  Array.isArray(step.toolCalls) &&
+                  Array.isArray(args.tools) &&
+                  args.tools.length
+                    ? 'tool_calls'
+                    : step.finishReason || 'stop';
                 return (async function* () {
-                  if (text) {
+                  if (!pieces.length) {
                     yield {
                       model: 'deepseek-chat',
-                      choices: [{ index: 0, delta: { content: text } }],
+                      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+                    };
+                    return;
+                  }
+                  for (let i = 0; i < pieces.length; i += 1) {
+                    if (step.chunkDelayMs) {
+                      await new Promise(resolve => setTimeout(resolve, step.chunkDelayMs));
+                    }
+                    yield {
+                      model: 'deepseek-chat',
+                      choices: [
+                        {
+                          index: 0,
+                          delta: pieces[i].delta,
+                          ...(i === lastIndex ? { finish_reason: finishReason } : {}),
+                        },
+                      ],
                     };
                   }
                 })();
@@ -214,13 +288,26 @@ require.cache[openaiTarget] = {
                   ],
                 };
               }
+              // 剧本只给了流式分片时，非流式请求按拼接结果返回，避免用例要
+              // 同时维护两份文本。
+              const nonStreamFallback =
+                typeof step.content === 'string'
+                  ? step.content
+                  : Array.isArray(step.streamChunks)
+                    ? step.streamChunks.join('')
+                    : Array.isArray(step.streamPieces)
+                      ? step.streamPieces
+                          .map(piece => piece && piece.content)
+                          .filter(Boolean)
+                          .join('')
+                      : null;
               return {
                 model: 'deepseek-chat',
                 choices: [
                   {
                     message: {
                       role: 'assistant',
-                      content: step.content ?? '[calm] 默认回复',
+                      content: nonStreamFallback ?? '[calm] 默认回复',
                     },
                   },
                 ],
@@ -341,6 +428,7 @@ async function sseWithAbort(route, body, abortOn) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   const events = [];
+  const eventTimes = [];
   let buffer = '';
 
   const drain = () => {
@@ -353,6 +441,7 @@ async function sseWithAbort(route, body, abortOn) {
       try {
         const event = JSON.parse(line.slice(6));
         events.push(event);
+        eventTimes.push(Date.now());
         if (abortOn && abortOn(event)) {
           controller.abort();
           return true;
@@ -369,13 +458,13 @@ async function sseWithAbort(route, body, abortOn) {
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      if (drain()) return { events, aborted: true };
+      if (drain()) return { events, eventTimes, aborted: true };
     }
     drain();
   } catch (_) {
     /* abort 导致的读失败：预期内 */
   }
-  return { events, aborted: controller.signal.aborted };
+  return { events, eventTimes, aborted: controller.signal.aborted };
 }
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -1084,6 +1173,153 @@ async function main() {
       calls: stubCalls.length,
       steps: delegateFallback.json.toolSteps,
     })
+  );
+
+  // ================= C1f. Agent 真流式与先核对再下发 =================
+  ORIG_LOG('\nC1f. Agent 真流式');
+  resetScript();
+  scripted.push({
+    streamChunks: ['[calm] 流式甲段。', '流式乙段。', '流式丙段。'],
+    chunkDelayMs: 60,
+  });
+  const realStream = await sseWithAbort(
+    '/chat/stream',
+    { message: '随便聊聊今天的安排' },
+    () => false
+  );
+  const realTypes = realStream.events.map(event => event.type);
+  const firstDeltaIndex = realTypes.indexOf('delta');
+  let lastDeltaIndex = -1;
+  realTypes.forEach((type, index) => {
+    if (type === 'delta') lastDeltaIndex = index;
+  });
+  const deltaEvents = realStream.events.filter(event => event.type === 'delta');
+  const realDone = realStream.events.find(event => event.type === 'done');
+  check(
+    'Agent 无工具轮按真实 token 流分多段下发，首段早于末段',
+    deltaEvents.length >= 2 &&
+      lastDeltaIndex > firstDeltaIndex &&
+      realStream.eventTimes[lastDeltaIndex] > realStream.eventTimes[firstDeltaIndex] &&
+      !!realDone &&
+      realDone.reply.includes('流式丙段'),
+    JSON.stringify({
+      types: realTypes,
+      gaps: realStream.eventTimes.slice(firstDeltaIndex, lastDeltaIndex + 1),
+    })
+  );
+  check(
+    'Agent 无工具轮事件顺序：meta 开场、无工具事件、done 收尾',
+    realTypes[0] === 'meta' &&
+      !realTypes.includes('tool_start') &&
+      realTypes[realTypes.length - 1] === 'done',
+    realTypes.join(',')
+  );
+
+  resetScript();
+  scripted.push({ toolCalls: [tc('call_buffered_tool', 'memory_search', { query: '咖啡' })] });
+  scripted.push({ content: '[calm] 核对后正文。' });
+  const buffered = await sseWithAbort(
+    '/chat/stream',
+    { message: '查一下我的咖啡记忆' },
+    () => false
+  );
+  const bufferedTypes = buffered.events.map(event => event.type);
+  const bufferedDone = buffered.events.find(event => event.type === 'done');
+  check(
+    '有工具回执的轮次仍先核对再下发（正文单段，工具事件早于正文）',
+    bufferedTypes.filter(type => type === 'delta').length === 1 &&
+      bufferedTypes.lastIndexOf('tool_end') < bufferedTypes.indexOf('delta') &&
+      bufferedTypes[bufferedTypes.length - 1] === 'done' &&
+      !!bufferedDone &&
+      bufferedDone.reply.includes('核对后正文'),
+    bufferedTypes.join(',')
+  );
+
+  resetScript();
+  scripted.push({
+    streamChunks: ['旁白：我先去查记忆。'],
+    toolCalls: [tc('call_gate_tool', 'memory_search', { query: '猫' })],
+  });
+  scripted.push({ streamChunks: ['[calm] 流式正式答案。'] });
+  const gateDeltas = [];
+  const gateOutcome = await agent.runAgentTurn({
+    providerId: 'deepseek',
+    modelId: 'deepseek-chat',
+    messages: [{ role: 'user', content: '查一下我的猫的记忆' }],
+    sessionId: 'default',
+    userText: '查一下我的猫的记忆',
+    stream: true,
+    onDelta: text => gateDeltas.push(text),
+  });
+  const gateText = gateDeltas.join('');
+  check(
+    '工具轮旁白不作为正式正文下发，且该轮转为先核对再下发',
+    !gateText.includes('我先去查记忆') &&
+      gateOutcome.streamed === false &&
+      gateOutcome.rawReply.includes('流式正式答案'),
+    JSON.stringify({ deltas: gateDeltas, streamed: gateOutcome.streamed })
+  );
+
+  resetScript();
+  scripted.push({
+    streamPieces: [
+      { reasoningContent: '思考片段甲' },
+      { content: '[calm] 结论甲。' },
+      { reasoningContent: '思考片段乙' },
+      { content: '结论乙。' },
+    ],
+  });
+  const reasoningDeltas = [];
+  const reasoningOutcome = await agent.runAgentTurn({
+    providerId: 'deepseek',
+    modelId: 'deepseek-chat',
+    messages: [{ role: 'user', content: '一句话回答：1+1 等于几' }],
+    sessionId: 'default',
+    userText: '一句话回答：1+1 等于几',
+    stream: true,
+    onDelta: text => reasoningDeltas.push(text),
+  });
+  const reasoningText = reasoningDeltas.join('');
+  check(
+    '思考链分片不作为正式正文下发',
+    reasoningOutcome.streamed === true &&
+      !reasoningText.includes('思考片段') &&
+      reasoningText.includes('结论甲') &&
+      reasoningText.includes('结论乙') &&
+      !reasoningOutcome.rawReply.includes('思考片段甲'),
+    JSON.stringify({ deltas: reasoningDeltas, reply: reasoningOutcome.rawReply })
+  );
+
+  resetScript();
+  scripted.push({
+    streamChunks: ['[calm] 取消甲段。', '取消乙段。', '取消丙段。'],
+    chunkDelayMs: 120,
+  });
+  const cancelledAgent = await sseWithAbort(
+    '/chat/stream',
+    { message: '随便聊聊周末去哪' },
+    event => event.type === 'delta'
+  );
+  await sleep(400);
+  const cancelledHistory = await req('/history');
+  const ghostMessage = (cancelledHistory.json.history || []).some(
+    item => item.role === 'assistant' && String(item.content || '').includes('取消甲段')
+  );
+  check(
+    'Agent 流式取消：已下发正文后中止仍无 done 事件',
+    cancelledAgent.events.some(event => event.type === 'delta') &&
+      !cancelledAgent.events.some(event => event.type === 'done'),
+    cancelledAgent.events.map(event => event.type).join(',')
+  );
+  check(
+    'Agent 流式取消：不落幽灵消息',
+    !ghostMessage,
+    JSON.stringify(
+      (cancelledHistory.json.history || [])
+        .filter(item => item.role === 'assistant')
+        .slice(-2)
+        .map(item => item.content)
+    )
   );
 
   // ================= C2. 正常工具流程（/chat/stream + SSE 顺序） =================

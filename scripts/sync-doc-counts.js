@@ -58,7 +58,7 @@ const NOTES = {
   'agent-policy':
     'Agent policy schema/persistence/API, mode/tool whitelist, budgets, high-risk confirmation gate, trace privacy',
   'agent-tools':
-    'agent tool calling V1: three gates (switch / capability / no-new-image), explicit delegation requests dispatched by the runtime even when the model returns text only (delegate removed from the follow-up request), history-image and MIME boundary, 3-round cap, per-session memory scope, tool timeout & abort, late-result handling, toolSteps persistence & read-back, SSE tool_start/tool_end, model semantics on downgrade',
+    'agent tool calling V1: three gates (switch / capability / no-new-image), intent-driven first-round tool forcing (memory_remember > delegate_to_bot > the matching read tool) with an `auto` fallback when the Provider rejects forced tool_choice and no forcing for negated wording, real token streaming for tool-free Agent rounds vs. verify-before-send once a tool receipt exists, tool-round narration never emitted as body, reasoning chunks never merged into body, history-image and MIME boundary, 3-round cap, per-session memory scope, tool timeout & abort, late-result handling, toolSteps persistence & structured receipts, SSE tool_start/tool_end, model semantics on downgrade',
   'memory-retrieval':
     'filters, hybrid scoring, budgets, explainable metadata, tool validation',
   'memory-semantic':
@@ -86,7 +86,7 @@ const NOTES = {
   'memory-budget-golden':
     'budget trimming: 10 memories → memoryMaxItems=8 → final request injects ≤8, token budget enforced',
   'agent-dispatch':
-    'main tool → Bot task, explicit delegation intent detection, runtime-enforced delegate_to_bot dispatch even when the model does not call tools (policy-denied case documented), parent-memory read/write scope (agent rewrite of an existing memory parks a pending candidate until confirmed), parentUserId on the task, approval delivery, result SSE/snapshot, failure delivery, dedupe, outbox recovery',
+    'main tool → Bot task, cross-agent result snapshot (a researcher task shows up on reconnect, newest-first and capped per parent session, never another session\'s), task-claim audit across every agent, `/agent-tasks` with and without `botId`, parent-memory read/write scope (agent rewrite of an existing memory parks a pending candidate until confirmed), parentUserId on the task, approval delivery, result SSE/snapshot, failure delivery, dedupe, outbox recovery',
   'agent-router':
     'router decision chain, task contract v1, fast/slow budgets, idempotency/priority queue, route events privacy, delegate_to_bot compatibility',
   'agent-worker':

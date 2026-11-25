@@ -47,7 +47,7 @@ flowchart LR
     - **持久化** — sessions/memory/tasks/events/outbox/index（原子写；保留策略已实现：会话 200 / 消息 1000 / 分页 200）
     - **监控** — trace、metrics、alerts、health（已验证 / 只读）
   - **工程保障** — 测试、CI、覆盖率、文档（通过；计数对齐 scripts/test-coverage-baseline.json 单一基线）
-    - **后端测试** — 137 文件 / 2709 项；真实 HTTP + stub（通过）
+    - **后端测试** — 137 文件 / 2717 项；真实 HTTP + stub（通过）
     - **前端测试** — 18 套 / 146 项；apiFetch mock（通过 / 无 App E2E）
     - **CI** — GitHub Actions；push 仅 main、PR 指向 main，覆盖率脚本单次执行（通过）
     - **文档** — AGENTS/docs/README 计数同源（scripts/sync-doc-counts.js 单一基线，CI --check 兜底）
@@ -58,7 +58,7 @@ flowchart LR
 |---|---|---|---|
 | API | `server/index.js` | 路由、鉴权、限流、聊天、域服务、监控挂载 | 已验证（鉴权/限流先于 body 解析、未匹配路由统一 JSON 404） |
 | 编排 | `server/context/*` | 历史选择、摘要、记忆/知识检索、常驻记忆选择与去重（默认开启，`BLUEBIRD_CORE_MEMORY=0` 关闭）、上下文构建、输入保护 | 已验证 |
-| Agent | `server/agent-runtime.js`, `agent-policy.js`, `tool-*.js`, `textual-tool-calls.js`, `task-claim-guard.js`, `claim-guard.js`, `delegation-intent.js` | 工具注册、策略、预算、执行、结果归一化、正文工具调用解析、回复任务声明核对、完成声明与工具回执核对（默认开启，`BLUEBIRD_CLAIM_GUARD=0` 关闭）、显式委派检测 | 已验证 |
+| Agent | `server/agent-runtime.js`, `agent-policy.js`, `tool-*.js`, `textual-tool-calls.js`, `task-claim-guard.js`, `claim-guard.js`, `tool-postcondition.js`, `tool-step.js` | 工具注册、策略、预算、执行、结果归一化、正文工具调用解析、回复任务声明核对、完成声明与工具回执核对（默认开启，`BLUEBIRD_CLAIM_GUARD=0` 关闭）、读回/委派意图判定与工具强制（`tool-postcondition.js`）、结构化回执白名单（`tool-step.js`） | 已验证 |
 | 子 Agent | `server/agents/*` | Bot registry/config/vault/sessions/tasks/approvals/result delivery | 已实现；记忆 scope 与父会话对齐（P0-01 已闭合） |
 | 记忆 | `server/memory*.js` | 搜索、候选、生命周期、贡献、落盘 | 已验证；作用域见 §6 第 4 条，merge 口径见 `docs/p0-blocker-memory-ownership.md` §2.5 |
 | 检索 | `server/retrieval/*` | 五类来源、BM25/精确/可选向量、RRF、门控、索引 | backend 已验证；无 UI |

@@ -24,6 +24,7 @@
     "claim_guard_zero_result": "no_mismatch",
     "protocol_marker_leak": "marker_retained",
     "agent_stream": "single_delta",
+    "agent_stream_no_tools": "multi_delta",
     "ordinary_stream_disconnect_signal": "runtime_cancelled",
     "non_memory_snapshot": "all_agents_query",
     "context_window": "unknown_guard_24000"

@@ -848,8 +848,28 @@ async function createChatCompletion({
     return normalized;
   }
 
+  // 少数 OpenAI 兼容网关会忽略 stream:true，直接回一份非流式 JSON。统一成
+  // async iterable，上层 for-await 不会拿到不可迭代对象（否则表现为通用错误，
+  // 把「服务商没按流式返回」这个真实原因藏掉）。
+  const iterable =
+    result && typeof result[Symbol.asyncIterator] === 'function'
+      ? result
+      : (async function* singleChunkStream() {
+          const choices =
+            result && Array.isArray(result.choices) ? result.choices : [];
+          yield {
+            model: (result && result.model) || target.model,
+            usage: (result && result.usage) || null,
+            choices: choices.map((choice, index) => ({
+              index: Number.isInteger(choice && choice.index) ? choice.index : index,
+              delta: (choice && choice.message) || {},
+              finish_reason: (choice && choice.finish_reason) || 'stop',
+            })),
+          };
+        })();
+
   return wrapMonitoredStream(
-    result,
+    iterable,
     monitor,
     startedAt,
     (ok, code) => gate.settle(ok, ok ? null : streamSettleKind(code)),

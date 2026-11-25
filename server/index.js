@@ -96,7 +96,14 @@ function clientIp(req) {
   return req.ip || req.socket.remoteAddress || 'unknown';
 }
 
-function rateLimit({ maxPerWindow = 60 } = {}) {
+// 默认每分钟 60 次。数值可由部署方调整（自建/压测/自动化），但不允许关掉到 0，
+// 也不做不设限：下限 1、上限 100000 都由这里兜住。
+const RATE_LIMIT_PER_WINDOW = Math.min(
+  Math.max(Number(process.env.BLUEBIRD_RATE_LIMIT_PER_WINDOW) || 60, 1),
+  100000
+);
+
+function rateLimit({ maxPerWindow = RATE_LIMIT_PER_WINDOW } = {}) {
   return (req, res, next) => {
     const key = clientIp(req);
     const now = Date.now();
@@ -338,6 +345,7 @@ const { BLUEBIRD_SYSTEM_PROMPT } = require('./blue-system-prompt');
 const claimGuard = require('./claim-guard');
 const {
   requiresReadBack,
+  requiresDelegation,
   hasReadBackReceipt,
 } = require('./tool-postcondition');
 
@@ -2197,6 +2205,10 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   let upstreamModel = null;
   let toolSteps = null;
   let agentReachedMaxRounds = false;
+  // 正文是否已经按 token 流实时下发过。下发过就不能再整段重发，只能在核对后
+  // 追加增量；没下发过（缓冲模式、或工具回执需要先核对的轮次）就在核对完成后
+  // 把权威文本作为唯一 delta 发出。
+  let bodyStreamedLive = false;
   const stripper = createMoodTagStripper();
   let streamError = null;
 
@@ -2215,7 +2227,13 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
     policyToolCount: listToolSpecs(ctx.agentPolicy).length,
   });
   const agentOn = agentGate.allowed;
-  const deferReadBackDelta = requiresReadBack(ctx.userText);
+  // 需要服务端后置核对的意图（读回 / 记忆写入 / 显式委派）一律先缓冲：
+  // 这类回复的最终文本可能被整体改写，先把未验证内容发给用户再改口没有意义。
+  const deferVerifiedDelta =
+    requiresReadBack(ctx.userText) ||
+    detectExplicitMemoryIntent(ctx.userText) ||
+    detectMemoryCorrectionIntent(ctx.userText) ||
+    requiresDelegation(ctx.userText);
 
   if (ctx.contextTrace) {
     ctx.contextTrace.recordPolicy(ctx.agentPolicy, ctx.agentPolicyMeta, agentGate);
@@ -2269,6 +2287,15 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         timeout: 90000,
         isClientGone: () => clientGone,
         abortSignal: disconnect.signal,
+        // 最终正文轮走真实 token 流；需要核对的意图仍整段缓冲（见 deferVerifiedDelta）。
+        stream: !deferVerifiedDelta,
+        onDelta: text => {
+          const emit = stripper.push(text);
+          if (emit) {
+            bodyStreamedLive = true;
+            sendEvent({ type: 'delta', content: emit });
+          }
+        },
         onToolEvent: event => {
           sendEvent(event);
         },
@@ -2352,9 +2379,8 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
           if (reconciled.retried) lastAgentRounds += 1;
         }
 
-        // 最终文本经同一套情绪标签剥离后以 delta 发出
-        const emit = stripper.push(rawReply);
-        if (emit && !deferReadBackDelta) sendEvent({ type: 'delta', content: emit });
+        // 实时模式已在 onDelta 里逐片下发；缓冲模式由核对完成后的统一分支下发，
+        // 这里都不提前推正文，避免把未核对的内容交给客户端。
         streamOrchestrationMeta = orchestrationMeta;
       }
     } else {
@@ -2407,7 +2433,10 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         rawReply += delta;
 
         const emit = stripper.push(delta);
-        if (emit && !deferReadBackDelta && !sendEvent({ type: 'delta', content: emit })) break;
+        if (emit && !deferVerifiedDelta) {
+          bodyStreamedLive = true;
+          if (!sendEvent({ type: 'delta', content: emit })) break;
+        }
       }
 
       recordUsageForContext(ctx, { usage: streamUsage }, 1);
@@ -2497,21 +2526,22 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   rawReply = auditChatReply(rawReply, ctx, toolSteps);
   rawReply = ensureMemoryWriteReceipt(rawReply, ctx, toolSteps);
   rawReply = ensureReadBackReceipt(rawReply, ctx, toolSteps);
-  if (rawReply !== beforeClaimCheck && !deferReadBackDelta) {
-    // 校验说明是服务端追加的纯文本，直接作为末段 delta 让用户当场看到，
-    // done 事件里的权威文本同样是修正后的内容。
-    sendEvent({ type: 'delta', content: rawReply.slice(beforeClaimCheck.length) });
+  if (rawReply !== beforeClaimCheck && bodyStreamedLive) {
+    // 校验说明是服务端追加的纯文本，直接作为末段 delta 让用户当场看到；
+    // 已实时下发过正文时，只有「追加」这一种形状能安全地补 delta——整段改写
+    // 交给 done 的权威文本收口（客户端在 done 用权威分条整体替换）。
+    if (rawReply.startsWith(beforeClaimCheck)) {
+      sendEvent({ type: 'delta', content: rawReply.slice(beforeClaimCheck.length) });
+    }
   }
 
-  if (deferReadBackDelta) {
+  if (!bodyStreamedLive) {
+    // 缓冲模式：核对后的权威文本作为唯一 delta，用户看不到未核对的内容。
     const emit = stripper.push(rawReply);
     if (emit) sendEvent({ type: 'delta', content: emit });
-    const tail = stripper.flush();
-    if (tail) sendEvent({ type: 'delta', content: tail });
-  } else {
-    const tail = stripper.flush();
-    if (tail) sendEvent({ type: 'delta', content: tail });
   }
+  const tail = stripper.flush();
+  if (tail) sendEvent({ type: 'delta', content: tail });
 
   let result;
 
