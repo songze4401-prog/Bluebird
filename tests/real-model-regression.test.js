@@ -38,7 +38,7 @@ process.env.BLUEBIRD_AGENT_TOOLS = '1';
 process.env.BLUEBIRD_CLAIM_GUARD = '0';
 process.env.BLUEBIRD_MEMORY_OBSERVER = 'trigger';
 process.env.BLUEBIRD_CORE_MEMORY = '0';
-process.env.BLUEBIRD_MONITORING = '0';
+process.env.BLUEBIRD_MONITORING = '1';
 process.env.BLUEBIRD_WORKSPACE_TOOLS = '';
 process.env.BLUEBIRD_WORKSPACE_AUTO_CONFIRM = '0';
 process.env.BLUEBIRD_SKILLS = '';
@@ -53,6 +53,8 @@ const state = {
   mode: 'normal',
   calls: [],
   extractionModels: [],
+  extractionMode: 'normal',
+  extractionAttempts: 0,
   agentCalls: 0,
   slowStreamClosed: false,
 };
@@ -115,25 +117,41 @@ const mockServer = http.createServer((req, res) => {
 
     if (systemText.includes('长期记忆提取器')) {
       state.extractionModels.push(body.model);
-      if (body.model !== MODEL_ID) {
+      state.extractionAttempts += 1;
+      if (![MODEL_ID, MODEL_ID_NO_REASONING].includes(body.model)) {
         json(res, 400, { error: { message: `Unsupported model (model=${body.model})` } });
         return;
       }
+      if (state.extractionMode === 'fail_once' && state.extractionAttempts === 1) {
+        json(res, 500, { error: { message: 'temporary extraction failure' } });
+        return;
+      }
+      const userText = (body.messages || [])
+        .filter(item => item && item.role === 'user')
+        .map(item => String(item.content || ''))
+        .join('\n');
+      const candidate = JSON.stringify({
+        content:
+          state.extractionMode === 'reasoning'
+            ? `用户偏好：${userText}`
+            : '用户喜欢喝燕麦拿铁',
+        type: 'preference',
+        keywords: ['咖啡', '燕麦拿铁'],
+        confidence: 0.95,
+        inferred: false,
+        uncertainty: 'none',
+        sourceQuote: userText,
+      });
       json(res, 200, {
         model: body.model,
         choices: [
           {
             message: {
               role: 'assistant',
-              content: JSON.stringify({
-                content: '用户喜欢喝燕麦拿铁',
-                type: 'preference',
-                keywords: ['咖啡', '燕麦拿铁'],
-                confidence: 0.95,
-                inferred: false,
-                uncertainty: 'none',
-                sourceQuote: '我喜欢喝燕麦拿铁',
-              }),
+              content: state.extractionMode === 'reasoning' ? '' : candidate,
+              ...(state.extractionMode === 'reasoning'
+                ? { reasoning_content: candidate }
+                : {}),
             },
           },
         ],
@@ -602,25 +620,122 @@ async function main() {
     empty.text.slice(0, 160)
   );
 
+  const memory = require(path.join(SERVER, 'memory.js'));
+  const monitoring = require(path.join(SERVER, 'monitoring'));
   process.env.BLUEBIRD_MEMORY_OBSERVER = 'every_turn';
+  process.env.BLUEBIRD_MEMORY_PROVIDER_ID = providerId;
+  delete process.env.BLUEBIRD_MEMORY_MODEL_ID;
+  state.extractionModels = [];
+  await req('/chat', {
+    method: 'POST',
+    body: { message: '不完整辅助配置测试。', sessionId, providerId, modelId: MODEL_ID },
+  });
+  const invalidConfigEvent = await waitFor(() =>
+    monitoring
+      .getEvents({ eventName: monitoring.EVENTS.MEMORY_WRITE_COMPLETED, limit: 200 })
+      .items.some(event => event.attributes && event.attributes.reason === 'invalid_auxiliary_config') ||
+    null
+  );
+  checkCase(
+    'memory_extraction_incomplete_auxiliary_config',
+    invalidConfigEvent && state.extractionModels.length === 0
+      ? 'skipped_invalid_config'
+      : 'not_skipped',
+    state.extractionModels.join(',')
+  );
+  delete process.env.BLUEBIRD_MEMORY_PROVIDER_ID;
+
   state.mode = 'normal';
+  state.extractionMode = 'normal';
+  state.extractionModels = [];
+  state.extractionAttempts = 0;
   await req('/chat', {
     method: 'POST',
     body: { message: '我喜欢喝燕麦拿铁。', sessionId, providerId, modelId: MODEL_ID },
   });
   await waitFor(() => state.extractionModels.length > 0);
-  process.env.BLUEBIRD_MEMORY_OBSERVER = 'trigger';
   checkCase(
     'memory_extraction_custom_provider',
-    state.extractionModels.includes('deepseek-chat')
-      ? 'hardcoded_deepseek_chat'
-      : state.extractionModels.includes(MODEL_ID)
-        ? 'configured_model'
+    state.extractionModels.includes(MODEL_ID) && !state.extractionModels.includes('deepseek-chat')
+      ? 'configured_model'
+      : state.extractionModels.includes('deepseek-chat')
+        ? 'hardcoded_deepseek_chat'
         : 'no_extraction',
     state.extractionModels.join(',')
   );
 
-  const memory = require(path.join(SERVER, 'memory.js'));
+  const extractionEvents = monitoring
+    .getEvents({ eventName: monitoring.EVENTS.MODEL_REQUEST_STARTED, limit: 200 })
+    .items.filter(event => event.attributes && event.attributes.kind === 'memory_extract');
+  const extractionEvent = extractionEvents[0];
+  checkCase(
+    'memory_extraction_monitoring_target',
+    extractionEvent &&
+      extractionEvent.attributes.provider_id === providerId &&
+      extractionEvent.attributes.model_id === MODEL_ID
+      ? 'custom_provider_model'
+      : 'hardcoded_or_missing',
+    extractionEvent
+      ? `${extractionEvent.attributes.provider_id}/${extractionEvent.attributes.model_id}`
+      : 'no_event'
+  );
+
+  process.env.BLUEBIRD_MEMORY_PROVIDER_ID = providerId;
+  process.env.BLUEBIRD_MEMORY_MODEL_ID = MODEL_ID_NO_REASONING;
+  state.extractionModels = [];
+  state.extractionAttempts = 0;
+  await req('/chat', {
+    method: 'POST',
+    body: { message: '我喜欢喝美式。', sessionId, providerId, modelId: MODEL_ID },
+  });
+  await waitFor(() => state.extractionModels.length > 0);
+  checkCase(
+    'memory_extraction_explicit_auxiliary_model',
+    state.extractionModels.includes(MODEL_ID_NO_REASONING)
+      ? 'explicit_model'
+      : 'wrong_model',
+    state.extractionModels.join(',')
+  );
+  delete process.env.BLUEBIRD_MEMORY_PROVIDER_ID;
+  delete process.env.BLUEBIRD_MEMORY_MODEL_ID;
+
+  state.extractionMode = 'reasoning';
+  state.extractionModels = [];
+  state.extractionAttempts = 0;
+  await req('/chat', {
+    method: 'POST',
+    body: { message: '我喜欢喝手冲咖啡。', sessionId, providerId, modelId: MODEL_ID },
+  });
+  await waitFor(() => state.extractionModels.length > 0);
+  const reasoningMemory = await waitFor(() =>
+    memory
+      .getMemories()
+      .some(item => item.content.includes('我喜欢喝手冲咖啡。')) || null
+  );
+  checkCase(
+    'memory_extraction_reasoning_provider',
+    state.extractionModels.includes(MODEL_ID) && reasoningMemory
+      ? 'reasoning_json_extracted'
+      : 'reasoning_not_used',
+    state.extractionModels.join(',')
+  );
+
+  state.extractionMode = 'fail_once';
+  state.extractionModels = [];
+  state.extractionAttempts = 0;
+  await req('/chat', {
+    method: 'POST',
+    body: { message: '我喜欢喝茶。', sessionId, providerId, modelId: MODEL_ID },
+  });
+  await waitFor(() => state.extractionAttempts >= 2, 3000, 50);
+  checkCase(
+    'memory_extraction_transient_retry',
+    state.extractionAttempts === 2 ? 'retried_once' : `attempts_${state.extractionAttempts}`,
+    state.extractionModels.join(',')
+  );
+  state.extractionMode = 'normal';
+  process.env.BLUEBIRD_MEMORY_OBSERVER = 'trigger';
+
   const memoryOptions = {
     sessionId,
     userId: USER_ID,

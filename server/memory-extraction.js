@@ -412,32 +412,13 @@ async function extractMemory(client, message, force = false, sessionId = null, o
     );
 
     // B3：瞬时模型错误（timeout/connection/server）单次有界重试，退避 400ms。
-    // 确定性错误（auth/bad_request 等）与空返回（{} → no_content）不重试：
-    // 前者重试也不会变好，后者是模型的真实结论，翻倍成本没有收益。
-    // 每次尝试都是独立的 auxiliary 埋点，重试在监控里可见。
+    // 确定性错误（auth/bad_request 等）与空返回（{} → no_content）不重试。
     const TRANSIENT_EXTRACT_KINDS = new Set(['timeout', 'connection', 'server']);
     const EXTRACT_MAX_ATTEMPTS = 2;
-    let completion;
-    let extractAttempts = 0;
-    for (;;) {
-      extractAttempts += 1;
-      const monitoringApi = memoryCore().monitoring;
-      const auxiliary = monitoringApi.beginAuxiliaryModel({
-        providerId: 'deepseek',
-        modelId: 'deepseek-chat',
-        kind: 'memory_extract',
-        sessionRef: monitoringApi.sessionRefFor(sessionId),
-      });
-      try {
-        completion = await client.chat.completions.create(
-          {
-            model: 'deepseek-chat',
-            temperature: 0,
-            max_tokens: 300,
-            messages: [
-              {
-                role: 'system',
-                content: `
+    const messages = [
+      {
+        role: 'system',
+        content: `
 你是一个长期记忆提取器。当前阶段提出可能值得跨会话保留的候选；后续证据策略会决定存储、待确认或拒绝，不要只因为置信度不高就隐去有价值候选。
 优先提取清晰、稳定、具体的信息；不要把临时情绪、一次性状态、玩笑、假设或反问当作长期事实。
 sourceQuote 必须逐字引用用户当前消息中的连续原文，不得润色、改写或合并不同片段。
@@ -465,31 +446,69 @@ keywords 提取 3-5 个与这条记忆直接相关的具体关键词或同义词
 不要使用“什么”“应该”“这个”“那个”“以后”等低信息量词。
 uncertainty 在原话有犹豫表达时必须为 source_hedged，否则为 none。
 `.trim(),
-              },
-              {
-                role: 'user',
-                content: message,
-              },
-            ],
-          },
-          {
-            timeout: 15000,
-          }
-        );
+      },
+      { role: 'user', content: message },
+    ];
 
-        auxiliary.complete({
-          status: 'success',
-          usage: completion && completion.usage ? completion.usage : null,
-        });
+    let completion;
+    let extractAttempts = 0;
+    const createChatCompletion = client ? null : memoryCore().createChatCompletion;
+    if (!client && typeof createChatCompletion !== 'function') {
+      return skip('model_unavailable');
+    }
+    for (;;) {
+      extractAttempts += 1;
+      const monitoringApi = memoryCore().monitoring;
+      const auxiliary = client
+        ? monitoringApi.beginAuxiliaryModel({
+            providerId: options.providerId || 'deepseek',
+            modelId: options.modelId || 'deepseek-chat',
+            kind: 'memory_extract',
+            sessionRef: monitoringApi.sessionRefFor(sessionId),
+          })
+        : null;
+      try {
+        if (client) {
+          completion = await client.chat.completions.create(
+            {
+              model: options.modelId || 'deepseek-chat',
+              temperature: 0,
+              max_tokens: 300,
+              messages,
+            },
+            { timeout: 15000 }
+          );
+        } else {
+          completion = await createChatCompletion({
+            providerId: options.providerId,
+            modelId: options.modelId,
+            messages,
+            temperature: 0,
+            maxTokens: 300,
+            timeout: 15000,
+            monitoringKind: 'memory_extract',
+            sessionRef: monitoringApi.sessionRefFor(sessionId),
+            signal: options.signal,
+          });
+        }
+
+        if (auxiliary) {
+          auxiliary.complete({
+            status: 'success',
+            usage: completion && completion.usage ? completion.usage : null,
+          });
+        }
         break;
       } catch (error) {
         const kind = String(
           (error && (error.kind || error.code)) || 'model_error'
         );
-        auxiliary.complete({
-          status: error && error.kind === 'timeout' ? 'timeout' : 'failed',
-          errorCode: kind,
-        });
+        if (auxiliary) {
+          auxiliary.complete({
+            status: error && error.kind === 'timeout' ? 'timeout' : 'failed',
+            errorCode: kind,
+          });
+        }
         if (
           !TRANSIENT_EXTRACT_KINDS.has(kind) ||
           extractAttempts >= EXTRACT_MAX_ATTEMPTS

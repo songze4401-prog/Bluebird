@@ -546,9 +546,8 @@ function invalidateProviderCache(providerId) {
 }
 
 /**
- * 记忆提取专用 client：固定走内置 DeepSeek（extractMemory 内部硬编码
- * deepseek-chat，与改造前行为逐字节一致，不随用户切换默认模型而变）。
- * 内置不可用时退回默认服务商；都不可用返回 null（调用方跳过提取）。
+ * 表情包语义专用 client：固定走内置 DeepSeek（与改造前一致）。
+ * 内置不可用时退回默认服务商；都不可用返回 null（调用方跳过语义生成）。
  */
 function getMemoryClient() {
   const builtinKey = getProviderKey(BUILTIN_PROVIDER_ID);
@@ -725,6 +724,28 @@ function enterProviderGate({ providerId, holderId, now = Date.now() }) {
   return { allowed: true, error: null, settle, release: () => settle(true) };
 }
 
+function createAuxiliaryMonitor({ providerId, modelId, kind, sessionRef }) {
+  const auxiliary = monitoring.beginAuxiliaryModel({ providerId, modelId, kind, sessionRef });
+  return {
+    complete({ status = 'success', usage = null } = {}) {
+      auxiliary.complete({
+        status,
+        usage,
+        errorCode: status === 'success' ? null : status,
+      });
+    },
+    fail({ status = 'failed', errorCode = null } = {}) {
+      const normalizedStatus = ['timeout', 'denied', 'cancelled'].includes(status)
+        ? status
+        : 'failed';
+      auxiliary.complete({
+        status: normalizedStatus,
+        errorCode,
+      });
+    },
+  };
+}
+
 /**
  * 创建聊天补全。stream:true 时返回 SDK 的 async iterable，
  * 由调用方 for-await 消费（/chat/stream 现有循环原样复用）。
@@ -749,6 +770,8 @@ async function createChatCompletion({
   tools,
   tool_choice,
   monitoringRound = 1,
+  monitoringKind = null,
+  sessionRef = null,
   credentialKey = null,
   signal = null,
 }) {
@@ -761,14 +784,23 @@ async function createChatCompletion({
   // 闸门在 beginModelCall 之前：被本地挡住的调用不该在监控里冒充一次模型请求。
   const gate = enterProviderGate({ providerId: target.providerId, holderId: `${process.pid}:${crypto.randomUUID()}` });
   if (!gate.allowed) throw gate.error;
-  const monitor = monitoring.beginModelCall({
-    providerId: target.providerId,
-    modelId: target.modelId,
-    kind: stream ? 'stream' : 'chat',
-    round: monitoringRound,
-    toolsCount: Array.isArray(tools) ? tools.length : 0,
-    stream,
-  });
+  const kind = monitoringKind || (stream ? 'stream' : 'chat');
+  const monitor =
+    kind === 'memory_extract'
+      ? createAuxiliaryMonitor({
+          providerId: target.providerId,
+          modelId: target.modelId,
+          kind,
+          sessionRef,
+        })
+      : monitoring.beginModelCall({
+          providerId: target.providerId,
+          modelId: target.modelId,
+          kind,
+          round: monitoringRound,
+          toolsCount: Array.isArray(tools) ? tools.length : 0,
+          stream,
+        });
 
   let result;
   try {
