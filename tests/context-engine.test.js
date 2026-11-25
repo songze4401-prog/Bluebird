@@ -1037,3 +1037,184 @@ test.after(() => {
     /* ignore */
   }
 });
+
+// ---- W 组：上下文窗口元数据与 Token 估算校准（第 7 步） ----
+const { deriveBudgets } = require('../server/context/input-guard');
+const calibrationStore = require('../server/model-calibration');
+
+function windowProbe(model, calibration) {
+  return measureRequest({
+    systemBlocks: [{ id: 'core', kind: 'core', text: '核心规则。'.repeat(200) }],
+    historyMessages: [{ role: 'user', content: '历史内容'.repeat(50) }],
+    currentMessage: { role: 'user', content: '当前问题' },
+    toolsReserveTokens: 1600,
+    model,
+    calibration: calibration || null,
+  });
+}
+
+test('W1: 模型声明窗口时用声明值并标 verified，未声明时仍是保守护栏且不谎称已验证', () => {
+  const declared = windowProbe({ contextWindow: 1048576 });
+  const guard = windowProbe({});
+  assert.equal(declared.window.source, 'declared');
+  assert.equal(declared.window.verified, true);
+  assert.equal(declared.window.tokens, 1048576);
+  assert.equal(guard.window.source, 'unknown_guard');
+  assert.equal(guard.window.verified, false);
+  assert.equal(guard.window.tokens, config.inputGuard.unknownWindowGuardTokens);
+});
+
+test('W2: 校准比值只放大估算，且放大值与样本数写进计量口径', () => {
+  const uncalibrated = windowProbe({ contextWindow: 32000 });
+  const calibrated = windowProbe(
+    { contextWindow: 32000 },
+    {
+      ratio: 1.8,
+      appliedFactor: 1.8,
+      sampleCount: 4,
+      source: 'provider_usage',
+      updatedAt: '2026-11-25T00:00:00.000Z',
+    }
+  );
+  assert.equal(uncalibrated.calibration, null);
+  assert.equal(uncalibrated.safetyFactor, config.inputGuard.estimatorSafetyFactor);
+  assert.ok(
+    calibrated.estimatedInputTokens > uncalibrated.estimatedInputTokens,
+    `校准后应更保守：${calibrated.estimatedInputTokens} vs ${uncalibrated.estimatedInputTokens}`
+  );
+  assert.equal(
+    calibrated.estimatedInputTokens,
+    Math.ceil(uncalibrated.rawInputTokens * uncalibrated.safetyFactor * 1.8)
+  );
+  assert.equal(calibrated.calibration.ratio, 1.8);
+  assert.equal(calibrated.calibration.factor, 1.8);
+  assert.equal(calibrated.calibration.sampleCount, 4);
+  assert.equal(calibrated.calibration.source, 'provider_usage');
+});
+
+test('W3: 校准系数被钳在 1–3，异常比值不会把估算压到低于原口径', () => {
+  const low = windowProbe({ contextWindow: 32000 }, { ratio: 0.4, appliedFactor: 0.4, sampleCount: 9 });
+  const high = windowProbe({ contextWindow: 32000 }, { ratio: 9, appliedFactor: 9, sampleCount: 9 });
+  const plain = windowProbe({ contextWindow: 32000 });
+  assert.equal(low.calibration.factor, 1);
+  assert.equal(low.estimatedInputTokens, plain.estimatedInputTokens);
+  assert.equal(high.calibration.factor, 3);
+  assert.equal(
+    high.estimatedInputTokens,
+    Math.ceil(plain.rawInputTokens * plain.safetyFactor * 3)
+  );
+});
+
+test('W4: 预算按窗口只收缩不放大，小窗口提前收缩避免整段历史被裁', () => {
+  const small = deriveBudgets({
+    windowTokens: 4096,
+    history: { recentBudgetTokens: 4000, summaryBudgetTokens: 1200, longRangeBudgetTokens: 1400 },
+    inputGuard: config.inputGuard,
+  });
+  assert.deepEqual(small.capped, ['recentBudgetTokens', 'summaryBudgetTokens', 'longRangeBudgetTokens']);
+  assert.equal(small.history.recentBudgetTokens, Math.floor(4096 * 0.4));
+  assert.equal(small.history.summaryBudgetTokens, Math.floor(4096 * 0.15));
+  assert.ok(small.history.recentBudgetTokens < 4000);
+
+  const big = deriveBudgets({
+    windowTokens: 1048576,
+    history: { recentBudgetTokens: 4000, summaryBudgetTokens: 1200, longRangeBudgetTokens: 1400 },
+    inputGuard: config.inputGuard,
+  });
+  assert.deepEqual(big.capped, []);
+  assert.equal(big.history.recentBudgetTokens, 4000, '窗口变大不得自动放宽预算');
+  assert.equal(big.history.summaryBudgetTokens, 1200);
+});
+
+test('W5: 声明窗口下超限仍然 failRequest，不把超长请求发给上游', () => {
+  const huge = '很长的历史内容。'.repeat(4000);
+  const fit = fitRequest({
+    systemBlocks: [{ id: 'core', kind: 'core', text: '核心规则。'.repeat(50), critical: true }],
+    contextBlocks: [{ id: 'memory', kind: 'memory', text: huge, priority: 30 }],
+    historyMessages: Array.from({ length: 12 }, () => ({ role: 'user', content: huge })),
+    currentMessage: { role: 'user', content: '当前问题' },
+    toolsReserveTokens: 60000,
+    model: { contextWindow: 8192 },
+  });
+  assert.equal(fit.ok, false);
+  assert.equal(fit.errorCode, 'context_too_large');
+  assert.ok(
+    fit.error.includes('windowSource=declared'),
+    `超限原因必须写清窗口来源：${fit.error}`
+  );
+  assert.ok(
+    fit.dropped.length > 0,
+    '降级必须留下逐条原因，不能静默截断'
+  );
+});
+
+test('W6: 校准账本只认真实 Provider 的 usage，stub 与异常比值不入库', () => {
+  const stub = calibrationStore.observe({
+    providerId: 'p1',
+    modelId: 'm1',
+    providerKind: 'stub',
+    promptTokens: 900,
+    estimatedInputTokens: 500,
+  });
+  assert.equal(stub.recorded, false);
+  assert.equal(stub.reason, 'stub_usage');
+
+  const missing = calibrationStore.observe({
+    providerId: 'p1',
+    modelId: 'm1',
+    providerKind: 'provider',
+    promptTokens: null,
+    estimatedInputTokens: 500,
+  });
+  assert.equal(missing.recorded, false);
+  assert.equal(missing.reason, 'usage_unusable');
+
+  const absurd = calibrationStore.observe({
+    providerId: 'p1',
+    modelId: 'm1',
+    providerKind: 'provider',
+    promptTokens: 50000,
+    estimatedInputTokens: 100,
+  });
+  assert.equal(absurd.recorded, false);
+  assert.equal(absurd.reason, 'ratio_out_of_range');
+
+  assert.equal(calibrationStore.factorFor({ providerId: 'p1', modelId: 'm1' }), 1);
+  assert.equal(calibrationStore.viewFor({ providerId: 'p1', modelId: 'm1' }), null);
+});
+
+test('W7: 校准样本按中位数入库、跨读取一致，且窗口比例与来源可追溯', () => {
+  const seen = [];
+  for (const ratio of [2, 1.5, 4]) {
+    const res = calibrationStore.observe({
+      providerId: 'p2',
+      modelId: 'deepseek-chat',
+      providerKind: 'provider',
+      promptTokens: Math.round(1000 * ratio),
+      estimatedInputTokens: 1000,
+    });
+    assert.equal(res.recorded, true, JSON.stringify(res));
+    seen.push(res.ratio);
+  }
+  const view = calibrationStore.viewFor({ providerId: 'p2', modelId: 'deepseek-chat' });
+  assert.equal(view.ratio, 2, `中位数应为 2，实际 ${JSON.stringify(view)}`);
+  assert.equal(view.sampleCount, 3);
+  assert.equal(view.source, 'provider_usage');
+  assert.ok(view.updatedAt);
+  // 已落盘：换一个新读取周期（清缓存）仍能拿到同一份比值。
+  calibrationStore._resetCacheForTests();
+  assert.equal(calibrationStore.factorFor({ providerId: 'p2', modelId: 'deepseek-chat' }), 2);
+  assert.ok(fs.existsSync(calibrationStore.CALIBRATION_FILE));
+
+  // provider+model 分键：另一个模型不受影响。
+  assert.equal(calibrationStore.factorFor({ providerId: 'p2', modelId: 'other' }), 1);
+});
+
+test('W8: 校准文件损坏时按无校准降级，不抛不覆盖成空表', () => {
+  fs.writeFileSync(calibrationStore.CALIBRATION_FILE, '{ this is not json');
+  calibrationStore._resetCacheForTests();
+  assert.equal(calibrationStore.factorFor({ providerId: 'p2', modelId: 'deepseek-chat' }), 1);
+  const status = calibrationStore.status();
+  assert.equal(status.corrupted, true);
+  assert.equal(status.entries, 0);
+});
