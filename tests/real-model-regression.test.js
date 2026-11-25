@@ -262,6 +262,35 @@ const mockServer = http.createServer((req, res) => {
     if (state.mode === 'agent_stream') {
       state.agentCalls += 1;
       if (body.tools && body.tools.length) {
+        // 首轮即使带 tools 也可能是答案轮，服务端会按 stream 请求；工具轮同样
+        // 以流式增量返回，桩必须按请求形状回，否则运行时拿到不可迭代的响应。
+        if (body.stream) {
+          sse(res, [
+            {
+              model: body.model,
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'call_regression_memory_search',
+                        type: 'function',
+                        function: {
+                          name: 'memory_search',
+                          arguments: JSON.stringify({ query: '咖啡', limit: 3 }),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: 'tool_calls',
+                },
+              ],
+            },
+          ]);
+          return;
+        }
         json(res, 200, {
           model: body.model,
           choices: [
@@ -286,11 +315,55 @@ const mockServer = http.createServer((req, res) => {
         });
         return;
       }
+      // 最终正文轮：服务端应以真实 token 流请求（stream:true），桩按三段返回。
+      if (body.stream) {
+        sse(res, [
+          { model: body.model, choices: [{ index: 0, delta: { content: '[calm] Agent ' } }] },
+          { model: body.model, choices: [{ index: 0, delta: { content: '最终' } }] },
+          {
+            model: body.model,
+            choices: [{ index: 0, delta: { content: '回复。' }, finish_reason: 'stop' }],
+          },
+        ]);
+        return;
+      }
       json(res, 200, {
         model: body.model,
         choices: [
           {
             message: { role: 'assistant', content: '[calm] Agent 最终回复。' },
+            finish_reason: 'stop',
+          },
+        ],
+      });
+      return;
+    }
+
+    // Agent 开启但本轮没有工具回执：正文必须按真实 token 流分多段下发。
+    if (state.mode === 'agent_stream_no_tools') {
+      state.agentCalls += 1;
+      if (body.stream) {
+        sse(res, [
+          {
+            model: body.model,
+            choices: [{ index: 0, delta: { content: '[calm] 无工具甲段。' } }],
+          },
+          { model: body.model, choices: [{ index: 0, delta: { content: '无工具乙段。' } }] },
+          {
+            model: body.model,
+            choices: [{ index: 0, delta: { content: '无工具丙段。' }, finish_reason: 'stop' }],
+          },
+        ]);
+        return;
+      }
+      json(res, 200, {
+        model: body.model,
+        choices: [
+          {
+            message: {
+              role: 'assistant',
+              content: '[calm] 无工具甲段。无工具乙段。无工具丙段。',
+            },
             finish_reason: 'stop',
           },
         ],
@@ -867,7 +940,7 @@ async function main() {
   const deltaCount = agentEvents.filter(event => event.type === 'delta').length;
   const agentDone = agentEvents.find(event => event.type === 'done');
   const agentToolSteps = agentDone && Array.isArray(agentDone.toolSteps) ? agentDone.toolSteps : [];
-  const validSingleDelta =
+  const validBufferedUntilVerified =
     deltaCount === 1 &&
     state.agentCalls >= 2 &&
     agentDone &&
@@ -876,13 +949,34 @@ async function main() {
     agentToolSteps.some(step => step.name === 'memory_search');
   checkCase(
     'agent_stream',
-    validSingleDelta ? 'single_delta' : `invalid_delta_${deltaCount}`,
+    validBufferedUntilVerified ? 'single_delta' : `invalid_delta_${deltaCount}`,
     `${agentEvents.map(event => event.type).join(',')} | calls=${state.agentCalls} | ${serverErrors
       .filter(line => /AI |agent-|model-adapter/.test(line))
       .slice(-8)
       .join(' | ')}`
   );
   await new Promise(resolve => setTimeout(resolve, 350));
+
+  state.mode = 'agent_stream_no_tools';
+  state.agentCalls = 0;
+  const noToolsStream = await req('/chat/stream', {
+    method: 'POST',
+    body: { message: '一句话回答：今天几号', sessionId, providerId, modelId: MODEL_ID },
+  });
+  const noToolsEvents = parseSse(noToolsStream.text);
+  const noToolsDeltaCount = noToolsEvents.filter(event => event.type === 'delta').length;
+  const noToolsDone = noToolsEvents.find(event => event.type === 'done');
+  checkCase(
+    'agent_stream_no_tools',
+    noToolsDeltaCount >= 2 &&
+      noToolsDone &&
+      typeof noToolsDone.reply === 'string' &&
+      noToolsDone.reply.includes('无工具丙段') &&
+      state.agentCalls === 1
+      ? 'multi_delta'
+      : `invalid_delta_${noToolsDeltaCount}`,
+    noToolsEvents.map(event => event.type).join(',')
+  );
 
   state.mode = 'slow_stream';
   process.env.BLUEBIRD_AGENT_TOOLS = '0';

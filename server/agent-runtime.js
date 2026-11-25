@@ -295,22 +295,46 @@ async function consumeCompletionStream(stream, onDelta) {
   let content = '';
   const calls = new Map();
   let finishReason = null;
+  let upstreamModel = null;
+  // 工具轮的正文是过程旁白（「我先去查一下」），不能作为正式 delta 下发。
+  // 首片先扣住：确认这一轮不出现 tool_calls 之后才转成实时流，之后逐片直发。
+  let toolCallSeen = false;
+  let firstChunkSeen = false;
+  let heldText = '';
+  let textForwarded = false;
+
+  const forward = text => {
+    if (typeof onDelta !== 'function' || !text) return;
+    try {
+      onDelta(text);
+      textForwarded = true;
+    } catch (_) {
+      // 客户端写失败不应破坏模型流；调用方用 abortSignal 终止。
+    }
+  };
 
   for await (const chunk of stream) {
     const choice = chunk && Array.isArray(chunk.choices) ? chunk.choices[0] : null;
     if (!choice) continue;
+    if (typeof chunk.model === 'string' && !upstreamModel) upstreamModel = chunk.model;
     const delta = choice.delta || {};
     if (typeof delta.content === 'string' && delta.content) {
       content += delta.content;
-      if (typeof onDelta === 'function') {
-        try {
-          onDelta(delta.content);
-        } catch (_) {
-          // 客户端写失败不应破坏模型流；调用方用 abortSignal 终止。
+      if (toolCallSeen) {
+        // 已判定是工具轮：后续旁白只计入本轮文本，不实时下发。
+      } else if (!firstChunkSeen) {
+        heldText += delta.content;
+      } else {
+        if (heldText) {
+          forward(heldText);
+          heldText = '';
         }
+        forward(delta.content);
       }
     }
-    if (Array.isArray(delta.tool_calls)) {
+    if (Array.isArray(delta.tool_calls) && delta.tool_calls.length) {
+      toolCallSeen = true;
+      heldText = '';
       for (const part of delta.tool_calls) {
         const index = Number.isInteger(part.index) ? part.index : 0;
         const current = calls.get(index) || {
@@ -334,6 +358,13 @@ async function consumeCompletionStream(stream, onDelta) {
       }
     }
     if (choice.finish_reason) finishReason = choice.finish_reason;
+    firstChunkSeen = true;
+  }
+
+  // 整轮只回了一片正文（常见于短答案）：扣住的那片在此补发。
+  if (!toolCallSeen && heldText) {
+    forward(heldText);
+    heldText = '';
   }
 
   const toolCalls = [...calls.entries()]
@@ -349,6 +380,8 @@ async function consumeCompletionStream(stream, onDelta) {
     .filter(call => call.function.name);
 
   return {
+    streamed: textForwarded,
+    ...(upstreamModel ? { model: upstreamModel } : {}),
     choices: [
       {
         index: 0,
@@ -995,6 +1028,7 @@ async function runAgentTurn({
   let stopReason = null;
   let toolCallCount = 0;
   let readOnlyRetries = 0;
+  let streamedLive = false;
   let consecutiveFailures = 0;
   // B-06：累计本次 Run 的供应商真实 usage（每轮一次）。供应商没回 usage 时保持 null，
   // 绝不用字符数估算冒充 token 计量；累计值交给 Task 预算的 settle。
@@ -1231,6 +1265,9 @@ async function runAgentTurn({
         : forceReadTool
           ? preferredReadTool
           : null;
+    // 只有「本轮之前没有工具回执」时才按 token 流下发：一旦有回执，最终正文必须
+    // 先过 Claim Guard / 后置条件再发，不能把未核对的声明先推给客户端。
+    const streamThisRound = stream === true && toolSteps.length === 0;
     const completionRequest = {
       providerId,
       modelId,
@@ -1241,7 +1278,7 @@ async function runAgentTurn({
       monitoringRound: round,
       credentialKey,
       signal: abortSignal,
-      stream,
+      stream: streamThisRound,
       // 末轮/预算耗尽轮强制无 tools：模型只能产出文本，从结构上终结循环。
       // requestSpecs 为空时也不下发空数组，避免部分服务商拒绝 tools: []。
       ...(!isFinalRound && requestToolCount
@@ -1285,8 +1322,9 @@ async function runAgentTurn({
         tool_choice: 'auto',
       });
     }
-    if (stream) {
+    if (streamThisRound) {
       completion = await consumeCompletionStream(completion, onDelta);
+      if (completion && completion.streamed) streamedLive = true;
     }
     addUsage(completion && completion.usage);
 
@@ -1480,6 +1518,7 @@ async function runAgentTurn({
     toolCallCount,
     readOnlyRetries,
     reachedMaxRounds,
+    streamed: streamedLive,
     usage: usageTotals,
   };
 }
