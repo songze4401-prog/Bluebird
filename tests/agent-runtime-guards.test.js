@@ -559,3 +559,29 @@ test('P2-04：任务超过 deadlineMs 后收敛为 timed_out', async () => {
   assert.ok(elapsed >= 4500, `不应早于 deadline 结束，实际 ${elapsed}ms`);
   assert.ok(elapsed < 15000, `应贴着 deadline 结束，实际 ${elapsed}ms`);
 });
+
+test('委派意图识别：必须同时出现动作与受理方，否定与词面相似不误判', () => {
+  const { requiresDelegation } = require(path.join(SERVER, 'tool-postcondition'));
+  const cases = [
+    ['把「Bluebird 流式实现要点」派给研究员去调研。', true],
+    ['让 executor 跑一下迁移脚本', true],
+    ['这个交给子 agent 处理', true],
+    ['委派给 reviewer 审一遍', true],
+    ['转交给 researcher 就行', true],
+    ['这个不用派给研究员，你自己给结论就行。', false],
+    ['别交给研究员，我自己来看。', false],
+    ['解释一下派生类是什么意思。', false],
+    ['帮我记住这件事。', false],
+    ['让我想想这段代码怎么改。', false],
+    ['', false],
+  ];
+  for (const [text, expected] of cases) {
+    assert.equal(
+      requiresDelegation(text),
+      expected,
+      `「${text}」应判定为 ${expected}`
+    );
+  }
+  assert.equal(requiresDelegation(null), false);
+  assert.equal(requiresDelegation(undefined), false);
+});

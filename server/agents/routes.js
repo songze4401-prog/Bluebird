@@ -713,15 +713,23 @@ function createAgentRouter({ requireAuth, auditAction = null } = {}) {
   router.get(
     '/agent-tasks',
     route(async (req, res) => {
-      const botId = typeof req.query.botId === 'string' ? req.query.botId : 'memory';
+      const botId =
+        typeof req.query.botId === 'string' && req.query.botId.trim()
+          ? req.query.botId.trim()
+          : null;
+      const parentSessionId =
+        typeof req.query.parentSessionId === 'string'
+          ? req.query.parentSessionId
+          : null;
+      // 不带 botId 即查全部 Agent：任务页要能看见 researcher/executor/reviewer
+      // 的任务，默认只看历史 memory id 会把真实任务藏掉。
       res.json({
-        tasks: tasks.listTasks(botId, {
-          limit: req.query.limit,
-          parentSessionId:
-            typeof req.query.parentSessionId === 'string'
-              ? req.query.parentSessionId
-              : null,
-        }),
+        tasks: botId
+          ? tasks.listTasks(botId, { limit: req.query.limit, parentSessionId })
+          : tasks.listTasksScoped({
+              parentSessionId,
+              limit: req.query.limit ?? 100,
+            }),
       });
     })
   );

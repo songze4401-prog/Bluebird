@@ -43,6 +43,7 @@ const { parseTextualToolCalls, stripToolProtocolText } = require('./textual-tool
 const { sanitizeToolEvidence } = require('./tool-step');
 const {
   requiresReadBack,
+  requiresDelegation,
   preferredReadBackTool,
 } = require('./tool-postcondition');
 const {
@@ -1167,6 +1168,7 @@ async function runAgentTurn({
 
   const memoryWriteRequired = requiresMemoryWrite(userText);
   const readBackRequired = requiresReadBack(userText);
+  const delegationRequired = requiresDelegation(userText);
   for (let round = 1; round <= maxRounds; round += 1) {
     if (typeof isClientGone === 'function' && isClientGone()) {
       stopReason = 'client_gone';
@@ -1216,13 +1218,19 @@ async function runAgentTurn({
     const forceReadTool =
       preferredReadTool &&
       requestSpecs.some(spec => spec.function.name === preferredReadTool);
-    // 写入意图优先：一句话既要落库又要读回时，先保证落库工具真的被调用，
-    // 读回仍有服务端后置条件兜底。
+    const forceDelegateTool =
+      round === 1 &&
+      delegationRequired &&
+      requestSpecs.some(spec => spec.function.name === 'delegate_to_bot');
+    // 强制优先级：记忆落库 > 委派建任务 > 指定读回工具。一句话同时命中多个
+    // 意图时先保住不可逆的那一侧；读回侧还有服务端后置条件兜底。
     const forcedToolName = forceMemoryTool
       ? 'memory_remember'
-      : forceReadTool
-        ? preferredReadTool
-        : null;
+      : forceDelegateTool
+        ? 'delegate_to_bot'
+        : forceReadTool
+          ? preferredReadTool
+          : null;
     const completionRequest = {
       providerId,
       modelId,
@@ -1255,7 +1263,7 @@ async function runAgentTurn({
       }`.toLowerCase();
       const forcedChoice =
         round === 1 &&
-        (memoryWriteRequired || readBackRequired) &&
+        (memoryWriteRequired || delegationRequired || readBackRequired) &&
         completionRequest.tool_choice !== 'auto';
       if (!forcedChoice || error.kind !== 'bad_request' || !errorText.includes('tool_choice')) {
         throw error;

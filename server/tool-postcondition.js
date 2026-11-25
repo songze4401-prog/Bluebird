@@ -40,8 +40,24 @@ function hasReadBackReceipt(toolSteps, userText = '') {
   );
 }
 
+// 委派意图必须同时出现「派/交/让」动作与具体受理方（agent 名或角色），
+// 且不是被否定的一刻。「派生」「让我想想」这类词面不算委派。
+const DELEGATION_INTENT_RE =
+  /(?:派给|派去|派到|派个|派一名|派一位|派发|派遣|委派|指派|委托|交给|转给|让)[^。！？\n]{0,16}(?:子\s*agent|小\s*agent|\bagent\b|researcher|reviewer|executor|研究员|调研|审阅|评审|执行器|机器人|助理)/i;
+
+const DELEGATION_NEGATION_RE =
+  /(?:不用|不需要|不必|无需|不要|别再|先别|别|自己(?:来|处理|查|做|答|说))[^。！？\n]{0,10}(?:派|委派|委托|交给|转给|让)/i;
+
+function requiresDelegation(userText) {
+  const text = String(userText || '');
+  if (!text) return false;
+  if (DELEGATION_NEGATION_RE.test(text)) return false;
+  return DELEGATION_INTENT_RE.test(text);
+}
+
 module.exports = {
   requiresReadBack,
   preferredReadBackTool,
   hasReadBackReceipt,
+  requiresDelegation,
 };

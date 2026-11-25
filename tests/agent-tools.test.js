@@ -990,6 +990,102 @@ async function main() {
   agentRuntimeModule.unregisterTool('workspace_read');
   agentRuntimeModule.unregisterTool('workspace_list');
 
+  // ================= C1e. 显式委派的通用有界保障 =================
+  ORIG_LOG('\nC1e. 显式委派保障');
+  resetScript();
+  scripted.push({ content: '[calm] 我直接说结论：流式实现要点是缓冲与分段。' });
+  const forcedDelegate = await req('/chat', {
+    method: 'POST',
+    body: { message: '把「Bluebird 流式实现要点」派给研究员去调研。' },
+  });
+  check(
+    '显式委派首轮强制 delegate_to_bot',
+    forcedDelegate.status === 200 &&
+      stubCalls[0].tool_choice &&
+      stubCalls[0].tool_choice.type === 'function' &&
+      stubCalls[0].tool_choice.function.name === 'delegate_to_bot',
+    JSON.stringify(stubCalls[0] && stubCalls[0].tool_choice)
+  );
+
+  resetScript();
+  scripted.push({ content: '[calm] 结论是缓冲加分段，不需要再派人。' });
+  const negatedDelegate = await req('/chat', {
+    method: 'POST',
+    body: { message: '这个不用派给研究员，你自己给结论就行。' },
+  });
+  check(
+    '否定委派措辞不强制工具、不覆盖回复',
+    negatedDelegate.status === 200 &&
+      stubCalls[0].tool_choice === 'auto' &&
+      negatedDelegate.json.reply.includes('缓冲加分段'),
+    JSON.stringify({
+      choice: stubCalls[0].tool_choice,
+      reply: negatedDelegate.json.reply,
+    })
+  );
+
+  resetScript();
+  scripted.push({ content: '[calm] 这是普通回答，不涉及派单。派生类的用法也算。' });
+  const ordinaryTalk = await req('/chat', {
+    method: 'POST',
+    body: { message: '解释一下派生类是什么意思。' },
+  });
+  check(
+    '「派生」等词面不误判为委派意图',
+    ordinaryTalk.status === 200 &&
+      stubCalls[0].tool_choice === 'auto' &&
+      ordinaryTalk.json.reply.includes('派生类'),
+    JSON.stringify({
+      choice: stubCalls[0].tool_choice,
+      reply: ordinaryTalk.json.reply,
+    })
+  );
+
+  resetScript();
+  scripted.push({ content: '[calm] 已交给研究员处理，任务在排队，稍后回传。' });
+  const falseDispatch = await req('/chat', {
+    method: 'POST',
+    body: { message: '把「报告结构」派给评审员检查。' },
+  });
+  check(
+    '无委派回执时不得凭空声称已排队',
+    falseDispatch.status === 200 &&
+      falseDispatch.json.reply.includes('系统校验') &&
+      !(falseDispatch.json.toolSteps || []).some(
+        step => step.name === 'delegate_to_bot' && step.ok === true
+      ),
+    falseDispatch.json.reply
+  );
+
+  resetScript();
+  scripted.push({ error: { status: 400, message: 'tool_choice unsupported' } });
+  scripted.push({
+    toolCalls: [
+      tc('call_delegate_fallback', 'delegate_to_bot', {
+        botId: 'researcher',
+        taskType: 'research.analyze',
+        goal: '回退路径调研桩目标',
+      }),
+    ],
+  });
+  scripted.push({ content: '[calm] 任务已提交，状态可在任务页查看。' });
+  const delegateFallback = await req('/chat', {
+    method: 'POST',
+    body: { message: '把「回退路径验证」派给研究员处理。' },
+  });
+  check(
+    'Provider 拒绝委派 tool_choice 时回退 auto 并继续',
+    delegateFallback.status === 200 &&
+      stubCalls.length === 3 &&
+      stubCalls[1].tool_choice === 'auto' &&
+      delegateFallback.json.toolSteps.some(step => step.name === 'delegate_to_bot'),
+    JSON.stringify({
+      status: delegateFallback.status,
+      calls: stubCalls.length,
+      steps: delegateFallback.json.toolSteps,
+    })
+  );
+
   // ================= C2. 正常工具流程（/chat/stream + SSE 顺序） =================
   ORIG_LOG('\nC2. 正常工具流程（/chat/stream）');
   resetScript();

@@ -1519,6 +1519,24 @@ function listTasks(botId, { limit = 20, parentSessionId = null } = {}) {
     .map(task => publicTask(task));
 }
 
+// 通用任务列表：botId / parentSessionId 都可以省略，省略即不按该维度过滤。
+// 会话侧交付面（结果快照、任务声明核对、任务页）必须能看见全部 Agent 的任务，
+// 否则 researcher/executor/reviewer 的真实任务会被当成不存在。
+function listTasksScoped({ botId = null, parentSessionId = null, limit = 20 } = {}) {
+  const max = Math.min(Math.max(Number(limit) || 20, 1), 100);
+  const agent = typeof botId === 'string' && botId.trim() ? botId.trim() : null;
+  const parent =
+    typeof parentSessionId === 'string' && parentSessionId.trim()
+      ? parentSessionId.trim()
+      : null;
+  return Object.values(loadTasks().tasks)
+    .filter(task => !agent || (task.agentId || task.botId) === agent)
+    .filter(task => !parent || task.parentSessionId === parent)
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    .slice(0, max)
+    .map(task => publicTask(task));
+}
+
 // ② CAS：版本由存储层分配，调用方只读。每次真实落盘 +1，绝不信任写入方自报。
 function bumpStateVersion(task) {
   task.stateVersion = (Number.isInteger(task.stateVersion) ? task.stateVersion : 0) + 1;
@@ -2792,6 +2810,7 @@ module.exports = {
   listDeadLetters,
   getRawTask,
   listTasks,
+  listTasksScoped,
   listAllTasks,
   getRunUsage,
   updateTask,
