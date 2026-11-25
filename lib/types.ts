@@ -39,6 +39,18 @@ export type ToolStep = {
   ok: boolean;
   summary: string;
   durationMs?: number;
+  evidence?: {
+    count?: number;
+    bytes?: number;
+    totalSize?: number;
+    truncated?: boolean;
+    written?: boolean;
+    pending?: boolean;
+    deduped?: boolean;
+    status?: string;
+    code?: string;
+    decision?: string;
+  };
   // 工作区写入确认凭据（仅 workspace_write 的 pending 流；服务端
   // sessions.js sanitizeToolSteps 白名单字段，只含元数据不含文件正文）
   pendingConfirmation?: {

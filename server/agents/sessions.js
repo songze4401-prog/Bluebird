@@ -16,6 +16,7 @@ const { writeFileAtomicSync } = require('../atomic-write');
 const { isKnownBot } = require('./manifest');
 const { AgentError } = require('./errors');
 const { LEGACY_ALIASES } = require('./status-vocabulary');
+const { sanitizeToolEvidence } = require('../tool-step');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -372,15 +373,19 @@ function getMessages(botId, sessionId) {
 
 function sanitizeToolSteps(value) {
   if (!Array.isArray(value)) return [];
-  return value.slice(0, TOOL_STEPS_MAX).map(item => ({
-    name: String(item && item.name ? item.name : '').slice(0, 60),
-    ok: Boolean(item && item.ok === true),
-    summary: String(item && item.summary ? item.summary : '').slice(0, 160),
-    durationMs:
-      Number.isFinite(item && item.durationMs) && item.durationMs >= 0
-        ? Math.floor(item.durationMs)
-        : 0,
-  }));
+  return value.slice(0, TOOL_STEPS_MAX).map(item => {
+    const evidence = sanitizeToolEvidence(item && item.evidence);
+    return {
+      name: String(item && item.name ? item.name : '').slice(0, 60),
+      ok: Boolean(item && item.ok === true),
+      summary: String(item && item.summary ? item.summary : '').slice(0, 160),
+      durationMs:
+        Number.isFinite(item && item.durationMs) && item.durationMs >= 0
+          ? Math.floor(item.durationMs)
+          : 0,
+      ...(evidence ? { evidence } : {}),
+    };
+  });
 }
 
 function sanitizeMessage(message) {
