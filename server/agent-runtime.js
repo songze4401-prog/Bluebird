@@ -40,6 +40,14 @@ const delegateToBotTool = require('./tool-dispatch-bot');
 const { truncateText } = require('./text-utils');
 const { buildPolicyInstruction } = require('./agent-policy');
 const { parseTextualToolCalls, stripToolProtocolText } = require('./textual-tool-calls');
+const {
+  detectExplicitMemoryIntent,
+  detectMemoryCorrectionIntent,
+} = require('./memory-evidence');
+
+function requiresMemoryWrite(userText) {
+  return detectExplicitMemoryIntent(userText) || detectMemoryCorrectionIntent(userText);
+}
 
 // ---- 可调参数（环境变量，加载时读取；开关除外——开关每请求重读） ----
 // 逐个显式读取（不用动态 process.env[name]：既让 lint 的
@@ -1150,6 +1158,7 @@ async function runAgentTurn({
 
   const requestSpecs = specs;
 
+  const memoryWriteRequired = requiresMemoryWrite(userText);
   for (let round = 1; round <= maxRounds; round += 1) {
     if (typeof isClientGone === 'function' && isClientGone()) {
       stopReason = 'client_gone';
@@ -1190,6 +1199,10 @@ async function runAgentTurn({
     }
 
     const remainingMs = Math.max(1000, maxTotalMs - (Date.now() - startedAt));
+    const forceMemoryTool =
+      round === 1 &&
+      memoryWriteRequired &&
+      requestSpecs.some(spec => spec.function.name === 'memory_remember');
     const completionRequest = {
       providerId,
       modelId,
@@ -1204,10 +1217,43 @@ async function runAgentTurn({
       // 末轮/预算耗尽轮强制无 tools：模型只能产出文本，从结构上终结循环。
       // requestSpecs 为空时也不下发空数组，避免部分服务商拒绝 tools: []。
       ...(!isFinalRound && requestToolCount
-        ? { tools: requestSpecs, tool_choice: 'auto' }
+        ? {
+            tools: requestSpecs,
+            tool_choice: forceMemoryTool
+              ? { type: 'function', function: { name: 'memory_remember' } }
+              : 'auto',
+          }
         : {}),
     };
-    completion = await createChatCompletion(completionRequest);
+    try {
+      completion = await createChatCompletion(completionRequest);
+    } catch (error) {
+      const errorText = `${error && error.message ? error.message : ''} ${
+        error && error.detail ? error.detail : ''
+      }`.toLowerCase();
+      if (
+        !forceMemoryTool ||
+        error.kind !== 'bad_request' ||
+        !errorText.includes('tool_choice')
+      ) {
+        throw error;
+      }
+      console.warn('[agent] memory tool_choice 不被 Provider 支持，回退 auto');
+      monitoring.recordEvent({
+        event_name: 'agent.tool_choice_fallback',
+        component: 'agent',
+        status: 'success',
+        attributes: { round, tool: 'memory_remember', provider_attempt: 2 },
+      });
+      completion = await createChatCompletion({
+        ...completionRequest,
+        timeout: Math.min(
+          timeout,
+          Math.max(1000, maxTotalMs - (Date.now() - startedAt))
+        ),
+        tool_choice: 'auto',
+      });
+    }
     if (stream) {
       completion = await consumeCompletionStream(completion, onDelta);
     }

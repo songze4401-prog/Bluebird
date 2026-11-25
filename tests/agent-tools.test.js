@@ -660,6 +660,192 @@ async function main() {
   const historyAssistant = [...(history.json.history || [])].reverse().find(m => m.role === 'assistant');
   check('历史接口读回 toolSteps', Array.isArray(historyAssistant.toolSteps));
 
+  // ================= C1b. 显式记忆更正必须产生真实工具回执 =================
+  ORIG_LOG('\nC1b. 显式记忆更正与回执门禁');
+  resetScript();
+  scripted.push({
+    toolCalls: [
+      tc('call_memory_correction', 'memory_remember', {
+        content: '用户现在改喝燕麦拿铁，不再喝冰美式',
+        type: 'preference',
+        keywords: ['咖啡', '燕麦拿铁'],
+        confidence: 0.95,
+        sourceQuote: '我现在改喝燕麦拿铁了，不再喝冰美式',
+      }),
+    ],
+  });
+  scripted.push({ content: '[calm] 记忆已更新。' });
+  scripted.push({ content: '[calm] 记忆更新已提交，等待用户确认。' });
+  process.env.BLUEBIRD_CLAIM_GUARD = '1';
+  const correction = await req('/chat', {
+    method: 'POST',
+    body: { message: '更正一下：我现在改喝燕麦拿铁了，不再喝冰美式。' },
+  });
+  process.env.BLUEBIRD_CLAIM_GUARD = '0';
+  check('显式更正返回 200', correction.status === 200, JSON.stringify(correction.json));
+  check(
+    '显式更正首轮强制 memory_remember',
+    stubCalls[0] &&
+      stubCalls[0].tool_choice &&
+      stubCalls[0].tool_choice.type === 'function' &&
+      stubCalls[0].tool_choice.function.name === 'memory_remember',
+    JSON.stringify(stubCalls[0] && stubCalls[0].tool_choice)
+  );
+  check(
+    '显式更正产生 memory_remember 回执',
+    Array.isArray(correction.json.toolSteps) &&
+      correction.json.toolSteps.some(step => step.name === 'memory_remember'),
+    JSON.stringify(correction.json.toolSteps)
+  );
+  check(
+    'pending 回执不被回复成已完成',
+    correction.json.reply.includes('等待用户确认') &&
+      !correction.json.reply.includes('记忆已更新'),
+    correction.json.reply
+  );
+
+  resetScript();
+  scripted.push({ error: { status: 400, message: 'tool_choice unsupported' } });
+  scripted.push({
+    toolCalls: [
+      tc('call_memory_correction_fallback', 'memory_remember', {
+        content: '用户现在改喝燕麦拿铁，不再喝冰美式',
+        type: 'preference',
+        keywords: ['咖啡', '燕麦拿铁'],
+        confidence: 0.95,
+        sourceQuote: '我现在改喝燕麦拿铁了，不再喝冰美式',
+      }),
+    ],
+  });
+  scripted.push({ content: '[calm] 已提交记忆更新，等待用户确认。' });
+  const fallbackCorrection = await req('/chat', {
+    method: 'POST',
+    body: { message: '更正一下：我现在改喝燕麦拿铁了，不再喝冰美式。' },
+  });
+  check(
+    'Provider 拒绝强制 tool_choice 时回退 auto 并继续',
+    fallbackCorrection.status === 200 &&
+      stubCalls.length === 3 &&
+      stubCalls[1].tool_choice === 'auto' &&
+      fallbackCorrection.json.toolSteps.some(step => step.name === 'memory_remember'),
+    JSON.stringify({ status: fallbackCorrection.status, calls: stubCalls.length })
+  );
+
+  resetScript();
+  scripted.push({ error: { status: 400, message: 'bad request' } });
+  const nonToolChoiceError = await req('/chat', {
+    method: 'POST',
+    body: { message: '更正一下：我现在改喝燕麦拿铁了，不再喝冰美式。' },
+  });
+  check(
+    '非 tool_choice 的 400 不重复调用',
+    nonToolChoiceError.status === 400 && stubCalls.length === 1,
+    JSON.stringify({ status: nonToolChoiceError.status, calls: stubCalls.length })
+  );
+
+  resetScript();
+  scripted.push({ content: '[calm] 居住地已改成上海了。' });
+  const noReceipt = await req('/chat', {
+    method: 'POST',
+    body: { message: '更正一下：我现在搬到上海了，以后就住在上海。' },
+  });
+  check(
+    '无 memory_remember 回执时不得声称已更新',
+    noReceipt.status === 200 &&
+      noReceipt.json.reply.includes('未执行记忆写入') &&
+      !noReceipt.json.reply.includes('已改成'),
+    noReceipt.json.reply
+  );
+
+  resetScript();
+  scripted.push({ content: '[calm] 居住地已改成上海了。' });
+  const noReceiptStream = await readSse('/chat/stream', {
+    message: '更正一下：我现在搬到上海了，以后就住在上海。',
+  });
+  const noReceiptDone = noReceiptStream.events.find(event => event.type === 'done');
+  check(
+    '流式无回执同样不得声称已更新',
+    noReceiptDone &&
+      noReceiptDone.reply.includes('未执行记忆写入') &&
+      !noReceiptDone.reply.includes('已改成'),
+    noReceiptDone && noReceiptDone.reply
+  );
+
+  resetScript();
+  scripted.push({
+    toolCalls: [tc('call_memory_failed', 'memory_remember', { type: 'preference' })],
+  });
+  scripted.push({ content: '[calm] 记忆已更新。' });
+  const failedReceipt = await req('/chat', {
+    method: 'POST',
+    body: { message: '更正一下：我现在改喝燕麦拿铁了，不再喝冰美式。' },
+  });
+  check(
+    '失败记忆回执不得被回复成已完成',
+    failedReceipt.status === 200 &&
+      failedReceipt.json.reply.includes('记忆写入失败') &&
+      !failedReceipt.json.reply.includes('记忆已更新'),
+    failedReceipt.json.reply
+  );
+
+  process.env.BLUEBIRD_AGENT_TOOLS = '0';
+  resetScript();
+  scripted.push({ content: '[calm] 记忆已更新。' });
+  const agentOff = await req('/chat', {
+    method: 'POST',
+    body: { message: '更正一下：我现在改喝燕麦拿铁了，不再喝冰美式。' },
+  });
+  process.env.BLUEBIRD_AGENT_TOOLS = '1';
+  check(
+    'Agent 工具关闭时同样不得声称已更新',
+    agentOff.status === 200 &&
+      agentOff.json.reply.includes('未执行记忆写入') &&
+      !agentOff.json.reply.includes('记忆已更新'),
+    agentOff.json.reply
+  );
+
+  resetScript();
+  scripted.push({ content: '[calm] 你说得对，2+2=4。' });
+  const ordinaryCorrection = await req('/chat', {
+    method: 'POST',
+    body: { message: '更正一下：你刚才说2+2=5。' },
+  });
+  check(
+    '普通纠错不强制记忆写入、不覆盖回复',
+    ordinaryCorrection.status === 200 &&
+      stubCalls[0].tool_choice === 'auto' &&
+      ordinaryCorrection.json.reply.includes('2+2=4'),
+    ordinaryCorrection.json.reply
+  );
+
+  resetScript();
+  scripted.push({ content: '[calm] 是的，我现在住在上海。' });
+  const bareResidence = await req('/chat', {
+    method: 'POST',
+    body: { message: '我现在住在上海，你呢？' },
+  });
+  check(
+    '裸居住地陈述不强制记忆写入、不覆盖回复',
+    bareResidence.status === 200 &&
+      stubCalls[0].tool_choice === 'auto' &&
+      bareResidence.json.reply.includes('我现在住在上海'),
+    bareResidence.json.reply
+  );
+
+  resetScript();
+  scripted.push({ content: '[calm] 生日已更新。' });
+  const birthdayCorrection = await req('/chat', {
+    method: 'POST',
+    body: { message: '更正：我的生日改为6月20日。' },
+  });
+  check(
+    '生日更正同样强制记忆回执',
+    birthdayCorrection.status === 200 &&
+      stubCalls[0].tool_choice.function.name === 'memory_remember' &&
+      birthdayCorrection.json.reply.includes('未执行记忆写入'),
+    birthdayCorrection.json.reply
+  );
+
   // ================= C2. 正常工具流程（/chat/stream + SSE 顺序） =================
   ORIG_LOG('\nC2. 正常工具流程（/chat/stream）');
   resetScript();
@@ -747,6 +933,47 @@ async function main() {
     '记忆成功声明仍能识别（记住 / 记忆已保存）',
     claimGuard.detectClaimMismatch('已经记住这条记忆。', [successStep('memory_remember', false)]) !== null &&
       claimGuard.detectClaimMismatch('记忆已保存。', [successStep('memory_remember', false)]) !== null
+  );
+  check(
+    '“居住地已改成上海”与 pending 记忆回执冲突',
+    claimGuard.detectClaimMismatch(
+      '居住地已改成上海。',
+      [
+        {
+          name: 'memory_remember',
+          ok: true,
+          summary: '已提交，等待用户确认',
+          durationMs: 1,
+        },
+      ],
+      { userText: '更正一下：我现在搬到上海了，以后就住在上海。' }
+    ) !== null
+  );
+  check(
+    '待确认表述不误报为完成声明',
+    claimGuard.detectClaimMismatch(
+      '已提交记忆更新，等待用户确认。',
+      [
+        {
+          name: 'memory_remember',
+          ok: true,
+          summary: '已提交，等待用户确认',
+          durationMs: 1,
+        },
+      ],
+      { userText: '更正一下：我现在搬到上海了，以后就住在上海。' }
+    ) === null
+  );
+  check(
+    '文件已更新不跨工具误报为记忆声明',
+    claimGuard.detectClaimMismatch('文件已更新。', [
+      successStep('workspace_write', true),
+      successStep('memory_remember', false),
+    ]) === null
+  );
+  check(
+    '记忆更新失败声明与成功回执冲突',
+    claimGuard.detectClaimMismatch('记忆更新失败。', [successStep('memory_remember', true)]) !== null
   );
   delete process.env.BLUEBIRD_CLAIM_GUARD;
   check('环境开关默认开启（未设置也启用）', claimGuard.claimGuardEnabled());

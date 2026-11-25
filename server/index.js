@@ -277,6 +277,10 @@ const {
   verifyStoreConsistency,
   getWriteOutcomes,
 } = require('./memory');
+const {
+  detectExplicitMemoryIntent,
+  detectMemoryCorrectionIntent,
+} = require('./memory-evidence');
 
 const { logDataEvent } = require('./data-events');
 const { buildProfile, applyProfileFeedback } = require('./profile');
@@ -1593,12 +1597,36 @@ function recordSentForContext(ctx, { round = 1, messages = ctx.requestMessages, 
   });
 }
 
+function ensureMemoryWriteReceipt(rawReply, ctx, toolSteps) {
+  const userText = ctx && ctx.userText ? String(ctx.userText) : '';
+  const explicitWrite =
+    detectExplicitMemoryIntent(userText) || detectMemoryCorrectionIntent(userText);
+  if (!explicitWrite || !claimGuard.detectMemorySuccessClaim(rawReply, { userText })) {
+    return rawReply;
+  }
+  const receipt =
+    Array.isArray(toolSteps) &&
+    toolSteps.find(step => step && step.name === 'memory_remember');
+  if (!receipt) {
+    console.warn(`[memory-claim-guard] session=${ctx.sessionId} receipt=missing`);
+    return '本轮未执行记忆写入，不能确认已更新。';
+  }
+  if (receipt.ok !== true) {
+    return '记忆写入失败，不能确认已更新。';
+  }
+  if (!claimGuard.toolSucceeded(receipt)) {
+    return '记忆更新已提交，等待用户确认；尚未生效。';
+  }
+  return rawReply;
+}
+
 // Provider 返回后立即对账：把真实 usage 写进 trace，并与本地估算输入 Token 比对。
 // 桩返回一律标 stub，不参与校准；没有 usage 就记 missing，不猜数字。
 async function reconcileAgentClaim({ ctx, rawReply, toolSteps, abortSignal, round }) {
   return claimGuard.reconcileClaim({
     reply: rawReply,
     toolSteps,
+    userText: ctx.userText,
     sessionId: ctx.sessionId,
     retry: async correctionInstruction => {
       const messages = [
@@ -1889,6 +1917,7 @@ app.post('/chat', requireAuth, async (req, res) => {
     }
 
     rawReply = auditChatReply(rawReply, ctx, toolSteps);
+    rawReply = ensureMemoryWriteReceipt(rawReply, ctx, toolSteps);
 
     const result = completeChatTurn({
       ctx,
@@ -2450,6 +2479,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   // done 事件的权威文本仍由 stripMoodTags 全量清洗兜底）
   const beforeClaimCheck = rawReply;
   rawReply = auditChatReply(rawReply, ctx, toolSteps);
+  rawReply = ensureMemoryWriteReceipt(rawReply, ctx, toolSteps);
   if (rawReply !== beforeClaimCheck) {
     // 校验说明是服务端追加的纯文本，直接作为末段 delta 让用户当场看到，
     // done 事件里的权威文本同样是修正后的内容。

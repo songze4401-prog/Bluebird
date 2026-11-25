@@ -133,12 +133,15 @@ function normalizeCandidate(raw, options = {}) {
   const provenance = resolveProvenance({ ...source, sourceType }, options);
   const userText = options.userText || source.userText || '';
   const persistentIntent = detectPersistentIntent(userText);
+  const explicitCorrection =
+    options.intent === 'correction' || detectExplicitCorrection(userText);
   const category = classifyCategory(
     {
       content,
       type: source.type,
       sourceQuote,
       userText,
+      explicitCorrection,
     },
     provenance
   );
@@ -200,9 +203,7 @@ function normalizeCandidate(raw, options = {}) {
       hasHedge(userText)
         ? 'source_hedged'
         : cleanText(source.uncertainty),
-    explicitCorrection:
-      options.intent === 'correction' ||
-      detectExplicitCorrection(userText),
+    explicitCorrection,
     observedAt,
     evidence: null,
     policyVersion: POLICY_VERSION,

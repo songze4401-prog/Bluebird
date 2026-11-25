@@ -2,6 +2,13 @@
 
 const monitoring = require('./monitoring');
 const { neutralizeContextText } = require('./context/text');
+const {
+  detectExplicitMemoryIntent,
+  detectMemoryCorrectionIntent,
+} = require('./memory-evidence');
+
+const MEMORY_UPDATE_CLAIM_RE =
+  /(?:已|已经)(?:成功)?(?:更改|更新|更正|替换|修改).{0,12}|(?:已|已经)?(?:改成|改为|更新为|更正为|替换为).{0,20}/i;
 
 const TOOL_GROUPS = Object.freeze({
   workspace_write: { group: 'file', operation: 'write' },
@@ -48,7 +55,7 @@ const FAILURE_PATTERNS = Object.freeze({
     reply: /(?:(?:回复|回信|邮件).{0,10}(?:失败|没成功|未成功|没能|无法|还没|没有|没)|(?:还没|没有|没|未能|无法|不能|没能|未).{0,8}(?:回复|回信))/i,
   },
   memory: {
-    remember: /(?:(?:记住|记录|保存|写入|记忆).{0,10}(?:失败|没成功|未成功|没能|无法|还没|没有|没)|(?:还没|没有|没|未能|无法|不能|没能|未).{0,8}(?:记住|记录|保存|写入))/i,
+    remember: /(?:(?:记住|记录|保存|写入|记忆|更改|更新|更正|替换|修改).{0,10}(?:失败|没成功|未成功|没能|无法|还没|没有|没)|(?:还没|没有|没|未能|无法|不能|没能|未).{0,8}(?:记住|记录|保存|写入|更改|更新|更正|替换|修改))/i,
     search: /(?:记忆|信息|记录).{0,6}(?:检索|查询|搜索)(?:失败|没成功|未成功)|(?:检索|查询|搜索)(?:记忆|信息|记录).{0,4}(?:失败|没成功|未成功)/i,
   },
   delegation: { delegate: /(?:(?:派发|委派|提交|任务|请求).{0,10}(?:失败|没成功|未成功|没能|无法|还没|没有|没)|(?:还没|没有|没|未能|无法|不能|没能|未).{0,8}(?:派发|委派|提交))/i },
@@ -76,15 +83,38 @@ function isNegatedOutcome(text, operation) {
     list: '(?:列出|扫描|查找)',
     send: '(?:发送|发出|发)',
     reply: '(?:回复|回信)',
-    remember: '(?:记住|记录|保存|写入)',
+    remember: '(?:记住|记下|记录|保存|写入|更改|更新|更正|替换|修改)',
     search: '(?:检索|查询|搜索)',
     delegate: '(?:派发|委派|提交)',
   }[operation];
   return new RegExp(`(?:不会|不打算|不准备|不需要|无需|不必|不想).{0,8}${action}`, 'i').test(text);
 }
 
-function detectClaimMismatch(reply, toolSteps) {
+function detectMemorySuccessClaim(reply, { userText = '' } = {}) {
+  if (typeof reply !== 'string') return false;
+  const memoryContext =
+    detectExplicitMemoryIntent(userText) || detectMemoryCorrectionIntent(userText);
+  if (!memoryContext) return false;
+  const pattern = new RegExp(
+    `${SUCCESS_PATTERNS.memory.remember.source}|${MEMORY_UPDATE_CLAIM_RE.source}`,
+    'i'
+  );
+  return reply
+    .split(/[。！？!?；;\n]+/u)
+    .map(clause => clause.trim())
+    .filter(Boolean)
+    .some(
+      clause =>
+        !isNegatedOutcome(clause, 'remember') &&
+        !PENDING_CLAIM_RE.test(clause) &&
+        pattern.test(clause)
+    );
+}
+
+function detectClaimMismatch(reply, toolSteps, { userText = '' } = {}) {
   if (typeof reply !== 'string' || !Array.isArray(toolSteps) || !toolSteps.length) return null;
+  const memoryContext =
+    detectExplicitMemoryIntent(userText) || detectMemoryCorrectionIntent(userText);
   const clauses = reply
     .slice(0, 12000)
     .split(/[。！？!?；;\n]+/u)
@@ -95,7 +125,13 @@ function detectClaimMismatch(reply, toolSteps) {
     const info = getToolInfo(step);
     if (!info || typeof step.ok !== 'boolean') continue;
     const succeeded = toolSucceeded(step);
-    const successPattern = SUCCESS_PATTERNS[info.group] && SUCCESS_PATTERNS[info.group][info.operation];
+    let successPattern = SUCCESS_PATTERNS[info.group] && SUCCESS_PATTERNS[info.group][info.operation];
+    if (info.group === 'memory' && memoryContext) {
+      successPattern = new RegExp(
+        `${successPattern.source}|${MEMORY_UPDATE_CLAIM_RE.source}`,
+        'i'
+      );
+    }
     const failurePattern = FAILURE_PATTERNS[info.group] && FAILURE_PATTERNS[info.group][info.operation];
     if (!successPattern || !failurePattern) continue;
 
@@ -202,6 +238,7 @@ module.exports = {
   TOOL_GROUPS,
   claimGuardEnabled,
   toolSucceeded,
+  detectMemorySuccessClaim,
   detectClaimMismatch,
   buildCorrectionInstruction,
   reconcileClaim,

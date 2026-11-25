@@ -742,7 +742,7 @@ async function main() {
     sourceType: 'user',
     userText: '我喜欢喝冰美式。',
   };
-  await memory.applyCandidate(
+  const oldMemory = await memory.applyCandidate(
     {
       content: '用户喜欢喝冰美式',
       type: 'preference',
@@ -765,11 +765,44 @@ async function main() {
       userText: '更正一下：我现在改喝燕麦拿铁了，不再喝冰美式。',
     }
   );
+  const correctedRows = memory.getMemories({ includeSuperseded: true });
+  // 更正目标是「当前生效且被否定的那条」，不绑定上一句写入的行：记忆库按实例
+  // 归属单一用户，前面若干轮的抽取结果会参与相似度匹配，绑定行号等于把用例
+  // 和用例顺序耦合。真正的不变量是：显式更正必须替代掉某条生效记忆，且更正
+  // 后被否定的事实不再以 active 形式留在库里。
+  const supersededRow = correctedRows.find(
+    item => item.id === correction.supersededId
+  );
+  const newActive = memory
+    .getMemories()
+    .find(item => item.status === 'active' && item.content.includes('燕麦拿铁'));
+  // 被否定的事实不得再以 active 形式留在库里（更正自身那条例外地：
+  // 它的正文按设计写明「不再喝冰美式」）。
+  const staleFactStillActive = memory
+    .getMemories()
+    .some(
+      item =>
+        item.id !== correction.id &&
+        item.status === 'active' &&
+        item.content.includes('冰美式')
+    );
+  // 被替代的原始行必须仍可追溯，不能被更正静默删除。
+  const originalRowTraceable = correctedRows.some(
+    item => item.id === oldMemory.id
+  );
   checkCase(
     'explicit_correction_temporary_marker',
-    correction.decision === 'reject' && correction.reason === 'temporary_state'
-      ? 'reject_temporary_state'
-      : `${correction.decision}_${correction.reason}`
+    correction.action === 'superseded' &&
+      supersededRow &&
+      supersededRow.status === 'superseded' &&
+      newActive &&
+      !staleFactStillActive &&
+      originalRowTraceable
+      ? 'superseded_active'
+      : `${correction.decision}_${correction.reason}`,
+    supersededRow
+      ? `superseded=${supersededRow.status} staleActive=${staleFactStillActive} traceable=${originalRowTraceable}`
+      : 'target_missing'
   );
 
   const temporary = await memory.applyCandidate(

@@ -19,7 +19,7 @@
     "memory_extraction_explicit_auxiliary_model": "explicit_model",
     "memory_extraction_reasoning_provider": "reasoning_json_extracted",
     "memory_extraction_transient_retry": "retried_once",
-    "explicit_correction_temporary_marker": "reject_temporary_state",
+    "explicit_correction_temporary_marker": "superseded_active",
     "temporary_preference_guard": "reject_temporary_state",
     "claim_guard_zero_result": "false_failure_claim",
     "protocol_marker_leak": "marker_retained",

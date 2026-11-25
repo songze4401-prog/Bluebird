@@ -262,6 +262,95 @@ describe('写入决策六类', { concurrency: 1 }, () => {
     assert.equal(memory.getMemories().length, 0);
   });
 
+  test('explicit correction：含“现在/不再”的更正优先于临时状态并 supersede', async () => {
+    const old = await memory.applyCandidate(
+      {
+        content: '用户喜欢喝冰美式',
+        type: 'preference',
+        keywords: ['咖啡', '冰美式'],
+        confidence: 0.95,
+        sourceQuote: '我喜欢喝冰美式',
+      },
+      USER
+    );
+    const corrected = await memory.applyCandidate(
+      {
+        content: '用户现在改喝燕麦拿铁，不再喝冰美式',
+        type: 'preference',
+        keywords: ['咖啡', '燕麦拿铁'],
+        confidence: 0.95,
+        sourceQuote: '我现在改喝燕麦拿铁了，不再喝冰美式',
+      },
+      {
+        ...USER,
+        userText: '更正一下：我现在改喝燕麦拿铁了，不再喝冰美式。',
+      }
+    );
+
+    assert.equal(corrected.decision, 'supersede');
+    assert.equal(corrected.written, true);
+    assert.equal(corrected.supersededId, old.id);
+    const all = memory.getMemories({ includeSuperseded: true });
+    assert.equal(all.find(item => item.id === old.id).status, 'superseded');
+    assert.ok(
+      memory.getMemories().some(
+        item => item.status === 'active' && item.content.includes('燕麦拿铁')
+      )
+    );
+  });
+
+  test('explicit correction：同关键词但不同属性不得误 supersede', async () => {
+    const work = await memory.applyCandidate(
+      {
+        content: '用户在上海工作',
+        type: 'fact',
+        keywords: ['工作', '上海'],
+        confidence: 0.95,
+        sourceQuote: '用户在上海工作',
+      },
+      USER
+    );
+    const residence = await memory.applyCandidate(
+      {
+        content: '用户住在上海，不再住北京',
+        type: 'fact',
+        keywords: ['居住', '上海', '北京'],
+        confidence: 0.95,
+        sourceQuote: '我现在住在上海，不再住北京',
+      },
+      {
+        ...USER,
+        userText: '更正一下：我现在住在上海，不再住北京。',
+      }
+    );
+
+    assert.equal(residence.decision, 'create');
+    assert.notEqual(residence.id, work.id);
+    assert.equal(
+      memory.getMemories({ includeSuperseded: true }).find(item => item.id === work.id).status,
+      'active'
+    );
+  });
+
+  test('explicit correction：心情类临时表达仍不得写成长期偏好', async () => {
+    const result = await memory.applyCandidate(
+      {
+        content: '用户现在心情不好',
+        type: 'preference',
+        keywords: ['心情'],
+        confidence: 0.95,
+        sourceQuote: '我现在心情不好',
+      },
+      {
+        ...USER,
+        userText: '更正一下：我现在心情不好。',
+      }
+    );
+
+    assert.equal(result.decision, 'reject');
+    assert.equal(result.reason, 'temporary_state');
+  });
+
   test('needs_confirmation：agent 低置信候选进入 pending，确认后才生效', async () => {
     const result = await memory.applyCandidate(
       {
