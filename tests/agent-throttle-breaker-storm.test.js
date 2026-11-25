@@ -371,7 +371,19 @@ test('e. 错误分类表与 model-adapter 对齐，未知码保守当瞬态', ()
   for (const transient of ['timeout', 'connection', 'server', 'rate_limit']) {
     assert.equal(breaker.classifyOutcome({ ok: false, errorCode: transient }), 'transient');
   }
-  for (const deterministic of ['auth', 'model', 'bad_request', 'not_configured', 'capability', 'cancelled']) {
+  for (const deterministic of [
+    'auth',
+    'model',
+    'bad_request',
+    'not_configured',
+    'provider_not_found',
+    'provider_disabled',
+    'model_not_found',
+    'model_disabled',
+    'empty_response',
+    'capability',
+    'cancelled',
+  ]) {
     assert.equal(breaker.classifyOutcome({ ok: false, errorCode: deterministic }), 'deterministic');
   }
   assert.equal(breaker.classifyOutcome({ ok: true }), 'ok');

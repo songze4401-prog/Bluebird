@@ -55,4 +55,44 @@ describe('streamChatRequest abort', () => {
     expect(FakeXHR.last?.aborted).toBe(true);
     expect(FakeXHR.last?.sent).toBe(true);
   });
+
+  it('SSE error 保留 code 与 HTTP 状态', async () => {
+    const promise = streamChatRequest(
+      { message: 'hi' },
+      { onDelta: () => {} }
+    );
+    const xhr = FakeXHR.last as FakeXHR;
+    xhr.status = 200;
+    xhr.responseText =
+      'data: {"type":"error","error":"模型不存在","code":"model_not_found"}\n\n';
+    xhr.onload?.();
+
+    await expect(promise).resolves.toEqual({
+      kind: 'error',
+      message: '模型不存在',
+      code: 'model_not_found',
+      status: 200,
+    });
+  });
+
+  it('非 200 JSON 错误保留 status 与 code', async () => {
+    const promise = streamChatRequest(
+      { message: 'hi' },
+      { onDelta: () => {} }
+    );
+    const xhr = FakeXHR.last as FakeXHR;
+    xhr.status = 400;
+    xhr.responseText = JSON.stringify({
+      error: '消息不能为空',
+      code: 'invalid_message',
+    });
+    xhr.onload?.();
+
+    await expect(promise).resolves.toEqual({
+      kind: 'error',
+      message: '消息不能为空',
+      code: 'invalid_message',
+      status: 400,
+    });
+  });
 });

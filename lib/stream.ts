@@ -19,7 +19,7 @@ export type StreamOutcome =
   | { kind: 'fallback' }
   // 用户主动停止：不是错误，调用方保留已生成的部分正文并清理生成态
   | { kind: 'aborted' }
-  | { kind: 'error'; message: string };
+  | { kind: 'error'; message: string; code?: string | null; status?: number };
 
 // 服务端下发的 SSE 事件（判别联合，逐条对照 server/index.js 与 agent-runtime.js）
 // 旧客户端忽略未知 type 即可；这里把已知的六种显式列出，
@@ -163,6 +163,8 @@ export function streamChatRequest(
             typeof event.error === 'string' && event.error
               ? event.error
               : '连接Bluebird失败了，再试一次。',
+          code: typeof event.code === 'string' ? event.code : null,
+          status: 200,
         });
       }
     });
@@ -205,17 +207,21 @@ export function streamChatRequest(
         // 校验类错误（400/401/429/500）对非流式同样成立，回退只会重现
         // 同样的错误，直接报出来更符合预期
         let message = '连接Bluebird失败了，再试一次。';
+        let code: string | null = null;
 
         try {
           const data = JSON.parse(xhr.responseText || '');
           if (typeof data.error === 'string' && data.error) {
             message = data.error;
           }
+          if (typeof data.code === 'string' && data.code) {
+            code = data.code;
+          }
         } catch {
           /* 非 JSON 错误体，用默认文案 */
         }
 
-        finish({ kind: 'error', message });
+        finish({ kind: 'error', message, code, status: xhr.status });
         return;
       }
 

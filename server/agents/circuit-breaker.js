@@ -33,7 +33,19 @@ const BREAKER_FILE = path.join(AGENTS_DIR, 'circuit-breaker.json');
 //   瞬态（计入故障率）：连接、超时、服务商 5xx、服务商限流
 //   确定性（不计故障率）：密钥被拒、模型/请求格式被拒、未配置、能力不支持、客户端取消
 const TRANSIENT_KINDS = Object.freeze(['timeout', 'connection', 'server', 'rate_limit']);
-const DETERMINISTIC_KINDS = Object.freeze(['auth', 'model', 'bad_request', 'not_configured', 'capability', 'cancelled']);
+const DETERMINISTIC_KINDS = Object.freeze([
+  'auth',
+  'model',
+  'bad_request',
+  'not_configured',
+  'provider_not_found',
+  'provider_disabled',
+  'model_not_found',
+  'model_disabled',
+  'empty_response',
+  'capability',
+  'cancelled',
+]);
 
 // 工具与 Worker 两个域的码表。取"未列出的码按确定性处理"这一保守方向：
 // 这两个域的码空间是开放的（工具各自报错、任务有恢复态），

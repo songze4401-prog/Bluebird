@@ -22,6 +22,12 @@ export type ModelCallErrorCode =
   | 'model' // 模型侧业务错误
   | 'bad_request' // 请求格式被拒
   | 'not_configured' // 没有可用密钥/服务商
+  | 'provider_not_found' // 服务商不存在
+  | 'provider_disabled' // 服务商已禁用
+  | 'model_not_found' // 模型不存在
+  | 'model_disabled' // 模型已禁用
+  | 'empty_response' // 模型未返回有效正文
+  | 'cancelled' // 客户端取消
   | 'capability'; // 模型未声明支持该能力
 
 // 其余出现在响应体里的 code（连接测试的 endpoint_missing、配置损坏等）
@@ -31,6 +37,7 @@ export type ApiErrorCode =
   | 'config_corrupted'
   | 'not_found'
   | 'invalid_request'
+  | 'invalid_message'
   // 允许未来新增 code，同时保留上面这些的补全
   | (string & {});
 
@@ -68,6 +75,12 @@ export class ApiError extends Error {
 const ACTION_HINTS: Partial<Record<string, string>> = {
   auth: '请到「模型与 API」检查该服务商的 API Key 是否有效。',
   not_configured: '请到「模型与 API」配置可用的服务商与密钥。',
+  provider_not_found: '请到「模型与 API」选择已存在的服务商。',
+  provider_disabled: '该服务商已禁用，请在「模型与 API」中启用后重试。',
+  model_not_found: '该模型不存在，请在「模型与 API」中重新选择。',
+  model_disabled: '该模型已禁用，请在「模型与 API」中启用后重试。',
+  empty_response: '模型未返回有效正文，请重试或切换模型。',
+  invalid_message: '请输入消息后再发送。',
   capability: '当前模型不支持这项能力，可在「模型与 API」切换模型后再试。',
   rate_limit: '服务商侧限流了，稍等片刻再试。',
   endpoint_missing: '该地址没有 /models 端点，请确认 Base URL 是否正确。',

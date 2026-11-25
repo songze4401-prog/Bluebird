@@ -12,6 +12,7 @@ const DATA_DIR = path.join(TMP_ROOT, 'data');
 const TOKEN = 'real-regression-test-token';
 const USER_ID = 'local-owner';
 const MODEL_ID = 'regression-model';
+const MODEL_ID_NO_REASONING = 'regression-model-no-reasoning';
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 process.env.BLUEBIRD_DATA_DIR = DATA_DIR;
@@ -53,6 +54,7 @@ const state = {
   calls: [],
   extractionModels: [],
   agentCalls: 0,
+  slowStreamClosed: false,
 };
 
 function json(res, status, body) {
@@ -168,6 +170,77 @@ const mockServer = http.createServer((req, res) => {
       return;
     }
 
+    if (state.mode === 'reasoning_then_content_stream') {
+      sse(res, [
+        {
+          model: body.model,
+          choices: [
+            { index: 0, delta: { reasoning_content: '内部推理，不应发送。' }, finish_reason: null },
+          ],
+        },
+        {
+          model: body.model,
+          choices: [
+            { index: 0, delta: { content: '[calm] 正式答案。' }, finish_reason: null },
+          ],
+        },
+        { model: body.model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+      ]);
+      return;
+    }
+
+    if (state.mode === 'whitespace_nonstream') {
+      json(res, 200, {
+        model: body.model,
+        choices: [{ message: { role: 'assistant', content: '   \n  ' } }],
+      });
+      return;
+    }
+
+    if (state.mode === 'slow_stream') {
+      state.slowStreamClosed = false;
+      res.on('close', () => {
+        if (!res.writableEnded) state.slowStreamClosed = true;
+      });
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+      res.write(
+        `data: ${JSON.stringify({
+          model: body.model,
+          choices: [{ index: 0, delta: { content: '[calm] 首段。' }, finish_reason: null }],
+        })}\n\n`
+      );
+      const timer = setTimeout(() => {
+        res.write(
+          `data: ${JSON.stringify({
+            model: body.model,
+            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          })}\n\n`
+        );
+        res.end('data: [DONE]\n\n');
+      }, 5000);
+      res.on('close', () => clearTimeout(timer));
+      return;
+    }
+
+    if (state.mode === 'empty_nonstream') {
+      json(res, 200, {
+        model: body.model,
+        choices: [{ message: { role: 'assistant', content: '' } }],
+      });
+      return;
+    }
+
+    if (state.mode === 'empty_stream') {
+      sse(res, [
+        { model: body.model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
+      ]);
+      return;
+    }
+
     if (state.mode === 'agent_stream') {
       state.agentCalls += 1;
       if (body.tools && body.tools.length) {
@@ -270,6 +343,49 @@ async function req(urlPath, { method = 'GET', body, auth = true } = {}) {
   return { status: res.status, text, json: jsonBody };
 }
 
+async function abortStreamAfterFirstDelta(body) {
+  const controller = new AbortController();
+  const res = await fetch(baseUrl + '/chat/stream', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+    signal: controller.signal,
+  });
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const events = [];
+  let buffer = '';
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary >= 0) {
+        const block = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const parsed = parseSse(block);
+        events.push(...parsed);
+        if (parsed.some(event => event.type === 'delta')) {
+          controller.abort();
+        }
+        boundary = buffer.indexOf('\n\n');
+      }
+    }
+  } catch (error) {
+    if (!(error && error.name === 'AbortError')) throw error;
+  }
+  try {
+    await reader.cancel();
+  } catch (_) {
+    // 客户端中止后 reader 可能已经关闭。
+  }
+  return events;
+}
+
 function checkCase(id, observed, detail = '') {
   observedResults[id] = observed;
   const expected = BASELINE.cases[id];
@@ -321,7 +437,12 @@ async function main() {
         {
           id: MODEL_ID,
           name: 'Regression Model',
-          capabilities: { tools: true, vision: false },
+          capabilities: { tools: true, vision: false, reasoning: true },
+        },
+        {
+          id: MODEL_ID_NO_REASONING,
+          name: 'Regression Model Without Reasoning',
+          capabilities: { tools: true, vision: false, reasoning: false },
         },
       ],
     },
@@ -352,29 +473,109 @@ async function main() {
   });
   checkCase(
     'reasoning_only_nonstream',
-    reasoning.status === 500 &&
-      serverErrors.some(line => line.includes('模型没有返回有效内容'))
-      ? 'http_500_empty_content'
+    reasoning.status === 200 &&
+      reasoning.json.reply &&
+      reasoning.json.reply.includes('这是推理模型答案')
+      ? 'http_200_reasoning_fallback'
       : `http_${reasoning.status}`,
     reasoning.text.slice(0, 160)
   );
 
   state.mode = 'reasoning_stream';
+  process.env.BLUEBIRD_AGENT_TOOLS = '0';
   const reasoningStream = await req('/chat/stream', {
     method: 'POST',
     body: { message: '你好', sessionId, providerId, modelId: MODEL_ID },
   });
   const reasoningEvents = parseSse(reasoningStream.text);
   const reasoningError = reasoningEvents.find(event => event.type === 'error');
+  const reasoningDelta = reasoningEvents
+    .filter(event => event.type === 'delta')
+    .map(event => event.content)
+    .join('');
   checkCase(
     'reasoning_only_stream',
-    reasoningError && reasoningError.error === '模型没有返回有效内容' && !reasoningError.code
-      ? 'sse_error_without_code'
+    !reasoningError && reasoningDelta.includes('这是推理模型答案')
+      ? 'sse_reasoning_fallback'
       : reasoningError
         ? `sse_error_${reasoningError.code || 'without_code'}`
-        : 'no_sse_error',
+        : 'no_reasoning_delta',
     reasoningStream.text.slice(0, 200)
   );
+
+  state.mode = 'reasoning_then_content_stream';
+  const mixedReasoning = await req('/chat/stream', {
+    method: 'POST',
+    body: { message: '你好', sessionId, providerId, modelId: MODEL_ID },
+  });
+  const mixedEvents = parseSse(mixedReasoning.text);
+  const mixedDelta = mixedEvents
+    .filter(event => event.type === 'delta')
+    .map(event => event.content)
+    .join('');
+  checkCase(
+    'reasoning_then_content_stream',
+    mixedDelta.includes('正式答案') && !mixedDelta.includes('内部推理')
+      ? 'formal_content_only'
+      : 'reasoning_leaked',
+    mixedDelta
+  );
+
+  state.mode = 'reasoning_nonstream';
+  const reasoningDisabled = await req('/chat', {
+    method: 'POST',
+    body: { message: '你好', sessionId, providerId, modelId: MODEL_ID_NO_REASONING },
+  });
+  checkCase(
+    'reasoning_capability_disabled',
+    reasoningDisabled.status === 502 && reasoningDisabled.json.code === 'empty_response'
+      ? 'http_502_empty_response'
+      : `http_${reasoningDisabled.status}_${reasoningDisabled.json.code || 'no_code'}`,
+    reasoningDisabled.text.slice(0, 160)
+  );
+
+  state.mode = 'whitespace_nonstream';
+  const whitespace = await req('/chat', {
+    method: 'POST',
+    body: { message: '你好', sessionId, providerId, modelId: MODEL_ID },
+  });
+  checkCase(
+    'whitespace_response_nonstream',
+    whitespace.status === 502 && whitespace.json.code === 'empty_response'
+      ? 'http_502_empty_response'
+      : `http_${whitespace.status}_${whitespace.json.code || 'no_code'}`,
+    whitespace.text.slice(0, 160)
+  );
+
+  state.mode = 'empty_nonstream';
+  const emptyResponse = await req('/chat', {
+    method: 'POST',
+    body: { message: '你好', sessionId, providerId, modelId: MODEL_ID },
+  });
+  checkCase(
+    'empty_response_nonstream',
+    emptyResponse.status === 502 && emptyResponse.json.code === 'empty_response'
+      ? 'http_502_empty_response'
+      : `http_${emptyResponse.status}_${emptyResponse.json.code || 'no_code'}`,
+    emptyResponse.text.slice(0, 160)
+  );
+
+  state.mode = 'empty_stream';
+  const emptyStream = await req('/chat/stream', {
+    method: 'POST',
+    body: { message: '你好', sessionId, providerId, modelId: MODEL_ID },
+  });
+  const emptyStreamError = parseSse(emptyStream.text).find(event => event.type === 'error');
+  checkCase(
+    'empty_response_stream',
+    emptyStreamError && emptyStreamError.code === 'empty_response'
+      ? 'sse_error_empty_response'
+      : emptyStreamError
+        ? `sse_error_${emptyStreamError.code || 'without_code'}`
+        : 'no_sse_error',
+    emptyStream.text.slice(0, 200)
+  );
+  process.env.BLUEBIRD_AGENT_TOOLS = '1';
 
   state.mode = 'normal';
   const unknown = await req('/chat', {
@@ -383,8 +584,8 @@ async function main() {
   });
   checkCase(
     'unknown_model',
-    unknown.status === 500 && unknown.json.code === 'not_configured'
-      ? 'http_500_not_configured'
+    unknown.status === 400 && unknown.json.code === 'model_not_found'
+      ? 'http_400_model_not_found'
       : `http_${unknown.status}_${unknown.json.code || 'no_code'}`,
     unknown.text.slice(0, 160)
   );
@@ -395,8 +596,8 @@ async function main() {
   });
   checkCase(
     'empty_message',
-    empty.status === 400 && empty.json.error === '消息不能为空' && !empty.json.code
-      ? 'http_400_without_code'
+    empty.status === 400 && empty.json.error === '消息不能为空' && empty.json.code === 'invalid_message'
+      ? 'http_400_invalid_message'
       : `http_${empty.status}_${empty.json.code || 'no_code'}`,
     empty.text.slice(0, 160)
   );
@@ -529,20 +730,22 @@ async function main() {
   );
   await new Promise(resolve => setTimeout(resolve, 350));
 
-  const indexSource = fs.readFileSync(path.join(SERVER, 'index.js'), 'utf8');
-  const streamStart = indexSource.indexOf('const stream = await createChatCompletion({');
-  const streamEnd = indexSource.indexOf('// 流式 usage', streamStart);
-  const ordinaryStreamBlock =
-    streamStart >= 0 && streamEnd > streamStart
-      ? indexSource.slice(streamStart, streamEnd)
-      : '';
+  state.mode = 'slow_stream';
+  process.env.BLUEBIRD_AGENT_TOOLS = '0';
+  const cancelledEvents = await abortStreamAfterFirstDelta({
+    message: '取消测试',
+    sessionId,
+    providerId,
+    modelId: MODEL_ID,
+  });
+  await waitFor(() => state.slowStreamClosed, 2000, 25);
+  process.env.BLUEBIRD_AGENT_TOOLS = '1';
   checkCase(
     'ordinary_stream_disconnect_signal',
-    !ordinaryStreamBlock
-      ? 'anchor_missing'
-      : ordinaryStreamBlock.includes('signal:')
-        ? 'signal_passed'
-        : 'signal_not_passed'
+    !cancelledEvents.some(event => event.type === 'done') && state.slowStreamClosed
+      ? 'runtime_cancelled'
+      : 'cancel_not_observed',
+    cancelledEvents.map(event => event.type).join(',')
   );
 
   const deliverySource = fs.readFileSync(

@@ -862,8 +862,8 @@ async function main() {
     body: { message: 'x', sessionId, providerId: 'no-such' },
   });
   check(
-    '指定不存在服务商 → 结构化错误（code not_configured）',
-    badProvider.status === 500 && badProvider.json && badProvider.json.code === 'not_configured',
+    '指定不存在服务商 → 400 provider_not_found',
+    badProvider.status === 400 && badProvider.json && badProvider.json.code === 'provider_not_found',
     JSON.stringify(badProvider.json)
   );
 
@@ -877,8 +877,8 @@ async function main() {
     body: { message: 'x', sessionId, providerId: chatProvider.id, modelId: 'mock-model' },
   });
   check(
-    '指定已禁用服务商 → 结构化错误',
-    disabledCall.status === 500 && disabledCall.json && disabledCall.json.code === 'not_configured'
+    '指定已禁用服务商 → 503 provider_disabled',
+    disabledCall.status === 503 && disabledCall.json && disabledCall.json.code === 'provider_disabled'
   );
   await req(`/model-providers/${chatProvider.id}/enabled`, {
     method: 'POST',
@@ -1048,10 +1048,10 @@ async function main() {
     },
   });
   check(
-    '无效模型 ID → 结构化错误（not_configured）',
-    badModel.status === 500 &&
+    '无效模型 ID → 400 model_not_found',
+    badModel.status === 400 &&
       badModel.json &&
-      badModel.json.code === 'not_configured',
+      badModel.json.code === 'model_not_found',
     JSON.stringify(badModel.json)
   );
   check(

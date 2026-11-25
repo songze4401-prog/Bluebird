@@ -286,7 +286,7 @@ function normalizeModel(m, previous = null) {
 
   return {
     id: m.id.slice(0, MAX_MODEL_ID_LEN),
-    // PATCH 只提交 id 时必须保留已有名称/能力，不能静默把 tools/vision 关掉。
+    // PATCH 只提交 id 时必须保留已有名称/能力，不能静默把 tools/vision/reasoning 关掉。
     name:
       typeof m.name === 'string'
         ? m.name.slice(0, MAX_NAME_LEN)
@@ -300,8 +300,12 @@ function normalizeModel(m, previous = null) {
           ? previous.enabled !== false
           : true,
     // 只接受布尔能力；缺省 = 未知 = 不支持（调用方按不支持处理，不虚报）
-    // tools：Tool Calling 支持。自定义服务商必须显式声明 true 才会启用
-    capabilities: { vision: caps.vision === true, tools: caps.tools === true },
+    // tools：Tool Calling 支持。reasoning：允许 reasoning_content 作为空 content 的兜底。
+    capabilities: {
+      vision: caps.vision === true,
+      tools: caps.tools === true,
+      reasoning: caps.reasoning === true,
+    },
   };
 }
 
