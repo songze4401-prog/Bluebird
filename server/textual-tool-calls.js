@@ -217,21 +217,142 @@ function parseTextualToolCalls(content) {
   return { text: text.trim(), calls };
 }
 
+// 模型偶尔把内部提示词里的标记原样 echoed 成「[memory_remember 候选]」这类
+// 方括号短语。只按已知工具名 + 已知状态词匹配，普通方括号（markdown 链接、
+// [重要] 之类）一律不动。
+const TOOL_LABEL = 'tool_' + 'call';
+const KNOWN_TOOL_NAMES = [
+  'memory_remember',
+  'memory_search',
+  'knowledge_search',
+  'workspace_read',
+  'workspace_write',
+  'workspace_list',
+  'delegate_to_bot',
+  'load_skill',
+  'web_search',
+  'web_fetch',
+].join('|');
+const INTERNAL_MARKER_RE = new RegExp(
+  `\\[\\s*(?:${KNOWN_TOOL_NAMES})\\s*(?:候选|待确认|已提交|已派发|已调用|调用|派发|结果)\\s*\\]`,
+  'gi'
+);
+// 完整块与独立标签都清掉之后，仍然残留的开括标记只可能是残缺/未闭合形态。
+// 真机观测到的截断形态连 '>' 都没有（如 "<tool_callmemory_remember"），因此
+// 这里不以 '>' 作为终止条件。
+const RESIDUAL_TOOL_CALL_RE = new RegExp(`<${TOOL_LABEL}`, 'i');
+// 独立的协议标签（带 '>' 的开/闭括），在截断处理之后兜底清除。
+const STANDALONE_TOOL_TAG_RE = new RegExp(`</?${TOOL_LABEL}s?\\b[^<>]*>`, 'gi');
+const RESIDUAL_DSML_RE = new RegExp(`<${BAR}${BAR}DSML${BAR}`, 'i');
+
+// 代码示例不是协议：围栏块与行内代码原样保留，只在其余文本上做清洗。
+const PROTECTED_SEGMENT_RE = /(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)/g;
+
+function isFenceDelimiter(line) {
+  return /^\s*(?:```|~~~)/.test(line);
+}
+
 /**
- * 交付前兜底：无论块能否解析，都不把工具协议标记原样发给用户。
- * 只作用于协议块，不动普通正文。
+ * 把文本切成「代码 / 非代码」两类片段。
+ * 围栏块按整块保留（包含未闭合到文本末尾的情况），行内代码按 span 保留。
  */
-function stripToolProtocolText(content) {
-  if (typeof content !== 'string') return content;
-  return content
+function splitProtected(text) {
+  const lines = String(text).split('\n');
+  const segments = [];
+  let buffer = [];
+  let fence = null;
+
+  const flushProse = () => {
+    if (!buffer.length) return;
+    const prose = buffer.join('\n');
+    buffer = [];
+    for (const part of prose.split(PROTECTED_SEGMENT_RE)) {
+      if (!part) continue;
+      if (part.startsWith('`')) segments.push({ code: true, text: part });
+      else segments.push({ code: false, text: part });
+    }
+  };
+
+  for (const line of lines) {
+    if (fence) {
+      segments.push({ code: true, text: line });
+      if (isFenceDelimiter(line) && line.trim() !== fence) {
+        fence = null;
+      }
+      continue;
+    }
+    if (isFenceDelimiter(line)) {
+      flushProse();
+      fence = line.trim().slice(0, 3);
+      segments.push({ code: true, text: line });
+      continue;
+    }
+    buffer.push(line);
+  }
+  flushProse();
+  return segments;
+}
+
+function cleanProseSegment(text) {
+  let out = text
     .replace(DSML_ENVELOPE_RE, ' ')
     .replace(TOOL_CALLS_BLOCK_RE, ' ')
-    .replace(TOOL_CALL_BLOCK_RE, ' ')
-    .replace(/<\/?tool_calls?\b[^>]*>/gi, ' ')
+    .replace(TOOL_CALL_BLOCK_RE, ' ');
+
+  // 完整块已被摘走，剩下的开括标记只可能是残缺/未闭合形态：从最早出现处截到段尾。
+  // 说明性散文里的协议写法应写在代码块内（已保护），因此散文中的残留开括一定是
+  // 模型截断的调用，而不是用户该看到的内容。
+  const residual = [RESIDUAL_TOOL_CALL_RE.exec(out), RESIDUAL_DSML_RE.exec(out)]
+    .filter(Boolean)
+    .sort((a, b) => a.index - b.index)[0];
+  if (residual) out = out.slice(0, residual.index);
+
+  return out.replace(STANDALONE_TOOL_TAG_RE, ' ').replace(INTERNAL_MARKER_RE, ' ');
+}
+
+function tidyWhitespace(text) {
+  return text
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
 
-module.exports = { parseTextualToolCalls, stripToolProtocolText };
+/**
+ * 交付前兜底：无论块能否解析，都不把工具协议标记原样发给用户。
+ * 只作用于协议块与残缺协议文本，不动普通正文，也不动代码示例。
+ */
+function stripToolProtocolText(content) {
+  if (typeof content !== 'string') return content;
+  return tidyWhitespace(
+    splitProtected(content)
+      .map(segment => (segment.code ? segment.text : cleanProseSegment(segment.text)))
+      .join('\n')
+  );
+}
+
+/**
+ * 这条文本是否含工具协议形态（完整块、独立标签、残缺开括、内部候选标记）。
+ * 实时回复与历史读取用同一个探测函数决定是否走清洗，避免两条路径口径漂移。
+ */
+function looksLikeToolProtocol(content) {
+  if (typeof content !== 'string' || !content) return false;
+  // 探测用无 g 标志的正则：带 g 的正则会在 .test() 之间保留 lastIndex，
+  // 让同一段文本第二次探测得到不同结果。
+  const internal = new RegExp(INTERNAL_MARKER_RE.source, 'i');
+  const envelope = new RegExp(`${BAR}${BAR}DSML${BAR}`, 'i');
+  return splitProtected(content).some(
+    segment =>
+      !segment.code &&
+      (TOOL_CALL_OPEN_RE.test(segment.text) ||
+        RESIDUAL_TOOL_CALL_RE.test(segment.text) ||
+        envelope.test(segment.text) ||
+        internal.test(segment.text))
+  );
+}
+
+module.exports = {
+  parseTextualToolCalls,
+  stripToolProtocolText,
+  looksLikeToolProtocol,
+};

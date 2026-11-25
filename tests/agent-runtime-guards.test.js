@@ -585,3 +585,150 @@ test('委派意图识别：必须同时出现动作与受理方，否定与词�
   assert.equal(requiresDelegation(null), false);
   assert.equal(requiresDelegation(undefined), false);
 });
+
+// ---- M 组：交付前协议文本清洗（第 8 步） ----
+const { looksLikeToolProtocol } = require(path.join(SERVER, 'textual-tool-calls'));
+
+function nl(parts) {
+  return parts.join('\n');
+}
+
+test('M1: 完整的 <tool_call> 块被剥离，前后正文保留', () => {
+  const input = nl([
+    '好的，我记一下。',
+    '<tool_call>memory_remember',
+    '{"content":"林舟喜欢 Python"}',
+    '</tool_call>',
+  ]);
+  const out = stripToolProtocolText(input);
+  assert.equal(looksLikeToolProtocol(input), true);
+  assert.ok(!out.includes('tool_call'), out);
+  assert.ok(!out.includes('林舟喜欢 Python'), out);
+  assert.ok(out.includes('好的，我记一下。'), out);
+});
+
+test('M2: 未闭合的 <tool_call> 尾部被剥离', () => {
+  const input = nl([
+    '收到，我来处理。',
+    '<tool_call>memory_remember',
+    '{"content":"半截调用',
+  ]);
+  const out = stripToolProtocolText(input);
+  assert.equal(looksLikeToolProtocol(input), true);
+  assert.ok(!out.includes('tool_call'), out);
+  assert.ok(!out.includes('半截调用'), out);
+  assert.ok(out.includes('收到，我来处理。'), out);
+});
+
+test('M3: 未闭合的 DSML 封装尾部被剥离', () => {
+  const open = '<｜｜DSML｜｜ calls>';
+  const invoke = '<｜｜DSML｜｜ invoke name="memory_remember">';
+  const input = nl(['我这就记。', open, invoke, 'parameter name="content"']);
+  const out = stripToolProtocolText(input);
+  assert.equal(looksLikeToolProtocol(input), true);
+  assert.ok(!out.includes('DSML'), out);
+  assert.ok(out.includes('我这就记。'), out);
+});
+
+test('M4: 内部候选标记被剥离，普通方括号与 markdown 链接不误伤', () => {
+  const input = nl([
+    '[memory_remember 候选] 林舟喜欢 Python。',
+    '参考 [年糕](/img/niangao.png) 和 [重要] 提醒。',
+  ]);
+  const out = stripToolProtocolText(input);
+  assert.ok(!out.includes('memory_remember 候选'), out);
+  assert.ok(out.includes('林舟喜欢 Python。'), out);
+  assert.ok(out.includes('[年糕](/img/niangao.png)'), out);
+  assert.ok(out.includes('[重要] 提醒。'), out);
+});
+
+const FENCE = '`'.repeat(3);
+const CALL_OPEN = '<tool_' + 'call' + '>';
+const CALL_BARE = '<tool_' + 'call';
+const NL = '\n';
+
+test('M5: 代码示例里的协议文本原样保留，不当成协议剥离', () => {
+  const fenced = [
+    '文档里这样写：',
+    FENCE,
+    '  ' + CALL_BARE + 'memory_remember',
+    '  {"content":"示例"}',
+    FENCE,
+    '以上。',
+  ].join(NL);
+  const out = stripToolProtocolText(fenced);
+  assert.ok(out.includes(CALL_BARE + 'memory_remember'), `围栏代码被误删：${out}`);
+  assert.ok(out.includes('以上。'), out);
+
+  const inline = `行内写法 ${'`'}${CALL_BARE}...${'`'} 只是说明。`;
+  const inlineOut = stripToolProtocolText(inline);
+  assert.ok(inlineOut.includes(`${'`'}${CALL_BARE}...${'`'}`), `行内代码被误删：${inlineOut}`);
+  assert.ok(inlineOut.includes('只是说明。'), inlineOut);
+});
+
+test('M6: 普通尖括号、数学符号与标签说明不被误删', () => {
+  const prose = '当 a<b 且 n>=1 时，容器 <div> 需要闭合；另有 1<2 的比较。';
+  const out = stripToolProtocolText(prose);
+  assert.equal(out, prose);
+});
+
+test('M7: 整条只有协议文本时清洗为空，由调用方给可读兜底', () => {
+  const only = [CALL_BARE + 'memory_remember', '{"content":"x"}'].join(NL);
+  assert.equal(stripToolProtocolText(only), '');
+  assert.equal(looksLikeToolProtocol(only), true);
+  assert.equal(looksLikeToolProtocol('今天天气不错'), false);
+  assert.equal(looksLikeToolProtocol(CALL_OPEN), true);
+});
+
+test('M8: 模型调用错误码前后端集合并集一致，且每个都有中文文案', () => {
+  const adapterSource = fs.readFileSync(
+    path.join(SERVER, 'model-adapter.js'),
+    'utf8'
+  );
+  const statusBlock = /const ERROR_STATUS = Object\.freeze\(\{([\s\S]*?)\n\}\);/.exec(
+    adapterSource
+  );
+  const messageBlock = /const ERROR_MESSAGE = Object\.freeze\(\{([\s\S]*?)\n\}\);/.exec(
+    adapterSource
+  );
+  assert.ok(statusBlock && messageBlock, 'model-adapter 错误码表锚点缺失');
+  const serverCodes = [...statusBlock[1].matchAll(/^\s*([a-z_]+):\s*\d+,/gm)].map(m => m[1]);
+  const messageCodes = [...messageBlock[1].matchAll(/^\s*([a-z_]+):/gm)].map(m => m[1]);
+  assert.deepEqual(
+    serverCodes.slice().sort(),
+    messageCodes.slice().sort(),
+    '每个错误码都要有服务端中文文案，不能只有状态码'
+  );
+
+  const webSource = fs.readFileSync(
+    path.join(SERVER, '..', 'lib', 'api', 'errors.ts'),
+    'utf8'
+  );
+  const unionBlock = /export type ModelCallErrorCode =([\s\S]*?);/.exec(webSource);
+  assert.ok(unionBlock, 'lib/api/errors.ts 的 ModelCallErrorCode 锚点缺失');
+  const clientCodes = [...unionBlock[1].matchAll(/'([a-z_]+)'/g)].map(m => m[1]);
+  assert.deepEqual(
+    serverCodes.slice().sort(),
+    clientCodes.slice().sort(),
+    `前后端错误码集合不一致：server=${serverCodes.join(',')} client=${clientCodes.join(',')}`
+  );
+
+  const apiUnion = /export type ApiErrorCode =([\s\S]*?);/.exec(webSource);
+  assert.ok(apiUnion, 'lib/api/errors.ts 的 ApiErrorCode 锚点缺失');
+  const nonModelCodes = [...apiUnion[1].matchAll(/'([a-z_]+)'/g)].map(m => m[1]);
+  const allClientCodes = new Set([...clientCodes, ...nonModelCodes]);
+
+  const hintBlock = /const ACTION_HINTS: Partial<Record<string, string>> = \{([\s\S]*?)\n\};/.exec(
+    webSource
+  );
+  assert.ok(hintBlock, 'ACTION_HINTS 锚点缺失');
+  const hintCodes = [...hintBlock[1].matchAll(/^\s*([a-z_]+):/gm)].map(m => m[1]);
+  for (const code of hintCodes) {
+    assert.ok(allClientCodes.has(code), `提示表引用了未声明的错误码：${code}`);
+  }
+  // 用户能立刻行动的三类必须有提示文案，不能只在控制台里出现。
+  for (const code of ['auth', 'model_not_found', 'cancelled']) {
+    assert.ok(serverCodes.includes(code), `服务端缺少错误码：${code}`);
+  }
+  assert.ok(hintCodes.includes('auth') && hintCodes.includes('model_not_found'));
+});
