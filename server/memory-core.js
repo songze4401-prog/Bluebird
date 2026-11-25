@@ -4,7 +4,8 @@
 // memory-feedback 及后续生命周期簇）各自造容器函数与键名，键面随刀数
 // 漂移，wrong-source import 与 TDZ 复发面线性上升（R3a 一枪双中实证）。
 // 本模块把它们收拢为唯一容器与键名约定：
-// - memory.js 是唯一注入方（全部消费方都模块经 memory.js 加载）；
+// - memory.js 是基础依赖注入方；传输层可再注入模型适配器等外部能力。
+//   所有消费方都经 memory.js 加载，容器按键合并，后续注入不覆盖已有状态。
 // - 键分三域：状态读写（getMemoryList/setMemoryList/getMemories/
 //   getPendingMemories/memoryEnabled）、写基础设施（enqueueWrite/
 //   saveMemories/commitWithTombstones/refreshDerivedMemoryIndex/
@@ -13,7 +14,7 @@
 // - 本模块零依赖、零状态（容器本体只有一个引用槽），不参与加载圈。
 let core = null;
 function injectMemoryCore(deps) {
-  core = deps;
+  core = { ...(core || {}), ...deps };
 }
 function memoryCore() {
   if (!core) {

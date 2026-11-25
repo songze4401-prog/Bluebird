@@ -421,8 +421,8 @@ const {
   classifyError,
   testProviderConnection,
   invalidateProviderCache,
-  getMemoryClient,
 } = require('./model-adapter');
+require('./memory-core').injectMemoryCore({ createChatCompletion });
 
 // Agent 工作策略：独立于人格，服务端策略文件为唯一事实来源。
 const {
@@ -1448,8 +1448,8 @@ function completeChatTurn({
 }
 
 // 长期记忆提取：响应完成后异步进行，失败只记日志。
-// client 取自适配层：固定内置 DeepSeek（extractMemory 内部硬编码
-// deepseek-chat，与改造前逐字节一致）；没有任何可用服务商时跳过。
+// 默认跟随本次请求的 Provider/模型；也可成对配置 BLUEBIRD_MEMORY_PROVIDER_ID
+// 与 BLUEBIRD_MEMORY_MODEL_ID 作为固定辅助模型。抽取统一走 model-adapter。
 function scheduleMemoryExtraction(
   userText,
   sessionId,
@@ -1457,8 +1457,23 @@ function scheduleMemoryExtraction(
   options = {}
 ) {
   setImmediate(() => {
-    const memoryClient = getMemoryClient();
-    if (!memoryClient) return; // 未配置任何模型 key，跳过记忆提取
+    const explicitProvider = String(process.env.BLUEBIRD_MEMORY_PROVIDER_ID || '').trim();
+    const explicitModel = String(process.env.BLUEBIRD_MEMORY_MODEL_ID || '').trim();
+    if (Boolean(explicitProvider) !== Boolean(explicitModel)) {
+      console.error(
+        '[memory-extraction] BLUEBIRD_MEMORY_PROVIDER_ID 与 BLUEBIRD_MEMORY_MODEL_ID 必须成对配置'
+      );
+      monitoring.recordMemoryWrite({
+        action: 'none',
+        status: 'skipped',
+        written: false,
+        reason: 'invalid_auxiliary_config',
+        channel: 'extraction',
+      });
+      return;
+    }
+    const providerId = explicitProvider || options.providerId || null;
+    const modelId = explicitModel || options.modelId || null;
     // 纯发图（无文字）时给记忆提取一个占位文本，避免空串进提取器
     const memoryText =
       userText ||
@@ -1470,7 +1485,9 @@ function scheduleMemoryExtraction(
     // 提取是响应完成后的后台动作，返回值没人接就变成黑洞：
     // 这里把结论（写入/合并/更正/拒写短码）落成结构化事件，
     // 具体原因短码由 memory.js 的 reportSkip 与 writeOutcomes 记录。
-    processMemory(memoryClient, memoryText, sessionId, {
+    processMemory(null, memoryText, sessionId, {
+      providerId,
+      modelId,
       messageId: options.messageId || null,
       // 可信用户身份要一路带到 applyCandidate：否则写侧仍按会话级判定，
       // 新会话里的"改口"会被拒成 unauthorized_target。
@@ -1923,6 +1940,8 @@ app.post('/chat', requireAuth, async (req, res) => {
     });
 
     scheduleMemoryExtraction(ctx.userText, ctx.sessionId, ctx.attachments, {
+      providerId: ctx.providerId,
+      modelId: ctx.modelId,
       messageId: result.userMessageId || null,
       requestId: ctx.requestId,
       // 自动抽取的更正同样按用户级作用域判定可见性：新会话里改口要能覆盖旧记忆。
@@ -2483,6 +2502,8 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   res.end();
 
   scheduleMemoryExtraction(ctx.userText, ctx.sessionId, ctx.attachments, {
+    providerId: ctx.providerId,
+    modelId: ctx.modelId,
     messageId: result && result.userMessageId ? result.userMessageId : null,
     requestId: ctx.requestId,
     // 与 /chat 一致：更正按用户级作用域判定，新会话改口能覆盖旧记忆。
