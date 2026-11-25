@@ -12,6 +12,7 @@ const {
   isConfigCorrupted,
   addModelProvider,
   updateModelProvider,
+  applyProviderModelMetadata,
   deleteModelProvider,
   setDefaultModel,
   setProviderEnabled,
@@ -180,8 +181,22 @@ router.post('/model-providers/:id/enabled', requireAuth, (req, res) => {
 
 // 连接测试：GET {baseUrl}/models（5s 超时 / 64KB 响应上限）。
 // 自定义 Base URL 先过 SSRF 校验；错误摘要不含密钥。
+// 连通成功后顺手把 /models 声明的上下文窗口同步进模型记录（只同步服务商
+// 真实声明的数值），响应里以 windowSync 明示同步/拒绝项，不静默改配置。
 router.post('/model-providers/:id/test', requireAuth, async (req, res) => {
   const result = await testProviderConnection(req.params.id);
+  if (result && result.ok && Array.isArray(result.models)) {
+    const sync = applyProviderModelMetadata(req.params.id, result.models);
+    res.json({
+      ...result,
+      windowSync: {
+        error: sync.error || null,
+        updated: sync.updated || [],
+        rejected: sync.rejected || [],
+      },
+    });
+    return;
+  }
   res.json(result);
 });
 

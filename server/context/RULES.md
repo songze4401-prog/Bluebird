@@ -146,10 +146,22 @@ P3 计划可进一步传入 `filters.types` / `filters.categories` / `episodicOn
 - 窗口来源：模型声明 `contextWindow` 时用声明值（`windowSource=declared`，
   `verified=true`）；未声明时使用 `inputGuard.unknownWindowGuardTokens`
   作为**本地保守护栏**（`windowSource=unknown_guard`，`verified=false`），
-  不声称它是模型真实窗口。
+  不声称它是模型真实窗口。声明值只有两个合法来源：代码里实测过的内置模型元数据，
+  以及 `POST /model-providers/:id/test` 从服务商 `GET /models` 读到的窗口字段
+  （`contextWindowSource=provider_models` + `contextWindowSyncedAt`）；服务商没给
+  窗口字段时保持未声明，不写默认值。
 - Token 计量：统一 `heuristic-cjk-ascii-v1`（CJK 1 / ASCII 0.25 / 其他 Unicode 0.5），
   按 `inputGuard.estimatorSafetyFactor` 保守放大；误差范围写入 trace。
   图片按 `perImageTokens` 计，绝不按 dataURL 字符数计。
+- 估算校准：`server/model-calibration.js` 按 `providerId|modelId` 记账真实
+  `prompt_tokens` 与本次 `estimatedInputTokens` 的比值（中位数，最多 20 个样本），
+  只采信真实 Provider 的 usage——stub、缺 usage、比值超出 8 倍的异常样本一律不入库。
+  估算时乘 `clamp(中位比值, 1, 3)`：**只放大不缩小**，没样本时系数为 1（口径不变）。
+  `trace.build.measurement.calibration` 记录 `ratio/factor/sampleCount/source/updatedAt`，
+  无样本时为 `null`，不假装校准过。
+- 预算形状：`deriveBudgets` 按窗口比例**只收缩不放大**历史/摘要/长程预算
+  （0.4 / 0.15 / 0.15），配置值始终是上限；窗口变大不会自动放宽预算——
+  放宽需要估算校准证据，属于另一件事。
 - 预留：输出 `outputReserveTokens` + 工具循环预留 + `safetyMarginTokens`；
   Agent 工具预留 = 工具 schema 实测 + 每轮结果上界 × 额外轮数。
 - 超限降级顺序（每一步写入 `trace.build.dropped`）：

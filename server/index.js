@@ -470,6 +470,7 @@ const {
   projectStoredMessages,
 } = require('./context/projection');
 const { config: contextConfig } = require('./context/config');
+const modelCalibration = require('./model-calibration');
 
 // 情绪标签剥离：全量（/chat）与增量（/chat/stream）共用同一套规则。
 const { stripMoodTags, createMoodTagStripper } = require('./stream-strip');
@@ -1213,6 +1214,12 @@ async function prepareChatRequest(req) {
       ` dropped=${contextRuntime.dropped.length}` +
       ` window=${contextRuntime.measurement.window.tokens}` +
       ` windowSource=${contextRuntime.measurement.window.source}` +
+      ` windowVerified=${contextRuntime.measurement.window.verified}` +
+      ` calibration=${
+        contextRuntime.measurement.calibration
+          ? `${contextRuntime.measurement.calibration.ratio}x/${contextRuntime.measurement.calibration.sampleCount}`
+          : 'none'
+      }` +
       ` estInput=${contextRuntime.measurement.estimatedInputTokens}` +
       ` toolsReserve=${contextRuntime.measurement.toolsReserveTokens}`
   );
@@ -1691,6 +1698,23 @@ function recordUsageForContext(ctx, completion, round = 1) {
 
   if (ctx.contextTrace) {
     ctx.contextTrace.recordProviderUsage({ round, usage, providerKind: kind });
+  }
+
+  // 真实 usage 到手才记账校准样本：估算口径是否偏小只能由 Provider 的
+  // prompt_tokens 说话，stub 与缺 usage 一律不入库。
+  if (
+    ctx.contextMeasurement &&
+    Number.isFinite(ctx.contextMeasurement.estimatedInputTokens) &&
+    usage &&
+    Number.isFinite(usage.prompt_tokens)
+  ) {
+    modelCalibration.observe({
+      providerId: ctx.providerId,
+      modelId: ctx.modelId,
+      providerKind: kind,
+      promptTokens: usage.prompt_tokens,
+      estimatedInputTokens: ctx.contextMeasurement.estimatedInputTokens,
+    });
   }
 
   return monitoring.recordTokenReconciliation({

@@ -49,6 +49,7 @@ function measureRequest({
   toolsReserveTokens = 0,
   model = {},
   config = defaultConfig,
+  calibration = null,
 }) {
   const guard = config.inputGuard;
   const systemPrompt = renderSystem(systemBlocks);
@@ -78,7 +79,16 @@ function measureRequest({
     history.reduce((sum, item) => sum + item.tokens, 0) +
     (current ? current.tokens : 0);
 
-  const estimatedInputTokens = Math.ceil(rawInputTokens * guard.estimatorSafetyFactor);
+  // 校准系数只放大、不缩小（clamp 1–3，由 model-calibration 侧给定）：
+  // 一旦 Provider 真实回传的 prompt_tokens 系统性高于本地估算，就按真实比值
+  // 抬高估算，避免「估算说装得下、上游说超长」。没有样本时系数为 1，口径不变。
+  const calibrationFactor =
+    calibration && Number.isFinite(calibration.appliedFactor)
+      ? Math.min(Math.max(calibration.appliedFactor, 1), 3)
+      : 1;
+  const estimatedInputTokens = Math.ceil(
+    rawInputTokens * guard.estimatorSafetyFactor * calibrationFactor
+  );
   const declaredWindow = Number.isFinite(model.contextWindow) && model.contextWindow > 0
     ? Math.floor(model.contextWindow)
     : null;
@@ -91,6 +101,16 @@ function measureRequest({
     tokenSource: 'estimate',
     estimatorErrorRange: 'CJK≈1/字，ASCII≈0.25/字符；未校准目标模型 tokenizer，按 1.25 保守放大',
     safetyFactor: guard.estimatorSafetyFactor,
+    // 校准证据：无真实 usage 样本时为 null，不假装校准过。
+    calibration: calibration
+      ? {
+          ratio: Number.isFinite(calibration.ratio) ? calibration.ratio : null,
+          factor: calibrationFactor,
+          sampleCount: Number.isFinite(calibration.sampleCount) ? calibration.sampleCount : 0,
+          source: calibration.source || 'provider_usage',
+          updatedAt: calibration.updatedAt || null,
+        }
+      : null,
     window: {
       tokens: windowTokens,
       source: declaredWindow ? 'declared' : 'unknown_guard',
@@ -134,6 +154,7 @@ function fitRequest({
   toolsReserveTokens = 0,
   model = {},
   config = defaultConfig,
+  calibration = null,
 } = {}) {
   const guard = config.inputGuard;
   let baseBlocks = systemBlocks.slice();
@@ -151,6 +172,7 @@ function fitRequest({
       toolsReserveTokens,
       model,
       config,
+      calibration,
     });
     return { blocks, systemPrompt, measurement };
   };
@@ -262,8 +284,39 @@ function fitRequest({
   };
 }
 
+/**
+ * 按真实窗口收缩历史/摘要预算（只减不增）。
+ *
+ * 窗口很小（或某些服务商声明了 4k/8k 级窗口）时，配置里按 24k 护栏定的预算
+ * 会在 input-guard 阶段整段被裁掉，等于白读一遍历史再丢弃。这里提前按窗口
+ * 比例收缩，让「装得下」在选择阶段就成立；配置值始终是上限，绝不因为窗口大
+ * 就自动放大预算——那需要估算校准证据，属于另一件事。
+ */
+function deriveBudgets({ windowTokens, history = {}, inputGuard = {} } = {}) {
+  const window =
+    Number.isFinite(windowTokens) && windowTokens > 0
+      ? Math.floor(windowTokens)
+      : Number.isFinite(inputGuard.unknownWindowGuardTokens)
+        ? Math.floor(inputGuard.unknownWindowGuardTokens)
+        : 0;
+  const shares = { recentBudgetTokens: 0.4, summaryBudgetTokens: 0.15, longRangeBudgetTokens: 0.15 };
+  const next = { ...history };
+  const capped = [];
+  for (const [field, share] of Object.entries(shares)) {
+    const configured = Number(next[field]);
+    if (!Number.isFinite(configured) || configured <= 0) continue;
+    const limit = Math.floor(window * share);
+    if (limit > 0 && limit < configured) {
+      next[field] = limit;
+      capped.push(field);
+    }
+  }
+  return { history: next, capped };
+}
+
 module.exports = {
   fitRequest,
   measureRequest,
   renderSystem,
+  deriveBudgets,
 };

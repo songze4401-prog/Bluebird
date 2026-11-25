@@ -1123,6 +1123,34 @@ function classifyError(error) {
 const TEST_TIMEOUT_MS = 5000;
 const TEST_MAX_BODY_BYTES = 64 * 1024;
 
+// 服务商 /models 里代表「上下文窗口」的键名白名单。只认窗口语义的键：
+// max_tokens / max_output_tokens 是输出上限，混进来会把窗口算大。
+const CONTEXT_WINDOW_KEYS = Object.freeze([
+  'context_window',
+  'contextWindow',
+  'max_context_length',
+  'context_length',
+]);
+
+function extractModelWindows(payload) {
+  const list = payload && Array.isArray(payload.data) ? payload.data : [];
+  const out = [];
+  for (const item of list.slice(0, 200)) {
+    const id = item && typeof item.id === 'string' ? item.id.trim() : '';
+    if (!id) continue;
+    let contextWindow = null;
+    for (const key of CONTEXT_WINDOW_KEYS) {
+      const value = Number(item && item[key]);
+      if (Number.isFinite(value) && value > 0) {
+        contextWindow = Math.floor(value);
+        break;
+      }
+    }
+    out.push({ id, contextWindow });
+  }
+  return out;
+}
+
 async function testProviderConnection(providerId, { keyOverride = null } = {}) {
   const started = Date.now();
 
@@ -1187,8 +1215,10 @@ async function testProviderConnection(providerId, { keyOverride = null } = {}) {
       },
       res => {
         let size = 0;
+        const chunks = [];
         res.on('data', chunk => {
           size += chunk.length;
+          if (size <= TEST_MAX_BODY_BYTES) chunks.push(chunk);
           if (size > TEST_MAX_BODY_BYTES) {
             req.destroy();
             finish({
@@ -1203,7 +1233,21 @@ async function testProviderConnection(providerId, { keyOverride = null } = {}) {
         res.on('end', () => {
           const status = res.statusCode || 0;
           if (status >= 200 && status < 300) {
-            finish({ ok: true, code: 'ok', error: '连接成功', httpStatus: status });
+            // 顺手把 /models 的窗口元数据带回去：只有服务商声明的数值才算「已声明」，
+            // 解析不出来就是 null，由调用方保持 unknown_guard，绝不编造。
+            let models = [];
+            try {
+              models = extractModelWindows(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+            } catch (_) {
+              models = [];
+            }
+            finish({
+              ok: true,
+              code: 'ok',
+              error: '连接成功',
+              httpStatus: status,
+              models,
+            });
           } else if (status === 401 || status === 403) {
             finish({
               ok: false,
@@ -1266,6 +1310,7 @@ module.exports = {
   supportsTools,
   classifyError,
   testProviderConnection,
+  extractModelWindows,
   invalidateProviderCache,
   getMemoryClient,
   enterProviderGate,

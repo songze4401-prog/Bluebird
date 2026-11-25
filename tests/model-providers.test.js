@@ -1425,6 +1425,109 @@ async function main() {
     unit.configs.setDefaultModel({ providerId: 'deepseek', modelId: 'deepseek-chat' });
   }
 
+  // ================= H. 上下文窗口元数据同步（第 7 步） =================
+  ORIG_LOG('\nH. /models 窗口元数据同步与不编造原则');
+  {
+    const unit = reloadConfigModules();
+    const windows = unit.adapter.extractModelWindows({
+      data: [
+        { id: 'w1', context_window: 131072 },
+        { id: 'w2', contextWindow: 32768 },
+        { id: 'w3', max_context_length: 8192 },
+        { id: 'w4', context_length: 4096 },
+        // 输出上限不是上下文窗口：混进来会把窗口算大，必须忽略。
+        { id: 'w5', max_tokens: 65536, max_output_tokens: 8192 },
+        { id: 'w6', context_window: 0 },
+        { id: 'w7', context_window: 'abc' },
+        { id: 'w8', context_window: -5 },
+        { context_window: 123456 },
+      ],
+    });
+    const byId = new Map(windows.map(item => [item.id, item.contextWindow]));
+    check('窗口元数据只认窗口语义的键', byId.get('w1') === 131072 && byId.get('w2') === 32768 && byId.get('w3') === 8192 && byId.get('w4') === 4096);
+    check('输出上限不被当成上下文窗口', byId.get('w5') === null, JSON.stringify(byId.get('w5')));
+    check('非正数或非数值的窗口按未声明处理', byId.get('w6') === null && byId.get('w7') === null && byId.get('w8') === null);
+    check('缺少 id 的条目被丢弃', !windows.some(item => item.id === undefined));
+
+    const created = unit.configs.addModelProvider({
+      name: '窗口同步测试',
+      baseUrl: MOCK_BASE,
+      apiKey: CUSTOM_KEY,
+      models: [{ id: 'mock-model', capabilities: { tools: true } }, { id: 'other-model' }],
+    });
+    check('测试服务商创建成功', Boolean(created.provider), JSON.stringify(created));
+    const synced = unit.configs.applyProviderModelMetadata(created.provider.id, [
+      { id: 'mock-model', contextWindow: 131072 },
+      { id: 'other-model', contextWindow: null },
+    ]);
+    check(
+      '同步写入窗口、来源与同步时间',
+      synced.error === null &&
+        synced.updated.length === 1 &&
+        synced.updated[0].id === 'mock-model' &&
+        synced.rejected.length === 1 &&
+        synced.rejected[0].reason === 'no_window_in_metadata',
+      JSON.stringify(synced)
+    );
+    const stored = unit.configs.getModelProvider(created.provider.id);
+    const storedModel = stored.models.find(item => item.id === 'mock-model');
+    check(
+      '存储层可见窗口元数据三件套',
+      storedModel.contextWindow === 131072 &&
+        storedModel.contextWindowSource === 'provider_models' &&
+        typeof storedModel.contextWindowSyncedAt === 'string',
+      JSON.stringify(storedModel)
+    );
+    const untouched = stored.models.find(item => item.id === 'other-model');
+    check('服务商未声明窗口的模型保持未声明', untouched.contextWindow === undefined);
+
+    // 只提交 id 的 PATCH 不得把已同步的窗口抹掉。
+    const patched = unit.configs.updateModelProvider(created.provider.id, {
+      models: [{ id: 'mock-model' }],
+    });
+    const keptModel = patched.provider.models.find(item => item.id === 'mock-model');
+    check(
+      'PATCH 只改名称/列表时保留已声明窗口与来源',
+      keptModel.contextWindow === 131072 && keptModel.contextWindowSource === 'provider_models',
+      JSON.stringify(keptModel)
+    );
+
+    // 内置 DeepSeek 的窗口按代码实测值管理，运行时同步不得覆盖。
+    const builtinSync = unit.configs.applyProviderModelMetadata('deepseek', [
+      { id: 'deepseek-chat', contextWindow: 999999 },
+    ]);
+    check(
+      '内置服务商拒绝运行时覆盖窗口',
+      builtinSync.updated.length === 0 &&
+        builtinSync.rejected.every(item => item.reason === 'builtin_managed'),
+      JSON.stringify(builtinSync)
+    );
+    const builtinStill = unit.configs.getModelProvider('deepseek');
+    check(
+      '内置 deepseek-chat 仍不声明窗口（未实测即不编造）',
+      builtinStill.models.find(item => item.id === 'deepseek-chat').contextWindow === undefined,
+      JSON.stringify(builtinStill.models.find(item => item.id === 'deepseek-chat'))
+    );
+
+    // 端到端：mock 服务商 /models 只回 id，没有窗口元数据 → 同步必须空手而归。
+    const probe = await unit.adapter.testProviderConnection(created.provider.id);
+    check('连通测试带回 /models 元数据', probe.ok === true && Array.isArray(probe.models), JSON.stringify(probe));
+    check(
+      '服务商没声明窗口时不编造数值',
+      probe.models.length === 1 && probe.models[0].id === 'mock-model' && probe.models[0].contextWindow === null,
+      JSON.stringify(probe.models)
+    );
+    const noSync = unit.configs.applyProviderModelMetadata(created.provider.id, probe.models);
+    check(
+      '无窗口元数据的同步只记录拒绝、不改配置',
+      noSync.updated.length === 0 && noSync.rejected[0].reason === 'no_window_in_metadata',
+      JSON.stringify(noSync)
+    );
+
+    unit.configs.deleteModelProvider(created.provider.id);
+  }
+
+
   ORIG_LOG(`\n结果：${passed} 通过，${failed} 失败`);
   if (failures.length) {
     ORIG_LOG('失败项：');

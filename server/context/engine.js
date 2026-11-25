@@ -18,7 +18,8 @@ const { buildHistorySummary } = require('./summary');
 const { retrieveMemory } = require('./retriever');
 const { retrieveKnowledge } = require('./knowledge');
 const { buildContext } = require('./builder');
-const { fitRequest } = require('./input-guard');
+const { fitRequest, deriveBudgets } = require('./input-guard');
+const modelCalibration = require('../model-calibration');
 const { createTrace } = require('./trace');
 const { planContext, applyPlanToConfig } = require('./orchestrator');
 const { selectCoreMemories } = require('./core-memory');
@@ -121,9 +122,27 @@ async function runContextRuntime({
   const plan = planOverride || planContext({ task });
   const planLayers = plan.layers || {};
   const planBudgets = plan.budgets || {};
-  const effectiveConfig = applyPlanToConfig(config, plan);
+  let effectiveConfig = applyPlanToConfig(config, plan);
   const trace = createTrace({ task, sessionId, requestId });
   const guard = effectiveConfig.inputGuard;
+  // 预算按真实窗口收缩（只减不增）：窗口小的模型不该先按 24k 读历史再被
+  // input-guard 整段裁掉。
+  const windowForBudgets =
+    Number.isFinite(model.contextWindow) && model.contextWindow > 0
+      ? Math.floor(model.contextWindow)
+      : guard.unknownWindowGuardTokens;
+  const budgetShape = deriveBudgets({
+    windowTokens: windowForBudgets,
+    history: effectiveConfig.history,
+    inputGuard: guard,
+  });
+  if (budgetShape.capped.length) {
+    effectiveConfig = {
+      ...effectiveConfig,
+      history: budgetShape.history,
+    };
+    trace.recordBudgetCaps?.(budgetShape.capped);
+  }
 
   trace.recordOrchestration(plan);
 
@@ -268,6 +287,12 @@ async function runContextRuntime({
   });
   trace.recordKnowledge(knowledge, build.knowledge);
 
+  // 估算校准：只取该 provider+model 的真实 usage 中位比值；无样本即 null。
+  const calibration = modelCalibration.viewFor({
+    providerId: model.providerId,
+    modelId: model.modelId,
+  });
+
   const fit = fitRequest({
     systemBlocks,
     contextBlocks: build.blocks,
@@ -276,6 +301,7 @@ async function runContextRuntime({
     toolsReserveTokens,
     model,
     config: effectiveConfig,
+    calibration,
   });
 
   trace.recordStages({

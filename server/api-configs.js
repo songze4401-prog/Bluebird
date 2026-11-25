@@ -45,6 +45,8 @@ const BUILTIN_VISION_MODEL = 'deepseek-flash';
 // 规模上限：服务商与模型数量做硬顶，防止配置文件被刷爆
 const MAX_PROVIDERS = 20;
 const MAX_MODELS_PER_PROVIDER = 20;
+// 窗口上限：只防「把 1e12 当成上下文窗口」这类脏数据，不代表任何真实能力。
+const MAX_CONTEXT_WINDOW = 100000000;
 const MAX_NAME_LEN = 50;
 const MAX_BASE_URL_LEN = 200;
 const MAX_API_KEY_LEN = 200;
@@ -284,6 +286,24 @@ function normalizeModel(m, previous = null) {
       ? m.capabilities
       : previousCaps;
 
+  // 上下文窗口：只接受有限正整数；PATCH 未提交时保留上一次的值与来源/时间，
+  // 否则用户改一次名字就把已同步的窗口元数据丢了，退化成保守护栏。
+  const windowCandidate = Number.isFinite(Number(m.contextWindow))
+    ? Number(m.contextWindow)
+    : previous && Number.isFinite(previous.contextWindow)
+      ? previous.contextWindow
+      : null;
+  const contextWindow =
+    windowCandidate && windowCandidate > 0
+      ? Math.min(Math.floor(windowCandidate), MAX_CONTEXT_WINDOW)
+      : undefined;
+  const contextWindowSource =
+    contextWindow && typeof m.contextWindowSource === 'string'
+      ? m.contextWindowSource.slice(0, 40)
+      : contextWindow
+        ? (previous && previous.contextWindowSource) || 'manual'
+        : undefined;
+
   return {
     id: m.id.slice(0, MAX_MODEL_ID_LEN),
     // PATCH 只提交 id 时必须保留已有名称/能力，不能静默把 tools/vision/reasoning 关掉。
@@ -306,6 +326,11 @@ function normalizeModel(m, previous = null) {
       tools: caps.tools === true,
       reasoning: caps.reasoning === true,
     },
+    ...(contextWindow ? { contextWindow } : {}),
+    ...(contextWindowSource ? { contextWindowSource } : {}),
+    ...(contextWindow && previous && previous.contextWindowSyncedAt
+      ? { contextWindowSyncedAt: previous.contextWindowSyncedAt }
+      : {}),
   };
 }
 
@@ -525,6 +550,61 @@ function updateModelProvider(id, patch) {
   return { provider: publicProvider(provider) };
 }
 
+/**
+ * 把服务商 GET /models 返回的窗口元数据同步进已保存的服务商模型记录。
+ * 只写服务商声明的数值，并记下来源与同步时间；没声明的模型保持未声明，
+ * 由 Context Runtime 标注 unknown_guard——绝不因为「测试连通了」就编一个窗口。
+ * 内置 DeepSeek 的窗口在代码里按实测值声明，不接受运行时覆盖。
+ */
+function applyProviderModelMetadata(id, models) {
+  if (configCorrupted) return { error: 'config_corrupted', updated: [], rejected: [] };
+  const target = String(id || '');
+  if (target === BUILTIN_PROVIDER_ID) {
+    return {
+      error: null,
+      updated: [],
+      rejected: (Array.isArray(models) ? models : []).map(item => ({
+        id: item && item.id,
+        reason: 'builtin_managed',
+      })),
+    };
+  }
+  const provider = state.providers.find(p => p.id === target);
+  if (!provider) return { error: 'provider_not_found', updated: [], rejected: [] };
+  if (!Array.isArray(models)) {
+    return { error: 'invalid_models', updated: [], rejected: [] };
+  }
+
+  const declared = new Map();
+  for (const item of models) {
+    if (!item || typeof item.id !== 'string' || !item.id) continue;
+    const value = Number(item.contextWindow);
+    declared.set(item.id, Number.isFinite(value) && value > 0 ? Math.floor(value) : null);
+  }
+
+  const syncedAt = new Date().toISOString();
+  const updated = [];
+  const rejected = [];
+  for (const model of provider.models) {
+    if (!declared.has(model.id)) continue;
+    const value = declared.get(model.id);
+    if (!value) {
+      rejected.push({ id: model.id, reason: 'no_window_in_metadata' });
+      continue;
+    }
+    model.contextWindow = Math.min(value, MAX_CONTEXT_WINDOW);
+    model.contextWindowSource = 'provider_models';
+    model.contextWindowSyncedAt = syncedAt;
+    updated.push({ id: model.id, contextWindow: model.contextWindow });
+  }
+
+  if (updated.length) {
+    provider.updatedAt = syncedAt;
+    saveConfigs();
+  }
+  return { error: null, updated, rejected };
+}
+
 function deleteModelProvider(id) {
   if (configCorrupted) return { error: 'config_corrupted' };
 
@@ -606,6 +686,7 @@ module.exports = {
   getProviderKey,
   addModelProvider,
   updateModelProvider,
+  applyProviderModelMetadata,
   deleteModelProvider,
   setDefaultModel,
   setProviderEnabled,

@@ -1015,14 +1015,57 @@ async function main() {
     textModelStart >= 0 && textModelEnd > textModelStart
       ? apiConfigSource.slice(textModelStart, textModelEnd)
       : '';
+  // 窗口与校准按行为观察，而不是 grep 源码常量：声明值走 declared、未声明仍走
+  // 保守护栏且不谎称已验证、校准比值只放大估算、小窗口提前收缩预算，
+  // 同时内置 deepseek-chat 依旧不声明窗口（没实测就不编造）。
+  const { measureRequest, deriveBudgets } = require(path.join(SERVER, 'context', 'input-guard.js'));
+  const probeRequest = {
+    systemBlocks: [{ id: 'core', kind: 'core', text: '核心规则。'.repeat(400) }],
+    historyMessages: [],
+    currentMessage: { role: 'user', content: '当前问题' },
+    toolsReserveTokens: 0,
+  };
+  const guardProbe = measureRequest({ ...probeRequest, model: {} });
+  const declaredProbe = measureRequest({ ...probeRequest, model: { contextWindow: 131072 } });
+  const calibratedProbe = measureRequest({
+    ...probeRequest,
+    model: { contextWindow: 131072 },
+    calibration: {
+      ratio: 1.5,
+      appliedFactor: 1.5,
+      sampleCount: 2,
+      source: 'provider_usage',
+      updatedAt: null,
+    },
+  });
+  const smallWindowBudgets = deriveBudgets({
+    windowTokens: 4096,
+    history: { recentBudgetTokens: 4000, summaryBudgetTokens: 1200 },
+    inputGuard: contextConfig.inputGuard,
+  });
   checkCase(
     'context_window',
-    !textModelBlock
-      ? 'anchor_missing'
-      : !textModelBlock.includes('contextWindow') &&
-          contextConfig.inputGuard.unknownWindowGuardTokens === 24000
-        ? 'unknown_guard_24000'
-        : 'declared_or_changed'
+    textModelBlock &&
+      !textModelBlock.includes('contextWindow') &&
+      guardProbe.window.source === 'unknown_guard' &&
+      guardProbe.window.verified === false &&
+      guardProbe.window.tokens === contextConfig.inputGuard.unknownWindowGuardTokens &&
+      declaredProbe.window.source === 'declared' &&
+      declaredProbe.window.verified === true &&
+      calibratedProbe.calibration &&
+      calibratedProbe.calibration.factor === 1.5 &&
+      calibratedProbe.estimatedInputTokens > declaredProbe.estimatedInputTokens &&
+      smallWindowBudgets.capped.length === 2
+      ? 'declared_or_calibrated'
+      : textModelBlock
+        ? 'guard_or_calibration_missing'
+        : 'anchor_missing',
+    JSON.stringify({
+      guard: guardProbe.window,
+      declared: declaredProbe.window,
+      calibrated: calibratedProbe.calibration,
+      capped: smallWindowBudgets.capped,
+    })
   );
 
   ORIG_LOG(`\n通过 ${passed} 项，失败 ${failed} 项`);
