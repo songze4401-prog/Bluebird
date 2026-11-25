@@ -846,6 +846,150 @@ async function main() {
     birthdayCorrection.json.reply
   );
 
+  // ================= C1d. 读回后置条件与零结果回执 =================
+  ORIG_LOG('\nC1d. 读回后置条件与零结果回执');
+  const agentRuntimeModule = require('../server/agent-runtime');
+  const toolWorkspaceModule = require('../server/tool-workspace');
+  agentRuntimeModule.registerTool(toolWorkspaceModule.workspaceReadDefinition);
+  agentRuntimeModule.registerTool(toolWorkspaceModule.workspaceListDefinition);
+  const workspaceRoot = toolWorkspaceModule.WORKSPACE_ROOT;
+  fs.mkdirSync(workspaceRoot, { recursive: true });
+  fs.writeFileSync(path.join(workspaceRoot, 'e2e-note.md'), 'Bluebird 真实模型 E2E 测试通过。\n', 'utf8');
+  fs.mkdirSync(path.join(workspaceRoot, 'empty-dir'), { recursive: true });
+
+  resetScript();
+  scripted.push({
+    toolCalls: [
+      tc('call_readback', 'workspace_read', { path: 'e2e-note.md' }),
+    ],
+  });
+  scripted.push({ content: '[calm] 文件内容：Bluebird 真实模型 E2E 测试通过。' });
+  const readBack = await req('/chat', {
+    method: 'POST',
+    body: { message: '读回 e2e-note.md 并说明内容。' },
+  });
+  check(
+    '读回任务首轮强制 workspace_read',
+    readBack.status === 200 &&
+      stubCalls[0].tool_choice &&
+      stubCalls[0].tool_choice.type === 'function' &&
+      stubCalls[0].tool_choice.function.name === 'workspace_read',
+    JSON.stringify(stubCalls[0] && stubCalls[0].tool_choice)
+  );
+  check(
+    'workspace_read 回执保留结构化字节/截断信息',
+    readBack.json.toolSteps.some(
+      step =>
+        step.name === 'workspace_read' &&
+        step.evidence &&
+        step.evidence.status === 'success' &&
+        step.evidence.bytes > 0 &&
+        step.evidence.truncated === false
+    ),
+    JSON.stringify(readBack.json.toolSteps)
+  );
+  const readBackHistory = await req('/history');
+  const readBackAssistant = [...(readBackHistory.json.history || [])]
+    .reverse()
+    .find(item => item.role === 'assistant');
+  check(
+    '结构化工具回执可跨历史读回',
+    readBackAssistant.toolSteps.some(step => step.evidence && step.evidence.bytes > 0),
+    JSON.stringify(readBackAssistant.toolSteps)
+  );
+
+  process.env.BLUEBIRD_CLAIM_GUARD = '1';
+  resetScript();
+  scripted.push({
+    toolCalls: [tc('call_empty_list', 'workspace_list', { path: 'empty-dir' })],
+  });
+  scripted.push({ content: '[calm] 扫描完成，共 0 项，没有文件。' });
+  const zeroResult = await req('/chat', {
+    method: 'POST',
+    body: { message: '列出 empty-dir 的内容。' },
+  });
+  check(
+    '0 项成功回执不触发 Claim Guard 重生成',
+    zeroResult.status === 200 &&
+      stubCalls.length === 2 &&
+      zeroResult.json.reply.includes('共 0 项') &&
+      !zeroResult.json.reply.includes('核对说明'),
+    JSON.stringify({ calls: stubCalls.length, reply: zeroResult.json.reply })
+  );
+  process.env.BLUEBIRD_CLAIM_GUARD = '0';
+
+  resetScript();
+  scripted.push({ content: '[calm] 里面就一行：Bluebird 真实模型 E2E 测试通过。' });
+  const noReadReceipt = await req('/chat', {
+    method: 'POST',
+    body: { message: '读回 e2e-note.md 并说明内容。' },
+  });
+  check(
+    '无读取回执时不得给出文件内容',
+    noReadReceipt.status === 200 &&
+      noReadReceipt.json.reply.includes('未调用读取/核对工具') &&
+      !noReadReceipt.json.reply.includes('Bluebird 真实模型 E2E 测试通过'),
+    noReadReceipt.json.reply
+  );
+
+  resetScript();
+  scripted.push({
+    toolCalls: [tc('call_wrong_read_tool', 'workspace_list', { path: '.' })],
+  });
+  scripted.push({ content: '[calm] 里面就一行：Bluebird 真实模型 E2E 测试通过。' });
+  const wrongReadTool = await req('/chat', {
+    method: 'POST',
+    body: { message: '读回 e2e-note.md 并说明内容。' },
+  });
+  check(
+    '目录列表不能替代文件读取回执',
+    wrongReadTool.status === 200 &&
+      wrongReadTool.json.reply.includes('未调用读取/核对工具') &&
+      !wrongReadTool.json.reply.includes('Bluebird 真实模型 E2E 测试通过'),
+    wrongReadTool.json.reply
+  );
+
+  resetScript();
+  scripted.push({ content: '[calm] 里面就一行：Bluebird 真实模型 E2E 测试通过。' });
+  const noReadStream = await readSse('/chat/stream', {
+    message: '读回 e2e-note.md 并说明内容。',
+  });
+  const noReadDelta = noReadStream.events
+    .filter(event => event.type === 'delta')
+    .map(event => event.content)
+    .join('');
+  const noReadDone = noReadStream.events.find(event => event.type === 'done');
+  check(
+    '流式无读取回执时不提前泄漏内容',
+    noReadDone &&
+      noReadDone.reply.includes('未调用读取/核对工具') &&
+      !noReadDelta.includes('Bluebird 真实模型 E2E 测试通过'),
+    JSON.stringify({ delta: noReadDelta, done: noReadDone && noReadDone.reply, events: noReadStream.events.map(event => event.type) })
+  );
+
+  resetScript();
+  scripted.push({ error: { status: 400, message: 'tool_choice unsupported' } });
+  scripted.push({
+    toolCalls: [
+      tc('call_readback_fallback', 'workspace_read', { path: 'e2e-note.md' }),
+    ],
+  });
+  scripted.push({ content: '[calm] 文件内容：Bluebird 真实模型 E2E 测试通过。' });
+  const readFallback = await req('/chat', {
+    method: 'POST',
+    body: { message: '读回 e2e-note.md 并说明内容。' },
+  });
+  check(
+    'Provider 拒绝读回 tool_choice 时回退 auto 并继续',
+    readFallback.status === 200 &&
+      stubCalls.length === 3 &&
+      stubCalls[1].tool_choice === 'auto' &&
+      readFallback.json.toolSteps.some(step => step.name === 'workspace_read'),
+    JSON.stringify({ status: readFallback.status, calls: stubCalls.length })
+  );
+  agentRuntimeModule.unregisterTool('workspace_read');
+  agentRuntimeModule.unregisterTool('workspace_list');
+
   // ================= C2. 正常工具流程（/chat/stream + SSE 顺序） =================
   ORIG_LOG('\nC2. 正常工具流程（/chat/stream）');
   resetScript();

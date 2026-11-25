@@ -70,8 +70,20 @@ function getToolInfo(step) {
 
 function toolSucceeded(step) {
   if (!step || step.ok !== true || step.pendingConfirmation) return false;
+  const evidence = step.evidence;
+  if (evidence && (evidence.pending === true || /^(failed|denied|error)$/i.test(evidence.status || ''))) {
+    return false;
+  }
   const summary = typeof step.summary === 'string' ? step.summary : '';
   return !/(?:待确认|等待用户确认|等用户确认)/i.test(summary);
+}
+
+function listCount(step) {
+  const count = step && step.evidence && step.evidence.count;
+  if (Number.isFinite(count) && count >= 0) return count;
+  const summary = typeof step.summary === 'string' ? step.summary : '';
+  const match = summary.match(/共\s*(\d+)\s*项/);
+  return match ? Number(match[1]) : null;
 }
 
 // 只过滤「意向 / 拒绝」：不会保存、不打算发送等，不代表本轮执行结果。
@@ -144,7 +156,13 @@ function detectClaimMismatch(reply, toolSteps, { userText = '' } = {}) {
         failure: failurePattern.test(clause),
       }));
     const claimsSuccess = claims.some(claim => claim.success);
-    const claimsFailure = claims.some(claim => claim.failure);
+    const emptyListSuccess =
+      info.group === 'file' &&
+      info.operation === 'list' &&
+      succeeded &&
+      listCount(step) === 0;
+    const claimsFailure =
+      !emptyListSuccess && claims.some(claim => claim.failure);
     if ((claimsSuccess && !succeeded) || (claimsFailure && succeeded)) {
       return {
         aType: claimsSuccess && !succeeded ? 'success_claim' : 'failure_claim',

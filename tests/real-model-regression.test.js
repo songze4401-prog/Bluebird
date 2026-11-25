@@ -827,7 +827,13 @@ async function main() {
 
   const { detectClaimMismatch } = require(path.join(SERVER, 'claim-guard.js'));
   const mismatch = detectClaimMismatch('扫描完成，共 0 项，没有文件。', [
-    { name: 'workspace_list', ok: true, summary: '执行成功', durationMs: 1 },
+    {
+      name: 'workspace_list',
+      ok: true,
+      summary: '工作区 . 共 0 项',
+      evidence: { status: 'success', count: 0 },
+      durationMs: 1,
+    },
   ]);
   checkCase(
     'claim_guard_zero_result',

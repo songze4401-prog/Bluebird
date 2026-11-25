@@ -24,6 +24,7 @@ const agentLimits = require('./agent-limits');
 const { LEGACY_ALIASES } = require('./status-vocabulary');
 const approvalDeadline = require('./approval-deadline');
 const crashHook = require('./crash-hook');
+const { sanitizeToolEvidence } = require('../tool-step');
 
 const DATA_DIR = process.env.BLUEBIRD_DATA_DIR
   ? path.resolve(process.env.BLUEBIRD_DATA_DIR)
@@ -1863,15 +1864,19 @@ function updateTask(taskId, patch = {}) {
             }))
         : [],
       toolSteps: Array.isArray(result.toolSteps)
-        ? result.toolSteps.slice(0, 20).map(step => ({
-            name: String(step && step.name ? step.name : '').slice(0, 60),
-            ok: Boolean(step && step.ok === true),
-            summary: String(step && step.summary ? step.summary : '').slice(0, 160),
-            durationMs:
-              Number.isFinite(step && step.durationMs) && step.durationMs >= 0
-                ? Math.floor(step.durationMs)
-                : 0,
-          }))
+        ? result.toolSteps.slice(0, 20).map(step => {
+            const evidence = sanitizeToolEvidence(step && step.evidence);
+            return {
+              name: String(step && step.name ? step.name : '').slice(0, 60),
+              ok: Boolean(step && step.ok === true),
+              summary: String(step && step.summary ? step.summary : '').slice(0, 160),
+              durationMs:
+                Number.isFinite(step && step.durationMs) && step.durationMs >= 0
+                  ? Math.floor(step.durationMs)
+                  : 0,
+              ...(evidence ? { evidence } : {}),
+            };
+          })
         : [],
       evidence: Array.isArray(result.evidence)
         ? result.evidence

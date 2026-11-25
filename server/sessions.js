@@ -7,6 +7,7 @@ const { registerCorruptionHandler, handleCorruption } = require('./corruption');
 const { writeFileAtomicSync } = require('./atomic-write');
 const { truncateText } = require('./text-utils');
 const { getInstanceUserId } = require('./user-scope');
+const { sanitizeToolEvidence } = require('./tool-step');
 
 // 数据目录可通过 BLUEBIRD_DATA_DIR 覆盖：测试用临时目录，避免碰到真实数据。
 // 未设置时与 memory.js / emotion.js 保持一致，落在 server/data/。
@@ -729,8 +730,8 @@ function sanitizeAttachments(list) {
 
 // Agent 工具摘要：这是 appendMessages 白名单里继 attachments 之后第二个可选字段——
 // 之前未知字段会被静默丢弃，导致摘要存不下、读不回（已实测确认）。
-// 硬约束：只存 {name, ok, summary, durationMs} + 受控例外 pendingConfirmation
-// （工作区写入确认往返的凭据：id/path/mode/bytes，无文件正文），
+// 硬约束：只存 {name, ok, summary, durationMs, evidence?} + 受控例外 pendingConfirmation
+// （evidence 仅状态/计数/字节/截断等白名单元数据；pendingConfirmation 为工作区写入确认凭据），
 // 禁敏感参数原文、记忆原文与模型内部推理；条数、字段长度全部钳制。
 const TOOL_STEPS_MAX = 10;
 
@@ -780,12 +781,14 @@ function sanitizeToolSteps(list) {
         : null;
 
     const pendingConfirmation = sanitizePendingConfirmation(raw.pendingConfirmation);
+    const evidence = sanitizeToolEvidence(raw.evidence);
     items.push({
       name,
       ok,
       summary,
       ...(durationMs !== null ? { durationMs } : {}),
       ...(pendingConfirmation ? { pendingConfirmation } : {}),
+      ...(evidence ? { evidence } : {}),
     });
   }
 

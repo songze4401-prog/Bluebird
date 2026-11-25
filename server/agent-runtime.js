@@ -40,6 +40,11 @@ const delegateToBotTool = require('./tool-dispatch-bot');
 const { truncateText } = require('./text-utils');
 const { buildPolicyInstruction } = require('./agent-policy');
 const { parseTextualToolCalls, stripToolProtocolText } = require('./textual-tool-calls');
+const { sanitizeToolEvidence } = require('./tool-step');
+const {
+  requiresReadBack,
+  preferredReadBackTool,
+} = require('./tool-postcondition');
 const {
   detectExplicitMemoryIntent,
   detectMemoryCorrectionIntent,
@@ -1105,11 +1110,13 @@ async function runAgentTurn({
       }
     }
 
+    const evidence = sanitizeToolEvidence(result);
     toolSteps.push({
       name: toolName,
       ok: result.ok === true,
       summary: truncateText(summary, 120),
       durationMs: Date.now() - startedAtTool,
+      ...(evidence ? { evidence } : {}),
       // pending 确认凭据：确认行前端凭 id 调 confirm/reject；只含元数据，
       // 不含文件正文（content 留在服务端待确认存储里）。
       ...(result && result.pending === true && result.confirmationId
@@ -1159,6 +1166,7 @@ async function runAgentTurn({
   const requestSpecs = specs;
 
   const memoryWriteRequired = requiresMemoryWrite(userText);
+  const readBackRequired = requiresReadBack(userText);
   for (let round = 1; round <= maxRounds; round += 1) {
     if (typeof isClientGone === 'function' && isClientGone()) {
       stopReason = 'client_gone';
@@ -1203,6 +1211,18 @@ async function runAgentTurn({
       round === 1 &&
       memoryWriteRequired &&
       requestSpecs.some(spec => spec.function.name === 'memory_remember');
+    const preferredReadTool =
+      round === 1 && readBackRequired ? preferredReadBackTool(userText) : null;
+    const forceReadTool =
+      preferredReadTool &&
+      requestSpecs.some(spec => spec.function.name === preferredReadTool);
+    // 写入意图优先：一句话既要落库又要读回时，先保证落库工具真的被调用，
+    // 读回仍有服务端后置条件兜底。
+    const forcedToolName = forceMemoryTool
+      ? 'memory_remember'
+      : forceReadTool
+        ? preferredReadTool
+        : null;
     const completionRequest = {
       providerId,
       modelId,
@@ -1219,9 +1239,11 @@ async function runAgentTurn({
       ...(!isFinalRound && requestToolCount
         ? {
             tools: requestSpecs,
-            tool_choice: forceMemoryTool
-              ? { type: 'function', function: { name: 'memory_remember' } }
-              : 'auto',
+            tool_choice: forcedToolName
+              ? { type: 'function', function: { name: forcedToolName } }
+              : round === 1 && readBackRequired
+                ? 'required'
+                : 'auto',
           }
         : {}),
     };
@@ -1231,19 +1253,20 @@ async function runAgentTurn({
       const errorText = `${error && error.message ? error.message : ''} ${
         error && error.detail ? error.detail : ''
       }`.toLowerCase();
-      if (
-        !forceMemoryTool ||
-        error.kind !== 'bad_request' ||
-        !errorText.includes('tool_choice')
-      ) {
+      const forcedChoice =
+        round === 1 &&
+        (memoryWriteRequired || readBackRequired) &&
+        completionRequest.tool_choice !== 'auto';
+      if (!forcedChoice || error.kind !== 'bad_request' || !errorText.includes('tool_choice')) {
         throw error;
       }
-      console.warn('[agent] memory tool_choice 不被 Provider 支持，回退 auto');
+      console.warn('[agent] 强制 tool_choice 不被 Provider 支持，回退 auto');
       monitoring.recordEvent({
         event_name: 'agent.tool_choice_fallback',
         component: 'agent',
         status: 'success',
-        attributes: { round, tool: 'memory_remember', provider_attempt: 2 },
+        // forcedToolName 为空时只可能是读回用的 tool_choice: 'required'。
+        attributes: { round, tool: forcedToolName || 'any_read_tool', provider_attempt: 2 },
       });
       completion = await createChatCompletion({
         ...completionRequest,

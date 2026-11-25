@@ -22,6 +22,7 @@ const MAX_ID_LEN = 80;
 const MAX_NAME_LEN = 80;
 const MAX_MIME_LEN = 80;
 const MAX_SUMMARY_LEN = 160;
+const { sanitizeToolEvidence } = require('../tool-step');
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -70,6 +71,7 @@ function sanitizeToolSteps(raw) {
     .map(step => {
       const name = cleanString(step.name, MAX_NAME_LEN);
       if (!name) return null;
+      const evidence = sanitizeToolEvidence(step.evidence);
       return {
         name,
         ok: step.ok === true,
@@ -78,6 +80,7 @@ function sanitizeToolSteps(raw) {
           ? { summary: step.summary.slice(0, MAX_SUMMARY_LEN) }
           : {}),
         ...(Number.isFinite(step.durationMs) ? { durationMs: step.durationMs } : {}),
+        ...(evidence ? { evidence } : {}),
       };
     })
     .filter(Boolean);

@@ -336,6 +336,10 @@ const {
 // 内置后端提示词：用户未自定义时使用；控制面板读取/重置也以它为准。
 const { BLUEBIRD_SYSTEM_PROMPT } = require('./blue-system-prompt');
 const claimGuard = require('./claim-guard');
+const {
+  requiresReadBack,
+  hasReadBackReceipt,
+} = require('./tool-postcondition');
 
 // 回复分段：默认一条消息；只有超过单条硬上限才按语义边界分片（纯函数）。
 const { splitReplyIntoSegments, DEFAULT_MAX_CHARS } = require('./split-reply');
@@ -1620,6 +1624,16 @@ function ensureMemoryWriteReceipt(rawReply, ctx, toolSteps) {
   return rawReply;
 }
 
+function ensureReadBackReceipt(rawReply, ctx, toolSteps) {
+  if (!requiresReadBack(ctx && ctx.userText)) return rawReply;
+  if (hasReadBackReceipt(toolSteps, ctx && ctx.userText)) return rawReply;
+  if (/(?:无法|不能|没有|未|没|不支持|无权|不可用)/.test(String(rawReply || ''))) {
+    return rawReply;
+  }
+  console.warn(`[readback-guard] session=${ctx.sessionId} receipt=missing`);
+  return '本轮未调用读取/核对工具，无法确认实际内容。';
+}
+
 // Provider 返回后立即对账：把真实 usage 写进 trace，并与本地估算输入 Token 比对。
 // 桩返回一律标 stub，不参与校准；没有 usage 就记 missing，不猜数字。
 async function reconcileAgentClaim({ ctx, rawReply, toolSteps, abortSignal, round }) {
@@ -1918,6 +1932,7 @@ app.post('/chat', requireAuth, async (req, res) => {
 
     rawReply = auditChatReply(rawReply, ctx, toolSteps);
     rawReply = ensureMemoryWriteReceipt(rawReply, ctx, toolSteps);
+    rawReply = ensureReadBackReceipt(rawReply, ctx, toolSteps);
 
     const result = completeChatTurn({
       ctx,
@@ -2200,6 +2215,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
     policyToolCount: listToolSpecs(ctx.agentPolicy).length,
   });
   const agentOn = agentGate.allowed;
+  const deferReadBackDelta = requiresReadBack(ctx.userText);
 
   if (ctx.contextTrace) {
     ctx.contextTrace.recordPolicy(ctx.agentPolicy, ctx.agentPolicyMeta, agentGate);
@@ -2338,7 +2354,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
 
         // 最终文本经同一套情绪标签剥离后以 delta 发出
         const emit = stripper.push(rawReply);
-        if (emit) sendEvent({ type: 'delta', content: emit });
+        if (emit && !deferReadBackDelta) sendEvent({ type: 'delta', content: emit });
         streamOrchestrationMeta = orchestrationMeta;
       }
     } else {
@@ -2391,7 +2407,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         rawReply += delta;
 
         const emit = stripper.push(delta);
-        if (emit && !sendEvent({ type: 'delta', content: emit })) break;
+        if (emit && !deferReadBackDelta && !sendEvent({ type: 'delta', content: emit })) break;
       }
 
       recordUsageForContext(ctx, { usage: streamUsage }, 1);
@@ -2480,14 +2496,22 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
   const beforeClaimCheck = rawReply;
   rawReply = auditChatReply(rawReply, ctx, toolSteps);
   rawReply = ensureMemoryWriteReceipt(rawReply, ctx, toolSteps);
-  if (rawReply !== beforeClaimCheck) {
+  rawReply = ensureReadBackReceipt(rawReply, ctx, toolSteps);
+  if (rawReply !== beforeClaimCheck && !deferReadBackDelta) {
     // 校验说明是服务端追加的纯文本，直接作为末段 delta 让用户当场看到，
     // done 事件里的权威文本同样是修正后的内容。
     sendEvent({ type: 'delta', content: rawReply.slice(beforeClaimCheck.length) });
   }
 
-  const tail = stripper.flush();
-  if (tail) sendEvent({ type: 'delta', content: tail });
+  if (deferReadBackDelta) {
+    const emit = stripper.push(rawReply);
+    if (emit) sendEvent({ type: 'delta', content: emit });
+    const tail = stripper.flush();
+    if (tail) sendEvent({ type: 'delta', content: tail });
+  } else {
+    const tail = stripper.flush();
+    if (tail) sendEvent({ type: 'delta', content: tail });
+  }
 
   let result;
 
