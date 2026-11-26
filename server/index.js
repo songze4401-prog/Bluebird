@@ -1321,6 +1321,28 @@ function completeChatTurn({
 }) {
   const { sessionId, userText, userMessageId, attachments, personaConfig } = ctx;
 
+  // W2：交付前最后一道校验。即使前面的 Claim Guard 因没有工具调用/重试失败
+  // 没改写，也不能把“已创建/已发送/已派发”直接落盘。
+  const deliveryMismatch = claimGuard.detectClaimMismatch(
+    rawReply,
+    Array.isArray(toolSteps) ? toolSteps : [],
+    { userText }
+  );
+  if (
+    claimGuard.claimGuardEnabled() &&
+    deliveryMismatch &&
+    !String(rawReply).includes('【服务端完成校验】')
+  ) {
+    const notice = claimGuard.buildDeliveryNotice(deliveryMismatch, toolSteps, rawReply);
+    rawReply =
+      deliveryMismatch.bType === 'no_receipt'
+        ? notice
+        : `${String(rawReply).trim()}\n\n${notice}`;
+    console.warn(
+      `[delivery-claim-guard] session=${sessionId} type=${deliveryMismatch.aType}/${deliveryMismatch.bType}`
+    );
+  }
+
   const { reply: moodStripped, mood } = stripMoodTags(rawReply);
   // 工具协议文本兜底（2026-11-22）：工具未启用（如视觉模型轮次）或模型把
   // 调用写成正文时，<tool_call>…</tool_call> 绝不能进入气泡或落盘历史。
@@ -1935,12 +1957,13 @@ app.post('/chat', requireAuth, async (req, res) => {
         }
       }
 
-      // Claim Guard 在工具循环结束后最多重生成一次；重试不带 tools，绝不重跑工具。
-      if (Array.isArray(toolSteps) && toolSteps.length) {
+      // W2：Claim Guard 对零工具轮也生效；有工具时最多无工具重生成一次，
+      // 绝不重跑工具。
+      {
         const reconciled = await reconcileAgentClaim({
           ctx,
           rawReply,
-          toolSteps,
+          toolSteps: Array.isArray(toolSteps) ? toolSteps : [],
           abortSignal: disconnect.signal,
           round: outcome.rounds || 1,
         });
@@ -2427,12 +2450,12 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         }
 
         // 编排块处理会改写最终回复，因此核对必须位于编排之后、delta 之前。
-        // Claim Guard 最多无工具重生成一次，绝不重跑本轮工具。
-        if (Array.isArray(toolSteps) && toolSteps.length) {
+        // W2：零工具轮也要核对完成声明；有工具时最多无工具重生成一次。
+        {
           const reconciled = await reconcileAgentClaim({
             ctx,
             rawReply,
-            toolSteps,
+            toolSteps: Array.isArray(toolSteps) ? toolSteps : [],
             abortSignal: disconnect.signal,
             round: outcome.rounds || 1,
           });

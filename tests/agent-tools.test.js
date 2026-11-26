@@ -1378,7 +1378,7 @@ async function main() {
   check('“没发出去”与成功回执矛盾要报', claimGuard.detectClaimMismatch('邮件没发出去。', [successStep('mail_send', true)]) !== null);
   check('“不会保存”否定意向不误报', claimGuard.detectClaimMismatch('我不会保存这段内容。', [successStep('workspace_write', true)]) === null);
   check('“不打算发送”否定意向不误报', claimGuard.detectClaimMismatch('我不打算发送邮件。', [successStep('mail_send', true)]) === null);
-  check('无工具回执不做声明核对', claimGuard.detectClaimMismatch('已保存文件。', []) === null);
+  check('无工具回执也要核对完成声明', claimGuard.detectClaimMismatch('已保存文件。', []) !== null);
   check(
     '跨组不误报：只有文件成功时“已保存”不算记忆声明',
     claimGuard.detectClaimMismatch('文件已保存。', [
@@ -1483,7 +1483,12 @@ async function main() {
     method: 'POST',
     body: { message: '再次查询猫的记忆' },
   });
-  check('二次生成仍矛盾时追加固定核对文案', unresolved.status === 200 && unresolved.json.reply.endsWith('核对说明：本轮工具执行回执与回复中的完成状态不一致，请以工具回执为准。'));
+  check(
+    '二次生成仍矛盾时追加服务端完成校验',
+    unresolved.status === 200 &&
+      unresolved.json.reply.includes('【服务端完成校验】') &&
+      unresolved.json.reply.includes('请按实际回执判断')
+  );
 
   process.env.BLUEBIRD_CLAIM_GUARD = '1';
   resetScript();
