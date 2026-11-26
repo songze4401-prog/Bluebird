@@ -453,6 +453,36 @@ test('q2. 自动确认模式：主聊 workspace_write 直写落盘，不建 pend
   }
 });
 
+test('q2b. 自动确认模式：任务执行器（sideEffect 注入）workspace_write 同样直写落盘', async () => {
+  process.env.BLUEBIRD_WORKSPACE_AUTO_CONFIRM = '1';
+  try {
+    const written = await agentRuntime.executeToolCall(
+      'workspace_write',
+      { path: 'worker-auto.md', content: 'worker-auto-body' },
+      {
+        cache: new Map(),
+        sessionId: 'session-1',
+        userText: '在工作区新建文件',
+        sideEffect: {
+          splitOverride: a => ({ args: a, override: null }),
+          before: () => ({ mode: 'execute', opKey: 'k-auto' }),
+          after: () => {},
+          blocked: () => false,
+        },
+      }
+    );
+    assert.equal(written.ok, true, JSON.stringify(written));
+    assert.equal(written.code, undefined);
+    assert.equal(
+      fs.readFileSync(workspacePath('worker-auto.md'), 'utf8'),
+      'worker-auto-body',
+      '任务执行器在自动确认下应立即落盘'
+    );
+  } finally {
+    process.env.BLUEBIRD_WORKSPACE_AUTO_CONFIRM = '0';
+  }
+});
+
 test('r. 监控埋点：workspace.op.completed 记 tool/path/mode/bytes，正文绝不入事件流', async () => {
   const marker = 'MONITOR-CONTENT-MARKER-9f3a';
   await runTool(toolWorkspace.workspaceWriteDefinition, {

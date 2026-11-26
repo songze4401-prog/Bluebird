@@ -46,13 +46,20 @@ const TASK_TYPE_GUIDE = delegatableTaskTypes()
   .map(item => `${item.botId}: ${item.taskTypes.join(' / ')}`)
   .join('；');
 
+const BOT_ID_GUIDE = delegatableTaskTypes()
+  .map(item => item.botId)
+  .join(' / ');
+
 function validate(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     return { ok: false, error: '参数必须是 JSON 对象' };
   }
   const botId = typeof args.botId === 'string' ? args.botId.trim() : '';
   if (!botId) {
-    return { ok: false, error: '缺少必填参数 botId' };
+    return {
+      ok: false,
+      error: `缺少必填参数 botId（可选：${BOT_ID_GUIDE}）；不确定目标 Agent 时先问用户`,
+    };
   }
   if (!isKnownBot(botId)) {
     return { ok: false, error: `未知的 Agent：${botId}` };
@@ -110,8 +117,10 @@ const definition = Object.freeze({
   description:
     '把一个明确的任务派发给已注册的小 Agent（researcher / executor / memory / reviewer）。' +
     `可派发的 botId 与任务类型：${TASK_TYPE_GUIDE}。` +
-    '必须先选定 botId 与该 Agent 支持的任务类型；不会在当前轮同步返回执行结果，' +
-    '任务完成后结果会写入当前会话，用户也可以在任务页查看。' +
+    '调用时必须同一次给全 botId、taskType、goal；用户没有指定具体由哪个 Agent 执行时，' +
+    '先向用户确认，不要省略 botId 直接调用。' +
+    '不会在当前轮同步返回执行结果，' +
+    '任务完成后结果会自动写入当前会话；需要确认进度时用 get_bot_task_status(taskId) 查询，不要编造任务状态。' +
     '长期记忆的查询与写入由主控 Agent 自己用 memory_search / memory_remember 完成，不要用此工具处理记忆。',
   parameters: Object.freeze({
     type: 'object',
@@ -197,7 +206,7 @@ const definition = Object.freeze({
         path: task.route ? task.route.path : null,
         idempotent: idempotent === true,
         resultPending: true,
-        summary: `已提交给 ${target.displayName}（${target.botId}），状态与结果可从任务页或当前会话接收。`,
+        summary: `已提交给 ${target.displayName}（${target.botId}），结果会自动写回当前会话；如需进度可用 get_bot_task_status 查询。`,
       };
     } catch (error) {
       if (error && typeof error.code === 'string' && TOOL_ERROR_CODES[error.code]) {

@@ -12,9 +12,8 @@
  * - 上限：单次读取 64KB（超出截断并说明）、单文件写入 256KB、工作区总量
  *   50MB；不给删除、重命名、执行、git 能力；
  * - workspace_list / workspace_read 只读；workspace_write readOnly:false 且
- *   risk:'high_risk'——运行层既有语义是 deny-only `confirmation_required`
- *   （写前确认）。在用户确认协议接上之前，该工具不会被运行层执行；
- *   handler 本体按任务书完整实现并通过单测，供确认协议落地后直接复用。
+ *   risk:'high_risk'——主聊走写前确认；BLUEBIRD_WORKSPACE_AUTO_CONFIRM=1 时
+ *   主聊与任务执行器都跳过确认直接落盘（沙箱与配额校验不变）。
  * - overwrite 前把旧文件备份到 workspace/.history/<文件名>.<UTC时间戳>，
  *   同名备份保留最近 10 份；
  * - 监控：每次调用记 workspace.op.completed（工具名、相对路径、字节数、
@@ -506,8 +505,9 @@ const workspaceWriteDefinition = Object.freeze({
   readOnly: false,
   risk: 'high_risk',
   // 任务书接法 a：主聊直连路径走待确认往返（executeToolCall 据此放行到
-  // handler 创建 pending），任务执行器/无来源上下文仍 deny-only。
+  // handler 创建 pending）；任务执行器在显式开启自动确认时也放行直写。
   pendingConfirmation: true,
+  autoConfirm: isAutoConfirmEnabled,
 
   validate(args) {
     if (!args || typeof args !== 'object' || Array.isArray(args)) {

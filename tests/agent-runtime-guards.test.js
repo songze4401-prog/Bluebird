@@ -133,6 +133,25 @@ agentRuntime.registerTool({
   timeoutMs: 2000,
 });
 
+// 校验必败的探针：复现「模型漏传必填参数」时工具返回内部错误文案的场景。
+agentRuntime.registerTool({
+  name: 'guard_fail_probe',
+  description: '守卫探针：缺少 id 参数时校验失败',
+  parameters: {
+    type: 'object',
+    properties: { id: { type: 'string' } },
+  },
+  validate: args => {
+    const id = args && typeof args.id === 'string' ? args.id.trim() : '';
+    if (!id) return { ok: false, error: '缺少必填参数 id' };
+    return { ok: true, args: { id } };
+  },
+  handler: async args => ({ ok: true, summary: `probe ${args.id}` }),
+  readOnly: true,
+  risk: 'read',
+  timeoutMs: 2000,
+});
+
 // 与线上观测到的形态一致（全角 ｜）。也用于构造半角变体。
 function dsmlEnvelope(calls, bar = '｜｜') {
   const lines = [`<${bar}DSML${bar} calls>`];
@@ -305,6 +324,39 @@ test('正文工具调用封装：末轮只有调用没有正文时，用工具�
 
   assert.deepEqual(probeSeqs, [21, 22], '末轮封装里的调用必须真的执行');
   assert.equal(outcome.rawReply, 'probe', '空正文时用最后一条工具结果摘要收尾');
+});
+
+test('正文工具调用封装：末轮只有失败的调用时，不得把工具校验错误当成助手回复', async () => {
+  probeSeqs.length = 0;
+
+  modelResponder = body => {
+    const hasToolResult = (body.messages || []).some(m => m.role === 'tool');
+    if (!hasToolResult) return toolCallCompletion('guard_probe', { seq: 31 });
+
+    // 末轮只吐一个漏了必填参数的封装调用，没有一句人话。
+    return textCompletion(dsmlEnvelope([{ name: 'guard_fail_probe', args: {} }]));
+  };
+
+  const policy = policyWith({ maxRounds: 2 });
+  policy.tools.allowedTools = ['guard_probe', 'guard_fail_probe'];
+
+  const outcome = await agentRuntime.runAgentTurn({
+    messages: [{ role: 'user', content: '让他写' }],
+    sessionId: 's-textual-final-failed',
+    policy,
+  });
+
+  assert.deepEqual(probeSeqs, [31], '末轮封装里的调用必须真的执行');
+  assert.equal(outcome.toolSteps.at(-1).ok, false, '失败的调用仍要记入 toolSteps');
+  assert.ok(
+    outcome.toolSteps.at(-1).summary.includes('缺少必填参数'),
+    '工具轨迹保留原始错误，便于排查'
+  );
+  assert.equal(outcome.rawReply, '这次没办成，工具执行失败了。');
+  assert.ok(
+    !outcome.rawReply.includes('缺少必填参数'),
+    '助手回复不得透传工具内部校验文案'
+  );
 });
 
 test('正文工具调用封装：普通轮次解析后照常进入下一轮并回传工具结果', async () => {
