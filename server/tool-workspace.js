@@ -448,6 +448,14 @@ const workspaceReadDefinition = Object.freeze({
         const truncated = size > cap;
         const content = buffer.subarray(0, read).toString('utf8');
         const bytes = read;
+        // 回执 hash 覆盖完整文件（不受 64KB 读取截断影响），用于跨轮核对
+        // “文件是否被外部改动”；只进结构化 evidence，不进用户回复正文。
+        let sha256 = null;
+        try {
+          sha256 = crypto.createHash('sha256').update(fs.readFileSync(absolutePath)).digest('hex');
+        } catch (_) {
+          sha256 = null;
+        }
         recordOp({ tool: 'workspace_read', relPath: relativePath, status: 'success', bytes, truncated });
         return {
           ok: true,
@@ -455,6 +463,7 @@ const workspaceReadDefinition = Object.freeze({
           bytes,
           totalSize: size,
           truncated,
+          ...(sha256 ? { sha256 } : {}),
           content,
           summary: truncated
             ? `已读取前 ${bytes} 字节（文件共 ${size} 字节，超出部分被截断）`
@@ -640,11 +649,18 @@ async function executeWrite(args, { confirmed = false } = {}) {
         status: 'success',
         confirmed,
       });
+      let sha256 = null;
+      try {
+        sha256 = crypto.createHash('sha256').update(fs.readFileSync(absolutePath)).digest('hex');
+      } catch (_) {
+        sha256 = null;
+      }
       return {
         ok: true,
         path: relativePath,
         mode: args.mode,
         bytes: incoming,
+        ...(sha256 ? { sha256 } : {}),
         backup: backupName,
         summary:
           args.mode === 'append'

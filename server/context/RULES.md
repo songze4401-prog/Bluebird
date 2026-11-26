@@ -40,17 +40,18 @@ Agent 工具循环在上下文组装之后运行：工具调用与工具结果�
 project/execution 选择 fact/goal/identity/preference 与 document/code；
 review 使用 episodic only；fact_query 使用 document/web 且无答案阈值 0.08。
 
-## 3. 消息与数据契约（projection v3）
+## 3. 消息与数据契约（projection v4）
 
 `server/context/projection.js` 是存储消息 → 上下文消息的唯一投影：
 
 ```text
 {
-  projectionVersion: 3,
+  projectionVersion: 4,
   index, id, sessionId, role, content, createdAt,
   attachments: [{ id, kind, mime?, name? }],
   hasImage,
-  toolSteps: [{ name, ok, code?, summary?, durationMs? }],
+  toolSteps: [{ name, ok, code?, summary?, durationMs?, evidence? }],
+  receiptStatus: 'executed' | 'failed' | 'pending' | 'no_tool_calls' | null,
   contentKind: 'text' | 'attachment_only' | 'empty',
   unsupported: string[]
 }
@@ -61,8 +62,11 @@ review 使用 episodic only；fact_query 使用 document/web 且无答案阈值 
   不静默当成正常空消息。存储层不应出现该形态。
 - 附件只保留元数据；无 `id` 的附件无法读取文件，显式丢弃并标记
   `attachment_without_id`。
-- `toolSteps` 是落盘展示字段，不是模型 `tool_calls` 协议；它随投影保留，
-  **不进入提示词**。请求内的工具协议由 agent-runtime 维护。
+- `toolSteps` 是落盘展示字段，不是模型 `tool_calls` 协议；它随投影保留。
+  W1 起由 `server/turn-receipts.js` 把最近轮次回执以**独立 system 块**注入请求，
+  不拼进 assistant 正文（实测拼进正文会让模型把回执当成自己的话复述）。
+- `receiptStatus` 只由服务端写入：`no_tool_calls` 会明确提示“无回执，不得当作
+  已执行事实”；旧消息没有该字段时保持 `null`，不推断。
 - 模型消息由 `toModelMessages()` 从投影生成：用户图片转 `text + image_url`，
   助手图片/表情包降级为文本占位，`includeImages=false` 时用户图片也降级；
   读取失败退化为纯文本，不让整轮请求崩掉。

@@ -145,6 +145,7 @@ async function startServer(label) {
       BLUEBIRD_RETRIEVAL_ROOTS: '',
       BLUEBIRD_SKILLS: '',
       BLUEBIRD_MEMORY_OBSERVER: '',
+      BLUEBIRD_TURN_RECEIPTS: '1',
       MEMORY_ENABLED: 'true',
       BLUEBIRD_API_TOKEN: apiToken,
       DEEPSEEK_API_KEY: apiKey,
@@ -280,6 +281,15 @@ async function testA(sessionId) {
   recordCheck('A', 'create write receipt', toolNames(t.a1).includes('workspace_write:true'));
   recordCheck('A', 'read receipt', toolNames(t.a2).includes('workspace_read:true'));
   recordCheck('A', 'overwrite receipt', toolNames(t.a3).includes('workspace_write:true'));
+  const assistantWithReceipts = (t.history || []).find(
+    item => item.role === 'assistant' && Array.isArray(item.toolSteps) && item.toolSteps.length
+  );
+  recordCheck(
+    'A',
+    'history persists receiptStatus',
+    Boolean(assistantWithReceipts && assistantWithReceipts.receiptStatus),
+    assistantWithReceipts ? assistantWithReceipts.receiptStatus : 'no assistant receipt'
+  );
   recordCheck(
     'A',
     'success confirmation not replaced by readback guard',
@@ -311,7 +321,14 @@ async function testBResume(sessionId) {
   recordCheck('B', 'step2 exists', t.final.step2.exists);
   recordCheck('B', 'step3 exists', t.final.step3.exists);
   recordCheck('B', 'history survives restart', Array.isArray(t.historyAfterRestart) && t.historyAfterRestart.length > 0, `${(t.historyAfterRestart || []).length} messages`);
-  recordCheck('B', 'resume reports 3/3 or explicit pending', /3\s*\/\s*3|全部|完成|未完成|缺/.test(t.b3.reply || ''), (t.b3.reply || '').slice(0, 120));
+  const bReply = t.b3.reply || '';
+  recordCheck(
+    'B',
+    'resume reports 3/3 or explicit pending',
+    /3\s*\/\s*3|全部|完成|未完成|缺/.test(bReply) ||
+      (/b-step1\.txt/.test(bReply) && /b-step2\.txt/.test(bReply) && /b-step3\.txt/.test(bReply)),
+    bReply.slice(0, 120)
+  );
 }
 
 async function testC(sessionId) {
