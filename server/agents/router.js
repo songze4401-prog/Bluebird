@@ -22,6 +22,21 @@ const PRIORITY_VALUES = Object.freeze(['high', 'normal', 'low']);
 // A 类常量：与路由 profile 的轮次/工具上限一同冻结进任务，不代表供应商真实配额，
 // 需随后续真实 usage 数据校准；显式调用方仍可通过 budget.tokenBudget 覆盖。
 const TOKEN_BUDGET_BY_PATH = Object.freeze({ fast: 12000, slow: 20000 });
+const WRITE_TASK_TYPES = new Set(['workspace.file', 'action.execute', 'memory.write']);
+// 只认“对文件/目录/路径的写动作”；避免“记录一条待删除会话”这类目标
+// 因为出现“删除”二字就误触发写入审批。
+const WRITE_GOAL_RE =
+  /(?:创建|新建|写入|保存|覆盖|追加|修改|更新|删除|生成).{0,12}(?:文件|目录|路径|workspace|\.[a-z0-9]{1,8}\b)|(?:文件|目录|路径|workspace|\.[a-z0-9]{1,8}\b).{0,12}(?:创建|新建|写入|保存|覆盖|追加|修改|更新|删除|生成)/i;
+const WRITE_SCOPE_MAX_BYTES = 256 * 1024;
+
+function shouldRequireWriteApproval(task) {
+  if (!task) return false;
+  if (!Array.isArray(task.allowedTools) || !task.allowedTools.includes('workspace_write')) {
+    return false;
+  }
+  if (!WRITE_TASK_TYPES.has(task.taskType)) return false;
+  return WRITE_GOAL_RE.test(String(task.goal || ''));
+}
 const STATUS_BY_CODE = Object.freeze({
   invalid_task: 400,
   tool_not_allowed: 403,
@@ -545,6 +560,8 @@ function createRouter(overrides = {}) {
   const sessionStore = overrides.sessions || require('./sessions');
   const appendEvent = overrides.appendEvent || (args => require('./tasks').appendEvent(args));
   const startTask = overrides.startTask || (taskId => require('./runtime').startTask(taskId));
+  const createWriteApproval =
+    overrides.createWriteApproval || (args => require('./approvals').createApproval(args));
   const loadSnapshot = overrides.load || (() => computeLoad(taskStore));
   const now = overrides.now || Date.now;
 
@@ -665,7 +682,7 @@ function createRouter(overrides = {}) {
       });
     }
 
-    const task = taskStore.createTask({
+    let task = taskStore.createTask({
       agentId,
       workerSessionId,
       planId: workflowPlan.planId,
@@ -751,13 +768,55 @@ function createRouter(overrides = {}) {
       );
     }
 
+    // W3：委派写入在派发阶段创建任务级审批。未批准前任务停在 waiting_approval，
+    // 不进入 Worker；审批执行后写入资格才落到 task.writeApproved。
+    let writeApproval = null;
+    if (shouldRequireWriteApproval(task)) {
+      try {
+        taskStore.updateTask(task.taskId, {
+          writeApprovalScope: { taskId: task.taskId, maxBytes: WRITE_SCOPE_MAX_BYTES },
+        });
+        writeApproval = createWriteApproval({
+          botId: task.botId,
+          operation: 'workspace.write',
+          payload: {
+            producerTaskId: task.taskId,
+            taskType: task.taskType,
+            maxBytes: WRITE_SCOPE_MAX_BYTES,
+          },
+          taskId: task.taskId,
+          sessionId: task.sessionId,
+          requestedBy: 'agent',
+        });
+        taskStore.updateTask(task.taskId, {
+          writeApprovalId: writeApproval.approvalId,
+        });
+        task = taskStore.getTask(task.taskId) || task;
+      } catch (error) {
+        try {
+          taskStore.updateTask(task.taskId, {
+            requiresReview: true,
+            lastErrorCode: 'write_approval_unavailable',
+          });
+        } catch (_) {
+          // 任务已进入 waiting/终态时标记失败不改变拒绝结论。
+        }
+        throw new AgentError(
+          'write_approval_unavailable',
+          '写入审批创建失败，任务未启动',
+          503,
+          { taskId: task.taskId }
+        );
+      }
+    }
+
     writeRouteEvent(appendEvent, agentId, 'route.decided', decision, {
       taskId: task.taskId,
       priority: normalized.priority,
       idempotent: false,
     });
-    startTask(task.taskId);
-    return { task, decision, idempotent: false };
+    if (!writeApproval) startTask(task.taskId);
+    return { task, decision, idempotent: false, approval: writeApproval };
   }
 
   function decideWithContext(input, context = {}) {
@@ -783,6 +842,7 @@ module.exports = {
   STATUS_BY_CODE,
   classifyPath,
   validateContractInput,
+  shouldRequireWriteApproval,
   decide,
   createRouter,
   computeLoad,

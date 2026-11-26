@@ -616,6 +616,8 @@ async function execute({
   failOpen = null,
   // §20 第 349 步：本次运行的写入资格令牌（由 runTask 铸造，只留在内存）。
   fencingToken = null,
+  // W3：任务级写入授权（只有 workspace.write 审批执行后由 runTask 传入）。
+  writeAuthorization = null,
   runId: runIdOverride = null,
   stream = false,
   onDelta = null,
@@ -676,6 +678,7 @@ async function execute({
       toolAuthorizer,
       onToolDenied,
       failOpen,
+      writeAuthorization,
       sideEffect: sideEffectGuard,
       stream,
       onDelta,
@@ -986,11 +989,14 @@ function handleWaitingApprovalExpiry(taskId) {
 
 approvalDeadline.setExpireHandler(handleWaitingApprovalExpiry);
 
-async function runTask(taskId) {
+async function runTask(taskId, { resumeFromApproval = false } = {}) {
   const task = tasks.getRawTask(taskId);
   if (!task) return;
   // waiting_approval 是暂停态，不是终态；由 approvals.execute/reject 收尾。
   if (tasks.isTerminalStatus(task.status) || task.status === 'waiting_approval') return;
+  // W3：审批执行已把任务迁到 running；这里跳过 accepted/running 的重复迁移，
+  // 但仍走租约、预算、fencing 与完整工具链。
+  const alreadyRunning = resumeFromApproval && task.status === 'running';
   // Phase 1 交付物 2：依赖未就绪不在执行侧启动。
   // 判定复用 dependencies.isReady（与 tasks.nextQueuedTask 是同一实现），
   // 这里只是防「取队后依赖态变化」的二次确认，未就绪立即回队列。
@@ -1103,7 +1109,7 @@ async function runTask(taskId) {
       ) {
         return;
       }
-    } else {
+    } else if (!alreadyRunning) {
       tasks.transitionTask(task.taskId, {
         to: 'accepted',
         runId,
@@ -1168,11 +1174,13 @@ async function runTask(taskId) {
 
     // ---- start ----
     const runningSince = Date.now();
-    tasks.transitionTask(task.taskId, {
-      to: 'running',
-      startedAt: new Date(runningSince).toISOString(),
-      retryAt: null,
-    });
+    if (!alreadyRunning) {
+      tasks.transitionTask(task.taskId, {
+        to: 'running',
+        startedAt: new Date(runningSince).toISOString(),
+        retryAt: null,
+      });
+    }
     // P5 注入点：任务已进入 running，回合还没开始。
     crashHook.hold('task.after-running');
     safeEvent(
@@ -1289,8 +1297,13 @@ async function runTask(taskId) {
     });
     // 只认工具标签里显式的 high_risk；任务类型驱动的 R3（action.execute 等）
     // 不在 runtime 抬审校（理由见上）。
+    // W3：写入已由人工 workspace.write 审批授权时，审批本身就是高风险门；
+    // 不再二次抬独立审校，否则每个已批准写入都要再等一个 reviewer 任务，
+    // 60s deadline 内很容易被误判成 recovery。确定性验证仍然保留。
     const reviewRaised =
-      toolRiskLabels.includes('high_risk') && task.requiresReview !== true;
+      toolRiskLabels.includes('high_risk') &&
+      task.requiresReview !== true &&
+      task.writeApproved !== true;
     if (reviewRaised) {
       tasks.updateTask(task.taskId, { requiresReview: true });
     }
@@ -1373,6 +1386,17 @@ async function runTask(taskId) {
       signal: controller.signal,
       toolAuthorizer: authorizer,
       fencingToken,
+      // W3：只有审批执行路径写入 writeApproved=true；未授权任务在工具层
+      // 仍会收到 confirmation_required，不会因为任务有 workspace_write 就放行。
+      writeAuthorization:
+        task.writeApproved === true
+          ? {
+              approved: true,
+              taskId: task.taskId,
+              approvalId: task.writeApprovalId || null,
+              scope: task.writeApprovalScope || null,
+            }
+          : null,
       // 作用域取自任务记录（planId/planVersion 是创建时冻结的），
       // 老任务缺这两个字段时如实传 null——判定侧会拒绝而不是当成"无计划继续跑"。
       failOpen: {

@@ -361,11 +361,16 @@ async function testD(sessionId) {
   recordCheck('D', 'created original', t.baseline.exists && String(t.baseline.content).trim() === 'original');
   recordCheck('D', 'external change detected', /externally-changed/.test(t.d2.reply || ''));
   recordCheck('D', 'change read receipt', toolNames(t.d2).includes('workspace_read:true'));
-  recordCheck('D', 'deletion detected', /不在了|不存在|没有/.test(t.d3.reply || '') && t.d3.toolSteps.some(item => item.name === 'workspace_list' || item.name === 'workspace_read'));
+  recordCheck(
+    'D',
+    'deletion detected',
+    /不在了|不在|不存在|没有|删了|删除/.test(t.d3.reply || '') &&
+      t.d3.toolSteps.some(item => item.name === 'workspace_list' || item.name === 'workspace_read')
+  );
 }
 
-async function configureExecutor() {
-  const config = await api('/agents/executor/config', {
+async function configureAgent(botId) {
+  const config = await api(`/agents/${botId}/config`, {
     method: 'PUT',
     body: {
       modelProfile: {
@@ -377,25 +382,48 @@ async function configureExecutor() {
       },
     },
   });
-  const credential = await api('/agents/executor/credentials', {
+  const credential = await api(`/agents/${botId}/credentials`, {
     method: 'POST',
     body: { providerId, apiKey },
   });
-  recordCheck('E', 'executor configured', config.status === 200, `HTTP ${config.status}`);
-  recordCheck('E', 'executor credential created', credential.status === 201, `HTTP ${credential.status}`);
+  recordCheck('E', `${botId} configured`, config.status === 200, `HTTP ${config.status}`);
+  recordCheck('E', `${botId} credential created`, credential.status === 201, `HTTP ${credential.status}`);
+}
+
+async function configureExecutor() {
+  // 写入任务会因 high_risk 工具进入独立审校；不配置 reviewer 会让任务
+  // 等审校到 60s deadline，误判成 W3 失败。
+  await configureAgent('executor');
+  await configureAgent('reviewer');
+}
+
+async function findTask(sessionId, botId) {
+  const res = await api(`/agent-tasks?botId=${encodeURIComponent(botId)}&parentSessionId=${encodeURIComponent(sessionId)}&limit=20`);
+  return res.status === 200 && Array.isArray(res.json.tasks) && res.json.tasks.length
+    ? res.json.tasks[0]
+    : null;
 }
 
 async function waitForTask(sessionId, botId, timeoutMs = 90000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const res = await api(`/agent-tasks?botId=${encodeURIComponent(botId)}&parentSessionId=${encodeURIComponent(sessionId)}&limit=20`);
-    if (res.status === 200 && Array.isArray(res.json.tasks) && res.json.tasks.length) {
-      const task = res.json.tasks[0];
-      if (['completed', 'failed', 'cancelled', 'timed_out', 'recovery'].includes(task.status)) return task;
+    const task = await findTask(sessionId, botId);
+    if (task && ['completed', 'failed', 'cancelled', 'timed_out', 'recovery'].includes(task.status)) {
+      return task;
     }
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
   return null;
+}
+
+async function waitForTaskState(sessionId, botId, predicate, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const task = await findTask(sessionId, botId);
+    if (task && predicate(task)) return task;
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  return findTask(sessionId, botId);
 }
 
 async function testE(sessionId) {
@@ -403,12 +431,55 @@ async function testE(sessionId) {
   await configureExecutor();
   t.e1 = await chat('E', 'delegate', sessionId,
     '请把任务明确委派给 executor：在工作区创建 e-agent.txt，内容 delegated，并让执行 Agent 完成后汇报。必须使用 delegate_to_bot，然后告诉我任务 ID 和状态。');
+  t.initialTask = await waitForTaskState(
+    sessionId,
+    'executor',
+    task => task.status === 'waiting_approval' || ['completed', 'failed', 'cancelled', 'timed_out', 'recovery'].includes(task.status)
+  );
+
+  const approvalList = await api('/agents/executor/approvals?status=pending&limit=20');
+  t.pendingApprovals = approvalList.json && Array.isArray(approvalList.json.approvals)
+    ? approvalList.json.approvals
+    : [];
+  t.approval = t.pendingApprovals.find(
+    item =>
+      item.operation === 'workspace.write' &&
+      t.initialTask &&
+      (item.taskId === t.initialTask.taskId ||
+        (item.payload && item.payload.producerTaskId === t.initialTask.taskId))
+  ) || null;
+
+  if (t.approval) {
+    t.approve = await api(`/agent-approvals/${encodeURIComponent(t.approval.approvalId)}/approve`, {
+      method: 'POST',
+      body: { reason: 'audit e2e write authorization' },
+    });
+    t.execute = await api(`/agent-approvals/${encodeURIComponent(t.approval.approvalId)}/execute`, {
+      method: 'POST',
+      body: {},
+    });
+    t.approvalAfter = await api(`/agent-approvals/${encodeURIComponent(t.approval.approvalId)}`);
+  }
+
   t.task = await waitForTask(sessionId, 'executor');
   t.file = readWorkspace('e-agent.txt');
   t.history = await history(sessionId);
   t.deliveryMessage = (t.history || []).find(item => typeof item.id === 'string' && item.id.startsWith('bot-result-')) || null;
   evidence.tests.E = t;
+
   recordCheck('E', 'delegated', toolNames(t.e1).includes('delegate_to_bot:true'));
+  recordCheck(
+    'E',
+    'write approval created',
+    Boolean(t.initialTask && t.initialTask.status === 'waiting_approval' && t.approval),
+    t.initialTask ? `${t.initialTask.status}/${t.approval ? t.approval.approvalId : 'no-approval'}` : 'no task'
+  );
+  recordCheck(
+    'E',
+    'write approval executed',
+    Boolean(t.execute && t.execute.status === 200 && t.approvalAfter && t.approvalAfter.json && t.approvalAfter.json.approval && t.approvalAfter.json.approval.status === 'completed'),
+    t.execute ? `HTTP ${t.execute.status}` : 'not executed'
+  );
   recordCheck('E', 'task completed', Boolean(t.task && t.task.status === 'completed'), t.task ? `${t.task.status}/${t.task.errorCode || 'no-error'}` : 'no task');
   recordCheck('E', 'file created', t.file.exists && /delegated/.test(t.file.content || ''));
   recordCheck('E', 'delivered to parent', Boolean(t.deliveryMessage));

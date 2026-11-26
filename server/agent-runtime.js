@@ -579,18 +579,50 @@ async function executeToolCall(name, rawArgs, context) {
     Boolean(context && context.sessionId) &&
     Boolean(context && context.userText) &&
     !(context && context.sideEffect);
+  // W3：委派任务只有在 workspace.write 审批执行后才会拿到这份授权。
+  // 授权只代表“该任务可在工作区内写入”，路径/扩展名/总量仍由工具层与 scope 校验。
+  const writeAuth = context && context.writeAuthorization;
+  const approvedWrite =
+    def.name === 'workspace_write' &&
+    writeAuth &&
+    writeAuth.approved === true &&
+    typeof writeAuth.taskId === 'string' &&
+    writeAuth.taskId.length > 0;
   if (def.risk === 'high_risk' && !pendingFlow) {
-    monitor.complete({
-      ok: false,
-      code: 'confirmation_required',
-      durationMs: Date.now() - startedAt,
-      executed: false,
-    });
-    return {
-      ok: false,
-      code: 'confirmation_required',
-      error: '高风险工具需要后端确认，当前没有已授权的确认流程',
-    };
+    if (approvedWrite) {
+      const rawContent =
+        rawArgs && typeof rawArgs === 'object' ? rawArgs.content : '';
+      const maxBytes =
+        writeAuth.scope && Number.isInteger(writeAuth.scope.maxBytes)
+          ? writeAuth.scope.maxBytes
+          : null;
+      const bytes = Buffer.byteLength(String(rawContent || ''), 'utf8');
+      if (maxBytes !== null && bytes > maxBytes) {
+        monitor.complete({
+          ok: false,
+          code: 'write_scope_exceeded',
+          durationMs: Date.now() - startedAt,
+          executed: false,
+        });
+        return {
+          ok: false,
+          code: 'write_scope_exceeded',
+          error: `写入超出任务授权上限（${maxBytes} 字节，本次 ${bytes} 字节）`,
+        };
+      }
+    } else {
+      monitor.complete({
+        ok: false,
+        code: 'confirmation_required',
+        durationMs: Date.now() - startedAt,
+        executed: false,
+      });
+      return {
+        ok: false,
+        code: 'confirmation_required',
+        error: '高风险工具需要后端确认，当前没有已授权的确认流程',
+      };
+    }
   }
 
   // 显式区分只读工具与有副作用的写入工具：写入工具必须在运行层拿到
@@ -988,6 +1020,8 @@ async function runAgentTurn({
   failOpen = null,
   // P2：任务执行器的副作用幂等闸门；主控直聊不传，行为完全不变。
   sideEffect = null,
+  // W3：任务级写入授权；只有 workspace.write 审批执行后由 agents/runtime 传入。
+  writeAuthorization = null,
   credentialKey = null,
   stream = false,
   onDelta = null,
@@ -1089,6 +1123,7 @@ async function runAgentTurn({
       round,
       sideEffect,
       failOpen,
+      writeAuthorization,
     };
     let result = await executeToolCall(toolName, rawArgs, toolContext);
     toolCallCount += 1;

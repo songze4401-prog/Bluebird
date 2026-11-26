@@ -713,6 +713,13 @@ function publicTask(task, { includeResult = true } = {}) {
     stateVersion: Number.isInteger(task.stateVersion) ? task.stateVersion : 0,
     runs: Array.isArray(task.runs) ? clone(task.runs) : [],
     requiresReview: task.requiresReview === true,
+    // W3：委派写入的任务级授权。旧记录缺字段读作 false/null。
+    writeApproved: task.writeApproved === true,
+    writeApprovalId: typeof task.writeApprovalId === 'string' ? task.writeApprovalId : null,
+    writeApprovalScope:
+      task.writeApprovalScope && typeof task.writeApprovalScope === 'object'
+        ? { ...task.writeApprovalScope }
+        : null,
     // §16：来源引用与污点标签（只读）。旧记录缺字段读作 unknown，绝不默认"干净"。
     provenanceRefs: Array.isArray(task.provenanceRefs)
       ? task.provenanceRefs.map(item => ({ ...item }))
@@ -1449,6 +1456,10 @@ function createTask({
     stateVersion: 0,
     runs: [],
     requiresReview: false,
+    // W3：委派写入默认未授权；只有 workspace.write 审批执行后才会置 true。
+    writeApproved: false,
+    writeApprovalId: null,
+    writeApprovalScope: null,
     // §16：来源引用 + 污点并集；旧数据缺字段时由读取边界按 unknown 返回。
     provenanceRefs: cleanProvenanceRefs,
     taintLabels: cleanTaintLabels,
@@ -1829,6 +1840,32 @@ function updateTask(taskId, patch = {}) {
   }
   if (patch.requiresReview !== undefined) {
     task.requiresReview = patch.requiresReview === true;
+  }
+  // W3：写入授权只能由审批执行路径写入；字段本身是扁平的，scope 只保留
+  // 上限与任务 id，任何正文/路径内容都不进任务记录。
+  if (patch.writeApproved !== undefined) {
+    task.writeApproved = patch.writeApproved === true;
+  }
+  if (patch.writeApprovalId !== undefined) {
+    task.writeApprovalId =
+      typeof patch.writeApprovalId === 'string'
+        ? patch.writeApprovalId.slice(0, 80)
+        : null;
+  }
+  if (patch.writeApprovalScope !== undefined) {
+    const scope =
+      patch.writeApprovalScope && typeof patch.writeApprovalScope === 'object'
+        ? patch.writeApprovalScope
+        : null;
+    task.writeApprovalScope = scope
+      ? {
+          taskId: typeof scope.taskId === 'string' ? scope.taskId.slice(0, 80) : null,
+          maxBytes:
+            Number.isInteger(scope.maxBytes) && scope.maxBytes > 0
+              ? scope.maxBytes
+              : null,
+        }
+      : null;
   }
   if (patch.lease !== undefined) {
     if (patch.lease === null) {
