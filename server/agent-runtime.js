@@ -830,6 +830,7 @@ async function executeToolCall(name, rawArgs, context) {
         userId: context.userId || null,
         userText: context.userText,
         userMessageId: context.userMessageId,
+        getTask: typeof context.getTask === 'function' ? context.getTask : null,
         signal: controller.signal,
         workspacePendingFlow: pendingFlow === true,
       })
@@ -978,6 +979,8 @@ async function runAgentTurn({
   userId = null,
   userText = '',
   userMessageId = null,
+  // 只读任务状态查询由组合层注入，避免工具模块依赖任务业务层。
+  getTask = null,
   // 记忆作用域与对话作用域分开：委派任务用父主控会话作为记忆 scope，
   // 但工具轨迹、任务日志仍属于 Bot 自己的 session。
   memoryScopeSessionId = null,
@@ -1090,6 +1093,7 @@ async function runAgentTurn({
       userId,
       userText,
       userMessageId,
+      getTask,
       cache,
       abortSignal,
       policy: activePolicy,

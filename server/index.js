@@ -451,6 +451,8 @@ const {
   resetPolicy: resetAgentPolicy,
 } = require('./agent-policy');
 
+const { getTask: getAgentTask } = require('./agents/tasks');
+
 // Agent 工具调用（V1）：工具注册、多轮循环与开关判定都在 agent-runtime。
 // 默认关闭，只有 BLUEBIRD_AGENT_TOOLS=1 且模型声明 tools 能力时才启用。
 const {
@@ -1851,6 +1853,7 @@ app.post('/chat', requireAuth, async (req, res) => {
         userId: ctx.userId,
         userText: ctx.userText,
         userMessageId: ctx.userMessageId,
+        getTask: getAgentTask,
         temperature: 0.8,
         maxTokens: 8192,
         timeout: 90000,
@@ -2306,6 +2309,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         userId: ctx.userId,
         userText: ctx.userText,
         userMessageId: ctx.userMessageId,
+        getTask: getAgentTask,
         temperature: 0.8,
         maxTokens: 8192,
         timeout: 90000,

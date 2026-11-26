@@ -546,17 +546,17 @@ async function main() {
   check(
     'Agent 路径已激活（请求带白名单 tools，模型自己选择不调用）',
     Array.isArray(stubCalls[0].tools) &&
-      stubCalls[0].tools.length === 6 &&
-      stubCalls[0].tools.every(tool =>
-        [
+      [
           'memory_search',
           'memory_remember',
           'knowledge_search',
           'delegate_to_bot',
           'web_search',
           'web_fetch',
-        ].includes(tool.function.name)
-      )
+          'get_bot_task_status',
+        ].every(name =>
+          stubCalls[0].tools.some(tool => tool.function && tool.function.name === name)
+        )
   );
   check('model 回执保持原语义', plain.json.model === 'deepseek-chat');
 

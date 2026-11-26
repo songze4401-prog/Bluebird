@@ -8,8 +8,6 @@
  * 安全边界：只允许查询 parentSessionId === 当前会话的任务，跨会话一律按
  * task_not_found 处理，不回显任务内容。
  */
-const tasks = require('./agents/tasks');
-
 function validate(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) {
     return { ok: false, error: '参数必须是 JSON 对象' };
@@ -48,7 +46,11 @@ const definition = Object.freeze({
     if (!sessionId) {
       return { ok: false, code: 'session_required', error: '查询任务需要当前会话' };
     }
-    const task = tasks.getTask(checked.args.taskId);
+    const getTask = context && typeof context.getTask === 'function' ? context.getTask : null;
+    if (!getTask) {
+      return { ok: false, code: 'task_lookup_unavailable', error: '任务状态查询暂不可用' };
+    }
+    const task = getTask(checked.args.taskId);
     if (!task || task.parentSessionId !== sessionId) {
       return { ok: false, code: 'task_not_found', error: '任务不存在或不属于当前会话' };
     }

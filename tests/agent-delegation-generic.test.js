@@ -116,5 +116,53 @@ test('get_bot_task_status：只读注册，且只允许查询本会话派发的�
 
   const missing = await tool.handler({ taskId: 'task_missing' }, { sessionId: 's-1' });
   assert.equal(missing.ok, false);
-  assert.equal(missing.code, 'task_not_found');
+  assert.equal(missing.code, 'task_lookup_unavailable');
+  const missingTask = await tool.handler(
+    { taskId: 'task_missing' },
+    { sessionId: 's-1', getTask: () => null }
+  );
+  assert.equal(missingTask.ok, false);
+  assert.equal(missingTask.code, 'task_not_found');
+
+  const ownedTask = {
+    taskId: 'task_owned',
+    agentId: 'researcher',
+    botId: 'legacy-bot-id',
+    taskType: 'research.analyze',
+    status: 'running',
+    errorCode: null,
+    updatedAt: '2026-11-26T00:00:00.000Z',
+    parentSessionId: 's-1',
+    result: { private: 'must not be returned' },
+  };
+  const owned = await tool.handler(
+    { taskId: 'task_owned' },
+    { sessionId: 's-1', getTask: taskId => (taskId === 'task_owned' ? ownedTask : null) }
+  );
+  assert.deepEqual(owned, {
+    ok: true,
+    taskId: 'task_owned',
+    botId: 'researcher',
+    taskType: 'research.analyze',
+    status: 'running',
+    errorCode: null,
+    updatedAt: '2026-11-26T00:00:00.000Z',
+    summary: '任务 task_owned 当前状态：running',
+  });
+
+  const runtimeLookup = await runtime.executeToolCall(
+    'get_bot_task_status',
+    { taskId: 'task_owned' },
+    { sessionId: 's-1', getTask: () => ownedTask, cache: new Map() }
+  );
+  assert.equal(runtimeLookup.ok, true);
+  assert.equal(runtimeLookup.status, 'running');
+  assert.equal(runtimeLookup.result, undefined);
+
+  const foreign = await tool.handler(
+    { taskId: 'task_owned' },
+    { sessionId: 's-2', getTask: () => ownedTask }
+  );
+  assert.equal(foreign.ok, false);
+  assert.equal(foreign.code, 'task_not_found');
 });
