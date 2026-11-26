@@ -15,6 +15,7 @@ const agentApprovals = require('./agents/approvals');
 const toolWorkspace = require('./tool-workspace');
 const workspacePending = require('./workspace-pending');
 const turnReceipts = require('./turn-receipts');
+const agentLedger = require('./agent-ledger');
 const { estimateTokens } = require('./text-utils');
 const skillsLoader = require('./skills-loader');
 const { createSkillsRouter } = require('./routes/skills');
@@ -1093,10 +1094,13 @@ async function prepareChatRequest(req) {
     policyMode: agentPolicy.mode,
     policyToolCount: listToolSpecs(agentPolicy).length,
   }).allowed;
-  // W1：回执 system 块也要占输入预算，先算出来再一起预留下，避免在
-  // input-guard 之后追加导致实际请求超出窗口。
+  // W1/W4：回执与长任务账本 system 块都要占输入预算，先算出来再预留，
+  // 避免在 input-guard 之后追加导致实际请求超出窗口。
   const turnReceiptNote = turnReceipts.buildTurnReceiptNote(storedItems);
-  const receiptReserveTokens = turnReceiptNote ? estimateTokens(turnReceiptNote) : 0;
+  agentLedger.ensureLedger(sessionId, userText);
+  const ledgerNote = agentLedger.buildLedgerContextBlock(sessionId);
+  const systemNote = [turnReceiptNote, ledgerNote].filter(Boolean).join('\n\n');
+  const receiptReserveTokens = systemNote ? estimateTokens(systemNote) : 0;
   const toolsReserveTokens =
     (agentPossible ? estimateAgentToolsReserve() : 0) + receiptReserveTokens;
 
@@ -1204,18 +1208,18 @@ async function prepareChatRequest(req) {
 
   const contextTrace = contextRuntime.traceApi;
   const systemPrompt = contextRuntime.systemPrompt;
-  // W1：把最近轮次的工具回执作为独立 system 块插在当前 user 之前。
+  // W1/W4：把最近轮次回执与长任务账本作为独立 system 块插在当前 user 之前。
   // 不拼进 assistant 正文；note 为空时 messages 原样返回（旧行为零变化）。
   const receiptInjection = turnReceipts.injectTurnReceipts(
     contextRuntime.messages,
     storedItems,
-    turnReceiptNote
+    systemNote
   );
   const requestMessages = receiptInjection.messages;
   const promptHistory = contextRuntime.historyMessages;
   if (receiptInjection.note) {
     console.log(
-      `[turn-receipts] session=${sessionId} injected=true length=${receiptInjection.note.length}`
+      `[system-notes] session=${sessionId} injected=true length=${receiptInjection.note.length} ledger=${Boolean(ledgerNote)}`
     );
   }
 
@@ -1257,6 +1261,8 @@ async function prepareChatRequest(req) {
       userContent,
       promptHistory,
       requestMessages,
+      // W4：最终汇总轮仍有 pending 步骤时，强制对应工具先补齐。
+      ledgerForcedTools: agentLedger.forcedToolsForPending(sessionId, userText),
       systemPrompt,
       personaConfig,
       agentPolicy,
@@ -1306,6 +1312,23 @@ function receiptStatusFor(agentOn, toolSteps) {
   return 'executed';
 }
 
+// W4：只在“长任务最终交付”或“回复退化成一条工具摘要”时替换成账本清单，
+// 普通进度轮仍由模型自由表达，避免每轮都刷一份长清单。
+function shouldReplaceWithLedger(reply, userText, ledger) {
+  if (!ledger || !Array.isArray(ledger.steps) || !ledger.steps.length) return false;
+  const text = String(reply || '').trim();
+  const toolSummary =
+    /^(?:工作区|已读取|已覆盖|已创建|已追加|已写入|已列出|已删除)[^\n]{0,48}$/.test(text);
+  const finalIntent = /汇总|总结|最终|全部|整个|清单|剩余|进度/.test(String(userText || ''));
+  const { pending } = agentLedger.counts(ledger);
+  const hasStepCoverage = ledger.steps.some(step =>
+    new RegExp(`步骤${step.index}|(?:^|[^\\d])${step.index}[.、]`).test(text)
+  );
+  if (!toolSummary && !finalIntent && hasStepCoverage) return false;
+  if (pending && !finalIntent && !toolSummary) return false;
+  return toolSummary || (finalIntent && (!hasStepCoverage || text.length < 80));
+}
+
 // 收尾：清洗情绪标签 -> 分条 -> 落盘 -> presence。
 // isClientGone 是函数：流式路由里客户端可能在生成中途断开，取值发生在收尾时刻。
 // toolSteps：Agent 工具执行摘要（可选）。作为消息独立字段挂在最后一条
@@ -1341,6 +1364,19 @@ function completeChatTurn({
     console.warn(
       `[delivery-claim-guard] session=${sessionId} type=${deliveryMismatch.aType}/${deliveryMismatch.bType}`
     );
+  }
+
+  // W4：用服务端账本收口最终交付；B/F 的“已创建 b-step3.txt / 已读取 4 字节”
+  // 这类工具摘要不再代替 3/15 步清单。
+  agentLedger.bindReceipts(sessionId, toolSteps, userText);
+  const ledgerDelivery = agentLedger.buildDeliverySummary(sessionId);
+  const ledgerForCheck = agentLedger.getLedger(sessionId);
+  if (
+    ledgerDelivery &&
+    shouldReplaceWithLedger(rawReply, userText, ledgerForCheck)
+  ) {
+    rawReply = ledgerDelivery;
+    console.warn(`[task-ledger] session=${sessionId} delivery=replaced`);
   }
 
   const { reply: moodStripped, mood } = stripMoodTags(rawReply);
@@ -1916,6 +1952,7 @@ app.post('/chat', requireAuth, async (req, res) => {
         abortSignal: disconnect.signal,
         messages: ctx.requestMessages,
         policy: ctx.agentPolicy,
+        forcedToolNames: ctx.ledgerForcedTools || [],
         onRequest: requestMeta => recordSentForContext(ctx, requestMeta),
       });
 
@@ -2385,6 +2422,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
         },
         messages: ctx.requestMessages,
         policy: ctx.agentPolicy,
+        forcedToolNames: ctx.ledgerForcedTools || [],
         onRequest: requestMeta => recordSentForContext(ctx, requestMeta),
       });
 

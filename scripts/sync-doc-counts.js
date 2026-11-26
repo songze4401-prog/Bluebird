@@ -111,6 +111,8 @@ const NOTES = {
     'W0 known-gap baseline (todo): cross-turn tool receipts, zero-tool completion claims, and readback regex false positive; strict evidence is npm run audit:agent -- --run',
   'agent-write-approval':
     'W3 delegated write approval: task waits in waiting_approval, approve+execute sets writeApproved/scope and resumes Worker, unauthorized writes stay confirmation_required, scope overflow denied',
+  'agent-ledger':
+    'W4 numbered step ledger: parse 第N步/步骤N, bind tool receipts to steps, inject pending steps, detect stalls, and replace tool-summary final replies with a server-authored delivery checklist',
   'agent-approval-recovery':
     'approval execution idempotency (P3): begin-before-handler, crash-after-execution resumes to recovery without re-running the handler, a succeeded ledger row converges to executed instead of failed, approval-record-before-state-move (W5) leaves no dangling task, orphan waiting_approval tasks converge to recovery',
   'agent-artifact-content':

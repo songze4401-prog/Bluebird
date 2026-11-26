@@ -1022,6 +1022,8 @@ async function runAgentTurn({
   sideEffect = null,
   // W3：任务级写入授权；只有 workspace.write 审批执行后由 agents/runtime 传入。
   writeAuthorization = null,
+  // W4：最终汇总轮仍有 pending 步骤时，服务端强制对应工具先补齐。
+  forcedToolNames = [],
   credentialKey = null,
   stream = false,
   onDelta = null,
@@ -1291,15 +1293,20 @@ async function runAgentTurn({
       round === 1 &&
       delegationRequired &&
       requestSpecs.some(spec => spec.function.name === 'delegate_to_bot');
-    // 强制优先级：记忆落库 > 委派建任务 > 指定读回工具。一句话同时命中多个
-    // 意图时先保住不可逆的那一侧；读回侧还有服务端后置条件兜底。
+    // 强制优先级：记忆落库 > 委派建任务 > 指定读回工具 > W4 账本待办工具。
+    const forcedLedgerTool =
+      round === 1 && Array.isArray(forcedToolNames)
+        ? forcedToolNames.find(name => requestSpecs.some(spec => spec.function.name === name))
+        : null;
     const forcedToolName = forceMemoryTool
       ? 'memory_remember'
       : forceDelegateTool
         ? 'delegate_to_bot'
         : forceReadTool
           ? preferredReadTool
-          : null;
+          : forcedLedgerTool
+            ? forcedLedgerTool
+            : null;
     // 只有「本轮之前没有工具回执」时才按 token 流下发：一旦有回执，最终正文必须
     // 先过 Claim Guard / 后置条件再发，不能把未核对的声明先推给客户端。
     const streamThisRound = stream === true && toolSteps.length === 0;
