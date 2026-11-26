@@ -215,7 +215,7 @@ Run lint and typecheck before declaring any task done.
 
 ### Tests
 
-137 files, 2749 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, `model-calibration.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
+137 files, 2752 checks total. Every `tests/*.test.js` file points `BLUEBIRD_DATA_DIR` at an OS temp directory (override supported by `sessions.js`, `memory.js`, `emotion.js`, `presence.js`, `sticker-repo.js`, `model-calibration.js`, and `api-configs.js`), so tests never read or write the real `server/data`. Set `BLUEBIRD_DATA_DIR` **before** requiring any `server/` module — the data path is resolved once at module load, so setting it afterwards silently falls back to the real directory. Because `server/index.js` acquires the start-up single-instance lock before listening, tests that `require` it get a lock — but it lands in their own temp directory, so separate temp dirs never block each other. Run each file separately:
 
 ```bash
 node --test --test-concurrency=1 tests/memory.test.js tests/emotion.test.js tests/sticker-markers.test.js tests/streaming-segments.test.js tests/backup.test.js tests/context-engine.test.js tests/monitoring.test.js   # node:test suites (245)
@@ -235,7 +235,7 @@ node tests/agent-cost-tracking.test.js     # 3
 node tests/agent-crash-injection.test.js   # 4 — real SIGKILL crash injection (P5): handler-returned-but-unrecorded leaves one unknown ledger row and recovery without re-running the handler, artifacts persisted before state commit stay pending-commit and converge as pending, approval-record-before-state-move self-heals to waiting_approval, an interrupted read-only run leaves no intermediate state
 node tests/agent-cycle-detection.test.js   # 6 — §17 delegation and artifact-lineage cycle detection with a readable cycle path: wired into the delegation entry and artifact persist path, cycles are rejected before any write, and legal chains pass
 node tests/agent-dead-letter.test.js       # 4
-node tests/agent-delegation-generic.test.js # 6
+node tests/agent-delegation-generic.test.js # 7
 node tests/agent-dispatch.test.js          # 11 — main tool → Bot task, cross-agent result snapshot (a researcher task shows up on reconnect, newest-first and capped per parent session, never another session's), task-claim audit across every agent, `/agent-tasks` with and without `botId`, parent-memory read/write scope (agent rewrite of an existing memory parks a pending candidate until confirmed), parentUserId on the task, approval delivery, result SSE/snapshot, failure delivery, dedupe, outbox recovery
 node tests/agent-error-contract.test.js    # 6 — §23 seven-field contract for validation_failed/not_authorized/budget_exceeded/dependency_failed/internal_error: all fields present, same input yields the same fingerprint, retryable follows the spec, and existing code/error/status keys are untouched
 node tests/agent-eval-baseline.test.js     # 7
@@ -264,7 +264,7 @@ node tests/agent-recovery.test.js          # 31 — state machine transitions, t
 node tests/agent-risk-policy.test.js       # 8
 node tests/agent-router.test.js            # 50 — router decision chain, task contract v1, fast/slow budgets, idempotency/priority queue, route events privacy, delegate_to_bot compatibility
 node tests/agent-run-limits.test.js        # 4 — §25 persisted hard limits: delegation depth 2, two replans per run (task-level counts also recorded), three run retries; counts survive restart and retries never reset them
-node tests/agent-runtime-guards.test.js    # 20 — agent runtime guards: cross-session MERGE dedupe scope, task deadlineMs, policy maxRounds, abort-listener cleanup
+node tests/agent-runtime-guards.test.js    # 21 — agent runtime guards: cross-session MERGE dedupe scope, task deadlineMs, policy maxRounds, abort-listener cleanup
 node tests/agent-side-effect-ledger.test.js # 8 — runtime idempotency wiring (P2): begin-before-execute, succeeded reuse without re-execution, started residue routes the task to recovery, timeout becomes unknown and blocks retry, failed retries in place with one row per opKey, dedupeKeyOverride escape hatch for intentional repeats, read-only tools write no ledger rows
 node tests/agent-storage-limits.test.js    # 2 — agent event outbox hard cap, overflow accounting (drop_oldest) and outbox recovery
 node tests/agent-taint-policy.test.js      # 5
@@ -281,7 +281,7 @@ node tests/agent-worker.test.js            # 54 — worker lifecycle/runId, sess
 node tests/agent-workflow-binding.test.js  # 8 — task-to-plan binding (C2): plan is durably written before the task exists, A-class rejection leaves no task and no half-written plan, task-creation failure leaves only a harmless orphan plan, whole-store corruption fail-closes every bound non-terminal task to recovery while legacy planId=null tasks are untouched, per-task missing/mismatch/corrupt codes, planVersion and stateVersion never move each other, expectedVersion only honours stateVersion, idempotent replay adds no plan
 node tests/agent-workflow-crash.test.js    # 2 — workflow half-state crash injection (C3): a real SIGKILL right after the plan file is fsynced but before the task exists leaves exactly one durable orphan plan and zero task pointers (killed only after the marker, never by polling), and a constructed keyed-to-missing-plan task is fail-closed to recovery with plan_missing on restart while a healthy control task stays queued
 node tests/agent-workflow-store.test.js    # 15 — workflow store (C1): key-order-independent plan digest, immutable versions with monotonic +1 and rollback-as-new-version, 8 KB / 32-step / 1 KB-step hard rejects with no half-written file, 10-version soft prune that never evicts a referenced version (including terminal/recovery refs and task-scan live refs), audit-before-delete, corrupted-store and per-version corruption codes
-node tests/agent-workspace-tools.test.js   # 23
+node tests/agent-workspace-tools.test.js   # 24
 node tests/api.test.js                     # 36 — HTTP/auth/rate-limit/CORS/auth-before-body/JSON errors, custom runner
 node tests/atomic-write.test.js            # 16 — temp+fsync+rename atomic writes, incl. a SIGKILL crash simulation
 node tests/chat-abort.test.js              # 9 — client disconnect on the non-stream /chat: the abort signal reaches the model call, the upstream call is cancelled, nothing is persisted (no ghost message), and the server stays healthy instead of writing to a closed socket

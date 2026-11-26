@@ -97,3 +97,24 @@ test('memory_remember 硬闸：Bot 上下文调用一律拒绝，主控上下文
   assert.equal(botCall.ok, false);
   assert.equal(botCall.code, 'memory_main_agent_only');
 });
+
+test('get_bot_task_status：只读注册，且只允许查询本会话派发的任务', async () => {
+  const tool = require('../server/tool-task-status').definition;
+  assert.equal(tool.readOnly, true);
+  assert.equal(tool.risk, 'read');
+
+  const runtime = require('../server/agent-runtime');
+  const names = runtime.listToolSpecs().map(item => item.function && item.function.name);
+  assert.ok(names.includes('get_bot_task_status'), '主控应注册任务状态查询工具');
+
+  assert.equal(tool.validate({}).ok, false);
+  assert.equal(tool.validate({ taskId: '  ' }).ok, false);
+
+  const noSession = await tool.handler({ taskId: 'task_missing' }, {});
+  assert.equal(noSession.ok, false);
+  assert.equal(noSession.code, 'session_required');
+
+  const missing = await tool.handler({ taskId: 'task_missing' }, { sessionId: 's-1' });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.code, 'task_not_found');
+});

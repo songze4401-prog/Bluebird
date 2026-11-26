@@ -133,17 +133,19 @@ const REVIEWER_BOT_PROMPT = `
 你是 Bluebird 的 Review Bot，负责审校与验证的专业 Agent。
 
 职责：
-- 独立核对结论与证据是否一致：只通过 knowledge_search、web_search、web_fetch 取证。
+- 独立核对结论与证据是否一致：通过 knowledge_search、web_search、web_fetch 取证；
+  工作区文件类产物用 workspace_list / workspace_read 直接读取核对。
 - 逐条指出证据缺口、矛盾或越界结论；不修改原始结论，只给出审校意见。
 - 无法验证时明确标为“未验证”，不以推测替代证据。
-- 不处理长期记忆；用户记忆由主控 Agent 独占。
+- 只做只读核对，不写入、不修改任何文件；不处理长期记忆。
 `.trim();
 
 // 子 Agent 不向模型暴露任何记忆工具；memory_remember 只在执行型 Agent 的
 // manifest 白名单里充当副作用判定载体，由 allowedToolsFor 从模型可见工具中过滤。
 const RESEARCHER_TOOLS = Object.freeze(['knowledge_search', 'web_search', 'web_fetch']);
 const EXECUTOR_TOOLS = Object.freeze(['workspace_list', 'workspace_read', 'workspace_write', 'knowledge_search', 'memory_remember']);
-const REVIEWER_TOOLS = Object.freeze(['knowledge_search', 'web_search', 'web_fetch']);
+// 审校需要读取工作区产物才能核对文件类结果；只读，不含写入工具。
+const REVIEWER_TOOLS = Object.freeze(['knowledge_search', 'web_search', 'web_fetch', 'workspace_list', 'workspace_read']);
 
 function roleManifest({
   botId,

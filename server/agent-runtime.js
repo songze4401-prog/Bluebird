@@ -37,6 +37,7 @@ const memorySearchTool = require('./tool-memory-search');
 const memoryRememberTool = require('./tool-memory-remember');
 const knowledgeSearchTool = require('./tool-knowledge-search');
 const delegateToBotTool = require('./tool-dispatch-bot');
+const taskStatusTool = require('./tool-task-status');
 const { truncateText } = require('./text-utils');
 const { buildPolicyInstruction } = require('./agent-policy');
 const { parseTextualToolCalls, stripToolProtocolText } = require('./textual-tool-calls');
@@ -229,6 +230,7 @@ registerTool(memorySearchTool.definition);
 registerTool(memoryRememberTool.definition);
 registerTool(knowledgeSearchTool.definition);
 registerTool(delegateToBotTool.definition);
+registerTool(taskStatusTool.definition);
 // 轮 W：web 工具（DeepSeek Tools API，与对话 provider 共用同一把钥匙）。
 // 钥匙未配置则不注册——模型不声明也不派发（DSH readiness 口径）。
 const webTools = require('./tool-web');
@@ -572,14 +574,21 @@ async function executeToolCall(name, rawArgs, context) {
   // 主聊直连路径（有 sessionId+userText 来源、无任务执行器账本）放行到 handler
   // 创建待确认写入；pendingFlow 同时决定 handler 收到的 workspacePendingFlow——
   // 非 high_risk 工具即使误声明 pendingConfirmation 也永远进不了确认流
-  // （oracle 低-3），任务执行器/无来源上下文维持 deny-only。
+  // （oracle 低-3）。任务执行器/无来源上下文默认 deny-only；工具显式开启
+  // autoConfirm（如 workspace_write + BLUEBIRD_WORKSPACE_AUTO_CONFIRM=1）时，
+  // 任务侧与主聊共用同一套直写路径，沙箱/配额/扩展名校验不变。
   const pendingFlow =
     def.pendingConfirmation === true &&
     def.risk === 'high_risk' &&
     Boolean(context && context.sessionId) &&
     Boolean(context && context.userText) &&
     !(context && context.sideEffect);
-  if (def.risk === 'high_risk' && !pendingFlow) {
+  const autoConfirmFlow =
+    def.pendingConfirmation === true &&
+    def.risk === 'high_risk' &&
+    typeof def.autoConfirm === 'function' &&
+    def.autoConfirm() === true;
+  if (def.risk === 'high_risk' && !pendingFlow && !autoConfirmFlow) {
     monitor.complete({
       ok: false,
       code: 'confirmation_required',
@@ -1494,9 +1503,15 @@ async function runAgentTurn({
 
   // 工具已真实执行、模型却没留下正文（典型：末轮只吐了正文封装的工具调用，
   // 或直接返回空正文）。此时绝不能把整轮判成「模型没有返回有效内容」——
-  // 用最后一条工具结果摘要收尾，让用户看到操作确实完成了。
+  // 成功时用最后一条工具结果摘要收尾，让用户看到操作确实完成了。
+  // 失败时不能用工具摘要当回复：那是内部校验文案（如「缺少必填参数 botId」），
+  // 直接透传会把工具错误伪装成助手说的话。
   if (!rawReply && toolSteps.length) {
-    rawReply = toolSteps[toolSteps.length - 1].summary || '工具操作已执行完成。';
+    const lastStep = toolSteps[toolSteps.length - 1];
+    rawReply =
+      lastStep.ok === true
+        ? lastStep.summary || '工具操作已执行完成。'
+        : '这次没办成，工具执行失败了。';
   }
 
   monitoring.recordAgentRun({
