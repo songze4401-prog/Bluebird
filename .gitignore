@@ -11,5 +11,8 @@ server/index.before-memory.js
 
 server/data/
 
+# W0 真实审计脚本的本地证据（含临时路径/回复，不入库）
+audit-agent-e2e.json
+
 # Phase 4 离线评测的临时数据目录（快照走 eval-baselines/ 单独提交）
 .eval-data/
