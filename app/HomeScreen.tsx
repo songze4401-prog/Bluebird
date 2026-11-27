@@ -707,6 +707,7 @@ export function HomeScreen({
                 cancelRequested: realDetailLive.cancelRequested,
                 resultSummary: realDetailLive.result?.summary ?? '',
                 errorCode: realDetailLive.errorCode ?? '',
+                result: realDetailLive.result ?? null,
               }
             : null
         }

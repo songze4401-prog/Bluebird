@@ -274,6 +274,8 @@ const definition = Object.freeze({
         decision: result.decision,
         reason: result.reason,
         summary: `未写入：${result.reason}`,
+        deliveryState: 'rejected',
+        deliveryText: '记忆更正未被接受：当前记忆保持不变。',
       };
     }
 
@@ -285,6 +287,8 @@ const definition = Object.freeze({
         reason: result.reason,
         entryId: result.id || null,
         summary: '已提交，等待用户确认',
+        deliveryState: 'pending',
+        deliveryText: '记忆更正待确认：尚未生效，确认后才会用于后续会话检索。',
       };
     }
 
@@ -297,6 +301,8 @@ const definition = Object.freeze({
       status: result.status || null,
       durable: result.durable === true,
       summary: `记忆已${result.decision === 'create' ? '新增' : '更新'}`,
+      deliveryState: 'applied',
+      deliveryText: '记忆更正已生效：已写入并可用于后续检索。',
     };
   },
 });

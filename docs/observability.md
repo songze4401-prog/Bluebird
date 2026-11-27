@@ -260,3 +260,14 @@ Trace 里每个 span 只保留标识、名称、状态、耗时、错误码与�
 8. **监控本身是单进程内存聚合**：与应用单实例约束一致；多实例场景需外部聚合，不在 v1 范围。
 9. **监控数据会进入备份目录**：备份递归采集 `server/data`，监控元数据随之备份；不含正文/密钥，容量受上限与保留期约束。
 10. **辅助调用 provider 标签固定为内置 DeepSeek**：记忆提取/表情语义硬编码 `deepseek-chat` / `deepseek-flash`，监控如实按这两个模型记录；若未来把它们迁到可配置 provider，需要同步改为真实 provider_id。
+
+## 13. 受控审计回放（W6）
+
+默认关闭。`BLUEBIRD_AUDIT_MODE=1` 才落盘；密钥取 `BLUEBIRD_AUDIT_KEY`（64 位 hex）或本地 0600 `data/monitoring/.audit-key`，记录用 AES-256-GCM 加密写入 `data/monitoring/audit-replay.jsonl`。
+
+- 保留期：`BLUEBIRD_AUDIT_RETENTION_HOURS`，默认 24 小时，上限 72 小时；读取时自动过滤过期记录。
+- 内容：截断 Prompt（4000 字）+ prompt hash、工具回执摘要（工具名/成败/短码/摘要）、回复 hash、回执状态。不写工具参数、工具结果正文、回复正文。
+- 查询：`GET /monitoring/audit/:requestId`，复用 Bearer 鉴权（单用户 local-owner），只返回该 requestId 的记录；没有列表、删除或导出接口。关闭时返回 404 `audit_disabled`。
+- `claim.mismatch` 事件只带 `reply_hash`、`receipt_hash`、`match_rule`、`final_disposition`、`receipt_count`，定位 F2 类误判不靠回读正文。
+
+隐私边界：审计文件属于本地 owner，不进备份正文展示；密钥泄露等同于能解密这段时间内的 Prompt 摘要，轮换方式是删除 key 文件并重启。

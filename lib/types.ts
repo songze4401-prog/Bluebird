@@ -50,6 +50,10 @@ export type ToolStep = {
     status?: string;
     code?: string;
     decision?: string;
+    path?: string;
+    sha256?: string;
+    backup?: string;
+    deliveryState?: string;
   };
   // 工作区写入确认凭据（仅 workspace_write 的 pending 流；服务端
   // sessions.js sanitizeToolSteps 白名单字段，只含元数据不含文件正文）
@@ -115,6 +119,10 @@ export type Message = {
   agentNotice?: string;
   // Agent 工具调用摘要（仅 assistant）：设计图里的「调用工具」pill
   toolSteps?: ToolStepView[];
+  // W1/W6：本轮工具回执状态；无回执时必须显式展示，不能只信正文
+  receiptStatus?: string;
+  // W6-4：记忆写入的已生效/待确认交付状态
+  memoryDelivery?: { state: 'pending' | 'applied' | 'rejected'; text: string };
   // 记忆链路状态（仅 assistant、仅本轮）：ok/empty 不打扰用户，
   // degraded/failed 由 memoryNote 给出明确提示
   memoryState?: MemoryState;
@@ -237,4 +245,6 @@ export type ReplySegment = {
   attachments?: Attachment[];
   // Agent 工具执行摘要（服务端同样只挂在最后一格）
   toolSteps?: ToolStep[];
+  receiptStatus?: string;
+  memoryDelivery?: { state: 'pending' | 'applied' | 'rejected'; text: string };
 };

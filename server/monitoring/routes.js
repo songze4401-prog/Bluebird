@@ -12,6 +12,7 @@ const monitoring = require('./index');
 const { STATUSES, LEVELS } = require('./schema');
 const { SEVERITIES } = require('./alerts');
 const { ID_RE } = require('./schema');
+const auditCapture = require('./audit-capture');
 
 const QUERY_STATS = {
   calls: 0,
@@ -393,6 +394,22 @@ function createMonitoringRouter({ requireAuth } = {}) {
     wrap((req, res) => {
       const health = monitoring.getHealth();
       res.json({ ...health, query_layer: getQueryHealth() });
+    })
+  );
+
+  // W6-1：受控审计回放。默认 404；开启后仍复用 Bearer 鉴权，
+  // 只按 requestId 返回短期加密记录，不提供列表/删除接口。
+  router.get(
+    '/audit/:requestId',
+    wrap((req, res) => {
+      const requestId = String(req.params.requestId || '');
+      if (!/^req_[a-zA-Z0-9_-]{8,120}$/.test(requestId)) {
+        return badRequest(res, 'invalid_request_id', 'requestId 非法');
+      }
+      if (!auditCapture.enabled()) {
+        return res.status(404).json({ error: '审计模式未开启', code: 'audit_disabled' });
+      }
+      return res.json({ audit: auditCapture.read(requestId) });
     })
   );
 

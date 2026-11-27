@@ -27,6 +27,7 @@ skillsLoader.setEnablementProvider(() => getPersonaConfig().enabledSkills || [])
 // BLUEBIRD_MONITORING=0 可关闭，前端会显示 disabled 而不是健康。
 const monitoring = require('./monitoring');
 const { createMonitoringRouter } = require('./monitoring/routes');
+const auditCapture = require('./monitoring/audit-capture');
 
 // 模型客户端统一由 model-adapter.js 按服务商配置创建（内置 DeepSeek 从
 // DEEPSEEK_API_KEY 派生）。缺 key 时服务照常启动（管理接口可用），
@@ -1247,6 +1248,13 @@ async function prepareChatRequest(req) {
       ` toolsReserve=${contextRuntime.measurement.toolsReserveTokens}`
   );
 
+  // W6-1：默认关闭；开启后只留截断 Prompt 与请求 id 的加密摘要。
+  auditCapture.capture({
+    requestId,
+    event: 'prompt',
+    payload: { userText, sessionId },
+  });
+
   return {
     ctx: {
       requestId,
@@ -1303,6 +1311,28 @@ async function prepareChatRequest(req) {
 
 // W1：本轮工具回执状态。agentOn=false 的普通聊天不写字段（旧响应零变化），
 // 也不把闲聊回复标记成需要核对的执行轮次。
+// W6-4：记忆写入的交付状态只认工具回执，不认模型自称。
+function memoryDeliveryFromToolSteps(steps) {
+  const list = Array.isArray(steps) ? steps : [];
+  const step = list.find(item => item && item.name === 'memory_remember');
+  if (!step) return null;
+  const evidence = step.evidence && typeof step.evidence === 'object' ? step.evidence : {};
+  const state = ['pending', 'applied', 'rejected'].includes(evidence.deliveryState)
+    ? evidence.deliveryState
+    : /等待用户确认|待确认/.test(String(step.summary || ''))
+      ? 'pending'
+      : /未写入|拒绝/.test(String(step.summary || ''))
+        ? 'rejected'
+        : 'applied';
+  const text =
+    state === 'pending'
+      ? '记忆更正待确认：尚未生效，确认后才会用于后续会话检索。'
+      : state === 'rejected'
+        ? '记忆更正未被接受：当前记忆保持不变。'
+        : '记忆更正已生效：已写入并可用于后续检索。';
+  return { state, text };
+}
+
 function receiptStatusFor(agentOn, toolSteps) {
   if (!agentOn) return null;
   const steps = Array.isArray(toolSteps) ? toolSteps : [];
@@ -1365,6 +1395,13 @@ function completeChatTurn({
       `[delivery-claim-guard] session=${sessionId} type=${deliveryMismatch.aType}/${deliveryMismatch.bType}`
     );
   }
+
+  // W6-1：最终工具回执与回复 hash；不存回复正文。
+  auditCapture.capture({
+    requestId: ctx.requestId,
+    event: 'tool_receipts',
+    payload: { toolSteps, receiptStatus, replyHash: auditCapture.hash(rawReply) },
+  });
 
   // W4：用服务端账本收口最终交付；B/F 的“已创建 b-step3.txt / 已读取 4 字节”
   // 这类工具摘要不再代替 3/15 步清单。
@@ -1559,6 +1596,10 @@ function completeChatTurn({
     ...(hasToolSteps ? { toolSteps } : {}),
     // W1：本轮回执状态（executed/failed/pending/no_tool_calls/not_applicable）
     ...(receiptStatus ? { receiptStatus } : {}),
+    // W6-4：记忆已生效/待确认的显式交付状态
+    ...(memoryDeliveryFromToolSteps(toolSteps)
+      ? { memoryDelivery: memoryDeliveryFromToolSteps(toolSteps) }
+      : {}),
     // 服务端统一时间，供前端展示，避免客户端时钟偏差
     createdAt: now,
   };

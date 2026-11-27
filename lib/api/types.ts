@@ -1035,6 +1035,20 @@ export type AgentTask = {
     rounds: number;
     stopReason: string | null;
     model: { providerId: string; modelId: string } | null;
+    // W5：失败/恢复证据；普通结果不带这些字段。
+    sideEffectState?: 'none' | 'uncertain' | 'applied';
+    requiresReview?: boolean;
+    recovery?: {
+      attemptedWrites?: Array<{
+        path: string;
+        exists?: boolean;
+        size?: number;
+        sha256?: string;
+        backup?: string;
+        status?: string;
+      }>;
+      nextSteps?: string[];
+    };
   } | null;
 };
 

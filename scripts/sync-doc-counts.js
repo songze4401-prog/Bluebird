@@ -115,6 +115,8 @@ const NOTES = {
     'W4 numbered step ledger: parse 第N步/步骤N, bind tool receipts to steps, inject pending steps, detect stalls, and replace tool-summary final replies with a server-authored delivery checklist',
   'agent-recovery-evidence':
     'W5 recovery evidence: keep tool receipts and side-effect state in recovery results, verify attempted workspace writes with hash, and deliver a partial-result checklist to the parent session',
+  'monitoring-audit-capture':
+    'W6 controlled audit replay: encrypted short-retention prompt/tool-receipt snapshots, owner-only requestId lookup, and claim.mismatch rule/hash fields',
   'agent-approval-recovery':
     'approval execution idempotency (P3): begin-before-handler, crash-after-execution resumes to recovery without re-running the handler, a succeeded ledger row converges to executed instead of failed, approval-record-before-state-move (W5) leaves no dangling task, orphan waiting_approval tasks converge to recovery',
   'agent-artifact-content':

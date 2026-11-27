@@ -1,5 +1,7 @@
 # W5 恢复证据保全验收基线
 
+> W6 可观测性与交付体验见 [`agent-audit-w6-2026-11-27.md`](agent-audit-w6-2026-11-27.md)：UI E2E 10/10。
+
 - 日期：2026-11-27
 - 基线：W4 `ec578c7` + W5 工作树
 - 命令：`npm run audit:agent -- --run --out audit-agent-e2e.json`

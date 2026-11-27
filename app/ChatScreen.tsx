@@ -224,6 +224,9 @@ const createStyles = (t: V7Tokens, fd: number) =>
     stoppedTxt: { fontSize: 11, color: t.mut },
     // 提示条（modelNote/agentNotice/memoryNote，旧壳 ChatBubble 同语义）与收藏标记
     noteTxt: { fontSize: 11, color: t.mut, lineHeight: 16 },
+    // W6-3：本轮是否有真实工具回执；无回执/失败必须显式提示，不能只信正文
+    receiptTxt: { fontSize: 11, color: t.mut, lineHeight: 16 },
+    receiptWarnTxt: { fontSize: 11, color: t.warn, lineHeight: 16 },
     favStar: { fontSize: 11, color: t.warn },
     // 历史分页头 + 加载提示（旧壳 MessageList listHeader 同语义）
     loadOlder: {
@@ -437,6 +440,24 @@ const createStyles = (t: V7Tokens, fd: number) =>
     pl: { flexShrink: 0, fontSize: 13, fontWeight: '500', color: t.ink },
     pv: { flexShrink: 1, fontSize: 12, color: t.mut },
   });
+
+// W6-3：回执状态必须是用户可读的确定文案，不用模型自由叙述判断。
+function receiptStatusLabel(status: string): string {
+  switch (status) {
+    case 'executed':
+      return '本轮工具回执已核对';
+    case 'no_tool_calls':
+      return '本轮没有工具回执 · 完成声明未核实';
+    case 'failed':
+      return '本轮工具回执存在失败';
+    case 'pending':
+      return '工具正在等待确认';
+    case 'not_applicable':
+      return '本轮不涉及工具执行';
+    default:
+      return `回执状态：${status}`;
+  }
+}
 
 export function ChatScreen(props: {
   chat: ChatSessionApi;
@@ -878,6 +899,17 @@ export function ChatScreen(props: {
               {!!m.modelNote && <Text style={styles.noteTxt}>{m.modelNote}</Text>}
               {!!m.agentNotice && <Text style={styles.noteTxt}>{m.agentNotice}</Text>}
               {!!m.memoryNote && <Text style={styles.noteTxt}>{m.memoryNote}</Text>}
+              {!!m.receiptStatus && (
+                <Text
+                  style={
+                    m.receiptStatus === 'no_tool_calls' || m.receiptStatus === 'failed'
+                      ? styles.receiptWarnTxt
+                      : styles.receiptTxt
+                  }
+                >
+                  {receiptStatusLabel(m.receiptStatus)}
+                </Text>
+              )}
               {/* 发送失败的错误气泡是 assistant 角色 + retryText（旧壳 ChatBubble 同款语义）：
                   重试入口必须在这里，放用户分支永远不会出现（oracle 复查阻断②） */}
               {m.retryText !== undefined && (

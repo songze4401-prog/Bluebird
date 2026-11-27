@@ -12,6 +12,7 @@ import { apiFetch } from '../lib/api/client';
 import { API_PATHS } from '../lib/api/endpoints';
 import type { V7Tokens } from '../app/ui-theme';
 import type { DoneTask, RunningTask, StageMark } from '../data/ui-contract';
+import type { AgentTask } from '../lib/api/types';
 
 // 阶段标记 / 配色 token / 状态词（原型 smark/scol/slabel）
 const STAGE_MARK: Record<StageMark, string> = { done: '✓', active: '●', wait: '○', fail: '✕' };
@@ -43,6 +44,8 @@ export function TaskDetailSheet(props: {
     cancelRequested?: boolean;
     resultSummary?: string;
     errorCode?: string;
+    // W5/W6-3：失败/恢复任务的部分结果，不只给错误码
+    result?: AgentTask['result'] | null;
   } | null;
   onRealCancelled?: () => void;
 }) {
@@ -102,6 +105,51 @@ export function TaskDetailSheet(props: {
             <View>
               <Text style={styles.pglabel}>失败原因</Text>
               <Text style={styles.wfail}>{real.errorCode}</Text>
+            </View>
+          )}
+          {!!real.result?.sideEffectState && (
+            <View>
+              <Text style={styles.pglabel}>副作用状态</Text>
+              <Text style={styles.wres}>
+                {real.result.sideEffectState === 'uncertain'
+                  ? '不确定（需人工核对）'
+                  : real.result.sideEffectState === 'applied'
+                    ? '已发生'
+                    : '未发生'}
+                {real.result.requiresReview ? ' · 需要人工核对' : ''}
+              </Text>
+            </View>
+          )}
+          {!!real.result?.toolSteps?.length && (
+            <View>
+              <Text style={styles.pglabel}>已执行工具</Text>
+              {real.result.toolSteps.slice(0, 8).map((step, index) => (
+                <Text key={index} style={styles.wres}>
+                  {`${step.ok ? '✓' : '✕'} ${step.name}${step.summary ? ` · ${step.summary}` : ''}`}
+                </Text>
+              ))}
+            </View>
+          )}
+          {!!real.result?.recovery?.attemptedWrites?.length && (
+            <View>
+              <Text style={styles.pglabel}>已尝试写入</Text>
+              {real.result.recovery.attemptedWrites.slice(0, 8).map((item, index) => (
+                <Text key={index} style={styles.wres}>
+                  {`${item.path}${item.exists === false ? '（当前不存在）' : item.exists === true ? '（当前存在）' : '（状态未知）'}${
+                    item.sha256 ? ` · sha256=${item.sha256.slice(0, 12)}…` : ''
+                  }${item.backup ? ` · 备份=${item.backup}` : ''}`}
+                </Text>
+              ))}
+            </View>
+          )}
+          {!!real.result?.recovery?.nextSteps?.length && (
+            <View>
+              <Text style={styles.pglabel}>下一步</Text>
+              {real.result.recovery.nextSteps.map((item, index) => (
+                <Text key={index} style={styles.wres}>
+                  {item}
+                </Text>
+              ))}
             </View>
           )}
           <View style={styles.wacts}>
