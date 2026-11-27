@@ -16,6 +16,8 @@ process.env.BLUEBIRD_WORKSPACE_DIR = path.join(dataDir, 'workspace');
 process.env.BLUEBIRD_WORKSPACE_TOOLS = '1';
 process.env.BLUEBIRD_AGENT_TOOLS = '1';
 process.env.BLUEBIRD_CLAIM_GUARD = '0';
+// W3 审批闸门口径：自动确认关闭，委派写入才走人工审批。
+process.env.BLUEBIRD_WORKSPACE_AUTO_CONFIRM = '0';
 fs.mkdirSync(process.env.BLUEBIRD_WORKSPACE_DIR, { recursive: true });
 
 const tasks = require('../server/agents/tasks');
@@ -192,6 +194,33 @@ test('W3: 有审批授权时可写；超出 scope 上限仍拒绝', async () => 
   assert.equal(
     fs.readFileSync(path.join(process.env.BLUEBIRD_WORKSPACE_DIR, 'w3-ok.txt'), 'utf8'),
     'ok'
+  );
+});
+
+test('自动确认开启（默认）：写入任务不建审批、不进 waiting_approval', () => {
+  process.env.BLUEBIRD_WORKSPACE_AUTO_CONFIRM = '1';
+  try {
+    assert.equal(
+      router.shouldRequireWriteApproval({
+        allowedTools: ['workspace_write'],
+        taskType: 'workspace.file',
+        goal: '创建工作区文件',
+      }),
+      false
+    );
+  } finally {
+    process.env.BLUEBIRD_WORKSPACE_AUTO_CONFIRM = '0';
+  }
+});
+
+test('自动确认关闭：写入任务仍命中审批判定', () => {
+  assert.equal(
+    router.shouldRequireWriteApproval({
+      allowedTools: ['workspace_write'],
+      taskType: 'workspace.file',
+      goal: '创建工作区文件',
+    }),
+    true
   );
 });
 
