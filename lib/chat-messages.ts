@@ -226,6 +226,31 @@ export function buildMemoryNote(
   return undefined;
 }
 
+// W6-4：从真实工具回执推导记忆交付状态，不靠模型自称“已生效”。
+function memoryDeliveryFromSteps(
+  steps?: ToolStep[]
+): Message['memoryDelivery'] | undefined {
+  if (!Array.isArray(steps)) return undefined;
+  const step = steps.find(item => item && item.name === 'memory_remember');
+  if (!step) return undefined;
+  const state =
+    step.evidence && step.evidence.deliveryState
+      ? step.evidence.deliveryState
+      : /等待用户确认|待确认/.test(step.summary || '')
+        ? 'pending'
+        : /未写入|拒绝/.test(step.summary || '')
+          ? 'rejected'
+          : 'applied';
+  if (state !== 'pending' && state !== 'applied' && state !== 'rejected') return undefined;
+  const text =
+    state === 'pending'
+      ? '记忆更正待确认：尚未生效，确认后才会用于后续会话检索。'
+      : state === 'rejected'
+        ? '记忆更正未被接受：当前记忆保持不变。'
+        : '记忆更正已生效：已写入并可用于后续检索。';
+  return { state, text };
+}
+
 // 服务端最终回复（流式 done 或非流式 /chat）统一切成气泡数组。
 // 两条路径共用这一个切分函数，避免"复制消息处理逻辑"：边界、mood、
 // modelNote、附件透传全部在此处，done 与回退路径零差异。
@@ -241,12 +266,15 @@ export function buildReplyBubbles(
     // 记忆链路状态（旧服务端不返回，缺省即不提示）
     memoryState?: MemoryState;
     memoryStatus?: string;
+    receiptStatus?: string;
+    memoryDelivery?: Message['memoryDelivery'];
   },
   segments: ReplySegment[]
 ): { bubbles: Message[]; replyMood: string } {
   const replyMood = typeof data.mood === 'string' ? data.mood : 'calm';
   const modelNote = buildModelNote(data.modelRoute);
   const memoryNote = buildMemoryNote(data.memoryState, data.memoryStatus);
+  const deliveryNote = data.memoryDelivery?.text;
   const lastIndex = segments.length - 1;
 
   const bubbles: Message[] = segments.map((seg, index) => {
@@ -276,7 +304,21 @@ export function buildReplyBubbles(
       ...(index === lastIndex && data.memoryState
         ? { memoryState: data.memoryState }
         : {}),
-      ...(index === lastIndex && memoryNote ? { memoryNote } : {}),
+      ...(index === lastIndex && (memoryNote || deliveryNote)
+        ? { memoryNote: [memoryNote, deliveryNote].filter(Boolean).join('\n') }
+        : {}),
+      ...(index === lastIndex && seg.receiptStatus
+        ? { receiptStatus: seg.receiptStatus }
+        : {}),
+      ...(index === lastIndex && data.receiptStatus
+        ? { receiptStatus: data.receiptStatus }
+        : {}),
+      ...(index === lastIndex
+        ? {
+            memoryDelivery:
+              data.memoryDelivery ?? memoryDeliveryFromSteps(seg.toolSteps ?? data.toolSteps),
+          }
+        : {}),
     };
   });
 
@@ -303,10 +345,14 @@ export function mapHistoryItem(
     createdAt?: string;
     attachments?: Message['attachments'];
     toolSteps?: ToolStep[];
+    receiptStatus?: string;
+    memoryDelivery?: Message['memoryDelivery'];
   },
   index: number
 ): Message {
   const toolSteps = toToolStepViews(item.toolSteps);
+  const memoryDelivery =
+    item.memoryDelivery ?? memoryDeliveryFromSteps(item.toolSteps);
 
   return {
     id: item.id ?? `history-${index}`,
@@ -319,5 +365,9 @@ export function mapHistoryItem(
       : {}),
     // 历史里的工具摘要同样是真实执行记录，重进会话后 pill 仍然显示
     ...(toolSteps ? { toolSteps } : {}),
+    ...(item.receiptStatus ? { receiptStatus: item.receiptStatus } : {}),
+    ...(memoryDelivery
+      ? { memoryDelivery, memoryNote: memoryDelivery.text }
+      : {}),
   };
 }

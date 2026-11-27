@@ -2,7 +2,7 @@
 
 const NUMBER_FIELDS = Object.freeze(['count', 'bytes', 'totalSize']);
 const BOOLEAN_FIELDS = Object.freeze(['truncated', 'written', 'pending', 'deduped']);
-const STRING_FIELDS = Object.freeze(['status', 'code', 'decision']);
+const STRING_FIELDS = Object.freeze(['status', 'code', 'decision', 'deliveryState']);
 
 function sanitizeToolEvidence(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;

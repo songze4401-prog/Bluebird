@@ -501,3 +501,52 @@ describe('工具摘要挂载位置', () => {
     ).toBeUndefined();
   });
 });
+
+describe('W6 回执与记忆交付展示', () => {
+  it('无工具回执状态挂到最后一格，不靠正文猜测', () => {
+    const { bubbles } = buildReplyBubbles(
+      { receiptStatus: 'no_tool_calls' },
+      [
+        { id: 'a1', content: '第一段' },
+        { id: 'a2', content: '第二段' },
+      ]
+    );
+
+    expect(bubbles[0].receiptStatus).toBeUndefined();
+    expect(bubbles[1].receiptStatus).toBe('no_tool_calls');
+  });
+
+  it('记忆待确认回执生成显式待确认提示', () => {
+    const message = mapHistoryItem(
+      {
+        role: 'assistant',
+        content: '已提交更正',
+        toolSteps: [
+          {
+            name: 'memory_remember',
+            ok: true,
+            summary: '已提交，等待用户确认',
+            evidence: { deliveryState: 'pending' },
+          },
+        ],
+      } as never,
+      0
+    );
+
+    expect(message.memoryDelivery?.state).toBe('pending');
+    expect(message.memoryNote).toMatch(/待确认/);
+    expect(message.memoryNote).toMatch(/尚未生效/);
+  });
+
+  it('显式已生效交付状态覆盖文本猜测', () => {
+    const { bubbles } = buildReplyBubbles(
+      {
+        memoryDelivery: { state: 'applied', text: '记忆更正已生效：已写入并可用于后续检索。' },
+      },
+      [{ id: 'a1', content: '已更新' }]
+    );
+
+    expect(bubbles[0].memoryDelivery?.state).toBe('applied');
+    expect(bubbles[0].memoryNote).toMatch(/已生效/);
+  });
+});

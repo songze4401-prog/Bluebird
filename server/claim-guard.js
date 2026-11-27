@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const monitoring = require('./monitoring');
 const { neutralizeContextText } = require('./context/text');
 const {
@@ -130,10 +131,28 @@ function detectNoReceiptClaim(reply, { userText = '' } = {}) {
         toolGroup: item.group,
         toolOperation: item.operation,
         toolNames: [],
+        rule: `no_receipt:${item.group}.${item.operation}`,
       };
     }
   }
   return null;
+}
+
+function digest(value) {
+  return crypto.createHash('sha256').update(String(value || '')).digest('hex');
+}
+
+function receiptDigest(steps) {
+  const stable = (Array.isArray(steps) ? steps : []).map(step => ({
+    name: step && step.name ? String(step.name) : '',
+    ok: Boolean(step && step.ok === true),
+    code: step && step.code ? String(step.code) : '',
+    status:
+      step && step.evidence && step.evidence.status ? String(step.evidence.status) : '',
+    sha256:
+      step && step.evidence && step.evidence.sha256 ? String(step.evidence.sha256) : '',
+  }));
+  return digest(JSON.stringify(stable));
 }
 
 function getToolInfo(step) {
@@ -244,6 +263,9 @@ function detectClaimMismatch(reply, toolSteps, { userText = '' } = {}) {
         bType: succeeded ? 'tool_success' : 'tool_failure',
         toolGroup: info.group,
         toolNames: [step.name],
+        rule: `${info.group}.${info.operation}:${
+          claimsSuccess && !succeeded ? 'success_without_ok' : 'failure_with_ok'
+        }`,
       };
     }
   }

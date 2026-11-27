@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "updateRule": "新增/删除 tests/*.test.js 或改变用例数时，必须在同一变更中更新 files、backendTotal、nodeTestSuiteTotal、runnerTotal、frontend；不得只改总数或删除条目。nodeTestSuiteFiles 只包含由 node --test 七套命令执行的文件；runnerFiles 包含 CI 自定义 runner 逐文件执行的 134 个条目（format 为 node 的 93 个走 node --test 单文件、custom 的 41 个直接执行脚本，两者都按单文件退出码判定）。CI 清单必须覆盖所有 files 条目，verify-test-coverage.js 会检查。文档里的所有计数由 scripts/sync-doc-counts.js 从本文件生成，不要手工改数字。",
-  "backendTotal": 2779,
+  "updateRule": "新增/删除 tests/*.test.js 或改变用例数时，必须在同一变更中更新 files、backendTotal、nodeTestSuiteTotal、runnerTotal、frontend；不得只改总数或删除条目。nodeTestSuiteFiles 只包含由 node --test 七套命令执行的文件；runnerFiles 包含 CI 自定义 runner 逐文件执行的 135 个条目（format 为 node 的 94 个走 node --test 单文件、custom 的 41 个直接执行脚本，两者都按单文件退出码判定）。CI 清单必须覆盖所有 files 条目，verify-test-coverage.js 会检查。文档里的所有计数由 scripts/sync-doc-counts.js 从本文件生成，不要手工改数字。",
+  "backendTotal": 2782,
   "nodeTestSuiteTotal": 245,
   "frontend": {
     "suites": 18,
-    "tests": 146
+    "tests": 149
   },
   "nodeTestSuiteFiles": [
     "memory",
@@ -130,6 +130,7 @@
     "model-providers",
     "model-routing",
     "monitoring-api",
+    "monitoring-audit-capture",
     "multimodal",
     "notion-ledger-scan",
     "p3-acceptance",
@@ -857,7 +858,12 @@
       "format": "node",
       "count": 6,
       "runner": true
+    },
+    "monitoring-audit-capture": {
+      "format": "node",
+      "count": 3,
+      "runner": true
     }
   },
-  "runnerTotal": 2534
+  "runnerTotal": 2537
 }
