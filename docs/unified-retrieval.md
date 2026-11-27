@@ -284,8 +284,8 @@ curl -X POST "$BASE/retrieval/search" \
 | `node tests/retrieval-api.test.js` | 14/14（含 knowledge_search 中和、向量回填 401/409） |
 | `node tests/retrieval-embeddings.test.js` | 10/10（元数据隔离、批量回填、增量、reranker 契约/回退、引擎顺序、向量/重排 deadline 降级） |
 | `node tests/embedding-open-domain-eval.js`（真实服务） | 21 查询；overall Recall@5 1.0、跨语言 Recall@5 1.0；`EMBEDDING ACCEPTANCE PASSED` |
-| `npm test` | 140 个后端测试文件 / 2773 项全部通过 |
-| `node scripts/verify-test-coverage.js` | backend 2773/2773；nodeSuite 245/245；runner 2528/2528；frontend 146/146；CI 140/140 |
+| `npm test` | 141 个后端测试文件 / 2779 项全部通过 |
+| `node scripts/verify-test-coverage.js` | backend 2779/2779；nodeSuite 245/245；runner 2534/2534；frontend 146/146；CI 141/141 |
 | `npx tsc --noEmit` | 通过（0 错误） |
 | `npm run lint` | 通过（0 错误） |
 

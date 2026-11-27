@@ -34,6 +34,10 @@ function sanitizeToolEvidence(raw) {
   if (typeof raw.sha256 === 'string' && /^[a-f0-9]{64}$/.test(raw.sha256)) {
     evidence.sha256 = raw.sha256;
   }
+  // W5：覆盖写产生的 .history 备份名也是恢复时的关键证据，必须是相对文件名。
+  if (typeof raw.backup === 'string' && /^[A-Za-z0-9._-]{1,120}$/.test(raw.backup)) {
+    evidence.backup = raw.backup;
+  }
   if (!evidence.status && typeof raw.ok === 'boolean') {
     evidence.status = raw.ok ? 'success' : 'failed';
   }

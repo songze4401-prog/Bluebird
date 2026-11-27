@@ -1149,6 +1149,7 @@ async function runAgentTurn({
     else consecutiveFailures += 1;
 
     const summary = buildToolSummary(result);
+    const evidence = sanitizeToolEvidence(result);
 
     console.log(
       `[agent-tool] round=${round} name=${toolName}` +
@@ -1164,6 +1165,9 @@ async function runAgentTurn({
         ok: result.ok === true,
         ...(result.code ? { code: result.code } : {}),
         ...(result.deduped ? { deduped: true } : {}),
+        ...(String(process.env.BLUEBIRD_RECOVERY_EVIDENCE || '1').trim() !== '0' && evidence
+          ? { evidence }
+          : {}),
         summary,
       });
     }
@@ -1182,7 +1186,6 @@ async function runAgentTurn({
       }
     }
 
-    const evidence = sanitizeToolEvidence(result);
     toolSteps.push({
       name: toolName,
       ok: result.ok === true,

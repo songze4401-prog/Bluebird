@@ -244,6 +244,8 @@ function backendEnv(dataDir) {
     BLUEBIRD_TURN_RECEIPTS: '0',
   // W4 默认开启；普通回归按旧口径跑，账本专项测试显式打开。
   BLUEBIRD_TASK_LEDGER: '0',
+  // W5 默认开启；普通回归保持旧结果形状，恢复证据专项测试显式打开。
+  BLUEBIRD_RECOVERY_EVIDENCE: '0',
   };
 }
 

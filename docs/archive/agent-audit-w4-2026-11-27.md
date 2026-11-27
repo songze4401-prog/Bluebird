@@ -1,5 +1,7 @@
 # W4 长任务状态机验收基线
 
+> W5 恢复证据保全后的复测见 [`agent-audit-w5-2026-11-27.md`](agent-audit-w5-2026-11-27.md)：38/38。
+
 - 日期：2026-11-27
 - 基线：W3 `4b23cc2` + W4 工作树
 - 命令：`npm run audit:agent -- --run --out audit-agent-e2e.json`

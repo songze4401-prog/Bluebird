@@ -57,6 +57,28 @@ function formatDelivery(task, status, result, errorCode) {
   if (result && result.requiresConfirmation) {
     lines.push('需要用户确认后才会执行相关维护操作。');
   }
+  // W5：失败/恢复交付必须告诉用户“做到了哪、可能发生了什么、下一步”。
+  if (result && result.sideEffectState) {
+    const labels = { none: '未发生副作用', uncertain: '副作用结果不确定', applied: '副作用已发生' };
+    lines.push(`副作用状态：${labels[result.sideEffectState] || result.sideEffectState}`);
+  }
+  if (result && result.requiresReview === true) {
+    lines.push('需要人工核对：恢复结果可能在服务端留有已完成的操作。');
+  }
+  if (result && result.recovery && Array.isArray(result.recovery.attemptedWrites) && result.recovery.attemptedWrites.length) {
+    lines.push(
+      '已尝试写入：' +
+        result.recovery.attemptedWrites
+          .map(item => {
+            const state = item.exists === false ? '当前不存在' : item.exists === true ? '当前存在' : '状态未知';
+            return `${item.path}（${state}${item.sha256 ? ` sha256=${item.sha256.slice(0, 12)}…` : ''}${item.backup ? ` 备份=${item.backup}` : ''}）`;
+          })
+          .join('、')
+    );
+  }
+  if (result && result.recovery && Array.isArray(result.recovery.nextSteps) && result.recovery.nextSteps.length) {
+    lines.push(`下一步：${result.recovery.nextSteps.join('；')}`);
+  }
   if (errorCode) lines.push(`错误码：${errorCode}`);
   return lines.join('\n');
 }
@@ -375,6 +397,7 @@ function subscribe(listener) {
 
 module.exports = {
   messageIdFor,
+  formatDelivery,
   deliverTaskOutcome,
   deliverPlanOutcome,
   recoverPending,

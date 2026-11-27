@@ -10,7 +10,12 @@
  */
 
 const { TERMINAL_STATUSES } = require('./status-vocabulary');
+const { sanitizeToolEvidence } = require('../tool-step');
 const SUMMARY_MAX = 8000;
+
+function w5Enabled() {
+  return String(process.env.BLUEBIRD_RECOVERY_EVIDENCE || '1').trim() !== '0';
+}
 
 function refs(value, limit = 40) {
   if (!Array.isArray(value)) return [];
@@ -27,15 +32,19 @@ function refs(value, limit = 40) {
 
 function toolSteps(value) {
   if (!Array.isArray(value)) return [];
-  return value.slice(0, 20).map(step => ({
-    name: String(step && step.name ? step.name : '').slice(0, 60),
-    ok: Boolean(step && step.ok === true),
-    summary: String(step && step.summary ? step.summary : '').slice(0, 160),
-    durationMs:
-      Number.isFinite(step && step.durationMs) && step.durationMs >= 0
-        ? Math.floor(step.durationMs)
-        : 0,
-  }));
+  return value.slice(0, 20).map(step => {
+    const evidence = sanitizeToolEvidence(step && step.evidence);
+    return {
+      name: String(step && step.name ? step.name : '').slice(0, 60),
+      ok: Boolean(step && step.ok === true),
+      summary: String(step && step.summary ? step.summary : '').slice(0, 160),
+      durationMs:
+        Number.isFinite(step && step.durationMs) && step.durationMs >= 0
+          ? Math.floor(step.durationMs)
+          : 0,
+      ...(w5Enabled() && evidence ? { evidence } : {}),
+    };
+  });
 }
 
 function changes(value) {
@@ -78,6 +87,9 @@ function normalizeWorkerResult({
   neverStarted = false,
   blockedBy = null,
   usage = null,
+  sideEffectState = null,
+  requiresReview = false,
+  recovery = null,
 } = {}) {
   if (!TERMINAL_STATUSES.includes(status)) {
     throw new TypeError(`Worker 结果状态无效：${status}`);
@@ -106,6 +118,39 @@ function normalizeWorkerResult({
     finishedAt: typeof finishedAt === 'string' ? finishedAt : null,
     // 只有 provider 返回真实 usage 时才出现，避免给旧调用方增加空字段。
     ...(normalizeUsage(usage) ? { usage: normalizeUsage(usage) } : {}),
+    // W5：恢复/部分结果专用字段。只在显式给出时出现，普通结果形状不变。
+    ...(w5Enabled() && ['none', 'uncertain', 'applied'].includes(sideEffectState)
+      ? { sideEffectState }
+      : {}),
+    ...(w5Enabled() && requiresReview === true ? { requiresReview: true } : {}),
+    ...(w5Enabled() && recovery && typeof recovery === 'object'
+      ? {
+          recovery: {
+            attemptedWrites: Array.isArray(recovery.attemptedWrites)
+              ? recovery.attemptedWrites
+                  .filter(item => item && typeof item === 'object')
+                  .slice(0, 20)
+                  .map(item => ({
+                    path: String(item.path || '').slice(0, 200),
+                    ...(typeof item.exists === 'boolean' ? { exists: item.exists } : {}),
+                    ...(Number.isFinite(item.size) ? { size: Math.floor(item.size) } : {}),
+                    ...(item.sha256 && /^[a-f0-9]{64}$/.test(item.sha256)
+                      ? { sha256: item.sha256 }
+                      : {}),
+                    ...(item.backup && /^[A-Za-z0-9._-]{1,120}$/.test(item.backup)
+                      ? { backup: item.backup }
+                      : {}),
+                    ...(item.status && /^[a-z0-9_.:-]{1,40}$/i.test(item.status)
+                      ? { status: item.status }
+                      : {}),
+                  }))
+              : [],
+            nextSteps: Array.isArray(recovery.nextSteps)
+              ? recovery.nextSteps.slice(0, 8).map(item => String(item).slice(0, 200))
+              : [],
+          },
+        }
+      : {}),
     // 依赖失败收敛专用：该任务从未进入 running。只在为 true 时出现，
     // 其余结果形状保持不变（既有断言依赖原字段集）。
     ...(neverStarted === true

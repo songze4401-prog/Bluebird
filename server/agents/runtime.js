@@ -6,6 +6,7 @@
  * 两个入口的差别只有消息构造、结果交付对象与是否记录任务。
  */
 const crypto = require('crypto');
+const fs = require('fs');
 // agent-runtime 经惰性加载解环（解环 P1，2026-11-21）：runtime 与
 // agent-runtime 的顶层互相依赖（agent-runtime→tool-dispatch-bot→orchestrator
 // →router→runtime→agent-runtime 加载期环）由此打断；两个符号只在运行期用。
@@ -87,6 +88,52 @@ let scheduling = false;
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+// W5：恢复时只复核已尝试的工作区写入路径，保留相对路径、大小与 hash，
+// 绝不把文件正文带进任务结果或父会话消息。
+function inspectAttemptedWrites(records) {
+  if (String(process.env.BLUEBIRD_RECOVERY_EVIDENCE || '1').trim() === '0') return [];
+  if (!Array.isArray(records) || !records.length) return [];
+  let workspace = null;
+  try {
+    workspace = require('../tool-workspace');
+  } catch (_) {
+    return [];
+  }
+  if (!workspace.isEnabled()) return [];
+  const seen = new Set();
+  const out = [];
+  for (const raw of records) {
+    const relativePath = String(raw && raw.path ? raw.path : '').slice(0, 200);
+    if (!relativePath || seen.has(relativePath)) continue;
+    seen.add(relativePath);
+    const item = { path: relativePath };
+    if (raw.backup && /^[A-Za-z0-9._-]{1,120}$/.test(raw.backup)) item.backup = raw.backup;
+    try {
+      const resolved = workspace.resolveWithinRoot(relativePath);
+      const absolutePath =
+        typeof resolved === 'string' ? resolved : resolved && resolved.absolutePath;
+      if (!absolutePath || !fs.existsSync(absolutePath)) {
+        item.exists = false;
+        item.status = 'missing';
+      } else if (fs.statSync(absolutePath).isFile()) {
+        const content = fs.readFileSync(absolutePath);
+        item.exists = true;
+        item.size = content.length;
+        item.sha256 = crypto.createHash('sha256').update(content).digest('hex');
+        item.status = 'present';
+      } else {
+        item.exists = null;
+        item.status = 'not_a_file';
+      }
+    } catch (_) {
+      item.exists = null;
+      item.status = 'unverifiable';
+    }
+    out.push(item);
+  }
+  return out.slice(0, 20);
 }
 
 // B-02 重试决策归属：Gateway / 模型适配层只返回结果与错误（含 retryable 事实），
@@ -618,6 +665,8 @@ async function execute({
   fencingToken = null,
   // W3：任务级写入授权（只有 workspace.write 审批执行后由 runTask 传入）。
   writeAuthorization = null,
+  // W5：部分结果收集器，由 runTask 持有，失败收口时仍有证据可用。
+  partialCollector = null,
   runId: runIdOverride = null,
   stream = false,
   onDelta = null,
@@ -636,6 +685,7 @@ async function execute({
     goal,
   });
   const policy = buildPolicy({ config, allowedTools, toolsSupported, budget });
+  const collector = partialCollector || { toolSteps: [], evidence: [], changes: [], writes: [] };
   const evidence = [];
   const changes = [];
   const artifactInputs = [];
@@ -700,6 +750,15 @@ async function execute({
         }
       },
       onToolEvent: event => {
+        if (event.type === 'tool_end') {
+          collector.toolSteps.push({
+            name: event.name,
+            ok: event.ok === true,
+            summary: event.summary || '',
+            ...(event.code ? { code: event.code } : {}),
+            ...(event.evidence ? { evidence: event.evidence } : {}),
+          });
+        }
         const eventType =
           event.type === 'tool_start'
             ? 'tool.started'
@@ -723,6 +782,23 @@ async function execute({
       },
       onToolResult: result => {
         progressToolCalls += 1;
+        // W5：并行沉淀部分结果，失败收口时不再交空壳。
+        extractEvidence(result.name, result.result, collector.evidence, collector.changes);
+        if (result.ok === true && result.name === 'workspace_write') {
+          const writePath =
+            result.result && result.result.path
+              ? result.result.path
+              : result.result && result.result.evidence && result.result.evidence.path;
+          if (writePath) {
+            collector.writes.push({
+              path: String(writePath).slice(0, 200),
+              backup:
+                result.result && result.result.backup
+                  ? String(result.result.backup).slice(0, 120)
+                  : null,
+            });
+          }
+        }
         extractEvidence(result.name, result.result, evidence, changes);
         collectArtifacts(result.name, result.result, artifactInputs);
         if (result.ok && result.name === 'memory_search') {
@@ -1011,6 +1087,8 @@ async function runTask(taskId, { resumeFromApproval = false } = {}) {
   let authorityLost = false;
   let deadlineTimer = null;
   let heartbeatTimer = null;
+  // W5：即使 execute() 在中途抛错，这些由工具事件/结果回调沉淀的证据也能收口。
+  const partial = { toolSteps: [], evidence: [], changes: [], writes: [] };
 
   const recordCheckpoint = ({ round = 0, toolCalls = 0, phase = 'progress' } = {}) => {
     const checkpoint = {
@@ -1388,6 +1466,7 @@ async function runTask(taskId, { resumeFromApproval = false } = {}) {
       fencingToken,
       // W3：只有审批执行路径写入 writeApproved=true；未授权任务在工具层
       // 仍会收到 confirmation_required，不会因为任务有 workspace_write 就放行。
+      partialCollector: partial,
       writeAuthorization:
         task.writeApproved === true
           ? {
@@ -1918,15 +1997,46 @@ async function runTask(taskId, { resumeFromApproval = false } = {}) {
     // 部分结果且本次失败本可重试（被风暴判据或 attempt 上限拦下）时，
     // 落 task.decision_requested 请求决策，不留静默终态。
     const partialRefs = collectPartialOutcome(task.taskId);
+    const attemptedWrites = inspectAttemptedWrites(partial.writes);
+    // sideEffectGuard 属于 execute() 内层；runTask 只按保守证据判断：
+    // recovery + 已尝试写入/副作用错误码一律按“不确定”处理，不猜已失败。
+    const sideEffectUncertain =
+      status === 'recovery' &&
+      (String(errorCode).startsWith('side_effect_') || partial.writes.length > 0);
+    const sideEffectState = sideEffectUncertain
+      ? 'uncertain'
+      : attemptedWrites.length
+        ? 'applied'
+        : 'none';
+    const needsReview = status === 'recovery' && sideEffectState !== 'none';
+    const partialSummary = partial.toolSteps.length
+      ? `任务未完成（${errorCode}）：已执行 ${partial.toolSteps.length} 项工具，已保留工具回执与证据；缺口与未完成原因见 errorCode。`
+      : '';
     const failureResult = normalizeWorkerResult({
       status,
-      summary: partialRefs.length
-        ? `任务未完成（${errorCode}）：已交付 ${partialRefs.length} 项部分结果，缺口与未完成原因见 errorCode 与审计事件（§17 FM-6）。`
-        : '',
+      summary:
+        partialSummary ||
+        (partialRefs.length
+          ? `任务未完成（${errorCode}）：已交付 ${partialRefs.length} 项部分结果，缺口与未完成原因见 errorCode 与审计事件（§17 FM-6）。`
+          : ''),
       artifacts: partialRefs,
+      evidence: partial.evidence,
+      toolSteps: partial.toolSteps,
+      changes: partial.changes,
       errorCode,
       runId,
       finishedAt: nowIso(),
+      sideEffectState,
+      requiresReview: needsReview,
+      recovery: {
+        attemptedWrites,
+        nextSteps:
+          sideEffectState === 'uncertain'
+            ? ['按列出的路径与 sha256 人工核对服务端文件', '确认后再决定是否重跑剩余步骤']
+            : sideEffectState === 'applied'
+              ? ['核对已写文件的 hash 与内容', '确认后执行剩余步骤']
+              : ['按错误码重试或调整任务目标'],
+      },
     });
     tasks.transitionTask(task.taskId, {
       to: status,
@@ -2512,6 +2622,7 @@ module.exports = {
   startTask,
   cancelTask,
   runTask,
+  inspectAttemptedWrites,
   initializeTaskQueue,
   convergeWorkflowPlans,
   convergeFencingTokens,
