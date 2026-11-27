@@ -192,6 +192,13 @@ const GATE_OPERATIONS = Object.freeze({
       'taskType',
     ]),
   }),
+  // W3：委派写入的任务级授权。批准只授权“该任务可在工作区内写入”，
+  // 具体路径/内容仍由 workspace_write 沙箱、扩展名白名单与任务 scope 逐次校验；
+  // 审批记录不保存文件正文。
+  'workspace.write': Object.freeze({
+    risk: 'high',
+    allowedKeys: Object.freeze(['producerTaskId', 'taskType', 'maxBytes']),
+  }),
 });
 
 function gateOperation(operation) {
@@ -1714,6 +1721,82 @@ async function execute(approvalId, { actor = permissions.SINGLE_USER_ACTOR } = {
   // 因此不进操作账本、不调用 memoryService；人工批准只表达"允许越过保守裁决"，
   // 任务按既有 completeApprovalTask 收口。拒绝走既有 decide() → cancelled。
   if (gate) {
+    // W3：写入授权不是“执行一次写”，而是把任务从 waiting_approval 放回运行，
+    // 并把 approvalId/scope 冻结到任务上；真正的 workspace_write 仍由运行层逐次校验。
+    if (record.operation === 'workspace.write') {
+      const linked = tasks.getRawTask(record.taskId);
+      if (!linked || linked.status !== 'waiting_approval') {
+        throw new AgentError(
+          'task_not_waiting_approval',
+          '关联任务不在等待审批状态，不能执行写入授权',
+          409
+        );
+      }
+      const maxBytes =
+        Number.isInteger(record.payload && record.payload.maxBytes) &&
+        record.payload.maxBytes > 0
+          ? record.payload.maxBytes
+          : null;
+      const now = nowIso();
+      tasks.updateTask(record.taskId, {
+        writeApproved: true,
+        writeApprovalId: record.approvalId,
+        writeApprovalScope: { taskId: record.taskId, maxBytes },
+      });
+      // waiting_approval → running 是状态机允许的唯一出口；runTask 以
+      // resumeFromApproval 跳过 accepted/running 的重复迁移，直接接管本次运行。
+      tasks.transitionTask(record.taskId, {
+        to: 'running',
+        startedAt: now,
+        runStartedAt: now,
+      });
+      record.status = 'completed';
+      record.requestStatus = 'approved';
+      record.errorCode = null;
+      record.result = {
+        reason: 'ok',
+        gate: record.operation,
+        decision: 'write_authorized',
+        taskId: record.taskId,
+        maxBytes,
+      };
+      record.executedBy = String(actor || permissions.SINGLE_USER_ACTOR).slice(0, 80);
+      record.executedAt = now;
+      save();
+      recordEvent(
+        record.botId,
+        'approval.resolved',
+        {
+          status: 'completed',
+          decision: 'write_authorized',
+          taskType: record.operation,
+          mode: 'approval',
+          taskId: record.taskId,
+        },
+        { approvalId: record.approvalId, taskId: record.taskId, sessionId: record.sessionId }
+      );
+      setImmediate(() => {
+        try {
+          require('./runtime')
+            .runTask(record.taskId, { resumeFromApproval: true })
+            .catch(error => {
+              console.warn(
+                `[agent-approval] write task resume failed task=${record.taskId} code=${
+                  (error && error.code) || 'task_resume_failed'
+                }`
+              );
+            });
+        } catch (error) {
+          console.warn(
+            `[agent-approval] write task resume threw task=${record.taskId} code=${
+              (error && error.code) || 'task_resume_failed'
+            }`
+          );
+        }
+      });
+      return publicApproval(record);
+    }
+
     // P5-C2：plan.publish 的批准即交付。交付动作（读回 delivery 产物 → 产物提交
     // → 任务 completed → 幂等回写父会话）由 publish-gate 统一执行；失败按其
     // 既有口径收口，审批记录停留 pending 可重试。

@@ -167,7 +167,7 @@ const definition = Object.freeze({
 
     // 兼容适配器：工具 schema 与成功返回形状保持不变，创建/排队统一走编排入口。
     try {
-      const { task, idempotent } = orchestrator.orchestrate(
+      const { task, idempotent, approval } = orchestrator.orchestrate(
         {
           agentId: normalized.botId,
           capability: normalized.taskType,
@@ -197,7 +197,13 @@ const definition = Object.freeze({
         path: task.route ? task.route.path : null,
         idempotent: idempotent === true,
         resultPending: true,
-        summary: `已提交给 ${target.displayName}（${target.botId}），状态与结果可从任务页或当前会话接收。`,
+        // W3：写入型任务在派发阶段就停在 waiting_approval；模型必须告诉用户
+        // 去批准，不能把“已提交”说成“已执行”。
+        approvalRequired: Boolean(approval),
+        approvalId: approval ? approval.approvalId : task.writeApprovalId || null,
+        summary: approval
+          ? `已创建 ${target.displayName}（${target.botId}）写入任务，等待用户批准后才会执行。`
+          : `已提交给 ${target.displayName}（${target.botId}），状态与结果可从任务页或当前会话接收。`,
       };
     } catch (error) {
       if (error && typeof error.code === 'string' && TOOL_ERROR_CODES[error.code]) {

@@ -1,5 +1,7 @@
 # W2 完成校验验收基线
 
+> W3 委派写入后的复测见 [`agent-audit-w3-2026-11-27.md`](agent-audit-w3-2026-11-27.md)：E 10/10，完整 A–F 35/38。
+
 - 日期：2026-11-27
 - 基线：W1 `b68fa33` + W2 工作树
 - 命令：`npm run audit:agent -- --run --out audit-agent-e2e.json`
