@@ -62,9 +62,10 @@ function isEnabled() {
   return process.env.BLUEBIRD_WORKSPACE_TOOLS === '1';
 }
 
-// 写入自动确认（默认关闭）：开启后主聊的 workspace_write 跳过聊天内确认行直接落盘。
+// 写入自动确认（默认开启；设 BLUEBIRD_WORKSPACE_AUTO_CONFIRM=0 可关闭）：
+// 开启后主聊 workspace_write 跳过聊天内确认行直接落盘；委派任务同样跳过人工写入审批。
 function isAutoConfirmEnabled() {
-  return process.env.BLUEBIRD_WORKSPACE_AUTO_CONFIRM === '1';
+  return process.env.BLUEBIRD_WORKSPACE_AUTO_CONFIRM !== '0';
 }
 
 function ensureWorkspaceRoot() {
@@ -757,6 +758,7 @@ module.exports = {
   TEXT_EXTENSIONS,
   WORKSPACE_ROOT,
   isEnabled,
+  isAutoConfirmEnabled,
   ensureWorkspaceRoot,
   resolveWithinRoot,
   workspaceUsage,
