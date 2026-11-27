@@ -1,5 +1,7 @@
 # W1 执行账本验收基线
 
+> W2 完成校验后的复测见 [`agent-audit-w2-2026-11-27.md`](agent-audit-w2-2026-11-27.md)：31/34。
+
 - 日期：2026-11-27
 - 基线：`main @ 9c5a370` + W1 分支
 - 命令：`npm run audit:agent -- --run --out audit-agent-e2e.json`
