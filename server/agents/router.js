@@ -17,6 +17,7 @@ const circuitBreaker = require('./circuit-breaker');
 const { getInstanceUserId } = require('../user-scope');
 const { CONTRACT_VERSION } = require('./contract');
 const orchestrator = require('../context/orchestrator');
+const workspaceTools = require('../tool-workspace');
 const PRIORITY_VALUES = Object.freeze(['high', 'normal', 'low']);
 // B-06（§25）：路由冻结的 Task Token 硬上限。
 // A 类常量：与路由 profile 的轮次/工具上限一同冻结进任务，不代表供应商真实配额，
@@ -31,6 +32,8 @@ const WRITE_SCOPE_MAX_BYTES = 256 * 1024;
 
 function shouldRequireWriteApproval(task) {
   if (!task) return false;
+  // 自动确认开启（默认）：委派写入不建人工审批，任务直接启动。
+  if (workspaceTools.isAutoConfirmEnabled()) return false;
   if (!Array.isArray(task.allowedTools) || !task.allowedTools.includes('workspace_write')) {
     return false;
   }
@@ -309,7 +312,7 @@ function decideInternal(input, options = {}) {
       continue;
     }
     // §26 Worker 维度熔断：连续故障的 Agent 先不进候选池，
-    // 与"队列满""并发饱和"是三种不同原因，各用各的码，便于路由事件按原因聚合。
+    // 与“队列满”“并发饱和”是三种不同原因，各用各的码，便于路由事件按原因聚合。
     const circuit = (load.circuitByAgent || {})[agent.botId];
     if (circuit && circuit.allowed === false) {
       decision.rejected.push({
@@ -380,9 +383,9 @@ function emptyLoad() {
 }
 
 /**
- * 只把"当前不健康"的 Worker 列进负载快照：decide() 要保持纯函数契约
+ * 只把“当前不健康”的 Worker 列进负载快照：decide() 要保持纯函数契约
  * （只读 Agent 描述、路由配置和负载快照，不写存储），所以熔断状态在这里读，
- * 判定处只看传入的快照。状态文件读坏时按"无熔断"处理并交给下一次写入显式报错——
+ * 判定处只看传入的快照。状态文件读坏时按“无熔断”处理并交给下一次写入显式报错——
  * 让路由因为观测文件损坏而全量拒绝，是把观测故障升级成可用性故障。
  */
 function collectOpenCircuits() {
@@ -447,7 +450,7 @@ function normalizeOrchestration(value) {
       ? value.candidateOrder.slice(0, 10).map(item => String(item).slice(0, 80))
       : [],
     saturatedAgentIds: Array.isArray(value.saturatedAgentIds)
-      ? value.saturatedAgentIds.slice(0, 10).map(item => String(item).slice(0, 80))
+      ? value.saturatedAgentIds.slice(0, 10).map(String)
       : [],
     allocation: value.allocation ? String(value.allocation).slice(0, 40) : null,
     selectedAgentId: value.selectedAgentId
@@ -770,8 +773,16 @@ function createRouter(overrides = {}) {
 
     // W3：委派写入在派发阶段创建任务级审批。未批准前任务停在 waiting_approval，
     // 不进入 Worker；审批执行后写入资格才落到 task.writeApproved。
+    // 自动确认开启（默认）：跳过人工审批，派发时直接种下写入授权，任务直接启动。
     let writeApproval = null;
-    if (shouldRequireWriteApproval(task)) {
+    const autoConfirmWrites = workspaceTools.isAutoConfirmEnabled();
+    if (autoConfirmWrites) {
+      taskStore.updateTask(task.taskId, {
+        writeApproved: true,
+        writeApprovalScope: { taskId: task.taskId, maxBytes: WRITE_SCOPE_MAX_BYTES },
+      });
+      task = taskStore.getTask(task.taskId) || task;
+    } else if (shouldRequireWriteApproval(task)) {
       try {
         taskStore.updateTask(task.taskId, {
           writeApprovalScope: { taskId: task.taskId, maxBytes: WRITE_SCOPE_MAX_BYTES },
