@@ -57,6 +57,8 @@ const env = {
   BLUEBIRD_RETRIEVAL_ROOTS: '',
   // W1 默认开启；普通回归按旧口径跑，专项测试在文件内自行打开。
   BLUEBIRD_TURN_RECEIPTS: '0',
+  // W4 默认开启；普通回归按旧口径跑，账本专项测试显式打开。
+  BLUEBIRD_TASK_LEDGER: '0',
 };
 
 const failed = [];
