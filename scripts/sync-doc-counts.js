@@ -107,6 +107,8 @@ const NOTES = {
     'workflow half-state crash injection (C3): a real SIGKILL right after the plan file is fsynced but before the task exists leaves exactly one durable orphan plan and zero task pointers (killed only after the marker, never by polling), and a constructed keyed-to-missing-plan task is fail-closed to recovery with plan_missing on restart while a healthy control task stays queued',
   'agent-crash-injection':
     'real SIGKILL crash injection (P5): handler-returned-but-unrecorded leaves one unknown ledger row and recovery without re-running the handler, artifacts persisted before state commit stay pending-commit and converge as pending, approval-record-before-state-move self-heals to waiting_approval, an interrupted read-only run leaves no intermediate state',
+  'agent-continuity-audit':
+    'W0 known-gap baseline (todo): cross-turn tool receipts, zero-tool completion claims, and readback regex false positive; strict evidence is npm run audit:agent -- --run',
   'agent-approval-recovery':
     'approval execution idempotency (P3): begin-before-handler, crash-after-execution resumes to recovery without re-running the handler, a succeeded ledger row converges to executed instead of failed, approval-record-before-state-move (W5) leaves no dangling task, orphan waiting_approval tasks converge to recovery',
   'agent-artifact-content':
