@@ -23,6 +23,17 @@ function sanitizeToolEvidence(raw) {
       evidence[field] = value;
     }
   }
+  // 路径只用于回执展示，不参与任何路径解析；拒绝控制字符与超长值。
+  if (
+    typeof raw.path === 'string' &&
+    raw.path.length <= 200 &&
+    !/[\u0000-\u001f]/.test(raw.path)
+  ) {
+    evidence.path = raw.path;
+  }
+  if (typeof raw.sha256 === 'string' && /^[a-f0-9]{64}$/.test(raw.sha256)) {
+    evidence.sha256 = raw.sha256;
+  }
   if (!evidence.status && typeof raw.ok === 'boolean') {
     evidence.status = raw.ok ? 'success' : 'failed';
   }

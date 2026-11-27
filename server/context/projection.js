@@ -4,14 +4,17 @@
  * 存储消息 → 上下文消息的显式投影。所有历史选择、摘要、检索去重、输入保护
  * 都消费同一份投影，避免不同模块各自解释 session JSON。
  *
- * 契约版本：v3。字段：
- *   id / role / content / createdAt / attachments / hasImage / toolSteps / contentKind
+ * 契约版本：v4。字段：
+ *   id / role / content / createdAt / attachments / hasImage / toolSteps / receiptStatus / contentKind
  *
  * - 附件只保留渲染与视觉判断需要的元数据（id/kind/mime/name），不复制图片字节；
- * - toolSteps 是落盘展示字段，不是模型 tool_calls 协议：只随投影保留，不注入提示词；
+ * - toolSteps 是落盘展示字段；W1 起由 `server/turn-receipts.js` 以独立 system
+ *   块注入最近轮次，不拼进 assistant 正文（避免模型把回执当成自己的话复述）；
+ * - receiptStatus 标记本轮是 executed / failed / pending / no_tool_calls /
+ *   not_applicable；no_tool_calls 会明确提示“无回执，不得当作已执行事实”；
  * - 不支持的存储形态（content 不是字符串）显式标记 unsupported，不静默当成空文本。
  */
-const PROJECTION_VERSION = 3;
+const PROJECTION_VERSION = 4;
 
 // 模型消息不是内部投影对象：用 symbol 附带追溯标识，JSON.stringify 不会发送，
 // agent-runtime 的浅拷贝会保留它。sent trace 因此能对应真实发出的消息。
@@ -86,6 +89,18 @@ function sanitizeToolSteps(raw) {
     .filter(Boolean);
 }
 
+const RECEIPT_STATUSES = new Set([
+  'executed',
+  'failed',
+  'pending',
+  'no_tool_calls',
+  'not_applicable',
+]);
+
+function sanitizeReceiptStatus(value) {
+  return typeof value === 'string' && RECEIPT_STATUSES.has(value) ? value : null;
+}
+
 function projectStoredMessage(item, index, { sessionId = null } = {}) {
   if (!isObject(item) || !ROLES.has(item.role)) return null;
 
@@ -93,6 +108,7 @@ function projectStoredMessage(item, index, { sessionId = null } = {}) {
   const content = typeof rawContent === 'string' ? rawContent : '';
   const attachments = sanitizeAttachments(item.attachments);
   const toolSteps = sanitizeToolSteps(item.toolSteps);
+  const receiptStatus = sanitizeReceiptStatus(item.receiptStatus);
   const unsupported = [];
 
   if (typeof rawContent !== 'string') {
@@ -116,6 +132,7 @@ function projectStoredMessage(item, index, { sessionId = null } = {}) {
       att => typeof att.mime === 'string' && att.mime.startsWith('image/')
     ),
     toolSteps,
+    receiptStatus,
     contentKind:
       content.length > 0
         ? 'text'

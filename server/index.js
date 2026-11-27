@@ -14,6 +14,8 @@ const orchestrationChat = require('./orchestration-chat');
 const agentApprovals = require('./agents/approvals');
 const toolWorkspace = require('./tool-workspace');
 const workspacePending = require('./workspace-pending');
+const turnReceipts = require('./turn-receipts');
+const { estimateTokens } = require('./text-utils');
 const skillsLoader = require('./skills-loader');
 const { createSkillsRouter } = require('./routes/skills');
 // 启用状态经依赖注入进入 skills-loader（拆接口，SCC 冻结门禁 R1）：
@@ -1091,7 +1093,12 @@ async function prepareChatRequest(req) {
     policyMode: agentPolicy.mode,
     policyToolCount: listToolSpecs(agentPolicy).length,
   }).allowed;
-  const toolsReserveTokens = agentPossible ? estimateAgentToolsReserve() : 0;
+  // W1：回执 system 块也要占输入预算，先算出来再一起预留下，避免在
+  // input-guard 之后追加导致实际请求超出窗口。
+  const turnReceiptNote = turnReceipts.buildTurnReceiptNote(storedItems);
+  const receiptReserveTokens = turnReceiptNote ? estimateTokens(turnReceiptNote) : 0;
+  const toolsReserveTokens =
+    (agentPossible ? estimateAgentToolsReserve() : 0) + receiptReserveTokens;
 
   let contextRuntime;
   const contextBuildStartedAt = Date.now();
@@ -1197,8 +1204,20 @@ async function prepareChatRequest(req) {
 
   const contextTrace = contextRuntime.traceApi;
   const systemPrompt = contextRuntime.systemPrompt;
-  const requestMessages = contextRuntime.messages;
+  // W1：把最近轮次的工具回执作为独立 system 块插在当前 user 之前。
+  // 不拼进 assistant 正文；note 为空时 messages 原样返回（旧行为零变化）。
+  const receiptInjection = turnReceipts.injectTurnReceipts(
+    contextRuntime.messages,
+    storedItems,
+    turnReceiptNote
+  );
+  const requestMessages = receiptInjection.messages;
   const promptHistory = contextRuntime.historyMessages;
+  if (receiptInjection.note) {
+    console.log(
+      `[turn-receipts] session=${sessionId} injected=true length=${receiptInjection.note.length}`
+    );
+  }
 
   console.log(
     `[context] runtime session=${sessionId}` +
@@ -1276,16 +1295,29 @@ async function prepareChatRequest(req) {
   };
 }
 
+// W1：本轮工具回执状态。agentOn=false 的普通聊天不写字段（旧响应零变化），
+// 也不把闲聊回复标记成需要核对的执行轮次。
+function receiptStatusFor(agentOn, toolSteps) {
+  if (!agentOn) return null;
+  const steps = Array.isArray(toolSteps) ? toolSteps : [];
+  if (!steps.length) return 'no_tool_calls';
+  if (steps.some(step => step && step.pendingConfirmation)) return 'pending';
+  if (steps.some(step => step && step.ok !== true)) return 'failed';
+  return 'executed';
+}
+
 // 收尾：清洗情绪标签 -> 分条 -> 落盘 -> presence。
 // isClientGone 是函数：流式路由里客户端可能在生成中途断开，取值发生在收尾时刻。
 // toolSteps：Agent 工具执行摘要（可选）。作为消息独立字段挂在最后一条
 // assistant 消息上并随落盘保存，绝不拼进 content；普通聊天不传即零变化。
+// receiptStatus：W1 的回执状态，供下一轮投影注入“有回执/无回执”提示。
 function completeChatTurn({
   ctx,
   rawReply,
   isClientGone,
   userMessageReceivedAt,
   toolSteps,
+  receiptStatus = null,
 }) {
   const { sessionId, userText, userMessageId, attachments, personaConfig } = ctx;
 
@@ -1332,6 +1364,7 @@ function completeChatTurn({
       ? { attachments: replyAttachments }
       : {}),
     ...(index === segments.length - 1 && hasToolSteps ? { toolSteps } : {}),
+    ...(index === segments.length - 1 && receiptStatus ? { receiptStatus } : {}),
   }));
 
   const stamped = [
@@ -1446,13 +1479,14 @@ function completeChatTurn({
     reply,
     // 分条后的气泡数组：新客户端按此逐条展示；每条都是已落盘的独立消息
     replies: assistantMessages.map(
-      ({ id, content, createdAt, attachments: att, toolSteps: steps }) => ({
+      ({ id, content, createdAt, attachments: att, toolSteps: steps, receiptStatus: status }) => ({
         id,
         content,
         createdAt,
         ...(att ? { attachments: att } : {}),
         // Agent 工具执行摘要（仅最后一格可能出现）：独立字段，不含敏感内容
         ...(steps ? { toolSteps: steps } : {}),
+        ...(status ? { receiptStatus: status } : {}),
       })
     ),
     persisted,
@@ -1465,6 +1499,8 @@ function completeChatTurn({
     assistantAttachments: replyAttachments,
     // Agent 工具执行摘要：有则随响应返回，无则整个字段不出现（旧响应零变化）
     ...(hasToolSteps ? { toolSteps } : {}),
+    // W1：本轮回执状态（executed/failed/pending/no_tool_calls/not_applicable）
+    ...(receiptStatus ? { receiptStatus } : {}),
     // 服务端统一时间，供前端展示，避免客户端时钟偏差
     createdAt: now,
   };
@@ -1972,6 +2008,7 @@ app.post('/chat', requireAuth, async (req, res) => {
       isClientGone: () => clientGone,
       userMessageReceivedAt,
       ...(toolSteps ? { toolSteps } : {}),
+      receiptStatus: receiptStatusFor(agentOn, toolSteps),
     });
 
     // 非 Agent 路径的 trace 收尾（无工具调用，同样输出结构化 trace）
@@ -2576,6 +2613,7 @@ app.post('/chat/stream', requireAuth, async (req, res) => {
       isClientGone: () => clientGone,
       userMessageReceivedAt,
       ...(toolSteps ? { toolSteps } : {}),
+      receiptStatus: receiptStatusFor(agentOn, toolSteps),
     });
   } catch (error) {
     console.error('AI stream finalize error:', error);

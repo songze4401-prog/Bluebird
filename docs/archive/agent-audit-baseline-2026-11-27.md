@@ -1,5 +1,7 @@
 # W0 Agent 审计回归基线
 
+> W1 执行账本落地后的复测见 [`agent-audit-w1-2026-11-27.md`](agent-audit-w1-2026-11-27.md)：30/34。
+
 - 日期：2026-11-27
 - 基线：`main @ 9c5a370`
 - 模型：`deepseek/deepseek-chat`（真实调用）

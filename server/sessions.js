@@ -794,6 +794,20 @@ function sanitizeToolSteps(list) {
   return items.length ? items : undefined;
 }
 
+// W1：本轮工具回执状态。旧消息没有该字段时保持缺失（不推断），
+// 新 Agent 轮次由 completeChatTurn 显式写入。
+const RECEIPT_STATUSES = new Set([
+  'executed',
+  'failed',
+  'pending',
+  'no_tool_calls',
+  'not_applicable',
+]);
+
+function sanitizeReceiptStatus(value) {
+  return typeof value === 'string' && RECEIPT_STATUSES.has(value) ? value : undefined;
+}
+
 function appendMessagesDetailed(sessionId, messages) {
   const current = loadStore();
   const meta = findMeta(sessionId);
@@ -805,6 +819,7 @@ function appendMessagesDetailed(sessionId, messages) {
   const stamped = messages.map(item => {
     const attachments = sanitizeAttachments(item.attachments);
     const toolSteps = sanitizeToolSteps(item.toolSteps);
+    const receiptStatus = sanitizeReceiptStatus(item.receiptStatus);
 
     return {
       id: item.id || crypto.randomUUID(),
@@ -815,6 +830,8 @@ function appendMessagesDetailed(sessionId, messages) {
       ...(attachments ? { attachments } : {}),
       // 无工具摘要的消息同样不带该字段（普通聊天零变化）
       ...(toolSteps ? { toolSteps } : {}),
+      // W1：只有新 Agent 轮次显式写入；旧消息保持无字段
+      ...(receiptStatus ? { receiptStatus } : {}),
     };
   });
 

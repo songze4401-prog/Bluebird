@@ -240,6 +240,8 @@ function backendEnv(dataDir) {
     BLUEBIRD_WORKSPACE_AUTO_CONFIRM: '0',
     BLUEBIRD_WORKSPACE_DIR: path.join(dataDir, 'workspace'),
     BLUEBIRD_RETRIEVAL_ROOTS: '',
+    // W1 默认开启；普通回归按旧口径跑，专项测试在文件内自行打开。
+    BLUEBIRD_TURN_RECEIPTS: '0',
   };
 }
 
