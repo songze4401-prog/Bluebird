@@ -1976,6 +1976,25 @@ function updateTask(taskId, patch = {}) {
               : [],
           }
         : {}),
+      // W5：恢复/部分结果证据；普通结果不带这些字段。
+      ...(['none', 'uncertain', 'applied'].includes(result.sideEffectState)
+        ? { sideEffectState: result.sideEffectState }
+        : {}),
+      ...(result.requiresReview === true ? { requiresReview: true } : {}),
+      ...(result.recovery && typeof result.recovery === 'object'
+        ? {
+            recovery: {
+              attemptedWrites: Array.isArray(result.recovery.attemptedWrites)
+                ? result.recovery.attemptedWrites
+                    .filter(item => item && typeof item === 'object')
+                    .slice(0, 20)
+                : [],
+              nextSteps: Array.isArray(result.recovery.nextSteps)
+                ? result.recovery.nextSteps.slice(0, 8).map(item => String(item).slice(0, 200))
+                : [],
+            },
+          }
+        : {}),
     };
   }
   task.updatedAt = nowIso();

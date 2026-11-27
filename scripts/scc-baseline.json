@@ -1,13 +1,13 @@
 {
   "version": 2,
-  "updatedAt": "2026-11-26",
+  "updatedAt": "2026-11-27",
   "updateRule": "双层口径。层 1（硬闸）：加载期圈（仅顶层 require 边的 SCC）必须恒为 0，非零即失败——加载期循环会让模块初始化顺序不确定。层 2（影子圈台账）：静态圈（含惰性边）成员清单冻结，惰性 require 是认可的第一修法的成果，静态圈全部由惰性边闭合（影子圈）。成员/个数/惰性边清单变化必须在同一提交里用 --write 再生本文件并说明理由：新增成员 = 分层违规；新增惰性边 = 需说明为何不能注入/回调；减少 = 解环进展。禁止只改总数或静默漂移。",
   "loadCycleCount": 0,
   "loadCycleMembers": [],
   "sccCount": 1,
   "memberCount": 46,
-  "edgeCount": 601,
-  "lazyEdgeCount": 31,
+  "edgeCount": 605,
+  "lazyEdgeCount": 32,
   "lazyEdges": [
     "server/agents/approvals.js -> server/agents/orchestration-engine.js",
     "server/agents/approvals.js -> server/agents/publish-gate.js",
@@ -36,12 +36,13 @@
     "server/agents/runtime.js -> server/agents/config.js",
     "server/agents/runtime.js -> server/agents/config.js",
     "server/agents/runtime.js -> server/agents/publish-gate.js",
+    "server/agents/runtime.js -> server/tool-workspace.js",
     "server/agents/tasks.js -> server/agents/orchestration-engine.js",
     "server/data-events.js -> server/monitoring/index.js",
     "server/memory.js -> server/retrieval/index.js",
     "server/monitoring/index.js -> server/agent-runtime.js"
   ],
-  "moduleCount": 166,
+  "moduleCount": 167,
   "sccFiles": [
     "server/agent-policy.js",
     "server/agent-runtime.js",
