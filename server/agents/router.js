@@ -17,6 +17,7 @@ const circuitBreaker = require('./circuit-breaker');
 const { getInstanceUserId } = require('../user-scope');
 const { CONTRACT_VERSION } = require('./contract');
 const orchestrator = require('../context/orchestrator');
+const workspaceTools = require('../tool-workspace');
 const PRIORITY_VALUES = Object.freeze(['high', 'normal', 'low']);
 // B-06（§25）：路由冻结的 Task Token 硬上限。
 // A 类常量：与路由 profile 的轮次/工具上限一同冻结进任务，不代表供应商真实配额，
@@ -31,6 +32,8 @@ const WRITE_SCOPE_MAX_BYTES = 256 * 1024;
 
 function shouldRequireWriteApproval(task) {
   if (!task) return false;
+  // 自动确认开启（默认）：委派写入不建人工审批，任务直接启动。
+  if (workspaceTools.isAutoConfirmEnabled()) return false;
   if (!Array.isArray(task.allowedTools) || !task.allowedTools.includes('workspace_write')) {
     return false;
   }
@@ -770,8 +773,16 @@ function createRouter(overrides = {}) {
 
     // W3：委派写入在派发阶段创建任务级审批。未批准前任务停在 waiting_approval，
     // 不进入 Worker；审批执行后写入资格才落到 task.writeApproved。
+    // 自动确认开启（默认）：跳过人工审批，派发时直接种下写入授权，任务直接启动。
     let writeApproval = null;
-    if (shouldRequireWriteApproval(task)) {
+    const autoConfirmWrites = workspaceTools.isAutoConfirmEnabled();
+    if (autoConfirmWrites) {
+      taskStore.updateTask(task.taskId, {
+        writeApproved: true,
+        writeApprovalScope: { taskId: task.taskId, maxBytes: WRITE_SCOPE_MAX_BYTES },
+      });
+      task = taskStore.getTask(task.taskId) || task;
+    } else if (shouldRequireWriteApproval(task)) {
       try {
         taskStore.updateTask(task.taskId, {
           writeApprovalScope: { taskId: task.taskId, maxBytes: WRITE_SCOPE_MAX_BYTES },
